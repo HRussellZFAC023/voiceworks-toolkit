@@ -1,0 +1,166 @@
+import { describe, it, expect, beforeEach } from 'vitest';
+import { Whisper } from '../../src/features/Whisper';
+
+const { gmSpy } = vi.hoisted(() => ({
+    gmSpy: vi.fn(),
+}));
+
+vi.mock('../../src/infrastructure/HttpClient', async () => {
+    const actual = await vi.importActual<any>('../../src/infrastructure/HttpClient');
+    return {
+        ...actual,
+        gmRequest: gmSpy,
+    };
+});
+
+vi.mock('../../src/infrastructure/AudioCache', () => ({
+    AudioCache: class {
+        getBlob() {
+            return null;
+        }
+    }
+}));
+
+describe('Whisper', () => {
+    beforeEach(() => {
+        document.body.innerHTML = '';
+    });
+
+    describe('parseSegments', () => {
+        it('parses chunks with timestamps into segments', () => {
+            const whisper = new Whisper();
+            const chunks = [
+                { text: 'hello', timestamp: [0, 5] as [number, number] },
+                { text: 'world', timestamp: [5, 10] as [number, number] },
+            ];
+            const segments = (whisper as any).parseSegments(chunks);
+            expect(segments).toHaveLength(2);
+            expect(segments[0].text).toBe('hello');
+            expect(segments[0].start).toBe(0);
+            expect(segments[0].end).toBe(5);
+            expect(segments[1].text).toBe('world');
+        });
+
+        it('filters out chunks with null timestamps', () => {
+            const whisper = new Whisper();
+            const chunks = [
+                { text: 'hello', timestamp: [0, 5] as [number, number] },
+                { text: 'pending', timestamp: [null, null] as [null, null] },
+            ];
+            const segments = (whisper as any).parseSegments(chunks);
+            expect(segments).toHaveLength(1);
+            expect(segments[0].text).toBe('hello');
+        });
+
+        it('returns empty array for undefined input', () => {
+            const whisper = new Whisper();
+            expect((whisper as any).parseSegments(undefined)).toEqual([]);
+        });
+
+        it('returns empty array for empty array', () => {
+            const whisper = new Whisper();
+            expect((whisper as any).parseSegments([])).toEqual([]);
+        });
+    });
+
+    describe('buildWordTimings', () => {
+        it('splits text into word timings for whitespace languages', () => {
+            const whisper = new Whisper();
+            const words = (whisper as any).buildWordTimings('hello world', 0, 2);
+            expect(words).toHaveLength(2);
+            expect(words[0].text).toBe('hello');
+            expect(words[1].text).toBe('world');
+            expect(words[0].start).toBe(0);
+            expect(words[1].end).toBe(2);
+        });
+
+        it('splits Japanese text into characters', () => {
+            const whisper = new Whisper();
+            const words = (whisper as any).buildWordTimings('こんにちは', 0, 1);
+            expect(words).toHaveLength(5);
+            expect(words[0].text).toBe('こ');
+            expect(words[4].text).toBe('は');
+        });
+
+        it('returns empty array for empty text', () => {
+            const whisper = new Whisper();
+            expect((whisper as any).buildWordTimings('', 0, 1)).toEqual([]);
+        });
+    });
+
+    describe('mergeSegments', () => {
+        it('adds new segments', () => {
+            const whisper = new Whisper();
+            (whisper as any).segments = [];
+            (whisper as any).lastSegmentEnd = 0;
+            const newSegments = [
+                { start: 0, end: 2, text: 'hello' },
+                { start: 3, end: 5, text: 'world' },
+            ];
+            (whisper as any).mergeSegments(newSegments, { preferNew: true });
+            expect((whisper as any).segments).toHaveLength(2);
+        });
+
+        it('updates existing segment when overlap detected', () => {
+            const whisper = new Whisper();
+            (whisper as any).segments = [
+                { start: 0, end: 2, text: 'hi' },
+            ];
+            (whisper as any).lastSegmentEnd = 2;
+            const newSegments = [
+                { start: 0.1, end: 2.5, text: 'hello there' },
+            ];
+            (whisper as any).mergeSegments(newSegments, { preferNew: true });
+            expect((whisper as any).segments).toHaveLength(1);
+            expect((whisper as any).segments[0].text).toBe('hello there');
+        });
+
+        it('does nothing with empty input', () => {
+            const whisper = new Whisper();
+            (whisper as any).segments = [];
+            (whisper as any).lastSegmentEnd = 0;
+            (whisper as any).mergeSegments([], { preferNew: false });
+            expect((whisper as any).segments).toHaveLength(0);
+        });
+    });
+
+    describe('isNoiseOnly', () => {
+        it('detects noise patterns', () => {
+            const whisper = new Whisper();
+            expect((whisper as any).isNoiseOnly('[音楽]')).toBe(true);
+            expect((whisper as any).isNoiseOnly('（笑）')).toBe(true);
+            expect((whisper as any).isNoiseOnly('[laughter]')).toBe(true);
+            expect((whisper as any).isNoiseOnly('[silence]')).toBe(true);
+        });
+
+        it('returns false for normal text', () => {
+            const whisper = new Whisper();
+            expect((whisper as any).isNoiseOnly('こんにちは')).toBe(false);
+            expect((whisper as any).isNoiseOnly('Hello world')).toBe(false);
+        });
+
+        it('returns true for empty/whitespace text', () => {
+            const whisper = new Whisper();
+            expect((whisper as any).isNoiseOnly('')).toBe(true);
+            expect((whisper as any).isNoiseOnly('   ')).toBe(true);
+        });
+    });
+
+    describe('cleanText', () => {
+        it('collapses whitespace', () => {
+            const whisper = new Whisper();
+            expect((whisper as any).cleanText('hello    world')).toBe('hello world');
+        });
+
+        it('trims whitespace', () => {
+            const whisper = new Whisper();
+            expect((whisper as any).cleanText('  hello  ')).toBe('hello');
+        });
+
+        it('handles empty/null input', () => {
+            const whisper = new Whisper();
+            expect((whisper as any).cleanText('')).toBe('');
+            expect((whisper as any).cleanText(null)).toBe('');
+        });
+    });
+});

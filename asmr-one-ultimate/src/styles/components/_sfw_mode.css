@@ -1,0 +1,14 @@
+/* SFW Mode - Hide all images and visual media for public viewing */
+
+body.asmr-sfw-mode img,
+body.asmr-sfw-mode video,
+body.asmr-sfw-mode .q-img,
+body.asmr-sfw-mode [style*="background-image"] {
+    visibility: hidden !important;
+}
+
+/* Exclude the lightbox modal from SFW mode — users explicitly chose to view these */
+body.asmr-sfw-mode #asmr-media-viewer-modal img,
+body.asmr-sfw-mode #asmr-media-viewer-modal video {
+    visibility: visible !important;
+}

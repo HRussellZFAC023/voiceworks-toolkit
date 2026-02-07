@@ -1,0 +1,269 @@
+/* ========================================
+   True Fullscreen Layout (Precision Mobile Match)
+   ======================================== */
+
+/* Force visibility and higher z-index on body/html */
+html.asmr-fullscreen-active,
+body.asmr-fullscreen-active {
+    overflow: hidden !important;
+    background: #000 !important;
+}
+
+/* Hide global distractions - Aggressive targeting */
+body.asmr-fullscreen-active .q-drawer,
+body.asmr-fullscreen-active .q-drawer-container,
+body.asmr-fullscreen-active .q-header>.q-toolbar,
+body.asmr-fullscreen-active .asmr-support-btn,
+body.asmr-fullscreen-active .asmr-scroll-to-top,
+body.asmr-fullscreen-active>.q-notifications,
+body.asmr-fullscreen-active .q-page-sticky,
+body.asmr-fullscreen-active .q-footer,
+body.asmr-fullscreen-active .player-bar,
+body.asmr-fullscreen-active .player-bar-container {
+    display: none !important;
+}
+
+/* Base Fullscreen Container */
+.audio-player.asmr-player-fullscreen {
+    position: fixed !important;
+    inset: 0 !important;
+    width: 100vw !important;
+    height: 100vh !important;
+    z-index: var(--z-fullscreen, 100000) !important;
+    display: flex !important;
+    flex-direction: column !important;
+    justify-content: space-between !important;
+    /* Anchor art top, controls bottom */
+    background: #000 !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    border-radius: 0 !important;
+    overflow: hidden !important;
+    visibility: visible !important;
+    opacity: 1 !important;
+}
+
+/* Dynamic Blurred Backdrop */
+.audio-player.asmr-player-fullscreen::before {
+    content: '';
+    position: absolute;
+    inset: -40px;
+    background-image: var(--cover-url);
+    background-size: cover;
+    background-position: center;
+    filter: blur(50px) brightness(0.35);
+    z-index: 0 !important;
+    opacity: 1;
+    transition: background-image 0.5s ease;
+    pointer-events: none;
+}
+
+/* Gradient Overlay - Darker at the bottom */
+.audio-player.asmr-player-fullscreen::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(to top, rgba(0, 0, 0, 0.95) 0%, rgba(0, 0, 0, 0.6) 30%, transparent 60%, rgba(0, 0, 0, 0.4) 100%);
+    z-index: 1 !important;
+    pointer-events: none;
+}
+
+/* Ensure children are above backdrop/overlay - BUT keep button absolute */
+.audio-player.asmr-player-fullscreen>div:not(#asmr-player-fullscreen-root) {
+    position: relative !important;
+    z-index: 10 !important;
+}
+
+/* Hide Pull Handler */
+.audio-player.asmr-player-fullscreen .pull-handler {
+    display: none !important;
+}
+
+/* Album Art Area - MAXIMIZED & FOCUSED */
+.audio-player.asmr-player-fullscreen .albumart {
+    flex: 1 1 auto !important;
+    width: 100% !important;
+    min-height: 0 !important; /* Critical: allow flex shrink below content size */
+    margin: 0 !important;
+    padding: 40px 60px !important; /* Vertical padding reduced to give controls room */
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    background-image: none !important; /* We'll use an img tag instead */
+    background-color: transparent !important;
+    box-shadow: none !important;
+    overflow: hidden !important; /* Prevent tall images from pushing controls down */
+    position: relative !important;
+}
+
+/* Gallery Vue container - explicit dimensions so img max-width/max-height resolve correctly */
+.audio-player.asmr-player-fullscreen .albumart #asmr-player-gallery-root {
+    width: 100% !important;
+    height: 100% !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    position: relative !important;
+}
+
+/* Gallery image in fullscreen */
+.audio-player.asmr-player-fullscreen .albumart .asmr-gallery-img {
+    display: block !important;
+    position: static !important;
+    inset: auto !important;
+    max-width: 100% !important;
+    max-height: 100% !important;
+    width: auto !important;
+    height: auto !important;
+    object-fit: contain !important;
+    filter: drop-shadow(0 20px 50px rgba(0, 0, 0, 0.7));
+    border-radius: 8px !important;
+    transition: opacity 0.3s ease-in-out;
+}
+
+/* Hide the original q-img when gallery overlay is showing (prevents double image) */
+.audio-player .albumart.asmr-gallery-active .q-img {
+    visibility: hidden !important;
+}
+
+/* Also hide in fullscreen completely */
+.audio-player.asmr-player-fullscreen .albumart .q-img {
+    display: none !important;
+}
+
+/* Gallery Navigation in Fullscreen */
+.audio-player.asmr-player-fullscreen .albumart .asmr-gallery-nav {
+    z-index: 100 !important;
+    width: 60px !important;
+    height: 60px !important;
+    background: rgba(0, 0, 0, 0.3) !important;
+    backdrop-filter: blur(10px) !important;
+    color: #fff !important;
+    border: 1px solid rgba(255, 255, 255, 0.1) !important;
+    border-radius: 50% !important;
+    transition: all 0.2s ease !important;
+    opacity: 1;
+}
+
+.audio-player.asmr-player-fullscreen .albumart .asmr-gallery-nav:hover {
+    background: rgba(0, 0, 0, 0.5) !important;
+    transform: translateY(-50%) scale(1.1) !important;
+}
+
+.audio-player.asmr-player-fullscreen .albumart .asmr-gallery-prev {
+    left: 20px !important;
+}
+
+.audio-player.asmr-player-fullscreen .albumart .asmr-gallery-next {
+    right: 20px !important;
+}
+
+.audio-player.asmr-player-fullscreen .albumart .asmr-gallery-counter {
+    bottom: 24px !important;
+    background: rgba(0, 0, 0, 0.5) !important;
+    padding: 6px 16px !important;
+    border-radius: 20px !important;
+    font-size: 1rem !important;
+    backdrop-filter: blur(8px) !important;
+    font-weight: 500 !important;
+    opacity: 1 !important;
+}
+
+/* Controls Area - Anchored to Bottom */
+.audio-player.asmr-player-fullscreen .text-center.q-mb-sm.column,
+.audio-player.asmr-player-fullscreen .row.items-center.q-mx-lg,
+.audio-player.asmr-player-fullscreen .row.q-py-md.self-center,
+.audio-player.asmr-player-fullscreen .row.items-center.q-mx-lg.q-pt-sm,
+.audio-player.asmr-player-fullscreen .row.self-center {
+    flex: 0 0 auto !important;
+    width: 100% !important;
+    max-width: 550px !important;
+    margin: 0 auto !important;
+    background: transparent !important;
+    padding-left: 24px !important;
+    padding-right: 24px !important;
+}
+
+/* Vertical Spacing distribution */
+.audio-player.asmr-player-fullscreen .text-center.q-mb-sm.column {
+    margin-top: 20px !important;
+    margin-bottom: 30px !important;
+}
+
+.audio-player.asmr-player-fullscreen .row.items-center.q-mx-lg {
+    margin-bottom: 24px !important;
+}
+
+.audio-player.asmr-player-fullscreen .row.q-py-md.self-center {
+    padding: 10px 0 30px !important;
+}
+
+.audio-player.asmr-player-fullscreen .row.self-center:last-of-type {
+    padding-bottom: 60px !important;
+}
+
+/* Metadata Polish */
+.audio-player.asmr-player-fullscreen .text-bold {
+    font-size: 1.3rem !important;
+    font-weight: 700 !important;
+    color: #fff !important;
+    text-shadow: 0 4px 12px rgba(0, 0, 0, 0.9) !important;
+}
+
+.audio-player.asmr-player-fullscreen .text-caption {
+    font-size: 0.9rem !important;
+    opacity: 0.7 !important;
+    color: #fff !important;
+}
+
+/* Plyr Adjustment */
+.audio-player.asmr-player-fullscreen .plyr--audio {
+    background: transparent !important;
+}
+
+.audio-player.asmr-player-fullscreen .plyr__controls {
+    background: transparent !important;
+    color: #fff !important;
+}
+
+/* Playback Buttons */
+.audio-player.asmr-player-fullscreen .row.q-py-md.self-center {
+    justify-content: space-evenly !important;
+    margin: 10px 0 !important;
+}
+
+.audio-player.asmr-player-fullscreen .q-btn {
+    color: #fff !important;
+}
+
+/* Exit Button - MINIMALIST & BLENDED */
+.audio-player .asmr-fullscreen-btn {
+    position: absolute !important;
+    top: 8px !important;
+    right: 8px !important;
+    z-index: 1000000 !important;
+    width: 26px !important;
+    height: 26px !important;
+    background: rgba(255, 255, 255, 0.05) !important;
+    backdrop-filter: blur(4px) !important;
+    border: 1px solid rgba(255, 255, 255, 0.08) !important;
+    border-radius: 50% !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    color: #fff !important;
+    opacity: 0.5 !important;
+    cursor: pointer !important;
+    box-shadow: none !important;
+    transition: all 0.3s ease !important;
+}
+
+.audio-player .asmr-fullscreen-btn:hover {
+    background: rgba(255, 255, 255, 0.15) !important;
+    opacity: 1 !important;
+    transform: scale(1.05) !important;
+}
+
+.audio-player .asmr-fullscreen-btn .material-icons {
+    font-size: 16px !important;
+}

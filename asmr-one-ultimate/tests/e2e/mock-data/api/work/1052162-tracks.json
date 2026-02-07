@@ -1,0 +1,91 @@
+[
+    {
+        "type": "image",
+        "title": "cover.png",
+        "hash": "mock_hash_img_root_1",
+        "mediaStreamUrl": "https://asmr.one/test-image-1.png"
+    },
+    {
+        "type": "image",
+        "title": "sample.jpg",
+        "hash": "mock_hash_img_root_2",
+        "mediaStreamUrl": "https://asmr.one/test-image-2.png"
+    },
+    {
+        "type": "folder",
+        "title": "MP3+LRC",
+        "children": [
+            {
+                "type": "audio",
+                "title": "01 é€²åº—.mp3",
+                "hash": "mock_hash_mp3_1",
+                "work_id": "RJ01052162",
+                "stream_url": "https://example.com/01.mp3",
+                "mediaStreamUrl": "https://example.com/01.mp3",
+                "duration": 300
+            },
+            {
+                "type": "audio",
+                "title": "02 æ´—å‘.mp3",
+                "hash": "mock_hash_mp3_2",
+                "work_id": "RJ01052162",
+                "stream_url": "https://example.com/02.mp3",
+                "mediaStreamUrl": "https://example.com/02.mp3",
+                "duration": 420
+            }
+        ]
+    },
+    {
+        "type": "folder",
+        "title": "WAV+LRC",
+        "children": [
+            {
+                "type": "audio",
+                "title": "01 é€²åº—.wav",
+                "hash": "mock_hash_wav_1",
+                "work_id": "RJ01052162",
+                "stream_url": "https://example.com/01.wav",
+                "mediaStreamUrl": "https://example.com/01.wav",
+                "duration": 300
+            },
+            {
+                "type": "audio",
+                "title": "02 æ´—å‘.wav",
+                "hash": "mock_hash_wav_2",
+                "work_id": "RJ01052162",
+                "stream_url": "https://example.com/02.wav",
+                "mediaStreamUrl": "https://example.com/02.wav",
+                "duration": 420
+            }
+        ]
+    },
+    {
+        "type": "folder",
+        "title": "Images",
+        "children": [
+            {
+                "type": "image",
+                "title": "cover.png",
+                "hash": "mock_hash_img_1",
+                "mediaStreamUrl": "https://asmr.one/test-image-1.png"
+            },
+            {
+                "type": "image",
+                "title": "sample.jpg",
+                "hash": "mock_hash_img_2",
+                "mediaStreamUrl": "https://asmr.one/test-image-2.png"
+            }
+        ]
+    },
+    {
+        "type": "folder",
+        "title": "é™„èµ ",
+        "children": [
+            {
+                "type": "text",
+                "title": "readme.txt",
+                "hash": "mock_hash_txt_1"
+            }
+        ]
+    }
+]

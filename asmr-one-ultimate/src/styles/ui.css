@@ -1,0 +1,396 @@
+/* Shared Dialog Overlay (used by VectorSearch, AdvancedSearch) */
+.asmr-dialog-overlay {
+  z-index: var(--z-dialog, 10000);
+  background: var(--asmr-dialog-backdrop);
+  backdrop-filter: blur(5px);
+  display: flex;
+}
+
+/* Dialog Card shared styles */
+.asmr-dialog-card {
+  border-radius: 16px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+}
+
+/* Dialog Overlay */
+.asmr-filter-overlay {
+  position: fixed;
+  left: 12px;
+  right: 12px;
+  bottom: 12px;
+  z-index: var(--q-z-top, 6000);
+  padding: 8px 12px;
+  border-radius: 8px;
+  display: none;
+  backdrop-filter: blur(12px);
+  background: var(--asmr-bg-overlay);
+  color: var(--asmr-text-primary);
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+/* Main Dialog */
+.asmr-vector-dialog {
+  background: var(--asmr-bg-primary);
+  color: var(--asmr-text-primary);
+  width: min(1250px, 95vw);
+  max-width: 95vw;
+  height: auto;
+  max-height: 90vh;
+  border-radius: 12px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
+  gap: 12px;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Close button (match Advanced Search) */
+.asmr-vector-dialog .asmr-close-btn {
+  cursor: pointer !important;
+  padding: 8px;
+  border-radius: 50%;
+  transition: background 0.2s;
+  z-index: 100 !important;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.asmr-vector-dialog .asmr-close-btn:hover {
+  background: var(--asmr-hover-bg);
+}
+
+.asmr-vector-dialog .asmr-close-btn i {
+  font-size: 24px;
+  color: var(--asmr-text-secondary);
+  pointer-events: none;
+}
+
+/* Input styling */
+.asmr-vector-dialog input {
+  color: inherit;
+  background: var(--asmr-input-bg);
+  /* Quasar-like */
+  border: none;
+}
+
+.asmr-vector-dialog input::placeholder {
+  color: var(--asmr-text-tertiary);
+}
+
+/* Result List Container */
+.asmr-vector-result-list {
+  flex: 1;
+  max-height: none;
+  overflow-y: auto;
+  padding-right: 4px;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+}
+
+/* Fix 4: Targeted scrollbar */
+.asmr-vector-result-list::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.asmr-vector-result-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.asmr-vector-result-list::-webkit-scrollbar-thumb {
+  background: var(--asmr-text-disabled);
+  border-radius: 4px;
+}
+
+.asmr-vector-result-list::-webkit-scrollbar-thumb:hover {
+  background: var(--asmr-text-secondary);
+}
+
+.asmr-vector-result-list.is-empty {
+  display: none;
+  overflow: hidden;
+}
+
+/* Pagination */
+.asmr-vector-pagination {
+  min-height: 32px;
+  /* Fix 9: Visual separation */
+  border-top: 1px solid var(--asmr-border-color);
+  padding-top: 8px;
+}
+
+/* Buttons */
+.asmr-vector-go {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 96px;
+}
+
+.asmr-vector-go .q-btn__content {
+  width: 100%;
+  justify-content: center;
+}
+
+.asmr-vector-go .material-icons {
+  font-size: 22px;
+}
+
+.asmr-vector-hint {
+  color: var(--asmr-text-tertiary);
+}
+
+.asmr-vector-status {
+  text-align: right;
+  min-width: 180px;
+}
+
+.asmr-vector-status--loading::before {
+  content: '⏳ ';
+}
+
+/* Result Card */
+.asmr-vector-result {
+  background: var(--asmr-bg-overlay);
+  border: 1px solid var(--asmr-border-color);
+  border-radius: 12px;
+  display: flex;
+  flex-direction: row;
+  overflow: visible;
+  /* Fix 5: Ensure no clip on hover if we used transform */
+  /* Fix 5: Remove transform to prevent jitter */
+  transition: box-shadow 0.2s, background 0.2s, border-color 0.2s;
+}
+
+.asmr-vector-result:hover {
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  background: var(--asmr-bg-primary);
+  border-color: var(--asmr-accent);
+}
+
+.asmr-vector-result:focus-within {
+  outline: 2px solid var(--asmr-accent);
+  outline-offset: 2px;
+}
+
+/* Title & Text */
+.asmr-vector-result .asmr-vector-title {
+  font-size: 1rem;
+  line-height: 1.3;
+  font-weight: 600;
+  margin-bottom: 6px;
+  /* Fix 7: clamp logic remains, strictly speaking, but improved visibility */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* Fix 8: Contrast */
+.asmr-vector-title-translation {
+  color: var(--asmr-text-secondary);
+  /* High contrast */
+  font-size: 0.9rem;
+  margin-bottom: 8px;
+  line-height: 1.4;
+}
+
+/* Thumbnails */
+.asmr-vector-thumb {
+  /* Fix 6: Brittle sizing */
+  width: 120px;
+  height: auto;
+  aspect-ratio: 1 / 1;
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--asmr-hover-bg);
+  /* Fallback */
+  flex-shrink: 0;
+  position: relative;
+  margin: 12px;
+}
+
+.asmr-vector-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.asmr-vector-thumb-placeholder {
+  color: var(--asmr-text-tertiary);
+  background: var(--asmr-bg-secondary);
+  font-size: 1.1rem;
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1;
+}
+
+.asmr-vector-thumb-placeholder .material-icons {
+  font-size: 48px;
+  opacity: 0.5;
+}
+
+.asmr-vector-desc {
+  font-size: 0.85rem;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  margin-bottom: 8px;
+  color: var(--asmr-text-secondary);
+}
+
+/* Dialog Title */
+.asmr-dialog-title {
+  letter-spacing: -0.5px;
+}
+
+/* Search Bar (VectorSearch input row) */
+.asmr-search-bar {
+  border: 1px solid var(--asmr-border-color);
+  background: transparent;
+  padding: 4px;
+}
+
+.asmr-vector-input {
+  background: transparent;
+  border: none;
+  outline: none;
+  color: inherit;
+  padding: 12px 0;
+}
+
+.asmr-vector-go {
+  height: 40px;
+  border-radius: 8px;
+  background: var(--asmr-accent);
+}
+
+/* Result content column */
+.asmr-result-content {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Play icon in results */
+.asmr-play-icon {
+  font-size: 28px;
+}
+
+/* Placeholder visibility toggle */
+.asmr-vector-thumb-placeholder.visible {
+  display: flex;
+}
+
+/* Hidden utility (used for title translations etc.) */
+.hidden {
+  display: none;
+}
+
+/* Responsive */
+@media (min-width: 960px) {
+  .asmr-vector-result-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 600px) {
+  .asmr-vector-dialog {
+    width: 100vw;
+    max-width: 100vw;
+    height: 100vh;
+    max-height: 100vh;
+    border-radius: 0;
+  }
+
+  .asmr-vector-result-list {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Misc - dialog hover */
+:is(.body--dark, .q-dark) .asmr-vector-dialog .q-item--clickable:hover {
+  background: var(--asmr-bg-tertiary);
+}
+
+/* Metadata panel styles are in _metadata.css */
+
+/* HVDB/Chobit link wrapper - make transparent to parent flex row */
+#asmr-hvdb-link-root {
+  display: contents;
+}
+
+#asmr-radio-icon.asmr-accent {
+  color: var(--asmr-accent) !important;
+}
+
+/* ============================================
+   Whisper & Learner styles are now in:
+   - _learner.css (component styles)
+   - fixes.css (overrides)
+   ============================================ */
+
+/* Active control button - accent color with icon inheritance */
+.learner-control-btn.learner-btn-active {
+  color: var(--asmr-accent) !important;
+}
+
+.learner-control-btn.learner-btn-active i {
+  color: var(--asmr-accent) !important;
+}
+
+/* Learner button icon sizes */
+.learner-btn-icon {
+  font-size: 20px;
+}
+
+.learner-collapsed-controls .learner-btn-icon {
+  font-size: 18px;
+}
+
+/* Filter Chips */
+.asmr-filter-chip {
+  background: rgba(127, 127, 127, 0.15) !important;
+  border: 1px solid rgba(127, 127, 127, 0.1) !important;
+}
+
+/* Global Scrollbar Theme */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--asmr-text-disabled);
+  border-radius: 4px;
+  background-clip: padding-box;
+  border: 2px solid transparent;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--asmr-text-secondary);
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* Firefox */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--asmr-text-disabled) transparent;
+}

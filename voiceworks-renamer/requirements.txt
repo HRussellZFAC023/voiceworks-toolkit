@@ -1,0 +1,39 @@
+altgraph==0.17.4
+certifi==2024.8.30
+charset-normalizer==3.3.0
+cssselect==1.2.0
+future==0.18.3
+idna==2.10
+lxml==4.9.3
+numpy==1.26.0
+peewee==3.15.4
+pefile==2023.2.7
+Pillow==10.0.1
+pyinstaller==5.13.0
+pyinstaller-hooks-contrib==2023.5
+pyquery==1.4.3
+pywin32-ctypes==0.2.2
+requests==2.25.1
+six==1.16.0
+urllib3==1.26.16
+wxPython==4.2.2
+pywin32==306
+mutagen==1.47.0
+googletrans==3.1.0a0
+ffmpeg-python==0.2.0
+faster-whisper==1.0.3
+torch==2.5.1+cxx11.abi
+torchvision==0.20.1+cxx11.abi
+torchaudio==2.5.1+cxx11.abi
+intel-extension-for-pytorch==2.5.10+xpu
+aiohttp==3.11.11
+langdetect==1.0.9
+librosa>=0.10.0
+
+# --- AMD iGPU (DirectML) + NPU (VitisAI) support ---
+# Install ONE of these depending on your hardware:
+#   AMD iGPU only:  pip install onnxruntime-directml
+#   AMD NPU:        Install AMD Ryzen AI Software (includes onnxruntime with VitisAI EP)
+# Then install the ONNX Whisper pipeline:
+#   pip install optimum[onnxruntime] transformers
+# These are optional — the transcriber auto-detects available backends.

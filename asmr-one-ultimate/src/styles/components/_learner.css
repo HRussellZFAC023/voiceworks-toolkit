@@ -1,0 +1,402 @@
+/* Learner Mode Components (Subtitles, Whisper, Controls) */
+
+/* ============================================
+   Subtitle Containers
+   ============================================ */
+.learner-subs-expanded {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    width: 100%;
+    min-height: 80px;
+    padding: 12px 16px;
+    margin: 4px 0 8px 0;
+    gap: 8px;
+    text-align: center;
+    border-bottom: 1px solid var(--asmr-border-color);
+    transition: opacity 0.2s, min-height 0.2s, margin 0.2s;
+    position: relative;
+    z-index: 100;
+}
+
+.learner-subs-expanded.hidden {
+    display: none !important;
+}
+
+.learner-subs-collapsed {
+    position: fixed;
+    bottom: 60px;
+    /* Stacks on top of the player bar */
+    left: var(--asmr-drawer-width, 0px);
+    right: 0;
+    width: auto;
+    background: var(--asmr-bg-overlay);
+    backdrop-filter: blur(20px);
+    border-top: 1px solid var(--asmr-border-color);
+    padding: 13px 21px;
+    z-index: var(--z-subs, 9993);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    transition: opacity 0.25s, transform 0.25s, left 0.3s;
+    box-shadow: 0 -2px 10px rgba(0, 0, 0, 0.05);
+    pointer-events: none;
+    /* Let clicks pass through empty areas */
+}
+
+/* Ensure content is clickable */
+.learner-subs-collapsed .learner-jp,
+.learner-subs-collapsed .learner-en {
+    pointer-events: auto;
+}
+
+.learner-subs-collapsed.hidden {
+    opacity: 0 !important;
+    pointer-events: none !important;
+    transform: translateY(8px) !important;
+}
+
+/* ============================================
+   Typography (JP/EN)
+   ============================================ */
+.learner-jp {
+    font-size: 1.5rem;
+    line-height: 1.55;
+    font-weight: 600;
+    color: var(--asmr-text-primary);
+    text-align: center;
+    transition: opacity 0.2s, max-height 0.2s, margin 0.2s;
+    max-height: 200px;
+    filter: opacity(1);
+}
+
+.learner-subs-collapsed .learner-jp {
+    font-size: 1.15rem;
+}
+
+.hide-jp .learner-jp {
+    opacity: 0;
+    max-height: 0;
+    overflow: hidden;
+    margin: 0;
+}
+
+.learner-en {
+    font-size: 0.8125rem;
+    color: var(--asmr-text-tertiary);
+    cursor: pointer;
+    text-align: center;
+    user-select: none;
+    transition: opacity 0.2s;
+    filter: opacity(1);
+    position: relative;
+    z-index: 101;
+}
+
+.learner-en.blurred {
+    filter: blur(5px);
+    opacity: 0.3;
+}
+
+/* ============================================
+   Controls & Layout
+   ============================================ */
+.learner-controls,
+.learner-collapsed-controls {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: flex-start;
+    position: relative;
+    height: 100%;
+    padding: 0 4px;
+    margin-right: 8px;
+}
+
+/* Mobile-first: compact button base */
+.learner-controls .q-btn,
+.learner-collapsed-controls .q-btn,
+.learner-collapsed-controls .asmr-whisper-btn,
+.learner-collapsed-controls .learner-control-btn,
+.learner-controls .learner-control-btn {
+    height: 36px !important;
+    width: 36px !important;
+    min-height: 36px !important;
+    min-width: 36px !important;
+    border-radius: 4px;
+    padding: 4px !important;
+    font-size: 14px;
+    color: var(--asmr-text-primary);
+    background: transparent;
+}
+
+/* Player Bar / Miniview override - compact on mobile base */
+:is(.player-bar, .q-footer) :is(.learner-controls, .learner-collapsed-controls) :is(.q-btn, .learner-control-btn, .asmr-whisper-btn) {
+    height: 28px !important;
+    width: 28px !important;
+    min-height: 28px !important;
+    min-width: 28px !important;
+}
+
+/* Icon centering - mobile-first smaller */
+.learner-controls .q-icon,
+.learner-controls .material-icons,
+.learner-collapsed-controls .q-icon,
+.learner-collapsed-controls .material-icons {
+    font-size: 18px !important;
+    line-height: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+/* Desktop: larger button and icon sizes */
+@media (min-width: 601px) {
+
+    .learner-controls .q-btn,
+    .learner-collapsed-controls .q-btn,
+    .learner-collapsed-controls .asmr-whisper-btn,
+    .learner-collapsed-controls .learner-control-btn,
+    .learner-controls .learner-control-btn {
+        height: 40px !important;
+        width: 40px !important;
+        min-height: 40px !important;
+        min-width: 40px !important;
+        padding: 0 !important;
+    }
+
+    :is(.player-bar, .q-footer) :is(.learner-controls, .learner-collapsed-controls) :is(.q-btn, .learner-control-btn, .asmr-whisper-btn) {
+        height: 36px !important;
+        width: 36px !important;
+        min-height: 36px !important;
+        min-width: 36px !important;
+    }
+
+    .learner-controls .q-icon,
+    .learner-controls .material-icons,
+    .learner-collapsed-controls .q-icon,
+    .learner-collapsed-controls .material-icons {
+        font-size: 22px !important;
+    }
+}
+
+.learner-btn-normal {
+    opacity: 0.8;
+    transition: all 0.2s ease;
+    color: var(--asmr-text-primary) !important;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.learner-btn-normal:hover {
+    opacity: 1;
+    background: var(--asmr-hover-bg);
+    color: var(--asmr-accent) !important;
+}
+
+.learner-btn-active {
+    opacity: 1 !important;
+    color: var(--asmr-accent) !important;
+    background: var(--asmr-hover-bg) !important;
+}
+
+/* ============================================
+   Responsive (mobile-first)
+   ============================================ */
+
+/* Mobile base: compact subtitle areas */
+.learner-subs-expanded {
+    padding: 8px 10px;
+    gap: 6px;
+}
+
+.learner-subs-collapsed {
+    padding: 10px 12px;
+}
+
+.learner-controls,
+.learner-collapsed-controls {
+    gap: 0;
+}
+
+/* Hide speed slider in miniplayer bar on mobile (base) */
+:is(.player-bar, .q-footer, .player-bar-container) .asmr-speed-slider-wrap {
+    display: none;
+}
+
+@media (min-width: 601px) {
+    .learner-subs-expanded {
+        padding: 12px 16px;
+        gap: 8px;
+    }
+
+    .learner-subs-collapsed {
+        padding: 12px 16px;
+    }
+
+    .learner-controls,
+    .learner-collapsed-controls {
+        gap: 4px;
+    }
+
+    :is(.player-bar, .q-footer, .player-bar-container) .asmr-speed-slider-wrap {
+        display: flex;
+    }
+}
+
+/* ============================================
+   Speed Swatch Indicator & Slider
+   ============================================ */
+.asmr-speed-swatch {
+    position: absolute;
+    bottom: 1px;
+    right: -2px;
+    font-size: 8px;
+    font-weight: 700;
+    line-height: 1;
+    padding: 2px 4px;
+    border-radius: 6px;
+    background: var(--asmr-accent);
+    color: #fff;
+    pointer-events: none;
+    opacity: 0.85;
+    white-space: nowrap;
+    letter-spacing: -0.3px;
+}
+
+.asmr-speed-swatch.modified {
+    opacity: 1;
+    background: var(--q-negative, #f44336);
+}
+
+.asmr-speed-slider-wrap {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0 8px;
+    position: relative;
+    z-index: 10;
+}
+
+.asmr-speed-slider-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--asmr-accent);
+    min-width: 32px;
+    text-align: center;
+    white-space: nowrap;
+}
+
+.asmr-speed-slider {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 64px;
+    height: 4px;
+    border-radius: 2px;
+    background: var(--asmr-border-color);
+    outline: none;
+    cursor: pointer;
+}
+
+.asmr-speed-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--asmr-accent);
+    cursor: pointer;
+}
+
+.asmr-speed-slider::-moz-range-thumb {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--asmr-accent);
+    border: none;
+    cursor: pointer;
+}
+
+.asmr-speed-slider:focus-visible {
+    outline: 2px solid var(--asmr-accent);
+    outline-offset: 2px;
+}
+
+/* ============================================
+   Overflow Menu (appended to body, fixed positioning)
+   ============================================ */
+.learner-overflow-menu {
+    position: fixed;
+    width: auto;
+    min-width: 48px;
+    background: var(--asmr-bg-overlay);
+    backdrop-filter: blur(20px);
+    border: 1px solid var(--asmr-border-color);
+    border-radius: 8px;
+    padding: 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    z-index: var(--z-overflow-menu, 9995);
+    align-items: center;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+}
+
+.learner-overflow-menu.hidden {
+    display: none !important;
+}
+
+.learner-overflow-menu .q-btn {
+    margin: 2px !important;
+    color: var(--asmr-text-primary) !important;
+}
+
+/* ============================================
+   Media Viewer Overlay - Full player + subtitles
+   visible over lightbox (mobile-first)
+   ============================================ */
+
+/* Elevate the player bar (footer) above the media viewer modal */
+body.media-viewer-open .q-footer,
+body.media-viewer-open .player-bar-container {
+    z-index: 10000 !important;
+}
+
+/* Elevate subtitles within the bar to ensure visibility */
+body.media-viewer-open .learner-subs-collapsed {
+    z-index: 10001;
+}
+
+body.media-viewer-open .learner-subs-collapsed .learner-jp {
+    color: white;
+}
+
+body.media-viewer-open .learner-subs-collapsed .learner-en {
+    color: rgba(255, 255, 255, 0.7);
+}
+
+@media (min-width: 769px) {
+    body.media-viewer-open .learner-subs-collapsed .learner-jp {
+        font-size: 1.15rem;
+    }
+}
+
+/* ============================================
+   Reduced Motion
+   ============================================ */
+@media (prefers-reduced-motion: reduce) {
+    .learner-subs-expanded,
+    .learner-subs-collapsed,
+    .learner-jp,
+    .learner-en,
+    .asmr-comments-chevron {
+        transition: none;
+    }
+}

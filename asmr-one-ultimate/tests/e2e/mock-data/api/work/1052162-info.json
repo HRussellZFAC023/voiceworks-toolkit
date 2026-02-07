@@ -1,0 +1,32 @@
+﻿{
+    "id": 1052162,
+    "title": "[Mock] Standard Test Work",
+    "name": "[Mock] Standard Test Work",
+    "circle": {
+        "id": 1,
+        "name": "Test Circle"
+    },
+    "author": [
+        {
+            "id": 1,
+            "name": "Test Author"
+        }
+    ],
+    "tags": [
+        {
+            "id": 1,
+            "name": "Relaxing",
+            "name_jp": "ç™’ã‚„ã—"
+        }
+    ],
+    "release": "2023-01-01",
+    "price": 1000,
+    "rating": "all",
+    "vas": [
+        {
+            "id": 1,
+            "name": "Test VA"
+        }
+    ],
+    "main_color": "#000000"
+}

@@ -1,0 +1,55 @@
+{
+    "works": [
+        {
+            "id": 1052162,
+            "source_id": "RJ01052162",
+            "title": "[Mock] Standard Work",
+            "circle": { "id": 1, "name": "Mock Circle" },
+            "nsfw": false,
+            "release": "2024-01-01",
+            "tags": [
+                { "id": 1, "name": "Relaxing" }
+            ],
+            "vas": [
+                { "id": 1, "name": "Test VA" }
+            ],
+            "mainCoverUrl": "/api/cover/RJ01052162.jpg?type=main"
+        },
+        {
+            "id": 1058639,
+            "source_id": "RJ01058639",
+            "title": "[Mock] Second Work",
+            "circle": { "id": 2, "name": "Sample Circle" },
+            "nsfw": false,
+            "release": "2023-12-15",
+            "tags": [
+                { "id": 2, "name": "Whisper" }
+            ],
+            "vas": [
+                { "id": 2, "name": "Sample VA" }
+            ],
+            "mainCoverUrl": "/api/cover/RJ01058639.jpg?type=main"
+        },
+        {
+            "id": 1057312,
+            "source_id": "RJ01057312",
+            "title": "[Mock] Third Work",
+            "circle": { "id": 3, "name": "Circle Three" },
+            "nsfw": false,
+            "release": "2023-11-20",
+            "tags": [
+                { "id": 1, "name": "Relaxing" }
+            ],
+            "vas": [
+                { "id": 3, "name": "Third VA" }
+            ],
+            "mainCoverUrl": "/api/cover/RJ01057312.jpg?type=main"
+        }
+    ],
+    "pagination": {
+        "currentPage": 1,
+        "pageSize": 24,
+        "totalCount": 3
+    },
+    "count": 3
+}

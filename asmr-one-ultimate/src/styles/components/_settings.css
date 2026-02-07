@@ -1,0 +1,404 @@
+/* Settings Panel Components
+   Theme-reactive styling using CSS variables
+   Matches kikoeru-quasar Quasar styling patterns */
+
+/* ============================================
+   Settings Section Containers
+   ============================================ */
+.asmr-settings-section {
+    border-radius: 4px;
+    overflow: visible !important;
+    background: var(--asmr-bg-secondary) !important;
+    color: var(--asmr-text-primary) !important;
+}
+
+/* Settings headers */
+.asmr-settings-header {
+    color: var(--asmr-text-primary) !important;
+}
+
+/* ============================================
+   Settings Items (q-item style)
+   ============================================ */
+.asmr-settings-section .q-item {
+    background: transparent;
+    color: var(--asmr-text-primary);
+}
+
+.asmr-settings-section .q-item__label {
+    color: var(--asmr-text-primary);
+}
+
+.asmr-settings-section .q-item__label--caption,
+.asmr-settings-section .text-caption {
+    color: var(--asmr-text-secondary) !important;
+}
+
+.asmr-settings-section .q-icon {
+    color: var(--asmr-text-primary);
+}
+
+/* Icons in settings - inherit from Quasar dark styling */
+
+/* ============================================
+   Separators - inherit from Quasar q-separator--dark
+   ============================================ */
+
+/* ============================================
+   Toggle Switch (q-toggle style)
+   Inherits from Quasar's q-toggle--dark class
+   ============================================ */
+
+/* ============================================
+   Toggle Switch (q-toggle style)
+   ============================================ */
+.asmr-settings-section .q-toggle__inner--truthy {
+    color: var(--asmr-accent);
+}
+
+.asmr-settings-section .q-toggle__inner--truthy .q-toggle__track {
+    opacity: 0.5;
+}
+
+.asmr-settings-section .q-toggle__inner--truthy .q-toggle__thumb:after {
+    background-color: currentColor;
+}
+
+.asmr-settings-section .q-field {
+    background: transparent;
+}
+
+.asmr-settings-section .q-field__control {
+    background: var(--asmr-input-bg, rgba(255, 255, 255, 0.07));
+    border-radius: 4px;
+    min-height: 40px;
+}
+
+.asmr-settings-section .q-field__native {
+    color: inherit;
+    padding: 8px 12px;
+}
+
+.asmr-settings-section .q-field__native::placeholder {
+    color: var(--asmr-text-tertiary, rgba(255, 255, 255, 0.3));
+    font-style: italic;
+}
+
+/* Focus state */
+.asmr-settings-section .q-field--focused .q-field__control {
+    border: 1px solid var(--q-primary, var(--asmr-accent));
+}
+
+/* ============================================
+   Select Fields
+   ============================================ */
+.asmr-settings-section select.q-field__native {
+    appearance: none;
+    -webkit-appearance: none;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    color: inherit;
+    padding-right: 28px;
+}
+
+/* ============================================
+   Cache Stats Text
+   ============================================ */
+.asmr-cache-stats {
+    color: var(--q-primary, var(--asmr-accent)) !important;
+}
+
+/* ============================================
+   Clear Cache Button
+   ============================================ */
+.asmr-clear-cache-btn {
+    background: var(--q-negative, #c10015) !important;
+    color: white !important;
+    transition: filter 0.2s, box-shadow 0.2s;
+}
+
+.asmr-clear-cache-btn:hover:not(.disabled) {
+    filter: brightness(1.1);
+    box-shadow: 0 2px 8px rgba(193, 0, 21, 0.3);
+    /* Keep red shadow for negative action */
+}
+
+.asmr-clear-cache-btn.disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+/* ============================================
+   Section Headers
+   ============================================ */
+.asmr-settings-header {
+    color: var(--asmr-text-primary);
+}
+
+/* ============================================
+   Scrollbar (for any scrollable settings)
+   ============================================ */
+.asmr-settings-section::-webkit-scrollbar {
+    width: 6px;
+}
+
+.asmr-settings-section::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.asmr-settings-section::-webkit-scrollbar-thumb {
+    background: var(--asmr-border-color);
+    border-radius: 3px;
+}
+
+.asmr-settings-section::-webkit-scrollbar-thumb:hover {
+    background: var(--asmr-text-disabled);
+}
+
+/* ============================================
+   Settings Icon Size
+   ============================================ */
+.asmr-settings-icon {
+    font-size: 28px;
+}
+
+/* ============================================
+   Input Field Label Column
+   ============================================ */
+.asmr-settings-input-label {
+    max-width: 60%;
+}
+
+/* ============================================
+   Hint Text (API key links)
+   ============================================ */
+.asmr-settings-hint {
+    margin-top: -8px;
+}
+
+.asmr-settings-hint-text {
+    font-size: 0.85em;
+}
+
+.asmr-settings-link {
+    text-decoration: underline;
+}
+
+/* ============================================
+   Danger / Factory Reset
+   ============================================ */
+.asmr-danger-text {
+    color: var(--q-negative, #c62828);
+}
+
+.asmr-nuke-btn {
+    background: var(--q-negative, #c62828);
+    color: white;
+}
+
+.asmr-nuke-btn:hover:not(.disabled) {
+    filter: brightness(1.15);
+}
+
+/* ============================================
+   Setup Guide & Code Block
+   ============================================ */
+.asmr-setup-guide {
+    background: rgba(128, 128, 128, 0.05);
+    border: 1px solid var(--asmr-border-color);
+    border-radius: 8px;
+    margin: 12px 0;
+    transition: all 0.3s ease;
+}
+
+.asmr-setup-guide[open] {
+    background: rgba(128, 128, 128, 0.08);
+    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+}
+
+.asmr-setup-guide summary {
+    padding: 10px 14px;
+    cursor: pointer;
+    font-size: 0.9em;
+    user-select: none;
+    list-style: none;
+    outline: none;
+}
+
+.asmr-setup-guide summary::-webkit-details-marker {
+    display: none;
+}
+
+.asmr-setup-guide summary::before {
+    content: "▶";
+    display: inline-block;
+    font-size: 0.7em;
+    margin-right: 10px;
+    transition: transform 0.2s ease;
+    opacity: 0.5;
+}
+
+.asmr-setup-guide summary:hover {
+    background: rgba(128, 128, 128, 0.1);
+}
+
+.asmr-setup-guide[open] summary {
+    border-bottom: 1px solid var(--asmr-border-color);
+}
+
+.asmr-setup-guide[open] summary::before {
+    transform: rotate(90deg);
+}
+
+.asmr-guide-content {
+    padding: 0 16px 16px 16px;
+    font-size: 0.9em;
+    line-height: 1.6;
+}
+
+.asmr-guide-content h3,
+.asmr-guide-content h4 {
+    margin: 16px 0 12px 0;
+    font-size: 1.1em;
+    font-weight: 700;
+    color: var(--asmr-accent);
+}
+
+.asmr-guide-content p {
+    margin: 8px 0;
+}
+
+.asmr-guide-content b {
+    color: var(--asmr-text-primary);
+    font-weight: 600;
+}
+
+.asmr-code-block {
+    font-family: 'Fira Code', 'Consolas', monospace;
+    background: var(--asmr-bg-tertiary, rgba(0, 0, 0, 0.05)) !important;
+    border: 1px solid var(--asmr-border-color, rgba(255, 255, 255, 0.1)) !important;
+    color: var(--asmr-text-primary) !important;
+    padding: 14px !important;
+    margin: 16px 0;
+    border-radius: 8px;
+    font-size: 0.82em;
+    line-height: 1.5;
+    white-space: pre;
+    overflow-x: auto;
+    box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.05);
+}
+
+.body--dark .asmr-code-block {
+    background: #0d1117 !important;
+    border-color: #30363d !important;
+    color: #c9d1d9 !important;
+}
+
+.asmr-copy-code-btn {
+    text-transform: none;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+}
+
+/* ============================================
+   Combobox (text input with dropdown suggestions)
+   ============================================ */
+.asmr-combobox {
+    position: relative;
+    width: 100%;
+}
+
+.asmr-combobox .q-field__control-container {
+    position: relative;
+    display: flex;
+    align-items: center;
+}
+
+.asmr-combobox-arrow {
+    position: absolute;
+    right: 6px;
+    top: 50%;
+    transform: translateY(-50%);
+    cursor: pointer;
+    opacity: 0.5;
+    font-size: 20px !important;
+    user-select: none;
+    transition: opacity 0.15s;
+    color: var(--asmr-accent, #1976d2);
+}
+
+.asmr-combobox-arrow:hover {
+    opacity: 0.9;
+}
+
+.asmr-combobox-arrow:active {
+    opacity: 1;
+    transform: translateY(-50%) scale(0.9);
+}
+
+.asmr-combobox-input {
+    padding-right: 28px !important;
+    width: 100%;
+}
+
+.asmr-combobox-dropdown {
+    display: none;
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 0;
+    right: 0;
+    z-index: 9999;
+    max-height: 240px;
+    overflow-y: auto;
+    background: var(--asmr-bg-secondary, #1e1e1e);
+    border: 1px solid var(--asmr-border-color, rgba(255, 255, 255, 0.12));
+    border-radius: 0 0 4px 4px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.asmr-combobox-option {
+    display: flex;
+    flex-direction: column;
+    padding: 8px 12px;
+    cursor: pointer;
+    transition: background 0.1s;
+}
+
+.asmr-combobox-option:hover {
+    background: var(--asmr-bg-hover, rgba(255, 255, 255, 0.08));
+}
+
+.asmr-combobox-option--active {
+    background: var(--asmr-bg-hover, rgba(255, 255, 255, 0.06));
+    border-left: 2px solid var(--asmr-accent, #1976d2);
+}
+
+.asmr-combobox-option-label {
+    font-size: 0.88em;
+    font-weight: 500;
+    color: var(--asmr-text-primary);
+    white-space: normal;
+    word-break: break-all;
+    line-height: 1.35;
+}
+
+.asmr-combobox-option-desc {
+    font-size: 0.78em;
+    color: var(--asmr-text-secondary);
+    margin-top: 2px;
+    white-space: normal;
+}
+
+/* ============================================
+   Responsive — compact settings on mobile
+   ============================================ */
+@media (max-width: 600px) {
+    .asmr-settings-input-label {
+        max-width: 100%;
+    }
+
+    .asmr-settings-section .q-item {
+        padding: 8px 12px;
+    }
+}

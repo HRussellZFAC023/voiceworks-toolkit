@@ -1,0 +1,488 @@
+/* ============================================
+   Comment Section Components
+   Mobile-first, theme-reactive via CSS variables
+   ============================================ */
+
+/* === Section Container === */
+.asmr-comments-section {
+    background: var(--asmr-bg-tertiary);
+    border-left: 4px solid var(--q-primary, var(--asmr-accent, #7c4dff));
+    overflow: hidden;
+    border-radius: 4px;
+}
+
+/* === Header (always visible, clickable to expand) === */
+.asmr-comments-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    cursor: pointer;
+    user-select: none;
+    transition: background 0.15s;
+}
+
+.asmr-comments-header:hover {
+    background: var(--asmr-hover-bg);
+}
+
+.asmr-comments-header-icon {
+    font-size: 20px;
+    color: var(--q-primary, var(--asmr-accent, #7c4dff));
+}
+
+.asmr-comments-header-label {
+    flex: 1;
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: var(--asmr-text-primary);
+}
+
+.asmr-comments-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 20px;
+    height: 20px;
+    padding: 0 6px;
+    border-radius: 10px;
+    background: var(--q-primary, var(--asmr-accent, #7c4dff));
+    color: #fff;
+    font-size: 0.7rem;
+    font-weight: 600;
+}
+
+.asmr-comments-chevron {
+    font-size: 20px;
+    color: var(--asmr-text-tertiary);
+    transition: transform 0.2s;
+}
+
+.asmr-comments-chevron--expanded {
+    transform: rotate(180deg);
+}
+
+/* === Body (collapsible) === */
+.asmr-comments-body {
+    max-height: 0;
+    overflow: hidden;
+    transition: max-height 0.3s ease;
+}
+
+.asmr-comments-body--expanded {
+    max-height: 2000px;
+}
+
+.asmr-comments-body-inner {
+    padding: 0 12px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+/* === My Review Editor === */
+.asmr-comments-editor {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.asmr-comments-editor-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.asmr-comments-editor-label {
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--asmr-text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+/* Star rating */
+.asmr-comments-stars {
+    display: inline-flex;
+    gap: 2px;
+}
+
+.asmr-comments-star {
+    font-size: 22px;
+    cursor: pointer;
+    transition: color 0.1s, transform 0.1s;
+    background: none;
+    border: none;
+    padding: 0;
+    line-height: 1;
+    color: var(--asmr-text-disabled);
+}
+
+.asmr-comments-star:hover {
+    transform: scale(1.15);
+}
+
+.asmr-comments-star--active {
+    color: var(--asmr-star-color);
+}
+
+/* Textarea */
+.asmr-comments-textarea {
+    width: 100%;
+    min-height: 80px;
+    max-height: 300px;
+    padding: 10px;
+    border: 1px solid var(--asmr-border-color);
+    border-radius: 4px;
+    background: var(--asmr-bg-secondary);
+    color: var(--asmr-text-primary);
+    font-family: inherit;
+    font-size: 0.875rem;
+    line-height: 1.5;
+    resize: vertical;
+    outline: none;
+    transition: border-color 0.2s;
+    box-sizing: border-box;
+}
+
+.asmr-comments-textarea:focus {
+    border-color: var(--q-primary, var(--asmr-accent, #7c4dff));
+}
+
+.asmr-comments-textarea::placeholder {
+    color: var(--asmr-text-disabled);
+}
+
+/* Save status + actions row */
+.asmr-comments-actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.asmr-comments-save-status {
+    font-size: 0.75rem;
+    color: var(--asmr-text-tertiary);
+    transition: color 0.2s;
+}
+
+.asmr-comments-save-status--saving {
+    color: var(--q-primary, var(--asmr-accent, #7c4dff));
+}
+
+.asmr-comments-save-status--saved {
+    color: var(--q-positive, #4caf50);
+}
+
+.asmr-comments-save-status--failed {
+    color: var(--q-negative, #f44336);
+}
+
+.asmr-comments-delete-btn {
+    background: none;
+    border: 1px solid var(--asmr-border, rgba(255, 255, 255, 0.12));
+    border-radius: 4px;
+    color: var(--asmr-text-tertiary);
+    cursor: pointer;
+    padding: 2px 8px;
+    font-size: 0.75rem;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    transition: color 0.2s, border-color 0.2s;
+}
+
+.asmr-comments-delete-btn:hover {
+    color: var(--q-negative, #f44336);
+    border-color: var(--q-negative, #f44336);
+}
+
+.asmr-comments-delete-btn:active {
+    background: color-mix(in srgb, var(--q-negative, #f44336) 10%, transparent);
+}
+
+/* === Section Divider === */
+.asmr-comments-divider {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding-top: 4px;
+    border-top: 1px solid var(--asmr-border-color);
+}
+
+.asmr-comments-divider-label {
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--asmr-text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    white-space: nowrap;
+}
+
+.asmr-comments-divider-count {
+    font-size: 0.75rem;
+    color: var(--asmr-text-disabled);
+}
+
+/* === DLsite Reviews List === */
+.asmr-comments-dlsite-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: 400px;
+    overflow-y: auto;
+}
+
+/* Single DLsite review */
+.asmr-comments-review {
+    padding: 8px 10px;
+    border-radius: 4px;
+    background: var(--asmr-bg-secondary);
+    border: 1px solid var(--asmr-border-color);
+}
+
+.asmr-comments-review-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 4px;
+}
+
+.asmr-comments-review-stars {
+    display: inline-flex;
+    gap: 1px;
+    font-size: 14px;
+    color: var(--asmr-star-color);
+}
+
+.asmr-comments-review-stars .star-empty {
+    color: var(--asmr-text-disabled);
+}
+
+.asmr-comments-review-user {
+    font-size: 0.8rem;
+    font-weight: 500;
+    color: var(--asmr-text-secondary);
+}
+
+.asmr-comments-review-date {
+    font-size: 0.75rem;
+    color: var(--asmr-text-disabled);
+    margin-left: auto;
+}
+
+/* === Review Grid (original + translated, stacking on mobile, side-by-side on desktop) === */
+.asmr-comments-review-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    max-height: 400px;
+    overflow-y: auto;
+}
+
+/* Each row = one paragraph pair (original + translated) */
+.asmr-comments-review-row {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 6px 0;
+    border-bottom: 1px solid var(--asmr-border-color);
+}
+
+.asmr-comments-review-row:last-child {
+    border-bottom: none;
+}
+
+/* Cell styles */
+.asmr-comments-review-cell {
+    font-size: 0.85rem;
+    line-height: 1.6;
+    min-width: 0;
+    word-break: break-word;
+    white-space: pre-wrap;
+}
+
+.asmr-comments-review-cell--original {
+    color: var(--asmr-text-secondary);
+}
+
+.asmr-comments-review-cell--translated {
+    color: var(--q-primary, var(--asmr-accent, #7c4dff));
+    font-size: 0.83rem;
+}
+
+/* Empty translated cells collapse */
+.asmr-comments-review-cell--translated:empty {
+    display: none;
+}
+
+/* Links and images inside review cells */
+.asmr-comments-review-cell a {
+    color: var(--q-primary, var(--asmr-accent, #7c4dff));
+    word-break: break-all;
+    text-decoration: underline;
+    cursor: pointer;
+}
+
+.asmr-comments-review-cell a:hover {
+    opacity: 0.8;
+}
+
+.asmr-comments-review-cell img {
+    max-width: 100%;
+    height: auto;
+    border-radius: 4px;
+    margin: 4px 0;
+}
+
+.asmr-comments-translate-btn {
+    background: none;
+    border: none;
+    color: var(--q-primary, var(--asmr-accent, #7c4dff));
+    cursor: pointer;
+    font-size: 0.75rem;
+    padding: 2px 0;
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    transition: opacity 0.15s;
+}
+
+.asmr-comments-translate-btn:hover {
+    opacity: 0.8;
+}
+
+.asmr-comments-translate-btn .material-icons {
+    font-size: 14px;
+}
+
+/* === Loading skeleton === */
+.asmr-comments-skeleton {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 4px 0;
+}
+
+.asmr-comments-skeleton-bar {
+    height: 14px;
+    border-radius: 3px;
+    background: var(--asmr-hover-bg);
+    animation: asmr-comments-pulse 1.5s ease-in-out infinite;
+}
+
+.asmr-comments-skeleton-bar:nth-child(1) {
+    width: 60%;
+}
+
+.asmr-comments-skeleton-bar:nth-child(2) {
+    width: 90%;
+}
+
+.asmr-comments-skeleton-bar:nth-child(3) {
+    width: 45%;
+}
+
+@keyframes asmr-comments-pulse {
+    0%, 100% { opacity: 0.4; }
+    50% { opacity: 0.8; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .asmr-comments-skeleton-bar {
+        animation: none;
+        opacity: 0.6;
+    }
+}
+
+/* No reviews message */
+.asmr-comments-empty {
+    font-size: 0.8rem;
+    color: var(--asmr-text-disabled);
+    font-style: italic;
+    padding: 4px 0;
+}
+
+/* Fetch error message */
+.asmr-comments-fetch-error {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    padding: 24px 16px;
+    text-align: center;
+    color: var(--asmr-text-tertiary);
+    font-size: 0.85rem;
+    background: var(--asmr-bg-secondary);
+    border-radius: 4px;
+    border: 1px dashed var(--asmr-border-color);
+    cursor: pointer;
+    transition: background 0.2s, border-color 0.2s, color 0.2s;
+}
+
+.asmr-comments-fetch-error:hover {
+    background: var(--asmr-hover-bg);
+    border-color: var(--q-primary, var(--asmr-accent, #7c4dff));
+    color: var(--asmr-text-secondary);
+}
+
+.asmr-comments-fetch-error .material-icons {
+    font-size: 32px;
+    color: var(--asmr-text-disabled);
+    transition: color 0.2s;
+}
+
+.asmr-comments-fetch-error:hover .material-icons {
+    color: var(--q-primary, var(--asmr-accent, #7c4dff));
+}
+
+/* === Dark Mode === */
+:is(.body--dark, .q-dark) .asmr-comments-review {
+    background: rgba(255, 255, 255, 0.04);
+    border-color: rgba(255, 255, 255, 0.08);
+}
+
+:is(.body--dark, .q-dark) .asmr-comments-textarea {
+    background: rgba(255, 255, 255, 0.04);
+    border-color: rgba(255, 255, 255, 0.12);
+}
+
+/* === Responsive === */
+@media (min-width: 600px) {
+    .asmr-comments-header {
+        padding: 10px 14px;
+    }
+
+    .asmr-comments-body-inner {
+        padding: 0 14px 14px;
+    }
+
+    .asmr-comments-dlsite-list {
+        max-height: 500px;
+    }
+}
+
+@media (min-width: 960px) {
+
+    /* Side-by-side paragraph rows on desktop (mirrors asmr-meta-body-row) */
+    .asmr-comments-review-row {
+        flex-direction: row;
+        gap: 16px;
+    }
+
+    .asmr-comments-review-cell--original {
+        flex: 1;
+        border-right: 1px solid var(--asmr-border-color);
+        padding-right: 16px;
+    }
+
+    .asmr-comments-review-cell--translated {
+        flex: 1;
+    }
+
+    .asmr-comments-review-grid {
+        max-height: 600px;
+    }
+}

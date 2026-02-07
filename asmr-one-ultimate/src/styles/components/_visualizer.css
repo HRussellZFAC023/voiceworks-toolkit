@@ -1,0 +1,128 @@
+/* Sound Visualizer - Frequency Bar Overlay */
+
+/* ============================================
+   Main Bar (glassmorphic, above JOI)
+   ============================================ */
+.asmr-viz-bar {
+    position: fixed;
+    bottom: 60px; /* JS overrides dynamically via updatePosition() */
+    left: var(--asmr-drawer-width, 0px);
+    right: 0;
+    width: auto;
+    display: flex;
+    align-items: center;
+    padding: 0;
+    background: var(--asmr-bg-overlay);
+    backdrop-filter: blur(24px);
+    border-top: 1px solid var(--asmr-border-color);
+    z-index: var(--z-viz, 9991);
+    transition: opacity 0.3s ease, transform 0.3s ease, left 0.3s ease;
+    box-shadow: 0 -2px 12px rgba(0, 0, 0, 0.08);
+    pointer-events: auto;
+}
+
+.asmr-viz-bar.hidden {
+    opacity: 0;
+    pointer-events: none;
+    transform: translateY(8px);
+}
+
+/* ============================================
+   Paused State
+   ============================================ */
+.asmr-viz-bar.asmr-viz-paused {
+    opacity: 0.4;
+    filter: saturate(0.2);
+    transition: opacity 0.5s ease, filter 0.5s ease, left 0.3s ease;
+}
+
+/* ============================================
+   Canvas
+   ============================================ */
+.asmr-viz-canvas {
+    flex: 1;
+    height: 48px;
+    display: block;
+    /* Canvas stretches to fill bar width */
+}
+
+/* ============================================
+   Close Button
+   ============================================ */
+.asmr-viz-close {
+    position: absolute;
+    top: 4px;
+    right: 6px;
+    background: none;
+    border: none;
+    color: var(--asmr-text-tertiary);
+    cursor: pointer;
+    padding: 4px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.2s, color 0.2s;
+    flex-shrink: 0;
+    opacity: 0;
+    z-index: 2;
+}
+
+.asmr-viz-bar:hover .asmr-viz-close {
+    opacity: 1;
+}
+
+.asmr-viz-close:hover {
+    background: var(--asmr-hover-bg);
+    color: var(--asmr-text-primary);
+}
+
+.asmr-viz-close:focus-visible {
+    outline: 2px solid var(--asmr-accent);
+    outline-offset: 2px;
+    opacity: 1;
+}
+
+.asmr-viz-close .material-icons {
+    font-size: 16px;
+}
+
+/* ============================================
+   Expanded Player Position
+   ============================================ */
+.audio-player .asmr-viz-bar {
+    position: relative;
+    bottom: auto;
+    left: auto;
+    right: auto;
+    width: 100%;
+    border-top: none;
+    border-bottom: 1px solid var(--asmr-border-color);
+    box-shadow: none;
+    z-index: 100;
+}
+
+/* ============================================
+   Fullscreen Adjustments
+   ============================================ */
+body.asmr-fullscreen-active .asmr-viz-bar:not(.audio-player .asmr-viz-bar) {
+    display: none !important;
+}
+
+/* ============================================
+   Responsive
+   ============================================ */
+@media (max-width: 600px) {
+    .asmr-viz-canvas {
+        height: 36px;
+    }
+}
+
+/* ============================================
+   Reduced Motion
+   ============================================ */
+@media (prefers-reduced-motion: reduce) {
+    .asmr-viz-bar {
+        transition: none;
+    }
+}

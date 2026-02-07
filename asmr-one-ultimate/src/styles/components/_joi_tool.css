@@ -1,0 +1,391 @@
+/* JOI Tool - Edge Game Overlay */
+
+/* ============================================
+   Main Bar (above subtitles)
+   ============================================ */
+.asmr-joi-bar {
+    position: fixed;
+    bottom: 60px; /* default fallback; JS overrides dynamically via updatePosition() */
+    left: var(--asmr-drawer-width, 0px);
+    right: 0;
+    width: auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    padding: 10px 20px;
+    background: var(--asmr-bg-overlay);
+    backdrop-filter: blur(24px);
+    border-top: 1px solid var(--asmr-border-color);
+    z-index: var(--z-joi, 9992);
+    transition: opacity 0.3s ease, transform 0.3s ease, background 0.4s ease,
+                box-shadow 0.4s ease, left 0.3s ease;
+    box-shadow: 0 -2px 12px rgba(0, 0, 0, 0.08);
+    pointer-events: auto;
+}
+
+.asmr-joi-bar.hidden {
+    opacity: 0;
+    pointer-events: none;
+    transform: translateY(8px);
+}
+
+/* ============================================
+   Paused State (audio paused → dim bar)
+   ============================================ */
+.asmr-joi-bar.asmr-joi-paused {
+    opacity: 0.5;
+    filter: saturate(0.3);
+    transition: opacity 0.5s ease, filter 0.5s ease, background 0.4s ease,
+                box-shadow 0.4s ease, left 0.3s ease;
+}
+
+.asmr-joi-bar.asmr-joi-paused .asmr-joi-ring {
+    animation-play-state: paused !important;
+}
+
+/* ============================================
+   Transition Flash
+   ============================================ */
+.asmr-joi-bar.asmr-joi-flash {
+    animation: joi-bar-flash 0.4s ease-out;
+}
+
+@keyframes joi-bar-flash {
+    0% {
+        background: rgba(255, 255, 255, 0.15);
+        box-shadow: 0 0 20px rgba(255, 255, 255, 0.1);
+    }
+    100% {
+        background: var(--asmr-bg-overlay);
+    }
+}
+
+.body--dark .asmr-joi-bar.asmr-joi-flash,
+.q-dark .asmr-joi-bar.asmr-joi-flash {
+    animation: joi-bar-flash-dark 0.4s ease-out;
+}
+
+@keyframes joi-bar-flash-dark {
+    0% {
+        background: rgba(255, 255, 255, 0.08);
+        box-shadow: 0 0 20px rgba(255, 255, 255, 0.05);
+    }
+    100% {
+        background: var(--asmr-bg-overlay);
+    }
+}
+
+/* ============================================
+   Status Badge
+   ============================================ */
+.asmr-joi-status {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 14px;
+    border-radius: 20px;
+    font-weight: 700;
+    font-size: 13px;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    transition: all 0.3s ease;
+    min-width: 80px;
+    justify-content: center;
+    user-select: none;
+}
+
+.asmr-joi-label {
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 1.5px;
+}
+
+/* ============================================
+   State Colors
+   ============================================ */
+
+/* Idle / Ready */
+.asmr-joi-bar[data-state="idle"] .asmr-joi-status {
+    background: var(--asmr-hover-bg);
+    color: var(--asmr-text-tertiary);
+}
+
+/* GO — Green */
+.asmr-joi-bar[data-state="go"] {
+    border-top-color: color-mix(in srgb, var(--asmr-state-go) 30%, transparent);
+    box-shadow: 0 -2px 16px color-mix(in srgb, var(--asmr-state-go) 12%, transparent);
+}
+.asmr-joi-bar[data-state="go"] .asmr-joi-status {
+    background: color-mix(in srgb, var(--asmr-state-go) 15%, transparent);
+    color: var(--asmr-state-go);
+}
+
+/* STOP — Red */
+.asmr-joi-bar[data-state="stop"] {
+    border-top-color: color-mix(in srgb, var(--asmr-state-stop) 30%, transparent);
+    box-shadow: 0 -2px 16px color-mix(in srgb, var(--asmr-state-stop) 12%, transparent);
+}
+.asmr-joi-bar[data-state="stop"] .asmr-joi-status {
+    background: color-mix(in srgb, var(--asmr-state-stop) 15%, transparent);
+    color: var(--asmr-state-stop);
+}
+
+/* EDGE — Amber */
+.asmr-joi-bar[data-state="edge"] {
+    border-top-color: color-mix(in srgb, var(--asmr-state-edge) 30%, transparent);
+    box-shadow: 0 -2px 16px color-mix(in srgb, var(--asmr-state-edge) 15%, transparent);
+}
+.asmr-joi-bar[data-state="edge"] .asmr-joi-status {
+    background: color-mix(in srgb, var(--asmr-state-edge) 15%, transparent);
+    color: var(--asmr-state-edge);
+    animation: joi-edge-pulse 1.2s ease-in-out infinite;
+    will-change: transform, opacity;
+}
+
+/* CUM — Accent with glow */
+.asmr-joi-bar[data-state="cum"] {
+    border-top-color: color-mix(in srgb, var(--asmr-accent) 40%, transparent);
+    box-shadow: 0 -2px 24px color-mix(in srgb, var(--asmr-accent) 25%, transparent);
+}
+.asmr-joi-bar[data-state="cum"] .asmr-joi-status {
+    background: color-mix(in srgb, var(--asmr-accent) 20%, transparent);
+    color: var(--asmr-accent);
+    animation: joi-cum-flash 0.6s ease-out;
+    will-change: transform, opacity;
+}
+
+/* DENIED — Red pulse */
+.asmr-joi-bar[data-state="denied"] {
+    border-top-color: color-mix(in srgb, var(--asmr-state-denied) 40%, transparent);
+    box-shadow: 0 -2px 20px color-mix(in srgb, var(--asmr-state-denied) 20%, transparent);
+}
+.asmr-joi-bar[data-state="denied"] .asmr-joi-status {
+    background: color-mix(in srgb, var(--asmr-state-denied) 20%, transparent);
+    color: var(--asmr-state-denied);
+    animation: joi-denied-pulse 0.8s ease-in-out 2;
+    will-change: transform;
+}
+
+/* RUINED — Dim red */
+.asmr-joi-bar[data-state="ruined"] {
+    border-top-color: color-mix(in srgb, var(--asmr-state-stop) 20%, transparent);
+}
+.asmr-joi-bar[data-state="ruined"] .asmr-joi-status {
+    background: color-mix(in srgb, var(--asmr-state-stop) 10%, transparent);
+    color: var(--asmr-state-stop);
+    opacity: 0.8;
+}
+
+/* ============================================
+   Instruction Text
+   ============================================ */
+.asmr-joi-instruction {
+    font-size: 14px;
+    color: var(--asmr-text-secondary);
+    font-style: italic;
+    transition: opacity 0.3s ease;
+    min-width: 120px;
+    text-align: center;
+    user-select: none;
+}
+
+/* ============================================
+   Progress Ring (edge meter)
+   ============================================ */
+.asmr-joi-progress {
+    position: relative;
+    width: 28px;
+    height: 28px;
+    flex-shrink: 0;
+}
+
+.asmr-joi-ring {
+    width: 100%;
+    height: 100%;
+    border-radius: 50%;
+    border: 3px solid var(--asmr-border-color);
+    transition: border-color 0.3s ease;
+    position: relative;
+}
+
+.asmr-joi-bar[data-state="go"] .asmr-joi-ring {
+    border-color: color-mix(in srgb, var(--asmr-state-go) 40%, transparent);
+    border-top-color: var(--asmr-state-go);
+    animation: joi-ring-spin 2s linear infinite;
+}
+
+.asmr-joi-bar[data-state="stop"] .asmr-joi-ring {
+    border-color: color-mix(in srgb, var(--asmr-state-stop) 40%, transparent);
+    animation: none;
+}
+
+.asmr-joi-bar[data-state="edge"] .asmr-joi-ring {
+    border-color: color-mix(in srgb, var(--asmr-state-edge) 40%, transparent);
+    border-top-color: var(--asmr-state-edge);
+    animation: joi-ring-spin 0.6s linear infinite;
+}
+
+.asmr-joi-bar[data-state="cum"] .asmr-joi-ring {
+    border-color: var(--asmr-accent);
+    animation: joi-ring-burst 0.5s ease-out;
+}
+
+/* ============================================
+   Close Button
+   ============================================ */
+.asmr-joi-close {
+    background: none;
+    border: none;
+    color: var(--asmr-text-tertiary);
+    cursor: pointer;
+    padding: 4px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.2s, color 0.2s;
+    flex-shrink: 0;
+}
+
+.asmr-joi-close:hover {
+    background: var(--asmr-hover-bg);
+    color: var(--asmr-text-primary);
+}
+
+.asmr-joi-close:focus-visible {
+    outline: 2px solid var(--asmr-accent);
+    outline-offset: 2px;
+}
+
+.asmr-joi-close .material-icons {
+    font-size: 18px;
+}
+
+/* ============================================
+   Countdown Badge
+   ============================================ */
+.asmr-joi-countdown {
+    font-size: 11px;
+    color: var(--asmr-text-tertiary);
+    font-variant-numeric: tabular-nums;
+    min-width: 0;
+    text-align: center;
+    display: none; /* shown via JS when countdown is active */
+}
+
+/* ============================================
+   Context Indicator
+   ============================================ */
+.asmr-joi-context {
+    display: flex;
+    gap: 3px;
+    align-items: center;
+}
+
+.asmr-joi-context-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--asmr-border-color);
+    transition: background 0.3s ease;
+}
+
+.asmr-joi-context-dot.active {
+    background: var(--asmr-accent);
+}
+
+/* ============================================
+   Expanded Player Position
+   ============================================ */
+.audio-player .asmr-joi-bar {
+    position: relative;
+    bottom: auto;
+    left: auto;
+    right: auto;
+    width: 100%;
+    border-top: none;
+    border-bottom: 1px solid var(--asmr-border-color);
+    box-shadow: none;
+    z-index: 100;
+}
+
+/* ============================================
+   Fullscreen Adjustments
+   ============================================ */
+body.asmr-fullscreen-active .asmr-joi-bar:not(.audio-player .asmr-joi-bar) {
+    display: none !important;
+}
+
+/* ============================================
+   Animations
+   ============================================ */
+@keyframes joi-edge-pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.7; transform: scale(1.03); }
+}
+
+@keyframes joi-cum-flash {
+    0% { transform: scale(1.3); opacity: 0.5; }
+    100% { transform: scale(1); opacity: 1; }
+}
+
+@keyframes joi-denied-pulse {
+    0%, 100% { transform: scale(1); }
+    50% { transform: scale(1.05); }
+}
+
+@keyframes joi-ring-spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
+@keyframes joi-ring-burst {
+    0% { transform: scale(1.5); opacity: 0.3; }
+    100% { transform: scale(1); opacity: 1; }
+}
+
+/* ============================================
+   Responsive
+   ============================================ */
+@media (max-width: 600px) {
+    .asmr-joi-bar {
+        padding: 8px 12px;
+        gap: 8px;
+    }
+
+    .asmr-joi-status {
+        padding: 3px 10px;
+        font-size: 11px;
+        min-width: 60px;
+    }
+
+    .asmr-joi-instruction {
+        font-size: 12px;
+        min-width: 80px;
+    }
+
+    .asmr-joi-progress {
+        width: 24px;
+        height: 24px;
+    }
+}
+
+/* ============================================
+   Reduced Motion
+   ============================================ */
+@media (prefers-reduced-motion: reduce) {
+    .asmr-joi-bar[data-state="edge"] .asmr-joi-status,
+    .asmr-joi-bar[data-state="cum"] .asmr-joi-status,
+    .asmr-joi-bar[data-state="denied"] .asmr-joi-status,
+    .asmr-joi-ring,
+    .asmr-joi-bar.asmr-joi-flash {
+        animation: none;
+    }
+
+    .asmr-joi-bar,
+    .asmr-joi-status,
+    .asmr-joi-ring {
+        transition: none;
+    }
+}

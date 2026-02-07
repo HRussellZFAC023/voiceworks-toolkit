@@ -1,0 +1,1502 @@
+<script setup lang="ts">
+/**
+ * LearnerSubtitles.vue - Vue 3 SFC for Learner Mode subtitle display
+ *
+ * Renders both the expanded (inside audio player) and collapsed (fixed bar
+ * teleported to <body>) subtitle areas.  All audio sync, whisper handling,
+ * lyrics fetching, pre-translation, and control logic lives here.
+ */
+
+import {
+    ref, computed, watch, onMounted, onUnmounted, nextTick, type Ref,
+    Teleport,
+} from 'vue';
+
+import { useBridge } from '../../composables/useBridge';
+import { useConfig } from '../../composables/useConfig';
+import { useEventBus } from '../../composables/useEventBus';
+import { useI18n } from '../../composables/useI18n';
+import { TranslationService } from '../../services/TranslationService';
+import { AppStore } from '../../store/AppStore';
+import { getAudioElement, getPlayerBar } from '../../core/DomUtils';
+import { Logger, Config } from '../../core/Utils';
+import type { WhisperUpdatePayload } from '../../types';
+
+// ---------------------------------------------------------------------------
+// Composables
+// ---------------------------------------------------------------------------
+
+const bridge = useBridge();
+const { on, emit } = useEventBus();
+const { t, format } = useI18n();
+const learnerBlur = useConfig('learnerBlur');
+const showJP = useConfig('showJP');
+
+// ---------------------------------------------------------------------------
+// Reactive subtitle state
+// ---------------------------------------------------------------------------
+
+const primaryText = ref('');   // JP / primary line
+const secondaryText = ref(''); // EN / secondary line (blurred)
+const isBlurred = ref(!!learnerBlur.value);
+const isFallback = ref(false); // true when secondary is the untranslated fallback
+
+// Visibility
+const isPlayerMinimized = ref(false);
+const hasContent = ref(false);
+
+// Playback speed
+const playbackRate = ref(Number(Config.get('playbackRate')) || 1.0);
+
+// Overflow menu
+const overflowOpen = ref(false);
+const overflowStyle = ref<Record<string, string>>({});
+
+// ---------------------------------------------------------------------------
+// Non-reactive internal state (imperative, not triggering re-renders)
+// ---------------------------------------------------------------------------
+
+let currentLyrics: Array<{ time: number; endTime?: number; text: string; words?: Array<{ start: number; end: number; text: string }> }> = [];
+let lastText = '';
+let lastDisplayedText = '';
+let lastTrackKey: string | null = null;
+let translationToken = 0;
+
+// Whisper state
+let whisperLines: Array<{ time: number; endTime?: number; text: string; words?: Array<{ start: number; end: number; text: string }> }> = [];
+let whisperText = '';
+let whisperActive = false;
+let whisperFromCache = false;
+let whisperLive = false;
+let whisperLeadSec = 0;
+let lastWhisperDisplayText = '';
+let whisperTickerId: number | null = null;
+let whisperTickerInterval = 80;
+
+// Subtitle lead / append
+const subtitleLeadSec = 1.2;
+const subtitleAppendWindowSec = 1.5;
+const subtitleAppendMaxChars = 140;
+
+// Audio binding
+let boundAudio: HTMLAudioElement | null = null;
+let boundTimeHandler: (() => void) | null = null;
+let seekedDebounceTimer: number | null = null;
+
+// LRC fetch state
+let lastLrcTrackHash: string | null = null;
+let lrcFetchPromise: Promise<void> | null = null;
+const lrcFetchAttemptedHashes = new Set<string>();
+let lastNoLyricsLogHash: string | null = null;
+let lastPreTranslatedKey: string | null = null;
+
+// Ticker translation throttle
+let lastTickerTranslationText = '';
+let lastTickerTranslationAt = 0;
+const TICKER_TRANSLATION_COOLDOWN_MS = 500;
+
+// Drawer width tracking
+let drawerResizeObserver: ResizeObserver | null = null;
+
+// Host more button (for overflow proxy)
+let hostMoreBtn: HTMLElement | null = null;
+// Controls captured into overflow
+const originalParents = new Map<HTMLElement, { parent: HTMLElement; nextSibling: Node | null }>();
+
+// Overflow menu DOM ref (created imperatively and appended to body for z-index)
+let overflowMenuEl: HTMLElement | null = null;
+
+// Player observer (for injection race condition)
+let playerObserver: MutationObserver | null = null;
+
+// Store watchers cleanup
+const storeWatcherCleanups: (() => void)[] = [];
+
+// ---------------------------------------------------------------------------
+// Computed visibility
+// ---------------------------------------------------------------------------
+
+const showExpanded = computed(() => !isPlayerMinimized.value && hasContent.value);
+const showCollapsed = computed(() => isPlayerMinimized.value && hasContent.value);
+
+// ---------------------------------------------------------------------------
+// DOM refs
+// ---------------------------------------------------------------------------
+
+const expandedRef = ref<HTMLElement | null>(null);
+const collapsedRef = ref<HTMLElement | null>(null);
+const overflowToggleRef = ref<HTMLElement | null>(null);
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function isChinese(text: string): boolean {
+    return /[\u4e00-\u9fff]/.test(text) && !/[\u3040-\u309f\u30a0-\u30ff]/.test(text);
+}
+
+function getTrackKey(): string | null {
+    const track = bridge.currentTrack;
+    return track?.hash || track?.mediaStreamUrl || track?.src || track?.title || null;
+}
+
+function shouldTickerTranslate(text: string): boolean {
+    const now = Date.now();
+    if (text === lastTickerTranslationText && now - lastTickerTranslationAt < TICKER_TRANSLATION_COOLDOWN_MS) {
+        return false;
+    }
+    lastTickerTranslationText = text;
+    lastTickerTranslationAt = now;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Blur toggle
+// ---------------------------------------------------------------------------
+
+function toggleBlur() {
+    isBlurred.value = !isBlurred.value;
+    learnerBlur.value = isBlurred.value;
+}
+
+// Sync blur from external config changes
+on('config:change', ({ key, value }) => {
+    if (key === 'learnerBlur') {
+        isBlurred.value = !!value;
+    } else if (key === 'showJP') {
+        // showJP ref auto-syncs via useConfig
+    }
+});
+
+// ---------------------------------------------------------------------------
+// Primary / secondary line updates
+// ---------------------------------------------------------------------------
+
+function updatePrimaryLine(text: string) {
+    primaryText.value = text;
+}
+
+function updateSecondaryLine(text: string, fallback: boolean) {
+    secondaryText.value = text;
+    isFallback.value = fallback;
+    isBlurred.value = !!learnerBlur.value && !!text;
+}
+
+function clearDisplay() {
+    primaryText.value = '';
+    secondaryText.value = '';
+    lastDisplayedText = '';
+    refreshVisibility();
+}
+
+function refreshVisibility() {
+    isPlayerMinimized.value = !!bridge.store?.state?.AudioPlayer?.hide;
+    hasContent.value = !!lastDisplayedText || currentLyrics.length > 0 || whisperActive;
+}
+
+// ---------------------------------------------------------------------------
+// Audio time-update binding
+// ---------------------------------------------------------------------------
+
+function handleAudioPlay() {
+    if (boundAudio && playbackRate.value !== 1.0) {
+        boundAudio.playbackRate = playbackRate.value;
+    }
+}
+
+function handleAudioSeeking() {
+    lastText = '';
+    lastDisplayedText = '';
+    lastWhisperDisplayText = '';
+    translationToken += 1;
+    clearDisplay();
+}
+
+function handleAudioSeeked() {
+    if (seekedDebounceTimer) clearTimeout(seekedDebounceTimer);
+    seekedDebounceTimer = window.setTimeout(() => {
+        seekedDebounceTimer = null;
+        updateLyrics();
+    }, 50);
+}
+
+function bindAudioTimeUpdate() {
+    const audio = getAudioElement();
+    if (!audio) return;
+
+    if (playbackRate.value !== 1.0) {
+        audio.playbackRate = playbackRate.value;
+    }
+
+    if (boundAudio === audio) return;
+
+    // Unbind from old element
+    if (boundAudio && boundTimeHandler) {
+        boundAudio.removeEventListener('timeupdate', boundTimeHandler);
+        boundAudio.removeEventListener('play', handleAudioPlay);
+        boundAudio.removeEventListener('seeking', handleAudioSeeking);
+        boundAudio.removeEventListener('seeked', handleAudioSeeked);
+    }
+
+    boundAudio = audio;
+    if (boundTimeHandler) {
+        audio.addEventListener('timeupdate', boundTimeHandler);
+    }
+    audio.addEventListener('seeking', handleAudioSeeking);
+    audio.addEventListener('seeked', handleAudioSeeked);
+    audio.addEventListener('play', handleAudioPlay);
+}
+
+function unbindAudio() {
+    if (boundAudio) {
+        if (boundTimeHandler) boundAudio.removeEventListener('timeupdate', boundTimeHandler);
+        boundAudio.removeEventListener('play', handleAudioPlay);
+        boundAudio.removeEventListener('seeking', handleAudioSeeking);
+        boundAudio.removeEventListener('seeked', handleAudioSeeked);
+        boundAudio = null;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Timeline helpers
+// ---------------------------------------------------------------------------
+
+function findActiveLine(
+    lines: Array<{ time: number; endTime?: number; text: string }>,
+    now: number,
+): { time: number; endTime?: number; text: string } | null {
+    if (lines.length === 0) return null;
+    let activeLine: { time: number; endTime?: number; text: string } | null = null;
+    for (let i = lines.length - 1; i >= 0; i--) {
+        if (lines[i].time <= now) { activeLine = lines[i]; break; }
+    }
+    if (!activeLine) return null;
+    if (activeLine.endTime && now >= activeLine.endTime) return null;
+    return activeLine;
+}
+
+function getProgressiveText(
+    line: { time: number; endTime?: number; text: string },
+    now: number,
+): string {
+    const text = line.text?.trim() || '';
+    if (!text || line.endTime == null) return text;
+
+    const words = (line as any).words as Array<{ start: number; end: number; text: string }> | undefined;
+    if (Array.isArray(words) && words.length > 0) {
+        const visible = words.filter(w => w.start <= now + 0.01).map(w => (w.text || '').trim()).filter(Boolean);
+        if (visible.length === 0) return '';
+        return /\s/.test(text) ? visible.join(' ') : visible.join('');
+    }
+
+    const duration = Math.max(0.05, line.endTime - line.time);
+    const progress = Math.max(0, Math.min(1, (now - line.time) / duration));
+    if (/\s/.test(text)) {
+        const ws = text.split(/\s+/).filter(Boolean);
+        const count = Math.max(1, Math.min(ws.length, Math.ceil(progress * ws.length)));
+        return ws.slice(0, count).join(' ');
+    }
+    const chars = Array.from(text);
+    const count = Math.max(1, Math.min(chars.length, Math.ceil(progress * chars.length)));
+    return chars.slice(0, count).join('');
+}
+
+function getTextFromTimelineFor(
+    lines: Array<{ time: number; endTime?: number; text: string; words?: Array<{ start: number; end: number; text: string }> }>,
+    leadSec = 0,
+    progressive = false,
+    appendWindowSec = 0,
+    appendMaxChars = 0,
+): string {
+    const audio = getAudioElement();
+    if (!audio || lines.length === 0) return '';
+    const now = audio.currentTime + Math.max(0, leadSec);
+    const activeLine = findActiveLine(lines, now);
+    if (!activeLine || !activeLine.text) return '';
+    if (progressive && activeLine.endTime && activeLine.endTime > activeLine.time) {
+        return getProgressiveText(activeLine, now);
+    }
+    const base = activeLine.text.trim();
+    if (!appendWindowSec || lines.length < 2) return base;
+    const idx = lines.indexOf(activeLine);
+    if (idx < 0 || idx >= lines.length - 1) return base;
+    const next = lines[idx + 1];
+    if (!next?.text) return base;
+    const nextStart = next.time ?? 0;
+    if (nextStart - now > appendWindowSec) return base;
+    const combined = `${base} ${next.text.trim()}`.trim();
+    if (appendMaxChars > 0 && combined.length > appendMaxChars) return base;
+    return combined;
+}
+
+function getWhisperDisplay(): { displayText: string; fullText: string } {
+    const audio = getAudioElement();
+    if (!audio || whisperLines.length === 0) return { displayText: '', fullText: '' };
+    const now = audio.currentTime + Math.max(0, whisperLeadSec);
+    const activeLine = findActiveLine(whisperLines, now);
+    if (!activeLine || !activeLine.text) return { displayText: '', fullText: '' };
+    return { displayText: getProgressiveText(activeLine, now), fullText: activeLine.text.trim() };
+}
+
+function getSubtitleDisplay(): { displayText: string; fullText: string } {
+    const audio = getAudioElement();
+    if (!audio || currentLyrics.length === 0) return { displayText: '', fullText: '' };
+    const now = audio.currentTime + subtitleLeadSec;
+    const activeLine = findActiveLine(currentLyrics, now);
+    if (!activeLine || !activeLine.text) return { displayText: '', fullText: '' };
+    return { displayText: getProgressiveText(activeLine, now), fullText: activeLine.text.trim() };
+}
+
+// ---------------------------------------------------------------------------
+// Lyrics source finding
+// ---------------------------------------------------------------------------
+
+function getStoreLyricsSource(): any[] | null {
+    const player = (bridge.store?.state?.AudioPlayer || {}) as any;
+    const candidates: any[] = [
+        player.lyrics, player.lyricLines, player.lrcLines, player.lrc,
+        player.subtitleLines, player.subtitles,
+        player.subtitle?.lines, player.subtitle?.lrcLines, player.subtitle?.lyrics,
+        player.subtitle?.items, player.subtitle?.cues, player.lyric?.lines,
+    ];
+    for (const c of candidates) {
+        if (Array.isArray(c) && c.length > 0) return c;
+    }
+    // One-level deep scan
+    for (const key of Object.keys(player)) {
+        const value = player[key];
+        if (!value || typeof value !== 'object') continue;
+        if (Array.isArray(value) && value.length > 0 && isLyricLineArray(value)) return value;
+        const inner = value.lines || value.items || value.cues;
+        if (Array.isArray(inner) && inner.length > 0 && isLyricLineArray(inner)) return inner;
+    }
+    return null;
+}
+
+function isLyricLineArray(lines: any[]): boolean {
+    const sample = lines.find((l: any) => l);
+    if (!sample) return false;
+    return typeof sample.text === 'string' || typeof sample.content === 'string' || typeof sample.lyric === 'string';
+}
+
+function parseLyricsFromDom(): Array<{ time: number; text: string }> | null {
+    const lyricContent = document.querySelector('.lyric-content');
+    if (!lyricContent) return null;
+    const items = lyricContent.querySelectorAll('.q-item');
+    if (items.length === 0) return null;
+    const lyrics: Array<{ time: number; text: string }> = [];
+    const tsRegex = /\[(\d+):(\d+)\.(\d+)\]/;
+    for (const item of Array.from(items)) {
+        const label = item.querySelector('.q-item__label');
+        if (!label) continue;
+        const caption = item.querySelector('.q-item__label--caption');
+        const captionText = caption?.textContent?.trim() || '';
+        const match = tsRegex.exec(captionText);
+        const labelText = label.textContent?.replace(captionText, '').trim() || '';
+        if (match && labelText) {
+            const mins = parseInt(match[1], 10);
+            const secs = parseInt(match[2], 10);
+            const cs = parseInt(match[3], 10);
+            lyrics.push({ time: (mins * 60 + secs) * 1000 + cs * 10, text: labelText });
+        }
+    }
+    return lyrics.length > 0 ? lyrics : null;
+}
+
+function getTextTracksAsLyrics(): Array<{ time: number; endTime?: number; text: string }> | null {
+    const audio = getAudioElement();
+    if (!audio?.textTracks) return null;
+    for (const track of Array.from(audio.textTracks)) {
+        if (!track) continue;
+        if (track.mode === 'disabled') track.mode = 'hidden';
+        const cues = track.cues;
+        if (!cues || cues.length === 0) continue;
+        const lyrics: Array<{ time: number; endTime?: number; text: string }> = [];
+        for (let i = 0; i < cues.length; i++) {
+            const cue = cues[i] as VTTCue;
+            if (cue?.text) lyrics.push({ time: cue.startTime, endTime: cue.endTime, text: cue.text.trim() });
+        }
+        if (lyrics.length > 0) return lyrics;
+    }
+    return null;
+}
+
+function findLyricsSource(): any[] | null {
+    const storeLyrics = getStoreLyricsSource();
+    if (storeLyrics?.length) return storeLyrics;
+    const selectors = ['#lyric', '.lyric-content', '.q-card__section', '.audio-player', '.q-footer'];
+    for (const selector of selectors) {
+        const el = document.querySelector(selector) as any;
+        if (!el) continue;
+        const vm = el.__vue__;
+        if (vm) {
+            const data = vm.lyrics || vm.lrcLines || vm.lyricLines ||
+                vm.$data?.lyrics || vm.$data?.lrcLines ||
+                vm.$store?.state?.AudioPlayer?.lrcLines;
+            if (Array.isArray(data) && data.length) return data;
+            let parent = vm.$parent;
+            for (let i = 0; i < 5 && parent; i++) {
+                const pd = parent.lyrics || parent.lrcLines || parent.lyricLines ||
+                    parent.$data?.lyrics || parent.$data?.lrcLines;
+                if (Array.isArray(pd) && pd.length) return pd;
+                parent = parent.$parent;
+            }
+        }
+    }
+    const lrcDom = parseLyricsFromDom();
+    if (lrcDom?.length) return lrcDom;
+    return null;
+}
+
+// ---------------------------------------------------------------------------
+// VTT / LRC parsing
+// ---------------------------------------------------------------------------
+
+function parseVttContent(content: string): Array<{ time: number; endTime?: number; text: string }> {
+    const lyrics: Array<{ time: number; endTime?: number; text: string }> = [];
+    const lines = content.split(/\r?\n/);
+    const tsRegex = /^(?:(\d+):)?(\d{2}):(\d{2})\.(\d{3})\s*-->\s*(?:(\d+):)?(\d{2}):(\d{2})\.(\d{3})/;
+    let i = 0;
+    while (i < lines.length && !tsRegex.test(lines[i])) i++;
+    while (i < lines.length) {
+        const match = tsRegex.exec(lines[i]);
+        if (match) {
+            const startTime = (match[1] ? parseInt(match[1], 10) : 0) * 3600 + parseInt(match[2], 10) * 60 + parseInt(match[3], 10) + parseInt(match[4], 10) / 1000;
+            const endTime = (match[5] ? parseInt(match[5], 10) : 0) * 3600 + parseInt(match[6], 10) * 60 + parseInt(match[7], 10) + parseInt(match[8], 10) / 1000;
+            i++;
+            const textLines: string[] = [];
+            while (i < lines.length && lines[i].trim() !== '' && !tsRegex.test(lines[i])) {
+                if (!/^\d+$/.test(lines[i].trim())) textLines.push(lines[i].trim());
+                i++;
+            }
+            const text = textLines.join(' ').trim();
+            if (text) lyrics.push({ time: startTime, endTime, text });
+        } else {
+            i++;
+        }
+    }
+    return lyrics;
+}
+
+function parseLrcContent(content: string): Array<{ time: number; text: string }> {
+    const lyrics: Array<{ time: number; text: string }> = [];
+    const lines = content.split(/\r?\n/);
+    const tsRegex = /\[(\d+):(\d+)(?:\.(\d+))?\]/g;
+    for (const line of lines) {
+        if (!line.trim()) continue;
+        if (/^\[(ti|ar|al|by|offset|re|ve):/i.test(line)) continue;
+        const timestamps: number[] = [];
+        let text = line;
+        let match;
+        while ((match = tsRegex.exec(line)) !== null) {
+            const mins = parseInt(match[1], 10);
+            const secs = parseInt(match[2], 10);
+            const cs = match[3] ? parseInt(match[3].padEnd(2, '0').slice(0, 2), 10) : 0;
+            timestamps.push(mins * 60 + secs + cs / 100);
+            text = text.replace(match[0], '');
+        }
+        text = text.trim();
+        if (!text || timestamps.length === 0) continue;
+        for (const time of timestamps) lyrics.push({ time, text });
+    }
+    lyrics.sort((a, b) => a.time - b.time);
+    return lyrics;
+}
+
+// ---------------------------------------------------------------------------
+// LRC / subtitle fetching
+// ---------------------------------------------------------------------------
+
+async function fetchSubtitleFromUrl(url: string): Promise<boolean> {
+    try {
+        const res = await bridge.axios.get<string>(url, { responseType: 'text' as any });
+        const content = typeof res.data === 'string' ? res.data : String(res.data);
+        if (!content) return false;
+        let lyrics = parseVttContent(content);
+        if (lyrics.length === 0) lyrics = parseLrcContent(content);
+        if (lyrics.length > 0) {
+            const tk = getTrackKey();
+            if (tk) lastTrackKey = tk;
+            currentLyrics = lyrics;
+            preTranslateAll(lyrics);
+            updateLyrics();
+            return true;
+        }
+    } catch (err) {
+        Logger.error('[LearnerMode] Error fetching subtitle:', err);
+    }
+    return false;
+}
+
+async function fetchLrcByHash(hash: string): Promise<boolean> {
+    try {
+        const res = await bridge.axios.get<string>(`/api/media/stream/${hash}`, { responseType: 'text' as any });
+        const content = typeof res.data === 'string' ? res.data : String(res.data);
+        if (!content) return false;
+        const lyrics = parseLrcContent(content);
+        if (lyrics.length > 0) {
+            const tk = getTrackKey();
+            if (tk) lastTrackKey = tk;
+            currentLyrics = lyrics;
+            preTranslateAll(lyrics);
+            updateLyrics();
+            return true;
+        }
+    } catch (err) {
+        Logger.debug('[LearnerMode] Error fetching LRC by hash:', err);
+    }
+    return false;
+}
+
+async function fetchLrcForCurrentTrack(): Promise<void> {
+    const track = bridge.currentTrack;
+    if (!track) return;
+    const trackHash = track.hash || track.src || track.mediaStreamUrl || '';
+    if (!trackHash || trackHash === lastLrcTrackHash) return;
+    if (lrcFetchAttemptedHashes.has(trackHash)) return;
+    if (lrcFetchPromise) return lrcFetchPromise;
+    lrcFetchPromise = _fetchLrcInner(track, trackHash).finally(() => { lrcFetchPromise = null; });
+    return lrcFetchPromise;
+}
+
+async function _fetchLrcInner(track: any, trackHash: string): Promise<void> {
+    let fetched = false;
+
+    // Priority 1: availableLyrics
+    if (track.availableLyrics?.length) {
+        const trackTitle = (track.title || '').replace(/\.[^.]+$/, '');
+        const sorted = [...track.availableLyrics].sort((a: any, b: any) => {
+            const aMatch = trackTitle && (a.title || '').replace(/\.[^.]+$/, '') === trackTitle ? 0 : 1;
+            const bMatch = trackTitle && (b.title || '').replace(/\.[^.]+$/, '') === trackTitle ? 0 : 1;
+            return aMatch - bMatch;
+        });
+        for (const lyricFile of sorted) {
+            if (!lyricFile.mediaStreamUrl) continue;
+            try { fetched = await fetchSubtitleFromUrl(lyricFile.mediaStreamUrl); if (fetched) break; }
+            catch (err) { Logger.error('[LearnerMode] Error fetching subtitle:', err); }
+        }
+    }
+
+    // Priority 2: /api/media/check-lrc
+    if (!fetched) {
+        const workId = bridge.currentWorkId;
+        if (workId) {
+            const queue = bridge.queue;
+            const trackIndex = queue.findIndex((t: any) => t.hash === track.hash || t.mediaStreamUrl === track.mediaStreamUrl || t.src === track.src);
+            const candidates = new Set<number>();
+            if (trackIndex >= 0) candidates.add(trackIndex);
+            const fallback = bridge.queueIndex;
+            if (Number.isFinite(fallback) && fallback >= 0) candidates.add(fallback);
+
+            if (candidates.size === 0) {
+                fetched = await fetchLrcByHash(trackHash);
+            } else {
+                for (const idx of candidates) {
+                    try {
+                        const checkRes = await bridge.axios.get<{ result: boolean; hash?: string }>(`/api/media/check-lrc/${workId}/${idx}`);
+                        if (!checkRes.data.result || !checkRes.data.hash) continue;
+                        fetched = await fetchLrcByHash(checkRes.data.hash);
+                        if (fetched) break;
+                    } catch (err) { Logger.debug('[LearnerMode] Error fetching LRC:', err); }
+                }
+            }
+        }
+    }
+
+    if (fetched) lastLrcTrackHash = trackHash;
+    lrcFetchAttemptedHashes.add(trackHash);
+}
+
+// ---------------------------------------------------------------------------
+// Pre-translation
+// ---------------------------------------------------------------------------
+
+function preTranslateAll(lyrics: Array<{ time: number; text: string }>): void {
+    if (lyrics.length === 0) return;
+    const targetLang = (Config.get('subtitleLang') as string || 'en').toLowerCase();
+    const texts = lyrics.map(l => l.text?.trim()).filter(Boolean);
+    if (texts.length === 0 || !TranslationService.canPrefetch(texts.length)) return;
+    const uncached = texts.filter(t => !TranslationService.peekCached(t, targetLang));
+    if (uncached.length === 0) return;
+
+    const first = uncached[0] || '';
+    const last = uncached[uncached.length - 1] || '';
+    const key = `${uncached.length}:${first.slice(0, 20)}:${last.slice(0, 20)}`;
+    if (key === lastPreTranslatedKey) return;
+    lastPreTranslatedKey = key;
+
+    Logger.debug(`[LearnerMode] Pre-translating ${uncached.length}/${texts.length} uncached lines...`);
+
+    const processBatch = (batch: string[], priority: string) => {
+        if (batch.length === 0) return;
+        const cnTexts: string[] = [];
+        const allTexts: string[] = [];
+        for (const text of batch) {
+            if (isChinese(text) && !TranslationService.peekCached(text, 'ja')) cnTexts.push(text);
+            if (!TranslationService.peekCached(text, targetLang)) allTexts.push(text);
+        }
+        if (cnTexts.length > 0) {
+            TranslationService.translateBatch(cnTexts, 'ja').catch(err => Logger.warn(`[LearnerMode] CN->JA ${priority} batch failed:`, err));
+        }
+        if (targetLang !== 'ja' && allTexts.length > 0) {
+            TranslationService.translateBatch(allTexts, targetLang).catch(err => Logger.warn(`[LearnerMode] ->${targetLang} ${priority} batch failed:`, err));
+        }
+    };
+
+    const PRIORITY_BATCH_SIZE = 50;
+    processBatch(uncached.slice(0, PRIORITY_BATCH_SIZE), 'initial');
+    const bg = uncached.slice(PRIORITY_BATCH_SIZE);
+    if (bg.length > 0) setTimeout(() => processBatch(bg, 'background'), 2000);
+}
+
+// ---------------------------------------------------------------------------
+// The main updateLyrics() -- called on every timeupdate (~4Hz)
+// ---------------------------------------------------------------------------
+
+function updateLyrics() {
+    const trackKey = getTrackKey();
+    if (trackKey && trackKey !== lastTrackKey) {
+        lastTrackKey = trackKey;
+        lastText = '';
+        currentLyrics = [];
+        whisperLines = [];
+        whisperText = '';
+        whisperActive = false;
+        whisperFromCache = false;
+        whisperLive = false;
+        whisperLeadSec = 0;
+        lastWhisperDisplayText = '';
+        clearWhisperTicker();
+        clearDisplay();
+        translationToken += 1;
+    }
+
+    const useWhisper = whisperActive;
+    if (useWhisper) {
+        _updateWhisperDisplay();
+        return;
+    }
+
+    // Only try to find lyrics from other sources if we don't already have them
+    if (currentLyrics.length === 0) {
+        const data = findLyricsSource()
+            || bridge.store?.state?.AudioPlayer?.lrcLines
+            || getTextTracksAsLyrics();
+        if (data?.length) {
+            const newLyrics = data.map((l: any) => ({
+                time: typeof l.time === 'number'
+                    ? (l.time > 1000 ? l.time / 1000 : l.time)
+                    : parseFloat(l.time || l.start || l.startTime || 0),
+                endTime: l.end || l.endTime || undefined,
+                text: l.text || l.content || '',
+            }));
+            if (newLyrics.length !== currentLyrics.length ||
+                (newLyrics.length > 0 && newLyrics[0]?.text !== currentLyrics[0]?.text)) {
+                preTranslateAll(newLyrics);
+            }
+            currentLyrics = newLyrics;
+        } else {
+            const logKey = getTrackKey();
+            if (logKey !== lastNoLyricsLogHash) {
+                lastNoLyricsLogHash = logKey;
+                Logger.debug('[LearnerMode] No lyrics found');
+            }
+        }
+    }
+
+    const display = getSubtitleDisplay();
+    const fullText = display.fullText;
+    const progressiveText = display.displayText;
+    if (!fullText) { refreshVisibility(); return; }
+
+    const targetLang = (Config.get('subtitleLang') as string || 'en').toLowerCase();
+    const cn = isChinese(fullText);
+    let primary: string;
+    if (cn) {
+        const ja = TranslationService.peekCached(fullText, 'ja');
+        primary = ja || fullText;
+    } else {
+        primary = progressiveText;
+    }
+
+    if (primary && primary !== lastWhisperDisplayText) {
+        updatePrimaryLine(primary);
+        lastWhisperDisplayText = primary;
+    }
+
+    if (fullText !== lastText) {
+        lastText = fullText;
+        const cached = TranslationService.peekCached(fullText, targetLang);
+        updateSecondaryLine(cached || progressiveText, !cached);
+        lastDisplayedText = fullText;
+        const token = ++translationToken;
+
+        if (!cached) {
+            TranslationService.translate(fullText, targetLang).then(tr => {
+                if (tr && lastText === fullText && token === translationToken) updateSecondaryLine(tr, false);
+            }).catch(() => {});
+        }
+        if (cn && !TranslationService.peekCached(fullText, 'ja')) {
+            TranslationService.translate(fullText, 'ja').then(tr => {
+                if (tr && lastText === fullText && token === translationToken) {
+                    updatePrimaryLine(tr);
+                    lastWhisperDisplayText = tr;
+                }
+            }).catch(() => {});
+        }
+    }
+
+    refreshVisibility();
+}
+
+// ---------------------------------------------------------------------------
+// Whisper display logic (extracted to keep updateLyrics readable)
+// ---------------------------------------------------------------------------
+
+function _updateWhisperDisplay() {
+    const targetLang = (Config.get('subtitleLang') as string || 'en').toLowerCase();
+    const allowSecondary = !whisperLive || whisperFromCache;
+
+    if (whisperLines.length) {
+        currentLyrics = whisperLines;
+        const display = getWhisperDisplay();
+        const fullText = display.fullText;
+        if (fullText && fullText !== lastText) lastText = fullText;
+
+        let cachedSecondary: string | null = null;
+        if (fullText) {
+            cachedSecondary = TranslationService.peekCached(fullText, targetLang);
+            if (!cachedSecondary && whisperLive && shouldTickerTranslate(fullText)) {
+                const token = ++translationToken;
+                TranslationService.translate(fullText, targetLang).then(tr => {
+                    if (tr && lastDisplayedText === fullText && token === translationToken) updateSecondaryLine(tr, false);
+                }).catch(() => {});
+                if (isChinese(fullText) && targetLang !== 'ja') TranslationService.translate(fullText, 'ja').catch(() => {});
+            }
+        }
+        if (fullText && (allowSecondary || cachedSecondary) && fullText !== lastDisplayedText) {
+            lastDisplayedText = fullText;
+            updateSecondaryLine(cachedSecondary || '', !cachedSecondary);
+        }
+        if (display.displayText && display.displayText !== lastWhisperDisplayText) {
+            const cn = isChinese(display.displayText);
+            let prim = display.displayText;
+            if (cn) {
+                const ja = TranslationService.peekCached(fullText, 'ja');
+                prim = ja || display.displayText || fullText || '';
+                if (!ja) {
+                    TranslationService.translate(fullText, 'ja').then(ja2 => {
+                        if (ja2 && lastDisplayedText === fullText) { updatePrimaryLine(ja2); lastWhisperDisplayText = ja2; }
+                    }).catch(() => {});
+                }
+            }
+            updatePrimaryLine(prim);
+            lastWhisperDisplayText = prim;
+        } else if (!display.displayText && whisperText) {
+            _whisperFallback(targetLang, allowSecondary);
+        }
+        refreshVisibility();
+        return;
+    }
+
+    // No whisperLines but whisperText exists
+    if (whisperText) {
+        if (whisperText !== lastText) lastText = whisperText;
+        let cached: string | null = TranslationService.peekCached(whisperText, targetLang);
+        if (!cached && whisperLive && shouldTickerTranslate(whisperText)) {
+            const token = ++translationToken;
+            TranslationService.translate(whisperText, targetLang).then(tr => {
+                if (tr && lastDisplayedText === whisperText && token === translationToken) updateSecondaryLine(tr, false);
+            }).catch(() => {});
+            if (isChinese(whisperText) && targetLang !== 'ja') TranslationService.translate(whisperText, 'ja').catch(() => {});
+        }
+        if ((allowSecondary || cached) && whisperText !== lastDisplayedText) {
+            lastDisplayedText = whisperText;
+            updateSecondaryLine(cached || '', !cached);
+        }
+        if (whisperText !== lastWhisperDisplayText) {
+            const cn = isChinese(whisperText);
+            let prim = whisperText;
+            if (cn) {
+                const ja = TranslationService.peekCached(whisperText, 'ja');
+                prim = ja || whisperText;
+                if (!ja) TranslationService.translate(whisperText, 'ja').then(ja2 => {
+                    if (ja2 && lastDisplayedText === whisperText) { updatePrimaryLine(ja2); lastWhisperDisplayText = ja2; }
+                }).catch(() => {});
+            }
+            updatePrimaryLine(prim);
+            lastWhisperDisplayText = prim;
+        }
+    }
+    refreshVisibility();
+}
+
+function _whisperFallback(targetLang: string, allowSecondary: boolean) {
+    if (!whisperFromCache && whisperText.length <= 400) {
+        if (whisperText !== lastText) lastText = whisperText;
+        let cached = TranslationService.peekCached(whisperText, targetLang);
+        if (!cached && whisperLive && shouldTickerTranslate(whisperText)) {
+            const token = ++translationToken;
+            TranslationService.translate(whisperText, targetLang).then(tr => {
+                if (tr && lastDisplayedText === whisperText && token === translationToken) updateSecondaryLine(tr, false);
+            }).catch(() => {});
+            if (isChinese(whisperText) && targetLang !== 'ja') TranslationService.translate(whisperText, 'ja').catch(() => {});
+        }
+        if ((allowSecondary || cached) && whisperText !== lastDisplayedText) {
+            lastDisplayedText = whisperText;
+            updateSecondaryLine(cached || '', !cached);
+        }
+        if (whisperText !== lastWhisperDisplayText) {
+            const cn = isChinese(whisperText);
+            let prim = whisperText;
+            if (cn) {
+                const ja = TranslationService.peekCached(whisperText, 'ja');
+                prim = ja || whisperText;
+                if (!ja) TranslationService.translate(whisperText, 'ja').then(ja2 => {
+                    if (ja2 && lastDisplayedText === whisperText) { updatePrimaryLine(ja2); lastWhisperDisplayText = ja2; }
+                }).catch(() => {});
+            }
+            updatePrimaryLine(prim);
+            lastWhisperDisplayText = prim;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Whisper event handlers
+// ---------------------------------------------------------------------------
+
+function handleWhisperUpdate(payload: WhisperUpdatePayload) {
+    if (!payload) return;
+    whisperActive = true;
+    whisperFromCache = !!(payload as any).fromCache;
+    whisperLive = typeof (payload as any).live === 'boolean' ? !!(payload as any).live : false;
+    whisperLeadSec = typeof (payload as any).leadSec === 'number' ? Math.max(0, (payload as any).leadSec) : whisperLeadSec;
+    whisperText = payload.text || '';
+    ensureWhisperTicker(whisperLive ? 80 : 200);
+    if (Array.isArray(payload.segments) && payload.segments.length > 0) {
+        const newLines = payload.segments.map(s => ({ time: s.start, endTime: s.end, text: s.text, words: s.words }));
+        if (!whisperLive && TranslationService.canPrefetch(newLines.length)) preTranslateAll(newLines);
+        whisperLines = newLines;
+        lastWhisperDisplayText = '';
+    }
+    lastText = '';
+    updateLyrics();
+}
+
+function handleWhisperClear() {
+    whisperActive = false;
+    whisperText = '';
+    whisperLines = [];
+    whisperFromCache = false;
+    whisperLive = false;
+    whisperLeadSec = 0;
+    lastWhisperDisplayText = '';
+    clearWhisperTicker();
+    lastText = '';
+    lastDisplayedText = '';
+    clearDisplay();
+    refreshVisibility();
+}
+
+function ensureWhisperTicker(intervalMs = 80) {
+    if (whisperTickerId !== null && whisperTickerInterval === intervalMs) return;
+    if (whisperTickerId !== null) clearInterval(whisperTickerId);
+    whisperTickerInterval = intervalMs;
+    whisperTickerId = window.setInterval(() => { if (whisperActive) updateLyrics(); }, intervalMs);
+}
+
+function clearWhisperTicker() {
+    if (whisperTickerId === null) return;
+    clearInterval(whisperTickerId);
+    whisperTickerId = null;
+    whisperTickerInterval = 80;
+}
+
+// ---------------------------------------------------------------------------
+// Track / work change
+// ---------------------------------------------------------------------------
+
+function onTrackOrWorkChange() {
+    lastText = '';
+    lastDisplayedText = '';
+    currentLyrics = [];
+    whisperLines = [];
+    whisperText = '';
+    whisperActive = false;
+    whisperFromCache = false;
+    whisperLeadSec = 0;
+    lastWhisperDisplayText = '';
+    clearWhisperTicker();
+    translationToken += 1;
+    lastPreTranslatedKey = null;
+    lastLrcTrackHash = null;
+    lrcFetchAttemptedHashes.clear();
+    lrcFetchPromise = null;
+    lastNoLyricsLogHash = null;
+    clearDisplay();
+    bindAudioTimeUpdate();
+    fetchLrcForCurrentTrack().catch(err => Logger.error('[LearnerMode] LRC fetch failed:', err));
+    updateLyrics();
+}
+
+// ---------------------------------------------------------------------------
+// Controls: seek, speed
+// ---------------------------------------------------------------------------
+
+function seek(offset: number) {
+    const audio = getAudioElement();
+    if (!audio) return;
+    if (!currentLyrics.length) {
+        audio.currentTime = Math.max(0, audio.currentTime + offset * 5);
+        return;
+    }
+    const now = audio.currentTime;
+    let idx = currentLyrics.findIndex(l => l.time > now) - 1;
+    if (idx < 0) idx = 0;
+    const target = currentLyrics[Math.max(0, Math.min(currentLyrics.length - 1, idx + offset))];
+    if (target) {
+        audio.currentTime = target.time + 0.01;
+        audio.play().catch(err => Logger.warn('[LearnerMode] Audio play after seek failed:', err));
+    }
+}
+
+function setPlaybackRate(rate: number) {
+    playbackRate.value = rate;
+    Config.set('playbackRate', rate);
+    const audio = boundAudio || getAudioElement();
+    if (audio) audio.playbackRate = rate;
+    // Sync all speed swatches/sliders across DOM (including imperative controls)
+    document.querySelectorAll('.asmr-speed-swatch').forEach(el => {
+        el.textContent = `${rate}x`;
+        el.classList.toggle('modified', rate !== 1.0);
+    });
+    document.querySelectorAll<HTMLInputElement>('.asmr-speed-slider').forEach(s => { s.value = String(rate); });
+    document.querySelectorAll('.asmr-speed-slider-label').forEach(el => { el.textContent = `${rate}x`; });
+}
+
+function cyclePlaybackRate() {
+    const rates = [1.0, 1.25, 1.5, 2.0, 0.5, 0.75];
+    let idx = (rates.indexOf(playbackRate.value) + 1) % rates.length;
+    if (idx < 0) idx = 0;
+    setPlaybackRate(rates[idx]);
+}
+
+// ---------------------------------------------------------------------------
+// Drawer width sync
+// ---------------------------------------------------------------------------
+
+function syncDrawerWidth() {
+    const drawer = document.querySelector('.q-drawer--left') as HTMLElement | null;
+    const width = drawer ? `${drawer.getBoundingClientRect().width}px` : '0px';
+    document.documentElement.style.setProperty('--asmr-drawer-width', width);
+}
+
+// ---------------------------------------------------------------------------
+// Overflow menu helpers (imperative, for host button capture)
+// ---------------------------------------------------------------------------
+
+function triggerHostMenuAction(iconName: string) {
+    if (!hostMoreBtn) return;
+    hostMoreBtn.click();
+    setTimeout(() => {
+        const menus = document.querySelectorAll('.q-menu');
+        const menu = menus.length > 0 ? menus[menus.length - 1] : null;
+        if (menu) {
+            const items = Array.from(menu.querySelectorAll('.q-item'));
+            const target = items.find(i => i.innerHTML.includes(iconName));
+            if (target) (target as HTMLElement).click();
+        }
+    }, 100);
+}
+
+function downloadCurrentTrack() {
+    const track = bridge.currentTrack;
+    if (!track) return;
+    const url = (track as any).mediaDownloadUrl || (track as any).media_download_url || (track as any).file_url;
+    if (!url) return;
+    const a = document.createElement('a');
+    a.href = url; a.download = track.title || ''; a.style.display = 'none';
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+}
+
+function toggleOverflow(event: Event) {
+    const btn = (event.currentTarget || event.target) as HTMLElement;
+    overflowOpen.value = !overflowOpen.value;
+    if (overflowOpen.value) {
+        const rect = btn.getBoundingClientRect();
+        const sidebar = document.querySelector('.q-drawer--left, .q-drawer') as HTMLElement | null;
+        const minLeft = sidebar ? sidebar.getBoundingClientRect().right : 0;
+        overflowStyle.value = {
+            left: `${Math.max(minLeft, rect.left)}px`,
+            bottom: `${window.innerHeight - rect.top + 8}px`,
+            top: 'auto',
+        };
+    }
+}
+
+function closeOverflowOnOutsideClick(e: MouseEvent) {
+    if (!overflowOpen.value) return;
+    const target = e.target as Node;
+    const overflowEl = document.getElementById('asmr-learner-overflow');
+    const toggleEl = overflowToggleRef.value;
+    if (overflowEl?.contains(target) || toggleEl?.contains(target)) return;
+    overflowOpen.value = false;
+}
+
+// ---------------------------------------------------------------------------
+// Imperative controls injection (captures host buttons into overflow menu)
+// ---------------------------------------------------------------------------
+
+/**
+ * Inject learner controls into the player bar (for the collapsed/minibar view).
+ * This is imperative because we're inserting Quasar-style buttons into the
+ * host's player bar alongside its own buttons.
+ */
+function injectCollapsedControls() {
+    const bar = getPlayerBar();
+    if (!bar) return;
+    const playerBar = bar.matches('.player-bar, .q-footer') ? bar : bar.querySelector('.player-bar, .q-footer');
+    if (!playerBar || playerBar.querySelector('[data-asmr-learner-controls]')) return;
+
+    const ctrl = createControlsEl(true);
+    // Remove speed slider from bar controls
+    const slider = ctrl.querySelector('.asmr-speed-slider-wrap');
+    if (slider) slider.remove();
+
+    const skipNextBtn = Array.from(playerBar.querySelectorAll('button')).find(btn => {
+        if (btn.classList.contains('asmr-playlist-player-btn')) return false;
+        if (btn.closest('.asmr-playlist-player-controls')) return false;
+        if (btn.getAttribute('title')?.includes('Next Work')) return false;
+        const icon = btn.querySelector('.material-icons, .q-icon');
+        return icon && icon.textContent?.trim() === 'skip_next';
+    });
+    if (skipNextBtn?.parentElement) {
+        skipNextBtn.parentElement.insertBefore(ctrl, skipNextBtn.nextSibling);
+    } else {
+        playerBar.appendChild(ctrl);
+    }
+    setTimeout(() => captureControls(playerBar as HTMLElement, ctrl), 0);
+}
+
+/**
+ * Inject learner controls into the expanded audio player view.
+ */
+function injectExpandedControls() {
+    const player = document.querySelector('.audio-player') as HTMLElement | null;
+    if (!player) return;
+    const controls = player.querySelector('.row.self-center:not(.q-py-md)') as HTMLElement | null;
+    if (!controls) return;
+    const existing = controls.querySelector('.learner-controls') as HTMLElement | null;
+    if (existing) {
+        if (!existing.querySelector('.asmr-speed-slider-wrap')) {
+            existing.appendChild(createSpeedSliderEl());
+        }
+        setTimeout(() => captureControls(controls, existing), 0);
+        return;
+    }
+    const learnerCtrls = createControlsEl(false);
+    controls.insertBefore(learnerCtrls, controls.firstChild);
+    setTimeout(() => captureControls(controls, learnerCtrls), 0);
+}
+
+function createControlsEl(small: boolean): HTMLElement {
+    const div = document.createElement('div');
+    div.className = small ? 'learner-collapsed-controls' : 'learner-controls';
+    div.dataset.asmrLearnerControls = '1';
+
+    const createBtn = (icon: string, title: string, fn: (btn: HTMLElement) => void, isActive = false, extraClasses = '') => {
+        const b = document.createElement('button');
+        b.className = `q-btn q-btn-item non-selectable no-outline q-btn--flat q-btn--rectangle q-btn--dense q-ma-sm q-focusable q-hoverable learner-control-btn ${isActive ? 'learner-btn-active' : ''}`;
+        b.title = title;
+        b.ariaLabel = title;
+        b.innerHTML = `<span class="q-focus-helper"></span><span class="q-btn__wrapper col row q-anchor--skip"><span class="q-btn__content text-center col items-center q-anchor--skip justify-center row"><i aria-hidden="true" role="img" class="q-icon material-icons">${icon}</i></span></span>`;
+        if (extraClasses) b.classList.add(...extraClasses.split(' '));
+        b.onclick = (e) => { e.preventDefault(); e.stopPropagation(); fn(b); };
+        return b;
+    };
+
+    div.append(
+        createBtn('chevron_left', t('prevLine'), () => seek(-1)),
+        createBtn('chevron_right', t('nextLine'), () => seek(1)),
+        createBtn('psychology', t('toggleJP'), () => {
+            showJP.value = !showJP.value;
+        }, !!showJP.value),
+        (() => {
+            const btn = createBtn('more_vert', t('more'), (b) => {
+                if (!overflowMenuEl) return;
+                const isHidden = overflowMenuEl.classList.toggle('hidden');
+                if (!isHidden) {
+                    positionOverflowMenu(b);
+                    const onResize = () => positionOverflowMenu(b);
+                    window.addEventListener('resize', onResize);
+                    const close = (e: MouseEvent) => {
+                        const target = e.target as Node;
+                        if (!overflowMenuEl?.contains(target) && !b.contains(target)) {
+                            overflowMenuEl?.classList.add('hidden');
+                            document.removeEventListener('click', close, true);
+                            window.removeEventListener('resize', onResize);
+                        }
+                    };
+                    setTimeout(() => document.addEventListener('click', close, true), 0);
+                }
+            }, false, 'learner-overflow-toggle');
+            btn.classList.add('hidden');
+            return btn;
+        })(),
+        createSpeedSliderEl(),
+    );
+    return div;
+}
+
+function createSpeedSliderEl(): HTMLElement {
+    const wrap = document.createElement('div');
+    wrap.className = 'asmr-speed-slider-wrap';
+    wrap.style.filter = 'opacity(1)';
+    wrap.style.pointerEvents = 'auto';
+
+    const label = document.createElement('span');
+    label.className = 'asmr-speed-slider-label';
+    label.textContent = `${playbackRate.value}x`;
+    label.id = `speed-label-${Math.random().toString(36).substr(2, 9)}`;
+
+    const slider = document.createElement('input');
+    slider.type = 'range';
+    slider.className = 'asmr-speed-slider';
+    slider.min = '0.5'; slider.max = '2'; slider.step = '0.25';
+    slider.value = String(playbackRate.value);
+    slider.ariaLabel = t('playbackSpeed') || 'Playback Speed';
+    slider.setAttribute('aria-labelledby', label.id);
+    slider.addEventListener('input', () => {
+        const rate = parseFloat(slider.value);
+        label.textContent = `${rate}x`;
+        setPlaybackRate(rate);
+    });
+
+    wrap.append(label, slider);
+    return wrap;
+}
+
+function positionOverflowMenu(toggleBtn: HTMLElement) {
+    if (!overflowMenuEl) return;
+    const EDGE = 8;
+    const rect = toggleBtn.getBoundingClientRect();
+    const sidebar = document.querySelector('.q-drawer--left, .q-drawer') as HTMLElement | null;
+    const minLeft = sidebar ? sidebar.getBoundingClientRect().right + EDGE : EDGE;
+    const menuW = overflowMenuEl.offsetWidth || 48;
+    const maxLeft = window.innerWidth - menuW - EDGE;
+    overflowMenuEl.style.left = `${Math.max(minLeft, Math.min(rect.left, maxLeft))}px`;
+    const bottom = window.innerHeight - rect.top + 8;
+    const menuH = overflowMenuEl.offsetHeight || 0;
+    if (window.innerHeight - bottom < EDGE && menuH > 0) {
+        overflowMenuEl.style.bottom = 'auto';
+        overflowMenuEl.style.top = `${rect.bottom + 8}px`;
+    } else {
+        overflowMenuEl.style.bottom = `${bottom}px`;
+        overflowMenuEl.style.top = 'auto';
+    }
+}
+
+function captureControls(parent: HTMLElement, reference: HTMLElement) {
+    const allButtons = Array.from(parent.querySelectorAll('button'));
+    const excludedIcons = new Set([
+        'skip_previous', 'skip_next', 'play_arrow', 'pause',
+        'replay_5', 'forward_30', 'volume_up', 'volume_down',
+        'chevron_left', 'chevron_right', 'psychology', 'record_voice_over',
+    ]);
+    const candidates = allButtons.filter(btn => {
+        if (btn.classList.contains('learner-control-btn')) return false;
+        if (btn.classList.contains('asmr-whisper-btn')) return false;
+        const icon = btn.querySelector('.q-icon, .material-icons');
+        if (icon?.textContent) {
+            const iconName = icon.textContent.trim();
+            if (excludedIcons.has(iconName)) return false;
+            if (iconName === 'more_horiz') {
+                hostMoreBtn = btn;
+                hostMoreBtn.style.display = 'none';
+                return false;
+            }
+        }
+        return true;
+    }) as HTMLElement[];
+
+    if (!overflowMenuEl) {
+        overflowMenuEl = document.createElement('div');
+        overflowMenuEl.className = 'learner-overflow-menu hidden';
+        document.body.appendChild(overflowMenuEl);
+        addPermanentOverflowItems();
+    }
+
+    candidates.forEach(btn => {
+        if (originalParents.has(btn)) return;
+        originalParents.set(btn, { parent: btn.parentElement as HTMLElement, nextSibling: btn.nextSibling });
+        overflowMenuEl?.appendChild(btn);
+    });
+
+    const toggle = reference.querySelector('.learner-overflow-toggle') as HTMLElement;
+    if (toggle) toggle.classList.remove('hidden');
+}
+
+function addPermanentOverflowItems() {
+    if (!overflowMenuEl) return;
+    const createItem = (icon: string, title: string, onClick: () => void, extraClass = '') => {
+        const b = document.createElement('button');
+        b.className = `q-btn q-btn-item non-selectable no-outline q-btn--flat q-btn--rectangle q-btn--dense q-ma-sm q-focusable q-hoverable learner-control-btn learner-btn-normal ${extraClass}`;
+        b.title = title; b.ariaLabel = title;
+        b.innerHTML = `<span class="q-focus-helper"></span><span class="q-btn__wrapper col row q-anchor--skip"><span class="q-btn__content text-center col items-center q-anchor--skip justify-center row"><i aria-hidden="true" role="img" class="q-icon material-icons">${icon}</i></span></span>`;
+        b.onclick = (e) => { e.preventDefault(); e.stopPropagation(); onClick(); };
+        return b;
+    };
+
+    overflowMenuEl.appendChild(createItem('record_voice_over', t('aiTranscribe'), () => emit('whisper:toggle', undefined as any), 'asmr-whisper-btn'));
+    overflowMenuEl.appendChild(createItem('link', t('openWorkDetail'), () => triggerHostMenuAction('link')));
+    overflowMenuEl.appendChild(createItem('folder', t('loadSubtitle'), () => triggerHostMenuAction('subtitles')));
+
+    const speedBtn = createItem('speed', format('speedTitle', { rate: playbackRate.value }), () => cyclePlaybackRate(), 'asmr-speed-btn');
+    const swatch = document.createElement('span');
+    swatch.className = 'asmr-speed-swatch';
+    swatch.textContent = `${playbackRate.value}x`;
+    speedBtn.appendChild(swatch);
+    overflowMenuEl.appendChild(speedBtn);
+
+    overflowMenuEl.appendChild(createItem('download', t('downloadTrack'), () => downloadCurrentTrack()));
+    overflowMenuEl.appendChild(createItem('casino', t('joiToggle'), () => emit('joi:toggle', undefined as any), 'asmr-joi-btn'));
+    overflowMenuEl.appendChild(createItem('equalizer', t('vizToggle'), () => emit('viz:toggle', undefined as any), 'asmr-viz-btn'));
+}
+
+function restoreControls() {
+    originalParents.forEach((loc, btn) => {
+        btn.style.display = '';
+        if (loc.parent?.isConnected) loc.parent.insertBefore(btn, loc.nextSibling);
+    });
+    if (hostMoreBtn) { hostMoreBtn.style.display = ''; hostMoreBtn = null; }
+    originalParents.clear();
+    overflowMenuEl?.remove();
+    overflowMenuEl = null;
+}
+
+// Update style for psychology button active state
+function syncPsychologyBtn() {
+    document.querySelectorAll('.learner-controls button, .learner-collapsed-controls button').forEach(btn => {
+        const icon = btn.querySelector('i');
+        if (icon && icon.textContent?.trim() === 'psychology') {
+            btn.classList.toggle('learner-btn-active', !!showJP.value);
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Vuex store watchers
+// ---------------------------------------------------------------------------
+
+function setupStoreWatchers() {
+    const store = bridge.store;
+    if (!store?.watch) return;
+
+    const add = (fn: () => void) => storeWatcherCleanups.push(fn);
+
+    // Lyrics watchers
+    add(store.watch((state: any) => state.AudioPlayer?.lrcLines, () => updateLyrics(), { immediate: true }));
+    add(store.watch((state: any) => state.AudioPlayer?.lyrics, () => updateLyrics(), { immediate: true }));
+    add(store.watch((state: any) => state.AudioPlayer?.lyricLines, () => updateLyrics(), { immediate: true }));
+    add(store.watch((state: any) => state.AudioPlayer?.subtitleLines, () => updateLyrics(), { immediate: true }));
+    add(store.watch((state: any) => state.AudioPlayer?.subtitles, () => updateLyrics(), { immediate: true }));
+    add(store.watch((state: any) => state.AudioPlayer?.subtitle?.lines, () => updateLyrics(), { immediate: true }));
+    add(store.watch((state: any) => state.AudioPlayer?.currentLyric, (lyric: any) => { if (lyric) updateLyrics(); }));
+
+    // Track change via queue[queueIndex]
+    add(store.watch((state: any) => {
+        const ap = state.AudioPlayer;
+        if (!ap?.queue || typeof ap.queueIndex !== 'number') return null;
+        const track = ap.queue[ap.queueIndex];
+        return track?.hash || track?.mediaStreamUrl || null;
+    }, (trackKey: any) => {
+        setTimeout(() => {
+            bindAudioTimeUpdate();
+            if (trackKey) fetchLrcForCurrentTrack().catch(err => Logger.error('[LearnerMode] Store watcher LRC fetch failed:', err));
+        }, 100);
+    }, { immediate: true }));
+
+    // Audio source
+    add(store.watch((state: any) => state.AudioPlayer?.source, (src: any) => {
+        if (src) setTimeout(() => fetchLrcForCurrentTrack().catch(err => Logger.error('[LearnerMode] Source watcher LRC fetch failed:', err)), 200);
+    }, { immediate: true }));
+
+    // Playing state
+    add(store.watch((state: any) => state.AudioPlayer?.playing, (playing: any) => {
+        if (playing && currentLyrics.length === 0) fetchLrcForCurrentTrack().catch(err => Logger.error('[LearnerMode] Playing watcher LRC fetch failed:', err));
+    }, { immediate: true }));
+
+    // Player minimize/expand
+    add(store.watch((state: any) => state.AudioPlayer?.hide, () => refreshVisibility()));
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle
+// ---------------------------------------------------------------------------
+
+onMounted(() => {
+    AppStore.setLearnerState({ isActive: true });
+
+    boundTimeHandler = () => updateLyrics();
+
+    // EventBus listeners
+    on('whisper:clear', () => handleWhisperClear());
+    on('whisper:update', (payload) => handleWhisperUpdate(payload));
+    on('whisper:segment-translated', () => { if (whisperActive) updateLyrics(); });
+    on('track:change', () => onTrackOrWorkChange());
+    on('work:change', () => onTrackOrWorkChange());
+    on('player:nav-prev', () => {
+        if (currentLyrics.length > 0) seek(-1);
+        else bridge.dispatch('AudioPlayer/playPrev');
+    });
+    on('player:nav-next', () => {
+        if (currentLyrics.length > 0) seek(1);
+        else bridge.dispatch('AudioPlayer/playNext');
+    });
+    on('player:rate-change', (payload) => {
+        playbackRate.value = payload.rate;
+        syncPsychologyBtn();
+    });
+    on('translation:progress', (payload) => {
+        if (payload?.stage === 'ready') updateLyrics();
+    });
+
+    // Vue route watcher
+    const app = bridge.app as any;
+    if (app?.$watch) {
+        app.$watch('$route', (to: any) => {
+            lastText = '';
+            currentLyrics = [];
+            whisperLines = [];
+            whisperText = '';
+            whisperActive = false;
+            const path = to?.path || '';
+            if (!path.startsWith('/work/')) {
+                // Clean up controls when navigating away
+                restoreControls();
+                clearWhisperTicker();
+                unbindAudio();
+            } else {
+                setTimeout(() => {
+                    injectExpandedControls();
+                    injectCollapsedControls();
+                    updateLyrics();
+                }, 100);
+            }
+            refreshVisibility();
+            bindAudioTimeUpdate();
+        });
+    }
+
+    // Vuex store watchers
+    setupStoreWatchers();
+
+    // Initial injections
+    injectExpandedControls();
+    injectCollapsedControls();
+
+    // Player appearance observer
+    playerObserver = new MutationObserver(() => {
+        injectExpandedControls();
+        injectCollapsedControls();
+    });
+    playerObserver.observe(document.body, { childList: true, subtree: true });
+
+    // Drawer resize tracking
+    const drawer = document.querySelector('.q-drawer--left') as HTMLElement | null;
+    if (drawer && typeof ResizeObserver !== 'undefined') {
+        drawerResizeObserver = new ResizeObserver(() => syncDrawerWidth());
+        drawerResizeObserver.observe(drawer);
+    }
+    syncDrawerWidth();
+
+    // Bind audio
+    bindAudioTimeUpdate();
+
+    // Initial LRC fetch
+    setTimeout(() => {
+        if (bridge.currentTrack) {
+            fetchLrcForCurrentTrack().catch(err => Logger.error('[LearnerMode] Initial LRC fetch failed:', err));
+        }
+    }, 500);
+
+    // Outside-click listener for overflow
+    document.addEventListener('click', closeOverflowOnOutsideClick, true);
+});
+
+onUnmounted(() => {
+    AppStore.setLearnerState({ isActive: false });
+
+    clearWhisperTicker();
+    unbindAudio();
+    if (seekedDebounceTimer) { clearTimeout(seekedDebounceTimer); seekedDebounceTimer = null; }
+    playerObserver?.disconnect();
+    playerObserver = null;
+    drawerResizeObserver?.disconnect();
+    drawerResizeObserver = null;
+    restoreControls();
+    storeWatcherCleanups.forEach(fn => fn());
+    storeWatcherCleanups.length = 0;
+
+    // Remove imperative controls from DOM
+    document.querySelectorAll('.learner-controls, .learner-collapsed-controls').forEach(el => el.remove());
+
+    document.removeEventListener('click', closeOverflowOnOutsideClick, true);
+});
+
+// Watch showJP to sync the psychology button active state
+watch(showJP, () => syncPsychologyBtn());
+</script>
+
+<template>
+    <!-- Expanded subtitle area (rendered in-place, inside audio player via FeatureController) -->
+    <div
+        ref="expandedRef"
+        class="learner-subs-expanded"
+        :class="{ hidden: !showExpanded, 'hide-jp': !showJP }"
+        aria-live="polite"
+    >
+        <div class="learner-jp" role="status">{{ primaryText }}</div>
+        <div
+            class="learner-en"
+            :class="{ blurred: isBlurred && !!secondaryText, 'translation-fallback': isFallback }"
+            role="button"
+            tabindex="0"
+            :aria-label="t('toggleBlur')"
+            @click.prevent.stop="toggleBlur"
+            @keydown.enter.prevent.stop="toggleBlur"
+            @keydown.space.prevent.stop="toggleBlur"
+        >{{ secondaryText }}</div>
+    </div>
+
+    <!-- Collapsed subtitle bar (teleported to body for fixed positioning) -->
+    <Teleport to="body">
+        <div
+            ref="collapsedRef"
+            class="learner-subs-collapsed"
+            :class="{ hidden: !showCollapsed, 'hide-jp': !showJP }"
+            :style="{ display: showCollapsed ? 'flex' : 'none !important' }"
+            aria-live="polite"
+        >
+            <div class="learner-jp" role="status">{{ primaryText }}</div>
+            <div
+                class="learner-en"
+                :class="{ blurred: isBlurred && !!secondaryText, 'translation-fallback': isFallback }"
+                role="button"
+                tabindex="0"
+                :aria-label="t('toggleBlur')"
+                @click.prevent.stop="toggleBlur"
+                @keydown.enter.prevent.stop="toggleBlur"
+                @keydown.space.prevent.stop="toggleBlur"
+            >{{ secondaryText }}</div>
+        </div>
+    </Teleport>
+</template>
+
+<style scoped>
+/* No additional scoped styles needed - all styles come from _learner.css
+   which is imported globally in main.ts. The component uses the same
+   class names (.learner-subs-expanded, .learner-subs-collapsed, etc.)
+   as the original imperative implementation. */
+</style>

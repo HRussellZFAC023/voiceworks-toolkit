@@ -1,0 +1,15 @@
+# Ignore everything
+*
+
+# Whitelist asmr-one-ultimate
+!asmr-one-ultimate/
+!asmr-one-ultimate/**
+
+# Whitelist voiceworks-renamer
+!voiceworks-renamer/
+!voiceworks-renamer/**
+
+# Whitelist root files
+!.gitignore
+!README.md
+

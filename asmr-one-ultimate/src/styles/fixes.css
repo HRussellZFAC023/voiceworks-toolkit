@@ -1,0 +1,1136 @@
+/* ========================================
+   Bug Fixes & Cross-Cutting Overrides
+
+   This file provides targeted fixes that
+   override Quasar and component defaults.
+   Component-specific styles belong in their
+   respective _component.css files.
+   ======================================== */
+
+/* BUG-001: Blurred text should reveal on hover */
+:root {
+  .learner-en.blurred:hover {
+    filter: none !important;
+    opacity: 1 !important;
+  }
+}
+
+/* Use consistent accent color throughout the app */
+.asmr-accent {
+  color: var(--asmr-accent) !important;
+}
+
+/* ========================================
+   Sidebar Radio Toggle Active State
+   ======================================== */
+#asmr-radio-toggle.q-item--active {
+  background: color-mix(in srgb, var(--asmr-accent) 10%, transparent) !important;
+  border-left: 3px solid var(--asmr-accent) !important;
+}
+
+#asmr-radio-toggle.q-item--active #asmr-radio-icon {
+  color: var(--asmr-accent) !important;
+}
+
+/* ========================================
+   Whisper Button States
+   ======================================== */
+
+/* Base whisper button */
+.asmr-whisper-btn {
+  width: 40px !important;
+  height: 40px !important;
+  min-width: 40px !important;
+  min-height: 40px !important;
+  padding: 0 !important;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+  color: inherit;
+  background: transparent;
+  border-radius: 4px;
+}
+
+/* Whisper button hover - accent background */
+.asmr-whisper-btn:hover {
+  background: color-mix(in srgb, var(--asmr-accent) 10%, transparent) !important;
+  color: var(--asmr-accent) !important;
+}
+
+.asmr-whisper-btn:hover .q-icon {
+  color: var(--asmr-accent) !important;
+}
+
+/* Whisper active state - accent color, no flashing */
+.asmr-whisper-btn[data-active="true"],
+.asmr-whisper-btn[data-active="true"] i,
+.asmr-whisper-btn[data-active="true"] .q-icon {
+  color: var(--asmr-accent);
+}
+
+/* Remove animation from active state - only animate during loading */
+.asmr-whisper-btn[data-active="true"]:not(.asmr-whisper-loading) i {
+  animation: none;
+}
+
+/* Loading state */
+.asmr-whisper-loading {
+  opacity: 0.7;
+  pointer-events: none;
+  animation: whisper-load-pulse 1.5s ease-in-out infinite;
+  display: inline-flex;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .asmr-whisper-loading,
+  .asmr-whisper-btn.asmr-whisper-loading i {
+    animation: none;
+    opacity: 0.5;
+  }
+}
+
+.asmr-whisper-btn.asmr-whisper-loading i {
+  animation: whisper-load-pulse 1.5s ease-in-out infinite;
+}
+
+/* Whisper button variants */
+.asmr-whisper-btn--player {
+  display: inline-flex;
+}
+
+.asmr-whisper-btn--player .q-icon {
+  font-size: 20px;
+}
+
+.asmr-whisper-btn--mini .q-icon {
+  font-size: 18px;
+}
+
+/* Mobile-first: compact whisper button in player bar */
+.player-bar .asmr-whisper-btn--mini {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 4px;
+  min-width: 28px;
+  height: 28px;
+}
+
+/* Player Bar / Miniview override - mobile-first */
+:is(.player-bar, .q-footer) .asmr-whisper-btn {
+  width: 28px !important;
+  height: 28px !important;
+  min-width: 28px !important;
+  min-height: 28px !important;
+}
+
+@media (min-width: 601px) {
+  .player-bar .asmr-whisper-btn--mini {
+    min-width: 36px;
+    height: 36px;
+  }
+
+  :is(.player-bar, .q-footer) .asmr-whisper-btn {
+    width: 36px !important;
+    height: 36px !important;
+    min-width: 36px !important;
+    min-height: 36px !important;
+  }
+}
+
+/* ========================================
+   Whisper Status Display
+   ======================================== */
+.whisper-status {
+  text-align: center;
+  width: 100%;
+  padding: 8px 16px;
+  box-sizing: border-box;
+}
+
+.whisper-loading-indicator {
+  font-size: 0.9rem;
+  color: var(--asmr-accent);
+  font-weight: 500;
+  opacity: 0.9;
+  text-align: center;
+  padding: 8px 12px;
+  display: inline-block;
+  animation: none;
+}
+
+.whisper-status-text {
+  font-size: 0.9rem;
+  color: var(--asmr-accent);
+  font-weight: 500;
+  opacity: 0.9;
+  text-align: center;
+  padding: 8px 12px;
+  display: inline-block;
+}
+
+.whisper-error-indicator {
+  font-size: 0.9rem;
+  color: var(--q-negative, #f44336);
+  font-weight: 500;
+  opacity: 0.9;
+  text-align: center;
+  padding: 8px 12px;
+  display: inline-block;
+}
+
+/* Transcript download buttons (work tree + flat view) */
+.asmr-transcript-actions {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
+  align-items: center;
+}
+
+.asmr-transcript-btn {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 6px;
+  padding: 2px 6px;
+  font-size: 0.7rem;
+}
+
+.asmr-transcript-btn .q-icon {
+  font-size: 18px;
+  margin-right: 2px;
+}
+
+.asmr-transcript-label {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.asmr-transcript-btn--secondary {
+  background: rgba(128, 0, 255, 0.15);
+}
+
+:is(.body--dark, .q-dark) .whisper-error-indicator {
+  color: var(--q-negative, #ff7043);
+}
+
+@keyframes whisper-load-pulse {
+  0% {
+    opacity: 0.6;
+  }
+
+  50% {
+    opacity: 1;
+  }
+
+  100% {
+    opacity: 0.6;
+  }
+}
+
+/* ========================================
+   BUG-002: Mini-Player Subtitle Containment
+   ======================================== */
+.audio-player .learner-subs-expanded {
+  width: 100%;
+  max-width: 100vw !important;
+  min-width: 0 !important;
+  overflow: hidden !important;
+  box-sizing: border-box;
+}
+
+.audio-player {
+  min-width: 360px !important;
+}
+
+.learner-en {
+  white-space: normal !important;
+  overflow-wrap: anywhere !important;
+  word-break: break-word !important;
+}
+
+/* ========================================
+   Header & Navigation Icons
+   ======================================== */
+.asmr-header-actions .q-icon,
+.asmr-header-actions .material-icons {
+  color: var(--asmr-header-icon-color, var(--asmr-text-inverted)) !important;
+}
+
+/* Dark mode: header icons use accent */
+.body--dark,
+.q-dark {
+  --asmr-header-icon-color: var(--asmr-accent);
+}
+
+.asmr-header-actions .q-btn:hover {
+  background: var(--asmr-hover-bg) !important;
+}
+
+.asmr-header-actions .q-btn:hover .q-icon {
+  color: var(--asmr-text-inverted) !important;
+}
+
+.body--dark .asmr-header-actions .q-btn:hover .q-icon,
+.q-dark .asmr-header-actions .q-btn:hover .q-icon {
+  color: var(--asmr-accent) !important;
+}
+
+/* Header Buttons Consistency - mobile-first */
+.asmr-header-actions {
+  display: flex !important;
+  flex-wrap: nowrap !important;
+  align-items: center !important;
+  height: 100% !important;
+  gap: 2px;
+}
+
+/* Flexible spacer for header */
+.asmr-header-spacer {
+  flex-grow: 1 !important;
+}
+
+.asmr-header-actions .q-btn {
+  min-height: unset !important;
+  padding: 4px !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+}
+
+.asmr-header-actions .q-icon,
+.asmr-header-actions .material-icons {
+  font-size: 22px !important;
+  width: auto !important;
+  height: auto !important;
+  line-height: 1 !important;
+}
+
+@media (min-width: 601px) {
+  .asmr-header-actions {
+    padding-left: unset !important;
+    gap: 4px;
+  }
+}
+
+/* ========================================
+   Flat Inline Toggle
+   ======================================== */
+.asmr-flat-inline-toggle {
+  min-width: 28px;
+  height: 28px;
+  padding: 2px;
+}
+
+.asmr-flat-inline-toggle .q-icon {
+  font-size: 18px;
+}
+
+/* ========================================
+   Mini Radio Toggle in Player Bar
+   ======================================== */
+/* Mobile-first: compact radio button base */
+.asmr-radio-mini-btn {
+  min-width: 28px !important;
+  height: 28px !important;
+  width: 28px !important;
+  min-height: 28px !important;
+  padding: 2px !important;
+  margin-left: 4px;
+  border-radius: 4px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+  color: inherit;
+}
+
+:is(.player-bar, .q-footer) .asmr-radio-mini-btn {
+  width: 28px !important;
+  height: 28px !important;
+  min-width: 28px !important;
+  min-height: 28px !important;
+}
+
+.asmr-radio-mini-btn:hover {
+  background: var(--asmr-hover-bg) !important;
+  color: var(--asmr-accent) !important;
+}
+
+.asmr-radio-mini-btn .q-icon {
+  font-size: 16px;
+  color: inherit;
+}
+
+.asmr-radio-mini-btn .q-icon.asmr-accent {
+  color: var(--asmr-accent) !important;
+}
+
+/* Hide flat inline toggle on mobile (base) */
+.asmr-flat-inline-toggle {
+  display: none !important;
+}
+
+@media (min-width: 601px) {
+  .asmr-radio-mini-btn {
+    width: 40px !important;
+    height: 40px !important;
+    min-width: 40px !important;
+    min-height: 40px !important;
+    padding: 0 !important;
+  }
+
+  :is(.player-bar, .q-footer) .asmr-radio-mini-btn {
+    width: 36px !important;
+    height: 36px !important;
+    min-width: 36px !important;
+    min-height: 36px !important;
+  }
+
+  .asmr-radio-mini-btn .q-icon {
+    font-size: 20px;
+  }
+
+  .asmr-flat-inline-toggle {
+    display: inline-flex !important;
+  }
+}
+
+/* ========================================
+   Player Bar Alignment & Layout (mobile-first)
+   ======================================== */
+.player-bar,
+.player-bar-container,
+.q-footer .row.no-wrap.items-center {
+  flex-wrap: nowrap !important;
+  align-items: center !important;
+}
+
+/* Mobile base: compact buttons */
+.player-bar .q-btn {
+  padding: 2px !important;
+  min-width: 28px !important;
+}
+
+@media (min-width: 401px) {
+  .player-bar .q-btn {
+    padding: 4px !important;
+    min-width: 32px !important;
+  }
+}
+
+@media (min-width: 501px) {
+  .player-bar .q-btn {
+    padding: 0 !important;
+    min-width: unset !important;
+  }
+}
+
+/* ========================================
+   Semantic Search & Playlist Header Buttons
+   ======================================== */
+.asmr-vector-btn,
+.asmr-playlist-btn {
+  color: var(--asmr-text-inverted) !important;
+  transition: color 0.2s, background-color 0.2s;
+}
+
+.asmr-vector-btn .q-icon,
+.asmr-playlist-btn .q-icon {
+  font-size: 24px;
+}
+
+/* Vector button - light mode */
+.asmr-vector-btn .q-icon {
+  color: var(--asmr-text-inverted) !important;
+}
+
+.asmr-vector-btn:hover,
+.asmr-playlist-btn:hover {
+  background: rgba(255, 255, 255, 0.15) !important;
+}
+
+/* Dark mode: Use accent */
+:is(.body--dark, .q-dark) .asmr-vector-btn,
+:is(.body--dark, .q-dark) .asmr-vector-btn .q-icon {
+  color: var(--asmr-accent) !important;
+}
+
+:is(.body--dark, .q-dark) .asmr-vector-btn:hover,
+:is(.body--dark, .q-dark) .asmr-playlist-btn:hover {
+  background: color-mix(in srgb, var(--asmr-accent) 15%, transparent) !important;
+}
+
+/* Playlist button hover */
+.asmr-playlist-btn:hover .q-icon {
+  color: var(--asmr-accent) !important;
+}
+
+/* ========================================
+   Support Button
+   ======================================== */
+.asmr-support-btn {
+  color: var(--asmr-header-icon-color) !important;
+}
+
+.asmr-support-btn .asmr-support-text {
+  font-weight: 600;
+  margin-left: 4px;
+  font-size: 13px;
+  line-height: 1;
+}
+
+.asmr-support-btn .q-btn__content {
+  flex-wrap: nowrap !important;
+}
+
+/* Mobile-first: hide support text on small screens */
+.asmr-support-text {
+  display: none !important;
+}
+
+.asmr-support-btn .on-left {
+  margin-right: 0 !important;
+}
+
+@media (min-width: 601px) {
+  .asmr-support-text {
+    display: inline !important;
+  }
+
+  .asmr-support-btn .on-left {
+    margin-right: 4px !important;
+  }
+}
+
+/* ========================================
+   Dark Mode Icon Color Fixes
+   ======================================== */
+
+/* ASMR buttons use accent color in dark mode */
+:is(.body--dark, .q-dark) :is(.asmr-whisper-btn, .asmr-playlist-btn) .q-icon,
+:is(.body--dark, .q-dark) .learner-btn-active {
+  color: var(--asmr-accent) !important;
+}
+
+/* Sidebar icons - inherit by default, accent when active */
+:is(.body--dark, .q-dark) :is(#asmr-radio-icon, #asmr-playlist-icon) {
+  color: inherit;
+}
+
+:is(.body--dark, .q-dark) :is(#asmr-radio-icon, #asmr-playlist-icon).text-primary {
+  color: var(--asmr-accent) !important;
+}
+
+/* ========================================
+   WCAG Accessibility
+   ======================================== */
+
+/* Focus outlines for keyboard navigation */
+.asmr-whisper-btn:focus,
+.asmr-playlist-btn:focus,
+.asmr-vector-btn:focus,
+.learner-controls button:focus,
+.learner-collapsed-controls button:focus,
+.asmr-radio-mini-btn:focus,
+.asmr-clear-cache-btn:focus {
+  outline: 2px solid var(--asmr-accent) !important;
+  outline-offset: 2px;
+}
+
+/* Focus visible only for keyboard users (not mouse) */
+.asmr-whisper-btn:focus:not(:focus-visible),
+.asmr-playlist-btn:focus:not(:focus-visible),
+.asmr-vector-btn:focus:not(:focus-visible),
+.learner-controls button:focus:not(:focus-visible),
+.learner-collapsed-controls button:focus:not(:focus-visible) {
+  outline: none !important;
+}
+
+/* Mobile-first: minimum touch target size (44x44px) */
+.learner-controls button,
+.learner-collapsed-controls button,
+.asmr-whisper-btn,
+.asmr-playlist-btn,
+.asmr-radio-mini-btn {
+  min-width: 44px !important;
+  min-height: 44px !important;
+}
+
+@media (min-width: 769px) {
+
+  .learner-controls button,
+  .learner-collapsed-controls button,
+  .asmr-whisper-btn,
+  .asmr-playlist-btn,
+  .asmr-radio-mini-btn {
+    min-width: unset !important;
+    min-height: unset !important;
+  }
+}
+
+/* High contrast mode support */
+@media (prefers-contrast: high) {
+  .learner-btn-active {
+    outline: 2px solid currentColor !important;
+  }
+
+  .asmr-whisper-btn[data-active="true"] {
+    outline: 2px solid var(--asmr-accent) !important;
+  }
+}
+
+/* ========================================
+   Global Helper Classes
+   ======================================== */
+.asmr-lock-scroll {
+  overflow: hidden !important;
+  height: 100vh !important;
+}
+
+
+/* ========================================
+   Consistent Hover States
+   ======================================== */
+
+/* Learner control buttons hover */
+.learner-controls button:hover,
+.learner-collapsed-controls button:hover {
+  background: var(--asmr-hover-bg) !important;
+  border-radius: 4px;
+}
+
+/* Sidebar menu item hover */
+.q-drawer .q-item:hover #asmr-radio-icon,
+.q-drawer .q-item:hover #asmr-playlist-icon {
+  color: var(--asmr-accent) !important;
+}
+
+/* Clear cache button hover */
+.asmr-clear-cache-btn:hover {
+  background: rgba(255, 82, 82, 0.1) !important;
+}
+
+.asmr-clear-cache-btn:hover .q-icon {
+  color: var(--q-negative, #ff5252) !important;
+}
+
+/* Generate button hover (Playlist dialog) */
+.asmr-generate:hover {
+  filter: brightness(1.1);
+  box-shadow: 0 4px 12px color-mix(in srgb, var(--asmr-accent) 30%, transparent) !important;
+}
+
+/* Duration preset buttons hover */
+.asmr-preset-short:hover,
+.asmr-preset-medium:hover,
+.asmr-preset-long:hover {
+  background: var(--asmr-hover-bg) !important;
+  border-color: var(--asmr-accent) !important;
+  color: var(--asmr-accent) !important;
+}
+
+/* ========================================
+   Bottom Bar Icon Alignment (mobile-first)
+   ======================================== */
+
+/* Mobile base: tightest layout */
+.q-footer .row.items-center,
+.player-bar .row.items-center {
+  align-items: center !important;
+  gap: 0;
+}
+
+.q-footer .q-btn,
+.player-bar .q-btn {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  vertical-align: middle;
+}
+
+/* Respect Quasar's gt-sm responsive class: hide skip_prev/skip_next on mobile */
+.q-footer .q-btn.gt-sm,
+.player-bar .q-btn.gt-sm {
+  display: none !important;
+}
+
+@media (min-width: 601px) {
+
+  .q-footer .q-btn.gt-sm,
+  .player-bar .q-btn.gt-sm {
+    display: inline-flex !important;
+  }
+}
+
+.q-footer .q-icon,
+.player-bar .q-icon {
+  vertical-align: middle;
+  line-height: 1;
+}
+
+.q-footer .q-btn .q-icon,
+.player-bar .q-btn .q-icon {
+  font-size: 16px !important;
+}
+
+/* Small mobile: slightly larger icons */
+@media (min-width: 401px) {
+
+  .q-footer .q-btn .q-icon,
+  .player-bar .q-btn .q-icon {
+    font-size: 18px !important;
+  }
+}
+
+/* Tablet+: full size icons and spacing */
+@media (min-width: 601px) {
+
+  .q-footer .row.items-center,
+  .player-bar .row.items-center {
+    gap: 2px;
+  }
+
+  .q-footer .q-btn .q-icon,
+  .player-bar .q-btn .q-icon {
+    font-size: 20px !important;
+  }
+}
+
+/* ========================================
+   Collapsed Subtitle Controls Centering
+   ======================================== */
+.learner-collapsed-controls {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  vertical-align: middle;
+  height: 100%;
+  gap: 2px;
+}
+
+.learner-collapsed-controls button {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  vertical-align: middle;
+}
+
+/* Ensure button content is centered */
+.learner-collapsed-controls button .q-btn__content {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+}
+
+/* Ensure subtitle text in collapsed view is also centered */
+.learner-subs-collapsed {
+  display: flex !important;
+  align-items: center !important;
+  min-height: 32px;
+}
+
+.learner-subs-collapsed .learner-jp,
+.learner-subs-collapsed .learner-en {
+  display: flex;
+  align-items: center;
+}
+
+/* ========================================
+   Mini-Player Icon Alignment (mobile-first)
+   Prevents wrapping and ensures single row
+   ======================================== */
+
+/* Force single row layout on player bar containers */
+.q-footer,
+.player-bar,
+.player-bar-container {
+  overflow: hidden !important;
+}
+
+.q-footer>.row,
+.q-footer .row.items-center,
+.q-footer .row.no-wrap,
+.player-bar>.row,
+.player-bar .row.items-center,
+.player-bar .row.no-wrap {
+  flex-wrap: nowrap !important;
+  overflow-x: auto !important;
+  overflow-y: hidden !important;
+  scrollbar-width: none !important;
+  -ms-overflow-style: none !important;
+  align-items: center !important;
+  width: 100%;
+}
+
+/* Hide scrollbar on webkit */
+.q-footer>.row::-webkit-scrollbar,
+.q-footer .row.items-center::-webkit-scrollbar,
+.player-bar>.row::-webkit-scrollbar,
+.player-bar .row.items-center::-webkit-scrollbar {
+  display: none !important;
+  height: 0 !important;
+  width: 0 !important;
+}
+
+/* Mobile base: most compact button sizes */
+.q-footer .q-btn,
+.player-bar .q-btn {
+  min-width: 28px !important;
+  min-height: 28px !important;
+  max-width: 32px !important;
+  padding: 2px !important;
+  flex-shrink: 0 !important;
+  color: inherit;
+}
+
+/* Mobile base: smallest icon size */
+.q-footer .q-btn .q-icon,
+.q-footer .q-btn .material-icons,
+.player-bar .q-btn .q-icon,
+.player-bar .q-btn .material-icons {
+  font-size: 16px !important;
+}
+
+/* Learner controls in player bar - compact mobile base */
+.q-footer .learner-controls,
+.q-footer .learner-collapsed-controls,
+.player-bar .learner-controls,
+.player-bar .learner-collapsed-controls {
+  flex-shrink: 0 !important;
+  gap: 2px !important;
+  display: flex !important;
+  align-items: center !important;
+  height: 100% !important;
+  padding: 0 4px;
+}
+
+/* Mobile base: learner buttons tightest */
+.q-footer .learner-controls .q-btn,
+.q-footer .learner-collapsed-controls .q-btn,
+.player-bar .learner-controls .q-btn,
+.player-bar .learner-collapsed-controls .q-btn,
+.q-footer .learner-controls .learner-control-btn,
+.q-footer .learner-collapsed-controls .learner-control-btn,
+.player-bar .learner-controls .learner-control-btn,
+.player-bar .learner-collapsed-controls .learner-control-btn,
+.q-footer .asmr-whisper-btn,
+.player-bar .asmr-whisper-btn {
+  min-width: 24px !important;
+  min-height: 24px !important;
+  max-width: 32px !important;
+  padding: 2px !important;
+  margin: 0 1px !important;
+}
+
+.q-footer .learner-controls .q-icon,
+.q-footer .learner-collapsed-controls .q-icon,
+.player-bar .learner-controls .q-icon,
+.player-bar .learner-collapsed-controls .q-icon {
+  font-size: 16px !important;
+}
+
+/* Ensure buttons are properly sized and aligned */
+.q-footer .learner-control-btn,
+.player-bar .learner-control-btn {
+  padding: 0 !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+}
+
+/* Small mobile (381px+): slightly larger */
+@media (min-width: 381px) {
+
+  .q-footer .q-btn,
+  .player-bar .q-btn {
+    min-width: 32px !important;
+    min-height: 32px !important;
+    max-width: 36px !important;
+    padding: 4px !important;
+  }
+
+  .q-footer .q-btn .q-icon,
+  .q-footer .q-btn .material-icons,
+  .player-bar .q-btn .q-icon,
+  .player-bar .q-btn .material-icons {
+    font-size: 18px !important;
+  }
+}
+
+/* Tablet+ (501px+): full size */
+@media (min-width: 501px) {
+
+  .q-footer .q-btn,
+  .player-bar .q-btn {
+    max-width: 40px !important;
+    padding: 0 !important;
+    min-width: unset !important;
+    min-height: unset !important;
+  }
+
+  .q-footer .q-btn .q-icon,
+  .q-footer .q-btn .material-icons,
+  .player-bar .q-btn .q-icon,
+  .player-bar .q-btn .material-icons {
+    font-size: 20px !important;
+  }
+
+  .q-footer .learner-controls .q-btn,
+  .q-footer .learner-collapsed-controls .q-btn,
+  .player-bar .learner-controls .q-btn,
+  .player-bar .learner-collapsed-controls .q-btn,
+  .q-footer .learner-controls .learner-control-btn,
+  .q-footer .learner-collapsed-controls .learner-control-btn,
+  .player-bar .learner-controls .learner-control-btn,
+  .player-bar .learner-collapsed-controls .learner-control-btn,
+  .q-footer .asmr-whisper-btn,
+  .player-bar .asmr-whisper-btn {
+    min-width: unset !important;
+    min-height: unset !important;
+    max-width: 40px !important;
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+
+  .q-footer .learner-controls .q-icon,
+  .q-footer .learner-collapsed-controls .q-icon,
+  .player-bar .learner-controls .q-icon,
+  .player-bar .learner-collapsed-controls .q-icon {
+    font-size: 20px !important;
+  }
+}
+
+/* ========================================
+   Large Play Button Visibility
+   ======================================== */
+.q-footer .q-btn[style*="width: 60px"],
+.player-bar .q-btn[style*="width: 60px"] {
+  max-width: 60px !important;
+  max-height: 60px !important;
+  width: 60px !important;
+  height: 60px !important;
+  padding: 0 !important;
+  opacity: 1 !important;
+  background: var(--asmr-play-btn-bg) !important;
+}
+
+.q-footer .q-btn[style*="width: 60px"] .q-icon,
+.player-bar .q-btn[style*="width: 60px"] .q-icon {
+  font-size: 32px !important;
+}
+
+/* ========================================
+   Fix: Missing icons in Status/Marked menus
+   ======================================== */
+.q-menu .q-item__section--avatar .q-avatar[style*="display: none"] {
+  display: flex !important;
+}
+
+.q-menu .q-item__section--avatar .q-avatar[style*="display: none"] .q-avatar__content {
+  display: flex !important;
+}
+
+/* ========================================
+   BUG-003: Marquee broken after translation
+   Kikoeru calculates scroll distance at render
+   time for the original text. After translation,
+   Vue's inline styles become stale. We override
+   with our own smooth marquee animation.
+   ======================================== */
+@keyframes asmr-marquee {
+  0% {
+    transform: translateX(0);
+  }
+
+  100% {
+    transform: translateX(var(--asmr-scroll-distance));
+  }
+}
+
+.asmr-marquee-fix .scrolling {
+  animation: none !important;
+}
+
+.asmr-marquee-fix .one-line-expand {
+  animation: asmr-marquee var(--asmr-scroll-duration) linear infinite alternate !important;
+  will-change: transform;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .asmr-marquee-fix .one-line-expand {
+    animation: none !important;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+}
+
+/* ========================================
+   Fix: Quasar Field Styling in Dark Mode
+   Targeting "Lang" and similar settings
+   ======================================== */
+:is(.body--dark, .q-dark) .q-field__label,
+:is(.body--dark, .q-dark) .q-field__native,
+:is(.body--dark, .q-dark) .q-field--dark .q-field__native,
+:is(.body--dark, .q-dark) .q-field__native span {
+  color: var(--asmr-text-primary) !important;
+}
+
+:is(.body--dark, .q-dark) .q-field__append .q-icon {
+  color: var(--asmr-text-secondary) !important;
+}
+
+/* ========================================
+   Enhanced Quasar Input Styling
+   Modernize inputs with rounded corners & theme vars
+   ======================================== */
+.q-field__control {
+  background: var(--asmr-input-bg) !important;
+  border-radius: 8px !important;
+  transition: background 0.3s ease, box-shadow 0.3s ease !important;
+}
+
+.q-field__control:hover {
+  background: var(--asmr-hover-bg) !important;
+}
+
+/* Focus state: Accent border ring */
+.q-field--focused .q-field__control {
+  box-shadow: 0 0 0 2px var(--asmr-accent) inset !important;
+  background: var(--asmr-input-bg) !important;
+}
+
+/* Remove default Quasar underline/border if conflicting */
+.q-field__control:before,
+.q-field__control:after {
+  display: none !important;
+}
+
+/* Text & Icon Colors */
+.q-field__native,
+.q-field__prefix,
+.q-field__suffix,
+.q-field__input {
+  color: var(--asmr-text-primary) !important;
+}
+
+.q-field__input::placeholder {
+  color: var(--asmr-text-disabled) !important;
+}
+
+.q-field__append .q-icon,
+.q-field__prepend .q-icon {
+  color: var(--asmr-text-secondary) !important;
+  opacity: 0.8;
+}
+
+.q-field--focused .q-field__append .q-icon,
+.q-field--focused .q-field__prepend .q-icon {
+  color: var(--asmr-accent) !important;
+  opacity: 1;
+}
+
+/* ========================================
+   Header Search Bar Enhancements
+   ======================================== */
+
+/* Make the search bar wider and prevent scrollbars */
+.q-header .q-toolbar .q-field {
+  flex-grow: 1 !important;
+  margin: 0 16px !important;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
+  max-height: 40px !important;
+  overflow: hidden !important;
+  /* Force hide vertical scrollbar */
+}
+
+/* Force hide scrollbars on the field inner elements just in case */
+.q-header .q-toolbar .q-field__inner,
+.q-header .q-toolbar .q-field__control {
+  overflow: hidden !important;
+}
+
+/* Theme the Search Bar control — uses theme variables for both modes */
+.q-header .q-toolbar .q-field .q-field__control {
+  background: var(--asmr-bg-primary) !important;
+  border-radius: 12px !important;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05) !important;
+  border: 1px solid var(--asmr-border-color) !important;
+  transition: all 0.3s ease !important;
+}
+
+/* Input text and placeholder */
+.q-header .q-toolbar .q-field .q-field__native,
+.q-header .q-toolbar .q-field .q-field__input {
+  color: var(--asmr-text-primary) !important;
+}
+
+.q-header .q-toolbar .q-field .q-field__native::placeholder,
+.q-header .q-toolbar .q-field .q-field__input::placeholder {
+  color: var(--asmr-text-tertiary) !important;
+}
+
+/* Focus State — Accent glow ring */
+.q-header .q-toolbar .q-field--focused .q-field__control {
+  box-shadow: 0 0 0 1px var(--asmr-accent), 0 0 12px color-mix(in srgb, var(--asmr-accent) 30%, transparent) !important;
+  background: var(--asmr-bg-primary) !important;
+  border-color: var(--asmr-accent) !important;
+}
+
+/* Dark Mode — glassmorphic search bar */
+:is(.body--dark, .q-dark) .q-header .q-toolbar .q-field .q-field__control {
+  background: var(--asmr-input-bg) !important;
+  border-color: var(--asmr-border-color) !important;
+  box-shadow: none !important;
+}
+
+:is(.body--dark, .q-dark) .q-header .q-toolbar .q-field--focused .q-field__control {
+  background: var(--asmr-bg-secondary) !important;
+}
+
+/* Search bar icons — inherit theme's muted text */
+.q-header .q-toolbar .q-field .q-field__append .q-icon,
+.q-header .q-toolbar .q-field .q-field__prepend .q-icon {
+  color: var(--asmr-text-disabled) !important;
+  opacity: 1 !important;
+}
+
+.q-header .q-toolbar .q-field--focused .q-field__append .q-icon {
+  color: var(--asmr-accent) !important;
+}
+
+/* ========================================
+   Translation Pair (Side-by-side)
+   ======================================== */
+.asmr-translation-pair {
+  display: inline;
+}
+
+.asmr-translation-original {
+  opacity: 0.78;
+}
+
+.asmr-translation-sep {
+  opacity: 0.6;
+}
+
+.asmr-translation-translated {
+  opacity: 1;
+}
+
+/* ========================================
+   Z-Index Fixes
+   ======================================== */
+
+/* Ensure scroll-to-top button (and other bottom-right stickies) are on top */
+.q-page-sticky.fixed-bottom-right {
+  z-index: 1500 !important;
+}
+
+/* Ensure player "more" menu appears above learner panel and other overlays */
+.q-menu {
+  z-index: var(--z-menu, 10002) !important;
+}

@@ -1,0 +1,200 @@
+/* Playlist Generator & Advanced Search Styling */
+
+.asmr-playlist-card {
+    background: var(--asmr-bg-primary);
+    color: var(--asmr-text-primary);
+    width: min(500px, 95vw);
+    display: flex;
+    flex-direction: column;
+}
+
+.asmr-playlist-card input,
+.asmr-playlist-card select {
+    color: inherit;
+    background: var(--asmr-input-bg);
+    border: none;
+    border-radius: 4px;
+    padding: 8px;
+}
+
+.asmr-playlist-card select {
+    width: 100%;
+    border: 1px solid var(--asmr-border-color);
+}
+
+/* ============================================================
+   Playlist Discovery Controls
+   ============================================================ */
+
+.asmr-playlist-controls {
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.asmr-playlist-controls .asmr-playlist-controls-spacer {
+    flex: 1 1 auto;
+}
+
+.asmr-playlist-filter-select {
+    min-width: 90px;
+    max-width: 160px;
+    padding: 4px 8px;
+    border-radius: 6px;
+    border: 1px solid var(--asmr-border-color);
+    background: var(--asmr-bg-secondary);
+    color: var(--asmr-text-primary);
+    font-size: 0.85rem;
+    cursor: pointer;
+}
+
+.asmr-playlist-filter-select option {
+    background: var(--asmr-bg-secondary);
+    color: var(--asmr-text-primary);
+}
+
+.asmr-playlist-controls .asmr-playlist-count {
+    opacity: 0.7;
+    white-space: nowrap;
+}
+
+.asmr-playlist-controls .asmr-playlist-action {
+    padding: 4px 10px;
+    min-height: 30px;
+    border-radius: 6px;
+    border: 1px solid var(--asmr-border-color);
+    background: var(--asmr-bg-secondary);
+    color: var(--asmr-text-primary);
+}
+
+.asmr-playlist-controls .asmr-playlist-action:hover {
+    background: var(--asmr-bg-tertiary);
+}
+
+.asmr-playlist-controls .q-btn__content {
+    gap: 4px;
+    flex-wrap: nowrap;
+}
+
+.asmr-playlist-controls .q-icon {
+    font-size: 18px;
+}
+
+/* Tag Suggestions Dropdown */
+.asmr-tag-suggestions {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    background: var(--asmr-bg-primary);
+    color: var(--asmr-text-primary);
+    border: 1px solid var(--asmr-border-color);
+    max-height: 250px;
+    overflow-y: auto;
+    z-index: var(--q-z-top, 6000);
+    box-shadow: 0 8px 16px rgba(0, 0, 0, 0.3);
+    border-radius: 4px;
+}
+
+.asmr-tag-suggestion-item {
+    padding: 10px 14px;
+    cursor: pointer;
+    border-bottom: 1px solid var(--asmr-border-color);
+    display: flex;
+    justify-content: space-between;
+}
+
+.asmr-tag-suggestion-item:hover {
+    background: var(--asmr-accent);
+    color: #fff;
+}
+
+.asmr-tag-suggestion-item .text-caption {
+    opacity: 0.7;
+}
+
+.asmr-playlist-card .q-btn:hover {
+    background: var(--asmr-bg-tertiary);
+    color: var(--asmr-text-primary);
+}
+
+/* Chips in Playlist Builder */
+.asmr-tag-chip {
+    background: var(--asmr-bg-secondary);
+    color: var(--asmr-text-primary);
+    border-radius: 16px;
+    padding: 4px 8px;
+    margin: 2px;
+    font-size: 0.85rem;
+    display: inline-flex;
+    align-items: center;
+    transition: background 0.15s, color 0.15s;
+    cursor: default;
+}
+
+.asmr-tag-chip:hover {
+    background: var(--asmr-hover-bg);
+}
+
+/* ============================================================
+   Playlist Controls in Player Bar
+   ============================================================ */
+
+.asmr-playlist-player-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 16px;
+    flex-shrink: 0;
+    /* P5 FIX: Use absolute positioning to stay clear of the floating player card */
+    position: fixed;
+    bottom: 74px;
+    left: 74px;
+    background: var(--asmr-bg-overlay);
+    backdrop-filter: blur(20px);
+    border: 1px solid var(--asmr-border-color);
+    border-radius: 12px;
+    z-index: 1000;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.asmr-playlist-player-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    border: none;
+    border-radius: 50%;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+    transition: background 0.2s, opacity 0.2s;
+    padding: 0;
+}
+
+.asmr-playlist-player-btn:hover:not(.disabled) {
+    background: rgba(255, 255, 255, 0.1);
+}
+
+.asmr-playlist-player-btn:active:not(.disabled) {
+    background: rgba(255, 255, 255, 0.2);
+}
+
+.asmr-playlist-player-btn.disabled {
+    opacity: 0.3;
+    cursor: default;
+    pointer-events: none;
+}
+
+.asmr-playlist-player-btn .material-icons {
+    font-size: 20px;
+}
+
+.asmr-playlist-player-progress {
+    font-size: 0.75rem;
+    opacity: 0.85;
+    min-width: 36px;
+    text-align: center;
+    user-select: none;
+    white-space: nowrap;
+}

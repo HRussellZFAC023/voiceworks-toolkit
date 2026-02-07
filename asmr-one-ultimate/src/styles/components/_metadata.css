@@ -1,0 +1,19 @@
+/* ============================================
+   Work Metadata - Host DOM styles
+   These styles apply to elements injected into the
+   host page DOM (outside the Vue SFC scoped boundary).
+   Panel component styles are in WorkMetadataPanel.vue <style scoped>.
+   ============================================ */
+
+/* === Title Translation (injected into host DOM by translateTitle) === */
+.asmr-original-title {
+    font-size: 0.8rem;
+    color: var(--asmr-text-tertiary);
+    margin-bottom: 2px;
+}
+
+.asmr-translated-title {
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: var(--asmr-text-primary);
+}
