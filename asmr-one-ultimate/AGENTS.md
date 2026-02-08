@@ -373,7 +373,7 @@ A header with text “Magic Search” and a close “✖” icon.
 
 If the user hasn’t set a Jina API key, a warning message is shown in red: “Warning: Jina API Key missing. Set it in Settings or below.” followed by an input field for the key. (More on API key below.)
 
-The main input: a text box with placeholder “Describe functionality (e.g. 'pure scratching')” and a search icon button. The user will type an English (or any language) query describing what they want (could be a genre, a theme, etc.).
+The main input: a text box with placeholder “Describe functionality (e.g. 'relaxing')” and a search icon button. The user will type an English (or any language) query describing what they want (could be a genre, a theme, etc.).
 
 A secondary action row: a “Build Index” button and a label showing how many works are indexed.
 

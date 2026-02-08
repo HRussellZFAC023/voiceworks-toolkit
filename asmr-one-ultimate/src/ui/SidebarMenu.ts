@@ -179,13 +179,6 @@ export class SidebarMenu {
 
         const sidebar = this.findSidebar();
         if (sidebar) {
-            // Fix: Add padding to prevent overlap with the player bar
-            if (isActive) {
-                sidebar.style.paddingBottom = 'calc(var(--q-footer-height, 64px) + 20px)';
-            } else {
-                sidebar.style.paddingBottom = '';
-            }
-
             const playlistItem = Array.from(sidebar.querySelectorAll('a.q-item'))
                 .find(el => el.getAttribute('href') === '/playlists');
 
@@ -224,8 +217,8 @@ export class SidebarMenu {
     private ensurePlaylistControls(): void {
         if (this.playlistControlsEl && this.playlistControlsEl.isConnected) return;
 
-        // Remove any stale instances of the player controls (not discovery controls)
-        const existing = document.getElementById('asmr-playlist-player-controls');
+        // Remove any stale instances
+        const existing = document.getElementById('asmr-playlist-controls');
         if (existing) existing.remove();
 
         // Find the player bar
@@ -238,7 +231,7 @@ export class SidebarMenu {
 
         const controlsContainer = document.createElement('div');
         controlsContainer.className = 'asmr-playlist-player-controls';
-        controlsContainer.id = 'asmr-playlist-player-controls';
+        controlsContainer.id = 'asmr-playlist-controls';
 
         controlsContainer.innerHTML = `
             <button class="asmr-playlist-player-btn asmr-playlist-prev" title="${I18n.t('playlistPrevWork')}" aria-label="${I18n.t('playlistPrevWork')}">
@@ -285,7 +278,7 @@ export class SidebarMenu {
             e.stopPropagation();
             const pm = PlaylistMode.getInstance();
             pm.shuffle();
-
+            
             // Visual feedback
             const icon = this.playlistShuffleBtn?.querySelector('.material-icons');
             if (icon) {
@@ -301,7 +294,7 @@ export class SidebarMenu {
             this.updatePlaylistProgress(progress.current, progress.total);
         }
 
-        Logger.debug('[SidebarMenu] Playlist controls injected into player bar');
+        Logger.log('[SidebarMenu] Playlist controls injected into player bar');
     }
 
     private injectSfwToggle(sidebar: HTMLElement): void {
@@ -350,7 +343,7 @@ export class SidebarMenu {
         // Sync initial state
         this.updateSfwStatus(AppStore.getConfig('sfwMode'));
 
-        Logger.debug('[SidebarMenu] SFW toggle injected');
+        Logger.log('[SidebarMenu] SFW toggle injected');
     }
 
     private injectTranslateToggle(sidebar: HTMLElement): void {
@@ -400,7 +393,7 @@ export class SidebarMenu {
         // Sync initial state
         this.updateTranslateStatus(AppStore.getConfig('translateMode'));
 
-        Logger.debug('[SidebarMenu] Translate toggle injected');
+        Logger.log('[SidebarMenu] Translate toggle injected');
     }
 
     private setupObserver(): void {
@@ -425,7 +418,7 @@ export class SidebarMenu {
             subtree: true,
         });
 
-        Logger.debug('[SidebarMenu] Observer set up on:', drawerContainer.className);
+        Logger.log('[SidebarMenu] Observer set up on:', drawerContainer.className);
     }
 
     private scheduleInject(): void {
@@ -510,7 +503,7 @@ export class SidebarMenu {
             this.statusEl = el.querySelector('#asmr-radio-status') as HTMLElement | null;
             this.iconEl = el.querySelector('#asmr-radio-icon') as HTMLElement | null;
 
-            Logger.debug('[SidebarMenu] Radio toggle injected');
+            Logger.log('[SidebarMenu] Radio toggle injected');
 
             // Inject SFW Mode toggle
             this.injectSfwToggle(sidebar);

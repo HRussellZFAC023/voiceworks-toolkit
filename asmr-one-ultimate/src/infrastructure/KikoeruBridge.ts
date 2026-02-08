@@ -48,8 +48,15 @@ export class KikoeruBridge {
     }
 
     public static getInstance(): KikoeruBridge {
+        // Check window first for persisted instance across script re-injections
+        if (globalWindow.__ASMR_KIKOERU_BRIDGE__) {
+            KikoeruBridge.instance = globalWindow.__ASMR_KIKOERU_BRIDGE__;
+            return KikoeruBridge.instance;
+        }
+
         if (!KikoeruBridge.instance) {
             KikoeruBridge.instance = new KikoeruBridge();
+            globalWindow.__ASMR_KIKOERU_BRIDGE__ = KikoeruBridge.instance;
         }
         return KikoeruBridge.instance;
     }
@@ -126,24 +133,37 @@ export class KikoeruBridge {
     private setupWatchers(): void {
         const store = this.store;
 
-        // Watch for track changes via queue[queueIndex]
+        // Watch for track changes
         store.watch?.(
             (state) => {
-                const ap = state.AudioPlayer;
-                if (!ap?.queue || typeof ap.queueIndex !== 'number') return null;
-                // Primary: get track from queue[queueIndex]
-                const track = ap.queue[ap.queueIndex];
-                return track?.hash || track?.mediaStreamUrl || null;
+                const track = state.AudioPlayer?.currentTrack || state.AudioPlayer?.currentPlayingFile;
+                return track?.src || track?.mediaStreamUrl || track?.hash || null;
             },
             (newSrc) => {
                 if (newSrc && newSrc !== this._lastTrackSrc) {
                     this._lastTrackSrc = newSrc;
                     const track = this.currentTrack;
                     const workId = this.currentWorkId;
-                    if (track && workId) {
+                    if (track) {
                         Logger.debug('Track changed:', { title: track.title, workId });
                         EventBus.emit('track:change', { track, workId });
                     }
+                }
+            }
+        );
+
+        // Watch for queue index changes (backup: catches track advances the src watcher may miss)
+        store.watch?.(
+            (state) => state.AudioPlayer?.queueIndex,
+            (newIndex, oldIndex) => {
+                if (newIndex == null || newIndex === oldIndex) return;
+                const track = this.currentTrack;
+                const workId = this.currentWorkId;
+                const newSrc = track?.src || track?.mediaStreamUrl || track?.hash || null;
+                if (track && newSrc && newSrc !== this._lastTrackSrc) {
+                    this._lastTrackSrc = newSrc;
+                    Logger.debug('Track changed (queueIndex):', { index: newIndex, title: track.title, workId });
+                    EventBus.emit('track:change', { track, workId });
                 }
             }
         );
@@ -247,52 +267,51 @@ export class KikoeruBridge {
     // Core Accessors
     // =========================================================================
 
-    /** Throw if the bridge has not been initialized yet. Returns the app for convenient chaining. */
-    private assertInit(): KikoeruApp {
-        if (!this._app) throw new Error('KikoeruBridge not initialized');
-        return this._app;
-    }
-
     /**
      * Get the Vuex store
      */
     public get store(): KikoeruStore {
-        return this.assertInit().$store;
+        if (!this._app) throw new Error('Bridge not initialized');
+        return this._app.$store;
     }
 
     /**
      * Get the Vue router
      */
     public get router(): VueRouter {
-        return this.assertInit().$router;
+        if (!this._app) throw new Error('Bridge not initialized');
+        return this._app.$router;
     }
 
     /**
      * Get current route
      */
     public get route(): VueRoute {
-        return this.assertInit().$route;
+        if (!this._app) throw new Error('Bridge not initialized');
+        return this._app.$route;
     }
 
     /**
      * Get axios instance
      */
     public get axios(): AxiosInstance {
-        return this.assertInit().$axios;
+        if (!this._app) throw new Error('Bridge not initialized');
+        return this._app.$axios;
     }
 
     /**
      * Get the raw Vue app (for advanced use cases)
      */
     public get app(): KikoeruApp {
-        return this.assertInit();
+        if (!this._app) throw new Error('Bridge not initialized');
+        return this._app;
     }
 
     /**
      * Get the typed API client
      */
     public get api(): KikoeruApiClient {
-        if (!this._apiClient) throw new Error('KikoeruBridge not initialized');
+        if (!this._apiClient) throw new Error('Bridge not initialized');
         return this._apiClient;
     }
 
@@ -308,16 +327,10 @@ export class KikoeruBridge {
     }
 
     /**
-     * Get current track from the queue at the current index.
-     * The AudioPlayer stores tracks in `queue[]` and the current position in `queueIndex`.
+     * Get current track
      */
     public get currentTrack(): PlayerTrack | undefined {
         const player = this.player;
-        // Primary source: queue[queueIndex] - this is where the actual track data lives
-        if (player.queue && typeof player.queueIndex === 'number' && player.queue[player.queueIndex]) {
-            return player.queue[player.queueIndex];
-        }
-        // Fallback for legacy/alternative state shapes
         return player.currentTrack || player.currentPlayingFile;
     }
 
@@ -388,15 +401,10 @@ export class KikoeruBridge {
      */
     public updatePath(pathSegments: string[]): void {
         const currentQuery = this.route.query;
-        const nextPath = JSON.stringify(pathSegments);
-        const currentPath = typeof currentQuery.path === 'string'
-            ? currentQuery.path
-            : JSON.stringify(this.getPathSegments());
-        if (currentPath === nextPath) return;
         this.router.replace({
             query: {
                 ...currentQuery,
-                path: nextPath,
+                path: JSON.stringify(pathSegments),
             },
         }).catch(() => { });
     }
@@ -499,20 +507,6 @@ export class KikoeruBridge {
      * The component has a `tree` array prop and a `path` data array.
      */
     public findWorkTreeComponent(): KikoeruApp | null {
-        // Optimization: Try the #work-tree element directly first
-        const el = document.getElementById('work-tree') as any;
-        if (el?.__vue__) {
-            let vm = el.__vue__;
-            for (let i = 0; i < 5 && vm; i++) {
-                const v = vm as unknown as { tree: unknown[]; path: unknown[]; fatherFolder: unknown };
-                if (Array.isArray(v.tree) && Array.isArray(v.path) && typeof v.fatherFolder !== 'undefined') {
-                    return vm as KikoeruApp;
-                }
-                vm = vm.$parent;
-            }
-        }
-
-        // Fallback to BFS discovery
         return this.findComponent((vm: KikoeruApp) => {
             const v = vm as unknown as { tree: unknown[]; path: unknown[]; fatherFolder: unknown };
             return Array.isArray(v.tree) && Array.isArray(v.path) && typeof v.fatherFolder !== 'undefined';
@@ -524,7 +518,7 @@ export class KikoeruBridge {
      */
     public notify(message: string, type: 'positive' | 'negative' | 'warning' | 'info' = 'info', timeout = 3000): void {
         const app = this._app;
-        const q = app?.$q || (window as unknown as { Quasar?: { notify?: (...args: unknown[]) => void } }).Quasar;
+        const q = app?.$q || (window as any).Quasar;
 
         if (q?.notify) {
             q.notify({

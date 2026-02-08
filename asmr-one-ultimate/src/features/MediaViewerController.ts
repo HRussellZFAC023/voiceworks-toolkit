@@ -376,7 +376,7 @@ export class MediaViewerController {
             }
             if (self.isVideo(ext)) {
                 self.showMedia(item, 'video', workTreeRef);
-                return original.call(this, item);
+                return;
             }
             if (self.isPdf(ext)) {
                 self.showMedia(item, 'pdf', workTreeRef);
@@ -495,6 +495,11 @@ export class MediaViewerController {
         // Show modal immediately with the single item
         await this.lightboxRef.showMedia(item, type, [item], 0);
 
+        // For videos, load the track into the native AudioPlayer so the mini player bar appears
+        if (type === 'video') {
+            this.playVideoInNativePlayer(item, workTreeContext);
+        }
+
         // Fetch full media list in the background
         const requestId = ++this.activeRequestId;
         const mediaList = await this.populateMediaList(item, type, requestId, workTreeContext);
@@ -532,6 +537,46 @@ export class MediaViewerController {
         // Re-inject thumbnails after close
         // (handled by the 'closed' event from the lightbox, but also:)
         // Thumbnails are re-injected via the CentralObserver
+    }
+
+    /**
+     * Load the video file into the native AudioPlayer so the mini player bar appears.
+     * The native <audio> element can play the audio track from .mp4 files.
+     * We build a queue that includes both audio and video files from the current folder.
+     */
+    private playVideoInNativePlayer(item: MediaFile, workTreeContext?: WorkTreeComponent): void {
+        const store = this.bridge.store;
+        if (!store.commit) return;
+
+        let allItems: MediaFile[] = [];
+        if (workTreeContext) {
+            const ctx = workTreeContext as any;
+            allItems = ctx.fatherFolder || ctx.$data?.fatherFolder || [];
+        }
+        if (allItems.length === 0) {
+            const wt = this.findWorkTreeComponent() as any;
+            if (wt) {
+                allItems = wt.fatherFolder || wt.$data?.fatherFolder || [];
+            }
+        }
+
+        const queue = allItems.filter((f: MediaFile) => {
+            if ((f as any).type === 'audio') return true;
+            const fExt = this.getFileExtension(f.title);
+            return this.isVideo(fExt);
+        }).map(f => ({ ...f, type: 'audio' as const }));
+
+        const index = queue.findIndex(f => f.hash === item.hash);
+        if (index < 0) {
+            // Fallback: single-item queue
+            store.commit('AudioPlayer/SET_QUEUE', {
+                queue: [{ ...item, type: 'audio' }],
+                index: 0,
+            });
+        } else {
+            store.commit('AudioPlayer/SET_QUEUE', { queue, index });
+        }
+        Logger.debug(`[MediaViewerController] Playing video in native player: ${item.title} (${index + 1}/${queue.length})`);
     }
 
     private async populateMediaList(

@@ -162,8 +162,13 @@ export class Whisper {
     private translateAheadUpTo = 0; // seconds: segments up to this time already sent for translation
     private lastTranscribeProgressAt = 0;
     private lastPersistAt = 0;
-    private static whisperWebgpuBroken = false;
+    private static gpuRecoveryAttempts = 0;
+    private static readonly MAX_GPU_RECOVERY = 3;
+    private gpuRecoveryTimer: number | null = null;
+    private idleUnloadTimer: number | null = null;
+    private static readonly IDLE_UNLOAD_MS = 10 * 60 * 1000; // 10 minutes
     private _audioCache: AudioCache | null = null;
+    private autoStartCheckTimer: number | null = null;
 
     private getAudioCache(): AudioCache | null {
         if (!AudioCache.objectUrls) return null;
@@ -191,6 +196,82 @@ export class Whisper {
             this.autoWarmupStarted = true;
             this.initWorker(settings);
         }
+
+        const alwaysOn = Config.get('alwaysTranscribe');
+        Logger.log('[Whisper] alwaysTranscribe =', alwaysOn);
+
+        // If alwaysTranscribe is on, start watching for audio to auto-start
+        if (alwaysOn) {
+            this.startAutoTranscribeCheck();
+        }
+
+        // Also listen for config changes to auto-start when toggled on mid-session
+        EventBus.on('config:change', (payload) => {
+            if (payload.key === 'alwaysTranscribe') {
+                if (payload.value === true) {
+                    this.startAutoTranscribeCheck();
+                } else {
+                    this.stopAutoTranscribeCheck();
+                }
+            }
+        });
+    }
+
+    /**
+     * Simple recurring check: every 1s, see if audio is playing and we should
+     * auto-start transcription. Runs indefinitely until it succeeds or
+     * alwaysTranscribe is turned off. No fragile event listeners or race
+     * conditions — just poll until conditions are met.
+     */
+    private startAutoTranscribeCheck(): void {
+        this.stopAutoTranscribeCheck();
+
+        // Try immediately
+        if (this.tryAutoStartForCurrentTrack()) return;
+
+        Logger.log('[Whisper] Auto-transcribe: waiting for audio to start playing...');
+        this.autoStartCheckTimer = window.setInterval(() => {
+            // Stop if config was turned off
+            if (!Config.get('alwaysTranscribe')) {
+                this.stopAutoTranscribeCheck();
+                return;
+            }
+            // Skip if already transcribing
+            if (this.transcribing) {
+                this.stopAutoTranscribeCheck();
+                return;
+            }
+            this.tryAutoStartForCurrentTrack();
+        }, 1000);
+    }
+
+    private stopAutoTranscribeCheck(): void {
+        if (this.autoStartCheckTimer) {
+            clearInterval(this.autoStartCheckTimer);
+            this.autoStartCheckTimer = null;
+        }
+    }
+
+    /**
+     * Try to auto-start transcription for the current track.
+     * Returns true if transcription was started (or is already running).
+     */
+    private tryAutoStartForCurrentTrack(): boolean {
+        if (this.transcribing) return true;
+        const track = this.bridge.currentTrack;
+        const src = track?.hash || track?.mediaStreamUrl || track?.src;
+        if (!src) return false;
+        const audio = getAudioElement();
+        if (!audio || audio.paused) return false;
+
+        Logger.log('[Whisper] Always-transcribe: auto-starting for current track');
+        this.currentTrackSrc = src;
+        this.autoTranscribeWorkId = this.bridge.currentWorkId || null;
+        this.stopAutoTranscribeCheck();
+        setTimeout(() => {
+            void this.startTranscription();
+        }, 500);
+        return true;
     }
 
     public warmupModel(force = false): void {
@@ -296,6 +377,7 @@ export class Whisper {
 
     private async startTranscription(): Promise<void> {
         if (this.transcribing) return;
+        this.clearIdleUnloadTimer();
 
         const audio = getAudioElement();
         if (!audio) {
@@ -303,7 +385,10 @@ export class Whisper {
             return;
         }
 
-        const src = audio.currentSrc || audio.src || null;
+        // Prefer bridge track info — audio element may still have the old src after track change
+        const bridgeTrack = this.bridge.currentTrack;
+        const audioSrc = audio.currentSrc || audio.src || null;
+        const src = bridgeTrack?.mediaStreamUrl || bridgeTrack?.src || audioSrc;
         if (!src) {
             this.dispatchError(I18n.t('whisperNoAudioSource'));
             return;
@@ -313,7 +398,7 @@ export class Whisper {
         this.setButtonsActive(true);
         this.dispatchProgress(I18n.t('whisperInit'), 0, 'loading');
 
-        this.currentTrackSrc = src;
+        this.currentTrackSrc = bridgeTrack?.hash || bridgeTrack?.mediaStreamUrl || src;
         this.audio = audio;
         const workId = this.bridge.currentWorkId;
         this.autoTranscribeWorkId = workId || null;
@@ -336,7 +421,7 @@ export class Whisper {
         if (settings.cacheTranscripts) {
             const cached = SharedCache.get<CachedTranscript>(this.currentCacheKey);
             if (cached && cached.segments?.length) {
-                Logger.debug('[Whisper] Using cached transcript:', { segments: cached.segments.length });
+                Logger.debug('[Whisper] Using cached transcript:', { segments: cached.segments.length, complete: !!cached.complete });
                 this.segments = cached.segments;
                 this.lastSegmentEnd = cached.segments[cached.segments.length - 1]?.end || 0;
                 this.updateTranscriptIndex(this.currentCacheKey, cached);
@@ -344,16 +429,21 @@ export class Whisper {
                 EventBus.emit('whisper:update', {
                     text: latest?.text || cached.text,
                     segments: cached.segments,
-                    final: true,
+                    final: !!cached.complete,
                     fromCache: true,
                     live: false,
                     source: 'cache',
                 });
                 if (cached.complete) {
                     EventBus.emit('whisper:complete', { text: cached.text });
+                    this.stopTranscription('cache-hit');
+                    return;
                 }
-                this.stopTranscription('cache-hit');
-                return;
+                // Incomplete cache — continue transcription from where we left off
+                Logger.debug('[Whisper] Cache incomplete, continuing transcription from', this.lastSegmentEnd.toFixed(1) + 's');
+                this.transcribedUpTo = Math.max(0, this.lastSegmentEnd - 2);
+                this.lastTranslatedSegmentCount = this.segments.length;
+                this.translateAheadUpTo = this.lastSegmentEnd;
             }
         }
 
@@ -368,12 +458,20 @@ export class Whisper {
         }
 
         // Fetch + decode the full audio file for lookahead processing
+        const cacheTranscribedUpTo = this.transcribedUpTo; // 0 if no cache, >0 if partial
         this.dispatchProgress(I18n.t('whisperFetchingAudio'), 0, 'loading');
         try {
             this.pcmBuffer = await this.fetchAndDecodeAudio(trackUrl);
             this.pcmDuration = this.pcmBuffer.length / TARGET_SAMPLE_RATE;
             // Backfill a small window so model load latency does not drop opening lines.
             this.transcribedUpTo = Math.max(0, Math.min(this.pcmDuration, audio.currentTime - INITIAL_BACKFILL_SEC));
+
+            // Preserve cache continuation point if it's further along
+            if (cacheTranscribedUpTo > this.transcribedUpTo) {
+                this.transcribedUpTo = cacheTranscribedUpTo;
+                Logger.debug('[Whisper] Restored cache continuation point:', cacheTranscribedUpTo.toFixed(1) + 's');
+            }
+
             Logger.debug('[Whisper] Audio decoded:', {
                 duration: this.pcmDuration.toFixed(1) + 's',
                 samples: this.pcmBuffer.length,
@@ -408,6 +506,10 @@ export class Whisper {
         this.transcribing = false;
         this.finalizeOnIdle = false;
         this.clearModelLoadTimer();
+        if (this.gpuRecoveryTimer) {
+            clearTimeout(this.gpuRecoveryTimer);
+            this.gpuRecoveryTimer = null;
+        }
         // Keep buttons active if auto-transcribe is still enabled (track change or cache hit within work)
         const keepActive = this.autoTranscribeWorkId && (reason === 'track-change' || reason === 'cache-hit');
         if (!keepActive) {
@@ -435,6 +537,26 @@ export class Whisper {
         this.transcribedUpTo = 0;
 
         this.persistCache(shouldFinalize);
+        this.scheduleIdleUnload();
+    }
+
+    private scheduleIdleUnload(): void {
+        this.clearIdleUnloadTimer();
+        // Don't unload if auto-transcribe is pending (will start again on next track)
+        if (this.autoTranscribeWorkId) return;
+        this.idleUnloadTimer = window.setTimeout(() => {
+            if (!this.transcribing && this.worker) {
+                Logger.log('[Whisper] Idle timeout reached, unloading model to free memory');
+                this.resetWorker('idle-unload');
+            }
+        }, Whisper.IDLE_UNLOAD_MS);
+    }
+
+    private clearIdleUnloadTimer(): void {
+        if (this.idleUnloadTimer) {
+            clearTimeout(this.idleUnloadTimer);
+            this.idleUnloadTimer = null;
+        }
     }
 
     private resetState(reason: string): void {
@@ -463,7 +585,8 @@ export class Whisper {
     private resolveTrackUrl(): string | null {
         const track = this.bridge.currentTrack;
         if (!track) return null;
-        return track.mediaDownloadUrl || track.mediaStreamUrl || track.src || null;
+        // Prefer low-quality stream for transcription — smaller download, same Whisper accuracy
+        return track.streamLowQualityUrl || track.mediaDownloadUrl || track.mediaStreamUrl || track.src || null;
     }
 
     private isHlsUrl(url: string): boolean {
@@ -641,6 +764,19 @@ export class Whisper {
 
     private maybeProcessNextChunk(): void {
         if (!this.transcribing || !this.pcmBuffer) return;
+
+        // Sentinel: detect track changes that EventBus missed
+        const bridgeTrack = this.bridge.currentTrack;
+        const bridgeSrc = bridgeTrack?.hash || bridgeTrack?.mediaStreamUrl || null;
+        if (bridgeSrc && this.currentTrackSrc && bridgeSrc !== this.currentTrackSrc) {
+            Logger.warn('[Whisper] Stale track in processing loop, triggering reset', {
+                expected: this.currentTrackSrc,
+                actual: bridgeSrc,
+            });
+            this.handleTrackChange(bridgeSrc);
+            return;
+        }
+
         if (this.pendingChunks >= MAX_PENDING_CHUNKS) return;
 
         const audio = this.audio || getAudioElement();
@@ -767,13 +903,11 @@ export class Whisper {
     private ensureWorker(): void {
         if (this.worker) return;
         this.worker = createWhisperWorker();
-        if (Whisper.whisperWebgpuBroken) {
-            this.worker.postMessage({ type: 'skip-webgpu' });
-        }
         this.worker.onmessage = (e: MessageEvent<WorkerMessage>) => this.handleWorkerMessage(e);
         this.worker.onerror = (e: ErrorEvent) => {
             const errObj = (e as ErrorEvent & { error?: unknown }).error;
             const errorMsg = e.message || (errObj instanceof Error ? errObj.message : '') || 'Unknown worker error';
+            const isGpuError = /createBuffer|RangeError|out of memory|OOM|allocation|device lost|GPUDevice|createComputePipeline|createShaderModule|mapAsync|Instance reference|AbortError/i.test(errorMsg);
             const details = {
                 message: errorMsg,
                 filename: e.filename,
@@ -782,12 +916,37 @@ export class Whisper {
                 error: errObj ? String(errObj) : undefined,
             };
             Logger.error('[Whisper] Worker error:', details);
+            if (isGpuError) {
+                Logger.warn('[Whisper] GPU worker error — will retry with fresh context:', errorMsg);
+            }
             this.clearModelLoadTimer();
             this.resetWorker('error');
-            if (this.transcribing) {
+            const wasTranscribing = this.transcribing;
+            if (wasTranscribing) {
                 this.stopTranscription('worker-error');
             }
-            this.dispatchError(I18n.format('whisperWorkerError', { message: errorMsg }));
+            // Auto-recover from GPU errors: create a fresh worker with a new GPU device
+            if (isGpuError && wasTranscribing) {
+                Whisper.gpuRecoveryAttempts++;
+                if (Whisper.gpuRecoveryAttempts > Whisper.MAX_GPU_RECOVERY) {
+                    Logger.error(`[Whisper] GPU recovery failed after ${Whisper.MAX_GPU_RECOVERY} attempts, giving up`);
+                    this.dispatchError(I18n.format('whisperWorkerError', { message: errorMsg }));
+                    return;
+                }
+                Logger.warn(`[Whisper] Scheduling GPU recovery (attempt ${Whisper.gpuRecoveryAttempts}/${Whisper.MAX_GPU_RECOVERY}) in 2s...`);
+                if (this.gpuRecoveryTimer) clearTimeout(this.gpuRecoveryTimer);
+                this.gpuRecoveryTimer = window.setTimeout(() => {
+                    this.gpuRecoveryTimer = null;
+                    const audio = getAudioElement();
+                    if (audio && !audio.paused) {
+                        Logger.warn('[Whisper] Auto-recovery: restarting transcription with fresh GPU context');
+                        this.showStatus(`<span class="whisper-status-text">${I18n.t('whisperRecovering')}</span>`);
+                        void this.startTranscription();
+                    }
+                }, 2000);
+            } else {
+                this.dispatchError(I18n.format('whisperWorkerError', { message: errorMsg }));
+            }
         };
         Logger.debug('[Whisper] Worker created');
     }
@@ -860,10 +1019,8 @@ export class Whisper {
             case 'initiate':
                 if (message.backend) {
                     Logger.debug(`[Whisper] Worker backend: ${message.backend}${message.vendor ? ` (${message.vendor})` : ''}`);
-                    // If the worker fell back from WebGPU to WASM, remember it for future workers
-                    if (message.backend === 'wasm' && !Whisper.whisperWebgpuBroken) {
-                        Whisper.whisperWebgpuBroken = true;
-                        Logger.warn('[Whisper] WebGPU unavailable — using WASM for this session');
+                    if (message.backend === 'wasm') {
+                        Logger.warn('[Whisper] Worker using WASM backend (WebGPU unavailable on this device)');
                     }
                 }
                 break;
@@ -922,6 +1079,7 @@ export class Whisper {
 
             case 'update': {
                 if (!this.transcribing) return;
+                Whisper.gpuRecoveryAttempts = 0; // GPU is working — reset recovery counter
                 const update = message as WorkerUpdateMessage;
                 if (typeof update.chunkId === 'number' && !this.chunkSendTimes.has(update.chunkId)) {
                     return;
@@ -974,13 +1132,10 @@ export class Whisper {
 
             case 'error': {
                 const errMsg = message.data?.message || I18n.t('whisperUnknownError');
-                const isGpuError = /createBuffer|RangeError|out of memory|OOM|allocation|device lost|GPUDevice|createComputePipeline|createShaderModule/i.test(errMsg);
+                const isGpuError = /createBuffer|RangeError|out of memory|OOM|allocation|device lost|GPUDevice|createComputePipeline|createShaderModule|mapAsync|Instance reference|AbortError/i.test(errMsg);
 
-                // GPU error during inference — the worker may have already retried on WASM.
-                // If the host still thinks we're on WebGPU, flag it so future workers start on WASM.
-                if (isGpuError && !Whisper.whisperWebgpuBroken) {
-                    Whisper.whisperWebgpuBroken = true;
-                    Logger.warn('[Whisper] GPU inference error — WASM fallback flagged for future workers:', errMsg);
+                if (isGpuError) {
+                    Logger.warn('[Whisper] GPU inference error — will retry with fresh context:', errMsg);
                 }
 
                 Logger.error('[Whisper] Worker error:', errMsg);
@@ -992,6 +1147,32 @@ export class Whisper {
                 if (wasTranscribing) {
                     this.stopTranscription('worker-error');
                 }
+
+                // Auto-recover from GPU errors: create a fresh worker with a new GPU device.
+                // Cached segments are preserved by stopTranscription, and startTranscription
+                // will resume from where we left off via cache continuation logic.
+                if (isGpuError && wasTranscribing) {
+                    Whisper.gpuRecoveryAttempts++;
+                    if (Whisper.gpuRecoveryAttempts > Whisper.MAX_GPU_RECOVERY) {
+                        Logger.error(`[Whisper] GPU recovery failed after ${Whisper.MAX_GPU_RECOVERY} attempts, giving up`);
+                        break;
+                    }
+                    Logger.warn(`[Whisper] Scheduling GPU recovery (attempt ${Whisper.gpuRecoveryAttempts}/${Whisper.MAX_GPU_RECOVERY}) in 2s...`);
+                    if (this.gpuRecoveryTimer) clearTimeout(this.gpuRecoveryTimer);
+                    this.gpuRecoveryTimer = window.setTimeout(() => {
+                        this.gpuRecoveryTimer = null;
+                        const audio = getAudioElement();
+                        if (audio && !audio.paused) {
+                            Logger.warn('[Whisper] Auto-recovery: restarting transcription with fresh GPU context');
+                            this.showStatus(`<span class="whisper-status-text">${I18n.t('whisperRecovering')}</span>`);
+                            void this.startTranscription();
+                        } else {
+                            Logger.debug('[Whisper] Auto-recovery skipped: audio paused or unavailable');
+                        }
+                    }, 2000);
+                    break;
+                }
+
                 // Show error after stop (dispatchError has its own AppStore update)
                 const displayMsg = I18n.format('whisperTranscriptionError', { message: errMsg });
                 EventBus.emit('whisper:error', { message: errMsg });

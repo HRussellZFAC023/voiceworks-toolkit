@@ -13,12 +13,6 @@ import { AppStore } from '../store/AppStore';
 import { RouteStateSync } from './RouteStateSync';
 import { getAxios } from '../api/Client';
 
-interface WorksVmComponent {
-    sortOptions?: Array<{ label: string; value: string; order?: string; sort?: string }>;
-    options?: Array<{ label: string; value: string; order?: string; sort?: string }>;
-    [key: string]: unknown;
-}
-
 // Sort options for Advanced Search (merged with host options if present)
 const FALLBACK_SORT_OPTIONS: { value: WorkOrder; labelKey: string }[] = [
     { value: 'insert_time', labelKey: 'sortNewest' },
@@ -61,10 +55,6 @@ export class AdvancedSearch {
     private cancelRequested = false;
     private statusEl: HTMLElement | null = null;
     private langCleanup: (() => void) | null = null;
-    private sortWatcherCleanup: (() => void) | null = null;
-    private sortWatcherVm: any | null = null;
-    private lastHostSortKey = '';
-    private sortSyncRegistered = false;
 
     constructor() {
         this.bridge = KikoeruBridge.getInstance();
@@ -76,55 +66,9 @@ export class AdvancedSearch {
         this.attachButton();
         // Pre-fetch metadata in background so it's ready when clicked
         void this.loadMetadataLists();
-        this.registerSortSync();
         if (!this.langCleanup) {
             this.langCleanup = EventBus.on('lang:change', () => this.handleLangChange());
         }
-    }
-
-    private registerSortSync(): void {
-        if (this.sortSyncRegistered) return;
-        this.sortSyncRegistered = true;
-        CentralObserver.register('AdvancedSearch:SortSync', () => this.ensureHostSortWatcher(), 500);
-        this.ensureHostSortWatcher();
-    }
-
-    private ensureHostSortWatcher(): void {
-        const vm = this.findWorksComponent();
-        if (!vm || vm === this.sortWatcherVm) return;
-
-        if (this.sortWatcherCleanup) {
-            this.sortWatcherCleanup();
-            this.sortWatcherCleanup = null;
-        }
-
-        if (typeof vm.$watch === 'function') {
-            this.sortWatcherVm = vm;
-            this.sortWatcherCleanup = vm.$watch(
-                'sortOption',
-                (next: { order?: WorkOrder; sort?: 'asc' | 'desc' } | undefined) => this.onHostSortChange(next),
-                { deep: true, immediate: true }
-            );
-        }
-    }
-
-    private onHostSortChange(next?: { order?: WorkOrder; sort?: 'asc' | 'desc' }): void {
-        if (!next?.order) return;
-        const order = next.order as WorkOrder;
-        const sort = (next.sort || 'desc') as 'asc' | 'desc';
-        const key = `${order}:${sort}`;
-        if (key === this.lastHostSortKey) return;
-        this.lastHostSortKey = key;
-        this.sortOrder = order;
-        this.sortDirection = sort;
-        this.updateSortUiFromState();
-    }
-
-    private updateSortUiFromState(): void {
-        const card = this.dialog?.querySelector('.asmr-advanced-search-dialog') as HTMLElement | null;
-        if (!card) return;
-        this.populateSortOptions(card);
-        this.applySortDirectionUi(card);
     }
 
     private attachButton(): void {
@@ -250,28 +194,29 @@ export class AdvancedSearch {
     }
 
     private syncHostSortOption(): void {
-        const resolved = this.resolveSortSelection(this.sortOrder, this.sortDirection);
-        this.sortOrder = resolved.order;
-        this.sortDirection = resolved.sort;
+        const hostOptions = this.getHostSortOptions();
+        const availableOptions = hostOptions.length
+            ? hostOptions
+            : this.getFallbackSortOptions();
+        const resolvedOrder = this.resolveSortOrder(this.sortOrder, availableOptions);
+
+        // Update local state
+        this.sortOrder = resolvedOrder as WorkOrder;
 
         // Use AppStore for search state - source of truth for RouteStateSync
         AppStore.setSearchState({
-            pendingOrder: resolved.order,
-            pendingSort: resolved.sort
+            pendingOrder: resolvedOrder,
+            pendingSort: this.sortDirection
         });
 
-        // Persist for legacy compatibility (use host label key when available)
-        const newSortOption = {
-            label: resolved.label,
-            order: resolved.order,
-            sort: resolved.sort
-        };
-        try { localStorage.setItem('sortOption', JSON.stringify(newSortOption)); } catch (e) { Logger.warn('[AdvancedSearch] Failed to persist sortOption to localStorage:', e); }
+        // Persist for legacy compatibility
+        const newSortOption = { label: this.getSortLabel(resolvedOrder), order: resolvedOrder, sort: this.sortDirection };
+        try { localStorage.setItem('sortOption', JSON.stringify(newSortOption)); } catch { /* ignore */ }
 
         // Immediately update visual display for the host background dropdown
         try {
             const sync = RouteStateSync.getInstance();
-            sync.syncDisplayToHost(sync.getSortLabel(resolved.order, resolved.sort));
+            sync.syncDisplayToHost(sync.getSortLabel(resolvedOrder, this.sortDirection));
         } catch (e) {
             Logger.warn('[AdvancedSearch] Failed to sync host display:', e);
         }
@@ -280,10 +225,6 @@ export class AdvancedSearch {
         const worksVm = this.findWorksComponent();
         if (worksVm) {
             this.applySortToWorksVm(worksVm, newSortOption);
-        }
-
-        if (this.dialog) {
-            this.updateSortUiFromState();
         }
     }
 
@@ -457,7 +398,9 @@ export class AdvancedSearch {
         card.querySelector('.asmr-close-btn')?.addEventListener('click', (e) => {
             e.preventDefault();
             e.stopPropagation();
+            Logger.log('[AdvancedSearch] Close button clicked');
             if (this.generating) {
+                Logger.log('[AdvancedSearch] Cancelling generation');
                 this.cancelRequested = true;
             }
             this.close();
@@ -552,9 +495,6 @@ export class AdvancedSearch {
         const targetCard = card || (this.dialog?.querySelector('.asmr-advanced-search-dialog') as HTMLElement | null);
         if (!targetCard) return;
         this.syncSortStateFromHost();
-        const resolved = this.resolveSortSelection(this.sortOrder, this.sortDirection);
-        this.sortOrder = resolved.order;
-        this.sortDirection = resolved.sort;
         this.populateSortOptions(targetCard);
         this.applySortDirectionUi(targetCard);
     }
@@ -593,25 +533,15 @@ export class AdvancedSearch {
             if (parsed?.order && parsed?.sort) {
                 return { order: parsed.order as WorkOrder, sort: parsed.sort as 'asc' | 'desc' };
             }
-        } catch (e) {
-            Logger.warn('[AdvancedSearch] Malformed sortOption in localStorage:', e);
+        } catch {
+            // Ignore malformed storage
         }
         return null;
     }
 
-    private getVmSortOptions(vm: WorksVmComponent): Array<{ label: string; order: string; sort: string }> {
-        if (vm && Array.isArray(vm.sortOptions)) {
-            return vm.sortOptions as Array<{ label: string; order: string; sort: string }>;
-        }
-        if (vm && Array.isArray(vm.options)) {
-            return vm.options as Array<{ label: string; order: string; sort: string }>;
-        }
-        return [];
-    }
-
     private findWorksComponent(): any | null {
         return this.findWorksViaDom() || this.bridge.findComponent((c: any) =>
-            c.sortOption != null && typeof c.sortOption?.order === 'string' && this.getVmSortOptions(c).length > 0
+            c.sortOption != null && typeof c.sortOption?.order === 'string' && Array.isArray(c.options)
         );
     }
 
@@ -622,7 +552,7 @@ export class AdvancedSearch {
             for (let i = 0; i < 20 && current; i++) {
                 let vue = (current as any).__vue__ as any | undefined;
                 for (let v = 0; v < 5 && vue; v++) {
-                    if (vue.sortOption && typeof vue.sortOption?.order === 'string' && this.getVmSortOptions(vue).length > 0) {
+                    if (vue.sortOption && typeof vue.sortOption?.order === 'string' && Array.isArray(vue.options)) {
                         return vue;
                     }
                     vue = vue.$parent;
@@ -635,9 +565,8 @@ export class AdvancedSearch {
 
     private getHostSortOptions(): Array<{ label: string; order: string; sort: string }> {
         const vm = this.findWorksComponent();
-        if (vm) {
-            const options = this.getVmSortOptions(vm);
-            if (!options.length) return this.readCachedSortOptions();
+        if (vm && Array.isArray(vm.options)) {
+            const options = vm.options as Array<{ label: string; order: string; sort: string }>;
             if (this.shouldIgnoreHostLabels(options.map(opt => opt.label))) {
                 return [];
             }
@@ -655,8 +584,8 @@ export class AdvancedSearch {
             if (sanitized.length) {
                 GM_setValue(getSortOptionsCacheKey(), sanitized);
             }
-        } catch (e) {
-            Logger.warn('[AdvancedSearch] Failed to cache sort options:', e);
+        } catch {
+            // Ignore storage issues
         }
     }
 
@@ -673,21 +602,9 @@ export class AdvancedSearch {
                 return [];
             }
             return options;
-        } catch (e) {
-            Logger.warn('[AdvancedSearch] Failed to read cached sort options:', e);
+        } catch {
             return [];
         }
-    }
-
-    private resolveHostLabel(label: string): string {
-        if (!label) return label;
-        try {
-            const translated = (this.bridge as any)?.app?.$t?.(label);
-            if (translated && translated !== label) return translated as string;
-        } catch (e) {
-            Logger.warn('[AdvancedSearch] Host translation failed for label:', label, e);
-        }
-        return I18n.t(label);
     }
 
     private shouldIgnoreHostLabels(labels: string[]): boolean {
@@ -702,15 +619,6 @@ export class AdvancedSearch {
         }));
     }
 
-    private getOrderLabel(order: string, hostLabel?: string): string {
-        const fallback = FALLBACK_SORT_OPTIONS.find(opt => opt.value === order)
-            || (order === 'create_date'
-                ? FALLBACK_SORT_OPTIONS.find(opt => opt.value === 'insert_time')
-                : undefined);
-        if (fallback) return I18n.t(fallback.labelKey);
-        return hostLabel ? this.resolveHostLabel(hostLabel) : order;
-    }
-
     private resolveSortOrder(order: string, options: Array<{ order: string }>): string {
         if (options.some(o => o.order === order)) return order;
         if (order === 'create_date' && options.some(o => o.order === 'insert_time')) return 'insert_time';
@@ -718,66 +626,30 @@ export class AdvancedSearch {
         return order;
     }
 
-    private getSortLabel(order: string, sort?: 'asc' | 'desc'): string {
+    private getSortLabel(order: string): string {
         const hostOptions = this.getHostSortOptions();
         if (hostOptions.length) {
-            const matched = sort
-                ? hostOptions.find(o => o.order === order && o.sort === sort)
-                : hostOptions.find(o => o.order === order);
-            if (matched) return this.resolveHostLabel(matched.label);
+            return hostOptions.find(o => o.order === order)?.label || order;
         }
-        const fallback = FALLBACK_SORT_OPTIONS.find(o => o.value === order)
-            || (order === 'create_date'
-                ? FALLBACK_SORT_OPTIONS.find(o => o.value === 'insert_time')
-                : undefined);
+        const fallback = FALLBACK_SORT_OPTIONS.find(o => o.value === order);
         return fallback ? I18n.t(fallback.labelKey) : order;
-    }
-
-    private getSortLabelKey(order: WorkOrder, sort: 'asc' | 'desc'): string {
-        const hostOptions = this.getHostSortOptions();
-        const matched = hostOptions.find(o => o.order === order && o.sort === sort)
-            || hostOptions.find(o => o.order === order);
-        if (matched) return matched.label;
-        const fallback = FALLBACK_SORT_OPTIONS.find(o => o.value === order)
-            || (order === 'create_date'
-                ? FALLBACK_SORT_OPTIONS.find(o => o.value === 'insert_time')
-                : undefined);
-        return fallback ? I18n.t(fallback.labelKey) : order;
-    }
-
-    private resolveSortSelection(order: WorkOrder, sort: 'asc' | 'desc'): { order: WorkOrder; sort: 'asc' | 'desc'; label: string } {
-        const hostOptions = this.getHostSortOptions();
-        const available = hostOptions.length ? hostOptions : this.getFallbackSortOptions();
-        const resolvedOrder = this.resolveSortOrder(order, available);
-        const matchedExact = hostOptions.find(o => o.order === resolvedOrder && o.sort === sort);
-        const matchedOrder = matchedExact || hostOptions.find(o => o.order === resolvedOrder);
-        const label = matchedOrder?.label || this.getSortLabelKey(resolvedOrder as WorkOrder, sort);
-        return { order: resolvedOrder as WorkOrder, sort, label };
     }
 
     private populateSortOptions(card: HTMLElement): void {
         const select = card.querySelector('.asmr-sort-order') as HTMLSelectElement | null;
         if (!select) return;
         const hostOptions = this.getHostSortOptions();
-        const orderOptions: Array<{ order: string; label: string }> = [];
-        const seen = new Set<string>();
-
-        hostOptions.forEach(opt => {
-            if (seen.has(opt.order)) return;
-            seen.add(opt.order);
-            orderOptions.push({ order: opt.order, label: this.getOrderLabel(opt.order, opt.label) });
-        });
-
+        const mergedOptions = hostOptions.length
+            ? hostOptions.map(opt => ({ order: opt.order, label: opt.label }))
+            : [];
         const fallbackOptions = this.getFallbackSortOptions();
         fallbackOptions.forEach(opt => {
-            if (opt.order === 'insert_time' && seen.has('create_date')) return;
-            if (!seen.has(opt.order)) {
-                seen.add(opt.order);
-                orderOptions.push(opt);
+            if (!mergedOptions.some(existing => existing.order === opt.order)) {
+                mergedOptions.push(opt);
             }
         });
+        const options = mergedOptions.length ? mergedOptions : fallbackOptions;
 
-        const options = orderOptions.length ? orderOptions : fallbackOptions;
         select.innerHTML = options.map(opt => `<option value="${opt.order}">${opt.label}</option>`).join('');
         const resolvedOrder = this.resolveSortOrder(this.sortOrder, options);
         this.sortOrder = resolvedOrder as WorkOrder;
@@ -868,7 +740,7 @@ export class AdvancedSearch {
                     () => this.repopulateCircleSelect()
                 );
 
-                Logger.debug('[AdvancedSearch] Metadata loaded:', vaArray.length, 'VAs,', circlesArray.length, 'circles, and', this.tagList.length, 'tags');
+                Logger.log('[AdvancedSearch] Metadata loaded:', vaArray.length, 'VAs,', circlesArray.length, 'circles, and', this.tagList.length, 'tags');
             } catch (e) {
                 Logger.warn('[AdvancedSearch] Failed to load metadata lists:', e);
                 this.metadataLoadingPromise = null; // Allow retry on failure
@@ -898,7 +770,7 @@ export class AdvancedSearch {
                     if (en && en !== text) {
                         applyFn(item, en);
                     }
-                } catch (e) { Logger.warn('[AdvancedSearch] Background translation failed for:', text, e); }
+                } catch { /* ignore */ }
             }));
 
             // Refresh UI after each batch if dialog is open
@@ -1217,7 +1089,7 @@ export class AdvancedSearch {
 
     private async performSearch(): Promise<void> {
         if (!this.dialog) return;
-        Logger.debug('[AdvancedSearch] performSearch called', {
+        Logger.log('[AdvancedSearch] performSearch called', {
             includeTags: this.selectedIncludes.map(t => t.ja),
             excludeTags: this.selectedExcludes.map(t => t.ja),
             va: this.selectedVA?.name,
@@ -1293,19 +1165,27 @@ export class AdvancedSearch {
 
         // Pre-set localStorage so the Works component picks up the correct sort
         // on creation (cross-page navigation) or via RouteStateSync (same-page).
-        const worksVm = this.findWorksComponent();
-        const resolved = this.resolveSortSelection(this.sortOrder, this.sortDirection);
-        this.sortOrder = resolved.order;
-        this.sortDirection = resolved.sort;
+        const worksVm = this.bridge.findComponent((vm: any) =>
+            vm.sortOption != null && typeof vm.sortOption?.order === 'string' &&
+            Array.isArray(vm.options)
+        );
 
-        const newSortOption = { label: resolved.label, order: resolved.order, sort: resolved.sort };
-        try { localStorage.setItem('sortOption', JSON.stringify(newSortOption)); } catch (e) { Logger.warn('[AdvancedSearch] Failed to persist sortOption to localStorage:', e); }
+        const hostOptions = this.getHostSortOptions();
+        const availableOptions = hostOptions.length
+            ? hostOptions
+            : this.getFallbackSortOptions();
+        const resolvedOrder = this.resolveSortOrder(this.sortOrder, availableOptions);
+        this.sortOrder = resolvedOrder as WorkOrder;
+        const sortLabel = this.getSortLabel(resolvedOrder);
+
+        const newSortOption = { label: sortLabel, order: resolvedOrder, sort: this.sortDirection };
+        try { localStorage.setItem('sortOption', JSON.stringify(newSortOption)); } catch { /* ignore */ }
 
         // Set pending sort in AppStore so the RouteStateSync interceptor can
         // inject the correct order/sort into the host's first API request.
         AppStore.setSearchState({
-            pendingOrder: resolved.order,
-            pendingSort: resolved.sort,
+            pendingOrder: resolvedOrder,
+            pendingSort: this.sortDirection,
         });
 
         // Navigate to works page with search params
@@ -1314,11 +1194,11 @@ export class AdvancedSearch {
             params.set('keyword', keywordParts.join(' '));
         }
         // Include order/sort in URL for bookmarkability and as RouteStateSync fallback
-        params.set('order', resolved.order);
-        params.set('sort', resolved.sort);
+        params.set('order', resolvedOrder);
+        params.set('sort', this.sortDirection);
 
         const searchUrl = `/works?${params.toString()}`;
-        Logger.debug('[AdvancedSearch] Navigating to:', searchUrl, 'with pending sort:', this.sortOrder, this.sortDirection);
+        Logger.log('[AdvancedSearch] Navigating to:', searchUrl, 'with pending sort:', this.sortOrder, this.sortDirection);
 
         this.close();
 
@@ -1336,25 +1216,59 @@ export class AdvancedSearch {
         });
     }
 
-    private applySortToWorksVm(vm: WorksVmComponent, sortOption: { label: string; order: string; sort: string }): boolean {
+    /**
+     * After navigation, poll for the Works component and ensure its sortOption
+     * matches what we requested. Handles cases where the component remounts
+     * or where the direct assignment was overridden by the route change.
+     */
+    private applySortAfterNavigation(newSortOption: { label: string; order: string; sort: string }): void {
+        let attempts = 0;
+        const maxAttempts = 60;
+
+        const tryApply = () => {
+            attempts++;
+            const vm = this.findWorksComponent();
+
+            if (vm) {
+                const current = vm.sortOption as { order: string; sort: string };
+                const applied = this.applySortToWorksVm(vm, newSortOption);
+                if (applied && (current.order !== newSortOption.order || current.sort !== newSortOption.sort)) {
+                    Logger.log('[AdvancedSearch] Post-nav sort correction:', current, '→', newSortOption);
+                }
+                return; // Done
+            }
+
+            if (attempts < maxAttempts) {
+                setTimeout(tryApply, 150);
+            }
+        };
+
+        // Start after a short delay to let the navigation settle
+        setTimeout(tryApply, 150);
+    }
+
+    private applySortToWorksVm(vm: any, sortOption: { label: string; order: string; sort: string }): boolean {
         if (!vm) return false;
-        const options = this.getVmSortOptions(vm);
+        const options = Array.isArray(vm.options)
+            ? (vm.options as Array<{ label: string; order: string; sort: string }>)
+            : [];
         const resolvedOrder = options.length
             ? this.resolveSortOrder(sortOption.order, options)
             : sortOption.order;
-        const resolvedSort = sortOption.sort;
-
-        const matched = options.find(opt => opt.order === resolvedOrder && opt.sort === resolvedSort)
-            || options.find(opt => opt.order === resolvedOrder);
+        if (resolvedOrder !== sortOption.order) {
+            sortOption.order = resolvedOrder;
+            sortOption.label = this.getSortLabel(resolvedOrder);
+        }
+        const matched = options.find(opt => opt.order === resolvedOrder);
         if (matched) {
+            if (matched.sort !== sortOption.sort) matched.sort = sortOption.sort;
             vm.sortOption = matched;
             return true;
         }
-
         const injected = {
-            label: sortOption.label || this.getSortLabelKey(resolvedOrder as WorkOrder, resolvedSort as 'asc' | 'desc'),
+            label: this.getSortLabel(resolvedOrder),
             order: resolvedOrder,
-            sort: resolvedSort,
+            sort: sortOption.sort,
         };
         if (options.length) {
             options.push(injected);
@@ -1371,7 +1285,7 @@ export class AdvancedSearch {
 
         const worksCountInput = this.dialog.querySelector('.asmr-works-count') as HTMLInputElement;
         const requestedCount = parseInt(worksCountInput?.value || '10') || 10;
-        Logger.debug('[AdvancedSearch] Creating smart playlist', { requestedCount });
+        Logger.log('[AdvancedSearch] Creating smart playlist', { requestedCount });
 
         this.setButtonsDisabled(true);
         this.setStatus(I18n.t('advFindingWorks'), true);
@@ -1443,13 +1357,13 @@ export class AdvancedSearch {
                 works: workIds,
             });
 
-            Logger.debug('[AdvancedSearch] Created playlist:', result);
+            Logger.log('[AdvancedSearch] Created playlist:', result);
             this.setStatus(I18n.t('advPlaylistCreated'), false);
 
             // Disable Radio Mode if active
             const radio = RadioMode.getInstance();
             if (radio && radio.isActive) {
-                Logger.debug('[AdvancedSearch] Disabling Radio Mode for playlist.');
+                Logger.log('[AdvancedSearch] Disabling Radio Mode for playlist.');
                 radio.disable();
             }
 
@@ -1522,7 +1436,7 @@ export class AdvancedSearch {
         }
 
         // Sort
-        const sortLabel = this.getSortLabel(this.sortOrder, this.sortDirection);
+        const sortLabel = this.getSortLabel(this.sortOrder);
         if (sortLabel) {
             params.push(`${I18n.t('advSortBy')}: ${sortLabel} (${this.sortDirection === 'desc' ? I18n.t('advDesc') : I18n.t('advAsc')})`);
         }
@@ -1592,21 +1506,24 @@ export class AdvancedSearch {
 
             try {
                 Logger.debug(`[AdvancedSearch] Fetching page ${page}, have ${results.length}/${maxWorks} works so far`);
-                const resolved = this.resolveSortSelection(this.sortOrder, this.sortDirection);
-                this.sortOrder = resolved.order;
-                this.sortDirection = resolved.sort;
+                const hostOptions = this.getHostSortOptions();
+                const availableOptions = hostOptions.length
+                    ? hostOptions
+                    : this.getFallbackSortOptions();
+                const resolvedOrder = this.resolveSortOrder(this.sortOrder, availableOptions);
+                this.sortOrder = resolvedOrder as WorkOrder;
 
                 // Circle/VA endpoints don't support random/betterRandom ordering (returns 500).
                 // Use release order as fallback; createPlaylist shuffles client-side anyway.
-                const isRandomOrder = resolved.order === 'random' || resolved.order === 'betterRandom';
+                const isRandomOrder = resolvedOrder === 'random' || resolvedOrder === 'betterRandom';
                 const useCircleOrVA = !!(this.selectedVA || this.selectedCircle);
-                const effectiveOrder = (isRandomOrder && useCircleOrVA) ? 'release' : resolved.order;
+                const effectiveOrder = (isRandomOrder && useCircleOrVA) ? 'release' : resolvedOrder;
 
                 // Build base params
                 const baseParams: Record<string, any> = {
                     page,
                     order: effectiveOrder,
-                    sort: resolved.sort,
+                    sort: this.sortDirection,
                 };
 
                 // Add tag filters if selected

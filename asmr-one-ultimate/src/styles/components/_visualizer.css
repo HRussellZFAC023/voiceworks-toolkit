@@ -12,6 +12,7 @@
     display: flex;
     align-items: center;
     padding: 0;
+    overflow: hidden;
     background: var(--asmr-bg-overlay);
     backdrop-filter: blur(24px);
     border-top: 1px solid var(--asmr-border-color);
@@ -41,6 +42,7 @@
    ============================================ */
 .asmr-viz-canvas {
     flex: 1;
+    min-width: 0; /* Allow flex shrink below intrinsic canvas width */
     height: 48px;
     display: block;
     /* Canvas stretches to fill bar width */
@@ -88,7 +90,7 @@
 }
 
 /* ============================================
-   Expanded Player Position
+   Expanded Player Position (glassmorphic)
    ============================================ */
 .audio-player .asmr-viz-bar {
     position: relative;
@@ -96,10 +98,13 @@
     left: auto;
     right: auto;
     width: 100%;
+    background: transparent;
+    backdrop-filter: none;
     border-top: none;
-    border-bottom: 1px solid var(--asmr-border-color);
+    border-bottom: none;
     box-shadow: none;
     z-index: 100;
+    margin-bottom: 4px;
 }
 
 /* ============================================

@@ -136,7 +136,7 @@ Full English, Chinese, and Japanese UI localization. All user-facing strings use
 
 ## Installation
 
-1. Install [Tampermonkey](https://www.tampermonkey.net/) in your browser.
+1. Install [Tampermonkey](https://www.tampermonkey.net/) in your browser. On Chromium-based browsers (Edge, Chrome), go to the Tampermonkey extension details page and enable **Allow User Scripts**.
 2. Clone this repo and install dependencies:
    ```bash
    git clone https://github.com/HRussellZFAC023/voiceworks-toolkit.git

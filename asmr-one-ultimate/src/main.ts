@@ -19,6 +19,7 @@ import './styles/components/_sfw_mode.css';
 import './styles/components/_player_fullscreen.css';
 import './styles/components/_joi_tool.css';
 import './styles/components/_visualizer.css';
+import './styles/components/_visit_counter.css';
 
 import { KikoeruBridge } from './infrastructure/KikoeruBridge';
 import { getAudioElement, hasPlayerBar } from './core/DomUtils';
@@ -31,6 +32,7 @@ import { AppStore } from './store/AppStore';
 import { initReactiveConfig } from './store/ReactiveConfig';
 import { DialogStyles, Logger, I18n, Config } from './core/Utils';
 import { TranslationService } from './services/TranslationService';
+import { EmbeddingService } from './services/EmbeddingService';
 import { CentralObserver } from './core/CentralObserver';
 
 // Features
@@ -65,6 +67,8 @@ import { PlayerFullscreenController } from './features/PlayerFullscreenControlle
 import { PlayerGalleryController } from './features/PlayerGalleryController';
 import { JoiTool } from './features/JoiTool';
 import { VisualizerController } from './features/VisualizerController';
+import { VisitCounter } from './features/VisitCounter';
+import { ContinueListeningController } from './features/ContinueListeningController';
 
 
 declare const unsafeWindow: Window & typeof globalThis;
@@ -213,6 +217,11 @@ async function initialize(): Promise<void> {
         if (Config.get('preferLocalTranslation') !== false &&
             (Config.get('enablePlayerTranslator') || Config.get('enableLearnerMode'))) {
             TranslationService.ensureLocalModelReady(); // fire-and-forget
+        }
+
+        // Eagerly warm up embedding model so first search is instant
+        if (Config.get('enableVectorSearch')) {
+            EmbeddingService.ensureReady().catch(() => { /* non-critical */ });
         }
 
         // AI features
@@ -367,6 +376,18 @@ function initializeQOLFeatures(): void {
         Logger.debug('[Init] Visualizer enabled');
     }
 
+    if (Config.get('enableVisitCounter')) {
+        const visitCounter = new VisitCounter();
+        visitCounter.enable();
+        Logger.debug('[Init] VisitCounter enabled');
+    }
+
+    if (Config.get('enableContinueListening')) {
+        const continueListening = new ContinueListeningController();
+        continueListening.enable();
+        Logger.debug('[Init] ContinueListening enabled');
+    }
+
     if (Config.get('enableHVDBLink')) {
         // HVDBLink - link to HVDB next to DLsite link
         const hvdbLink = new HVDBLinkController();
@@ -425,30 +446,26 @@ async function initializeAIFeatures(): Promise<void> {
         Logger.debug('[Init] TranscriptFileInjector enabled');
     }
 
-    if (Config.get('enableFavicon')) {
-        const { FaviconNowPlaying } = await import('./features/FaviconNowPlaying');
-        const faviconManager = new FaviconNowPlaying();
-        faviconManager.enable();
-        Logger.debug('[Init] FaviconNowPlaying enabled');
-
-        // Expose debug methods on global API
-        if (globalWindow.ASMRUlt) {
-            globalWindow.ASMRUlt.testFavicon = (color?: string) => faviconManager.testWithColor(color);
-            globalWindow.ASMRUlt.forceFavicon = () => faviconManager.forceUpdate();
-        }
-    }
-
-    if (Config.get('enableMediaSession')) {
-        const { MediaSessionManager } = await import('./features/MediaSessionManager');
-        new MediaSessionManager().enable();
-        Logger.debug('[Init] MediaSessionManager enabled');
-    }
-
-    if (Config.get('enableMenuIconFixer')) {
-        const { MenuIconFixer } = await import('./features/MenuIconFixer');
-        new MenuIconFixer().enable();
-        Logger.debug('[Init] MenuIconFixer enabled');
-    }
+    // Parallel dynamic imports — each is independent
+    await Promise.all([
+        Config.get('enableFavicon') && import('./features/FaviconNowPlaying').then(({ FaviconNowPlaying }) => {
+            const faviconManager = new FaviconNowPlaying();
+            faviconManager.enable();
+            Logger.debug('[Init] FaviconNowPlaying enabled');
+            if (globalWindow.ASMRUlt) {
+                globalWindow.ASMRUlt.testFavicon = (color?: string) => faviconManager.testWithColor(color);
+                globalWindow.ASMRUlt.forceFavicon = () => faviconManager.forceUpdate();
+            }
+        }),
+        Config.get('enableMediaSession') && import('./features/MediaSessionManager').then(({ MediaSessionManager }) => {
+            new MediaSessionManager().enable();
+            Logger.debug('[Init] MediaSessionManager enabled');
+        }),
+        Config.get('enableMenuIconFixer') && import('./features/MenuIconFixer').then(({ MenuIconFixer }) => {
+            new MenuIconFixer().enable();
+            Logger.debug('[Init] MenuIconFixer enabled');
+        }),
+    ].filter(Boolean));
 
     Logger.debug('[Init] All AI features initialized');
 }
@@ -474,7 +491,7 @@ function initializeInfrastructure(bridge: KikoeruBridge): void {
     // Intercept playTrack for caching
     if (bridge.store.dispatch) {
         const originalDispatch = bridge.store.dispatch.bind(bridge.store);
-        bridge.store.dispatch = async (typeOrAction: string | { type: string; [key: string]: unknown }, payload?: unknown, options?: unknown) => {
+        bridge.store.dispatch = async (typeOrAction: string | { type: string;[key: string]: unknown }, payload?: unknown, options?: unknown) => {
             const actionType = typeof typeOrAction === 'string' ? typeOrAction : typeOrAction?.type;
             const actionPayload = typeof typeOrAction === 'string' ? payload : typeOrAction;
             Logger.debug(`[Dispatch] ${actionType}`, actionPayload);
@@ -518,6 +535,17 @@ function updateGlobalAPI(
     Object.assign(globalWindow.ASMRUlt!, updates);
 }
 
+function isValidAudioSrc(src: string): boolean {
+    if (!src) return false;
+    try {
+        const url = new URL(src);
+        // Just a bare origin (e.g. "https://asmr.one/") is not a real audio file
+        return url.pathname.length > 1;
+    } catch {
+        return false;
+    }
+}
+
 function setupAudioRecovery(): void {
     const audio = getAudioElement();
     if (!audio) {
@@ -530,16 +558,35 @@ function setupAudioRecovery(): void {
     const MAX_RECOVERY_ATTEMPTS = 3;
     const RECOVERY_COOLDOWN = 30000; // 30 seconds
     let lastRecoveryTime = 0;
+    let lastKnownGoodSrc = '';
+    let waitingTimer: ReturnType<typeof setTimeout> | null = null;
+
+    // Reset recovery state when the source genuinely changes to a valid URL
+    const srcObserver = new MutationObserver(() => {
+        const src = audio.getAttribute('src') || audio.src;
+        if (isValidAudioSrc(src) && src !== lastKnownGoodSrc) {
+            lastKnownGoodSrc = src;
+            audioRecoveryAttempts = 0;
+            if (waitingTimer !== null) {
+                clearTimeout(waitingTimer);
+                waitingTimer = null;
+            }
+        }
+    });
+    srcObserver.observe(audio, { attributes: true, attributeFilter: ['src'] });
 
     audio.addEventListener('stalled', () => {
+        if (!isValidAudioSrc(audio.src)) return; // Don't retry invalid src
         Logger.warn('[AudioRecovery] Audio stalled, retrying playback...', { src: audio.src, readyState: audio.readyState, currentTime: audio.currentTime });
         audio.play().catch(err => Logger.debug('[AudioRecovery] Stalled retry failed:', err));
     });
 
     audio.addEventListener('waiting', () => {
         Logger.debug('[AudioRecovery] Audio waiting', { src: audio.src, readyState: audio.readyState, paused: audio.paused });
-        setTimeout(() => {
-            if (audio.readyState < 3 && !audio.paused) {
+        if (waitingTimer !== null) clearTimeout(waitingTimer);
+        waitingTimer = setTimeout(() => {
+            waitingTimer = null;
+            if (audio.readyState < 3 && !audio.paused && isValidAudioSrc(audio.src)) {
                 const now = Date.now();
 
                 // Reset counter after cooldown period
@@ -566,8 +613,16 @@ function setupAudioRecovery(): void {
         }, 5000);
     });
 
-    audio.addEventListener('error', (e) => {
-        Logger.error('[AudioRecovery] Audio error event', { src: audio.src, error: audio.error, event: e });
+    audio.addEventListener('error', () => {
+        Logger.error('[AudioRecovery] Audio error event', { src: audio.src, error: audio.error });
+
+        // If the src is invalid (e.g. bare origin after rapid skipping), try to
+        // restore the last known good source so playback isn't permanently broken.
+        if (!isValidAudioSrc(audio.src) && lastKnownGoodSrc) {
+            Logger.warn('[AudioRecovery] Invalid src after error, restoring last good source', { lastKnownGoodSrc });
+            audio.src = lastKnownGoodSrc;
+            audio.play().catch(err => Logger.debug('[AudioRecovery] Restore retry failed:', err));
+        }
     });
 
     audio.addEventListener('play', () => {

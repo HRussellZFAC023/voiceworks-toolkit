@@ -2,84 +2,36 @@
  * Store & State Types
  */
 
-import type { PlayerTrack, PlayMode, PlayModeObject, WorkDetail, WorkSummary, TrackFolder, TrackItem } from './api';
+import type { PlayerTrack, PlayMode, PlayModeObject, WorkDetail, WorkSummary } from './api';
 
 // ============================================================================
 // Kikoeru Store Types (Host Application State)
 // ============================================================================
 
-/**
- * AudioPlayer Vuex module state.
- *
- * IMPORTANT: The current track is stored at queue[queueIndex], NOT at
- * currentTrack or currentPlayingFile. Those properties are legacy/unused.
- *
- * To get the current track:
- *   const track = state.AudioPlayer.queue?.[state.AudioPlayer.queueIndex];
- *
- * The track includes availableLyrics[] array with VTT subtitle files.
- */
 export interface AudioPlayerState {
-    /** Whether the player UI is hidden */
     hide?: boolean;
-    /** Whether audio is currently playing */
     playing?: boolean;
-    /** Current playback position in seconds */
     currentTime: number;
-    /** Total duration of current track in seconds */
     duration: number;
-    /**
-     * The playback queue - array of tracks.
-     * CURRENT TRACK is at queue[queueIndex].
-     */
     queue?: PlayerTrack[];
-    /**
-     * Index of the currently playing track in the queue.
-     * Use queue[queueIndex] to get the current track.
-     */
     queueIndex?: number;
-    /** Playback mode (order, repeat, shuffle, etc.) */
     playMode?: PlayMode | PlayModeObject;
-    /** Whether audio is muted */
     muted?: boolean;
-    /** Volume level 0-1 */
     volume?: number;
-    /** Current lyric line text (if LRC loaded) */
     currentLyric?: string;
-    /** Sleep timer target time (timestamp or null) */
     sleepTime?: number | null;
-    /** Whether sleep mode is active */
     sleepMode?: boolean;
-    /** Rewind seek time in seconds */
     rewindSeekTime?: number;
-    /** Forward seek time in seconds */
     forwardSeekTime?: number;
-    /** Whether rewind seek mode is active */
     rewindSeekMode?: boolean;
-    /** Whether forward seek mode is active */
     forwardSeekMode?: boolean;
-    /**
-     * @deprecated Not used - use queue[queueIndex] instead
-     */
     currentTrack?: PlayerTrack;
-    /**
-     * @deprecated Not used - use queue[queueIndex] instead
-     */
     currentPlayingFile?: PlayerTrack;
-    /**
-     * @deprecated Legacy alias for queue
-     */
     playlist?: PlayerTrack[];
-    /** Currently loaded work details */
     work?: WorkDetail;
-    /** Parsed LRC lines (if LRC loaded via API) */
     lrcLines?: Array<{ time: number; text: string }>;
-    /** Current audio source URL */
     src?: string;
-    /** Alternative current source URL field */
     currentSrc?: string;
-    /** Source URL (alternative field name) */
-    source?: string;
 }
 
 export interface UserState {
@@ -143,23 +95,14 @@ export interface VueRoute {
     meta?: Record<string, unknown>;
 }
 
-export interface AxiosRequestConfig {
-    params?: Record<string, unknown>;
-    responseType?: 'arraybuffer' | 'blob' | 'document' | 'json' | 'text' | 'stream';
-    headers?: Record<string, string>;
-    timeout?: number;
-    data?: unknown;
-    onDownloadProgress?: (event: { loaded?: number; total?: number; lengthComputable?: boolean }) => void;
-}
-
 export interface AxiosInstance {
     defaults: {
         baseURL?: string;
     };
-    get<T = unknown>(url: string, config?: AxiosRequestConfig): Promise<{ data: T; status: number }>;
-    post<T = unknown>(url: string, data?: unknown, config?: AxiosRequestConfig): Promise<{ data: T; status: number }>;
-    put<T = unknown>(url: string, data?: unknown, config?: AxiosRequestConfig): Promise<{ data: T; status: number }>;
-    delete<T = unknown>(url: string, config?: AxiosRequestConfig): Promise<{ data: T; status: number }>;
+    get<T = unknown>(url: string, config?: { params?: Record<string, unknown> }): Promise<{ data: T; status: number }>;
+    post<T = unknown>(url: string, data?: unknown, config?: Record<string, unknown>): Promise<{ data: T; status: number }>;
+    put<T = unknown>(url: string, data?: unknown, config?: Record<string, unknown>): Promise<{ data: T; status: number }>;
+    delete<T = unknown>(url: string, config?: Record<string, unknown>): Promise<{ data: T; status: number }>;
 }
 
 export interface KikoeruApp {
@@ -185,19 +128,10 @@ export interface KikoeruApp {
     };
     $root?: KikoeruApp;
     $parent?: KikoeruApp;
-    [key: string]: unknown;
-}
-
-export interface WorkTreeComponent extends KikoeruApp {
-    tree: Array<TrackFolder | TrackItem>;
-    path: string[];
-    fatherFolder: Array<TrackFolder | TrackItem>;
-    onClickItem: (item: TrackItem | TrackFolder) => void;
-    // Vue internals
-    $data?: {
-        tree: Array<TrackFolder | TrackItem>;
-        fatherFolder: Array<TrackFolder | TrackItem>;
+    __proto__?: {
+        constructor: any;
     };
+    [key: string]: unknown;
 }
 
 // ============================================================================
@@ -209,21 +143,34 @@ export interface PluginConfig {
     playAllInFolder: boolean;
     shuffle: boolean;
     autoFilterFolders: boolean;
+    radioUseFlatTracks: boolean;
 
     // Learner Mode
     showJP: boolean;
     subtitleLang: string;
     primarySubtitleLang: string;
+    karaokeMode: boolean;
+    segmentMode: boolean;
 
     // AI Features
+    whisperModel: string;
+    whisperTask: string;
+    whisperQuantized: boolean;
+    whisperOverrideSubs: boolean;
+    whisperLiveChunkSec: number;
+    whisperLiveOverlapSec: number;
+    whisperCacheTranscripts: boolean;
+    whisperAutoWarmup: boolean;
+    whisperAllowWasmFallback: boolean;
+    alwaysTranscribe: boolean;
     vectorSearchApiKey: string;
-    vectorSearchApiKeyHash: string;
-    vectorSearchModel: string;
-    vectorIndexVersion: number;
     vectorIndexCursor: number;
     vectorIndexLatestWorkId: string;
-    vectorRateLimitCooldownUntil: number;
+    vectorIndexVersion: number;
+    vectorSearchModel: string;
+    vectorSearchApiKeyHash: string;
     vectorRateLimitBackoff: number;
+    vectorRateLimitCooldownUntil: number;
 
     // Cache
     cacheLimitGB: number;
@@ -234,15 +181,17 @@ export interface PluginConfig {
     transcriptSyncApiKey: string;
     transcriptSyncCollection: string;
 
+    // Translation
+    preferLocalTranslation: boolean;
+
     // UI
     autoProgress: boolean;
+    dynamicFavicon: boolean;
     flatView: boolean;
     playbackRate: number;
     learnerBlur: boolean;
     sfwMode: boolean;
     translateMode: boolean;
-    preferLocalTranslation: boolean;
-    distributedTranslation: boolean;
 
     // Auto Progress (enhanced)
     autoProgressMarked: boolean;
@@ -256,7 +205,66 @@ export interface PluginConfig {
 
     // Radio Runtime (persisted for refresh survival)
     radioManuallyPaused: boolean;
-    radioUseFlatTracks: boolean;
+
+    // Feature Toggles
+    enableAdvancedSearch: boolean;
+    enableCommentSection: boolean;
+    enableContinueListening: boolean;
+    enableFavicon: boolean;
+    enableHVDBLink: boolean;
+    enableInfiniteScroll: boolean;
+    enableInterfaceTranslator: boolean;
+    enableJoiTool: boolean;
+    enableKeyboardManager: boolean;
+    enableLearnerMode: boolean;
+    enableMediaSession: boolean;
+    enableMediaViewer: boolean;
+    enableMenuIconFixer: boolean;
+    enablePageTitleManager: boolean;
+    enablePlayerFullscreen: boolean;
+    enablePlayerGallery: boolean;
+    enablePlayerTranslator: boolean;
+    enablePlaylistDiscovery: boolean;
+    enableRouteStateSync: boolean;
+    enableStoreBackup: boolean;
+    enableSupportButton: boolean;
+    enableTagFilters: boolean;
+    enableVectorSearch: boolean;
+    enableVisitCounter: boolean;
+    enableVisualizer: boolean;
+    enableWhisper: boolean;
+    enableWorkMetadata: boolean;
+    enableWorkTreeCopy: boolean;
+    enableWorkTreeManager: boolean;
+
+    // Feature Options
+    alwaysShowJoi: boolean;
+    alwaysShowVisualizer: boolean;
+    galleryAutoSlideshow: boolean;
+    galleryAutoSlideshowInterval: number;
+
+    // Keyboard Shortcuts
+    hotkeyPlayPause: string;
+    hotkeyMute: string;
+    hotkeyFullscreen: string;
+    hotkeySeekBack: string;
+    hotkeySeekForward: string;
+    hotkeySeekBackLong: string;
+    hotkeySeekForwardLong: string;
+    hotkeyVolumeUp: string;
+    hotkeyVolumeDown: string;
+    hotkeyPrevLine: string;
+    hotkeyNextLine: string;
+    hotkeyPrevTrack: string;
+    hotkeyNextTrack: string;
+    hotkeySpeedUp: string;
+    hotkeySpeedDown: string;
+    hotkeySpeedReset: string;
+    hotkeyToggleBlur: string;
+    hotkeyToggleJP: string;
+    hotkeyGalleryPrev: string;
+    hotkeyGalleryNext: string;
+    hotkeyGalleryExclude: string;
 
     // Debug
     debug: boolean;
@@ -264,43 +272,6 @@ export interface PluginConfig {
 
     // DLsite Proxy
     dlsiteProxyUrl: string;
-
-    // Feature Toggles (Global)
-    enablePlaylistDiscovery: boolean;
-    enableLearnerMode: boolean;
-    enableAdvancedSearch: boolean;
-    enableWorkMetadata: boolean;
-    enablePlayerTranslator: boolean;
-    enableSupportButton: boolean;
-    enableWorkTreeManager: boolean;
-    enableTagFilters: boolean;
-    enableVectorSearch: boolean;
-    enableWhisper: boolean;
-    alwaysTranscribe: boolean;
-    enableFavicon: boolean;
-    enableMediaSession: boolean;
-    enableMenuIconFixer: boolean;
-    enableStoreBackup: boolean;
-    enableHVDBLink: boolean;
-    enableInterfaceTranslator: boolean;
-    enablePageTitleManager: boolean;
-    enableKeyboardManager: boolean;
-    enableRouteStateSync: boolean;
-
-    enableMediaViewer: boolean;
-    enablePlayerFullscreen: boolean;
-    enablePlayerGallery: boolean;
-    enableWorkTreeCopy: boolean;
-    enableCommentSection: boolean;
-    enableInfiniteScroll: boolean;
-    enableJoiTool: boolean;
-    enableVisualizer: boolean;
-
-    // Gallery
-    galleryAutoSlideshow: boolean;
-    galleryAutoSlideshowInterval: number;
-
-    // Note: apiServerUrl is no longer used - we read from host app's "Select server" setting
 }
 
 export type ConfigKey = keyof PluginConfig;
@@ -370,25 +341,11 @@ export interface AppEvents {
     'whisper:start': { trackSrc: string };
     'whisper:toggle': void;
     'whisper:progress': { percent: number; message: string; stage: string };
-    'whisper:update': {
-        text: string;
-        segments: Array<{ start: number; end: number; text: string; words?: Array<{ start: number; end: number; text: string }> }>;
-        final: boolean;
-        chunkIndex?: number;
-        fromCache?: boolean;
-        leadSec?: number;
-        live?: boolean;
-        lagSec?: number;
-        source?: 'update' | 'complete' | 'cache' | 'seek';
-    };
+    'whisper:update': { text: string; segments: Array<{ start: number; end: number; text: string }>; final: boolean; chunkIndex?: number };
     'whisper:complete': { text: string };
     'whisper:error': { message: string; isHlsWarning?: boolean };
     'whisper:hls-warning': { message: string };
     'whisper:clear': void;
-    'whisper:cache-updated': { trackKey: string; cacheKey: string };
-    'whisper:segment-translated': { count: number };
-    'whisper:fallback': { originalModel: string; fallbackModel: string; reason?: string };
-    'translation:progress': { percent: number; message: string; stage?: string; model?: string };
     'cache:evicted': { count: number; freedBytes: number };
     'cache:cleared': { count: number; freedBytes: number };
     'cache:added': { url: string; size: number };
@@ -396,7 +353,6 @@ export interface AppEvents {
     'playlist:active': { isActive: boolean; workIds?: string[]; playlistId?: string };
     'playlist:navigate': { direction: 'next' | 'previous'; workId: string; index: number };
     'playlist:progress': { current: number; total: number; workId: string };
-    'playlist:shuffled': { workIds: string[]; currentWorkIndex: number };
     'title:update': { title: string };
     'player:rate-change': { rate: number };
     'player:nav-prev': {};
@@ -404,13 +360,31 @@ export interface AppEvents {
     'progress:update': { workId: string; progress: string; oldProgress: string | null };
     'flatview:toggle': { active: boolean };
     'lang:change': { lang: string };
-    'worktree:path-change': { path: string[] };
+    // Homepage caching events
+    'homepage:cached-data-injected': { sections: string[] };
+    'homepage:section-ready': { sectionKey: string; works: any[] };
+    'homepage:section-refresh': { sectionKey: string };
+    // Toggle events from overflow menu
+    'joi:toggle': void;
+    'joi:trigger': { state: string; keyword: string; source: string };
+    'viz:toggle': void;
+    // Whisper supplementary events
+    'whisper:fallback': { originalModel: string; fallbackModel: string; reason?: string };
+    'whisper:cache-updated': { trackKey: string; cacheKey: string };
+    'whisper:segment-translated': { count: number };
+    // Translation & embedding progress
+    'translation:progress': { percent: number; message: string; stage: string; model?: string };
+    'embedding:progress': { percent: number; message: string; stage: string };
+    // Fullscreen events
     'fullscreen:enter': void;
     'fullscreen:exit': void;
-    'joi:toggle': void;
-    'joi:trigger': { state: string; keyword: string; source: 'jp' | 'en' };
-    'viz:toggle': void;
-
+    // Work tree navigation
+    'worktree:path-change': { path: string };
+    // Gallery navigation
+    'gallery:nav': { direction: -1 | 1 };
+    'gallery:exclude': {};
+    // Playlist supplementary
+    'playlist:shuffled': { workIds: string[] };
 }
 
 export type AppEventName = keyof AppEvents;

@@ -7,7 +7,7 @@ import { CacheKeys, SharedCache } from '../core/Cache';
 import { TranslationService } from '../services/TranslationService';
 import { TranslatedTags } from './TranslatedTags';
 import { I18n } from '../core/Config';
-import { MediaViewerController } from './MediaViewerController';
+import { MediaViewer } from './MediaViewer';
 import { EventBus } from '../core/EventBus';
 import { AppStore } from '../store/AppStore';
 
@@ -69,7 +69,7 @@ export class WorkMetadata {
             const panelAlive = this.panel && document.body.contains(this.panel);
             if (panelAlive) return;
             // Panel was lost (Vue re-render) — allow re-processing
-            Logger.debug(`[WorkMetadata] Re-processing ${workId} (panel lost)`);
+            Logger.log(`[WorkMetadata] Re-processing ${workId} (panel lost)`);
             this.processedWorkIds.delete(workId);
         }
 
@@ -117,7 +117,7 @@ export class WorkMetadata {
         }
 
         if (!rjCode) {
-            Logger.debug('[WorkMetadata] No RJ code found for work', workId);
+            Logger.log('[WorkMetadata] No RJ code found for work', workId);
             return;
         }
 
@@ -125,7 +125,7 @@ export class WorkMetadata {
         const jpRjCode = this.resolveJpRjCode(work, rjCode);
         const scrapeCode = jpRjCode || rjCode;
         if (jpRjCode && jpRjCode !== rjCode) {
-            Logger.debug(`[WorkMetadata] Resolved JP original: ${rjCode} → ${jpRjCode}`);
+            Logger.log(`[WorkMetadata] Resolved JP original: ${rjCode} → ${jpRjCode}`);
         }
 
         const fallback = this.buildFallbackMeta(work, rjCode);
@@ -141,7 +141,7 @@ export class WorkMetadata {
         }
 
         try {
-            Logger.debug('[WorkMetadata] Fetching DLsite metadata for', scrapeCode);
+            Logger.log('[WorkMetadata] Fetching DLsite metadata for', scrapeCode);
 
             const onProgress = (partial: DLsiteMetadata) => {
                 // Phase 1: Product API + Dynamic API arrived — re-render with enriched data
@@ -254,12 +254,6 @@ export class WorkMetadata {
                 // If it's h1, we inject after it or its parent div
                 const injectAfter = (target.tagName === 'H1') ? target : target;
                 injectAfter.parentElement?.insertBefore(this.panel, injectAfter.nextSibling);
-
-                // Ensure comments section is always below metadata panel
-                const comments = document.querySelector('.asmr-comments-section');
-                if (comments && this.panel.parentElement && comments.parentElement === this.panel.parentElement) {
-                    this.panel.parentElement.insertBefore(comments, this.panel.nextSibling);
-                }
                 return;
             }
         }
@@ -355,9 +349,7 @@ export class WorkMetadata {
                 ...(meta.cvs || []).map(c => c.name)
             ];
             textsToInvalidate.forEach(text => {
-                if (!text) return;
-                SharedCache.set(CacheKeys.translation(text, 'en', 'local'), null as any, 0);
-                SharedCache.set(CacheKeys.translation(text, 'en', 'remote'), null as any, 0);
+                if (text) SharedCache.set(CacheKeys.translation(text, 'en'), null as any, 0);
             });
 
             this.processedWorkIds.delete(this.currentWorkId);
@@ -417,7 +409,7 @@ export class WorkMetadata {
                 if (tagId) {
                     const tagList = TranslatedTags.getInstance().getTagList();
                     const match = tagList.find(t => t.id === tagId || t.ja === text);
-                    if (match?.en && match.ja && match.en !== match.ja) {
+                    if (match?.en && match.en !== match.ja) {
                         labelEl.textContent = TranslationService.formatPair(match.ja, match.en);
                         chip.title = text;
                         return;
@@ -498,7 +490,7 @@ export class WorkMetadata {
                 imgWrap.className = 'asmr-meta-gallery-item';
                 const img = document.createElement('img');
                 img.src = url;
-                img.loading = 'eager';
+                img.loading = 'lazy';
                 img.alt = 'Sample';
 
                 let retryCount = 0;
@@ -519,9 +511,8 @@ export class WorkMetadata {
 
                 img.addEventListener('click', () => {
                     try {
-                        MediaViewerController.getInstance().showExternalImages(allUrls, idx);
-                    } catch (e) {
-                        Logger.warn('[WorkMetadata] MediaViewer failed, opening in new tab:', e);
+                        MediaViewer.getInstance().showExternalImages(allUrls, idx);
+                    } catch {
                         window.open(url, '_blank');
                     }
                 });
@@ -595,8 +586,7 @@ export class WorkMetadata {
                                 cell.el.textContent = '';
                             }
                         });
-                    }).catch((e) => {
-                        Logger.warn('[WorkMetadata] Batch translation of body paragraphs failed:', e);
+                    }).catch(() => {
                         transCells.forEach(c => c.el.textContent = '');
                     });
                 }

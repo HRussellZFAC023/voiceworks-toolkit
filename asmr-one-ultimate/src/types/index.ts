@@ -75,8 +75,3 @@ export type {
     WhisperUpdatePayload,
 } from './store';
 
-// Re-export legacy kikoeru types for backward compatibility
-export type {
-    AudioTrack as LegacyAudioTrack,
-    AudioPlayerState as LegacyAudioPlayerState,
-} from './kikoeru';

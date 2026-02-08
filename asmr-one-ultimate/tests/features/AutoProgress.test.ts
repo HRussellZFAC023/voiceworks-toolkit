@@ -455,10 +455,12 @@ describe('AutoProgress', () => {
     // =========================================================================
 
     describe('postponed via partial listen', () => {
-        it('should mark "postponed" when navigating away after <30% listen', () => {
-            // Simulate listening to a work at 20% progress
+        it('should mark "postponed" when navigating away with <30% of tracks played', () => {
+            // Simulate listening to a work but not completing any tracks
+            // Work has 3 tracks (from mock), 0 played = 0% < 30%
             (ap as any).currentListeningWorkId = '88888';
-            (ap as any).currentListeningMaxProgress = 0.20;
+            (ap as any).currentTrackStarted = true; // user actually started listening (>5s)
+            // No tracks added to playedTracksInWork for '88888'
 
             // Navigate to a different work
             (ap as any).handleWorkChange('77777');
@@ -470,16 +472,18 @@ describe('AutoProgress', () => {
             });
         });
 
-        it('should NOT mark "postponed" if listened past 30%', () => {
+        it('should NOT mark "postponed" if >=30% of tracks played', () => {
             (ap as any).currentListeningWorkId = '88888';
-            (ap as any).currentListeningMaxProgress = 0.50;
+            (ap as any).currentTrackStarted = true;
+            // Add 1 of 3 tracks played (33% > 30%)
+            (ap as any).playedTracksInWork.set('88888', new Set(['track1.mp3']));
             (ap as any).handleWorkChange('77777');
             expect(mockUpdateReview).not.toHaveBeenCalled();
         });
 
-        it('should NOT mark "postponed" if listened <1% (accidental)', () => {
+        it('should NOT mark "postponed" if user never started listening (<=5s)', () => {
             (ap as any).currentListeningWorkId = '88888';
-            (ap as any).currentListeningMaxProgress = 0.005;
+            (ap as any).currentTrackStarted = false; // never reached 5s
             (ap as any).handleWorkChange('77777');
             expect(mockUpdateReview).not.toHaveBeenCalled();
         });
@@ -487,7 +491,7 @@ describe('AutoProgress', () => {
         it('should NOT downgrade a "listened" work to "postponed"', () => {
             bridge.store.state.User.marks['88888'] = 3; // listened
             (ap as any).currentListeningWorkId = '88888';
-            (ap as any).currentListeningMaxProgress = 0.20;
+            (ap as any).currentTrackStarted = true;
             (ap as any).handleWorkChange('77777');
             expect(mockUpdateReview).not.toHaveBeenCalled();
         });
@@ -503,6 +507,67 @@ describe('AutoProgress', () => {
             expect(mockUpdateReview).toHaveBeenCalledTimes(1);
             (ap as any).checkAndMark(7); // still listening at 7s
             expect(mockUpdateReview).toHaveBeenCalledTimes(1); // no duplicate
+        });
+
+        it('should allow retry after API failure (dedup key removed)', async () => {
+            mockUpdateReview.mockRejectedValueOnce(new Error('Network error'));
+            (ap as any).checkAndMark(6); // listening — will fail
+            expect(mockUpdateReview).toHaveBeenCalledTimes(1);
+            // Wait for the promise rejection to process
+            await vi.waitFor(() => {
+                expect((ap as any).sentUpdates.has('12345-listening')).toBe(false);
+            });
+            // Now retry should work
+            mockUpdateReview.mockResolvedValueOnce(undefined);
+            (ap as any).checkAndMark(7);
+            expect(mockUpdateReview).toHaveBeenCalledTimes(2);
+        });
+
+        it('should track multiple work+status keys independently', () => {
+            // Disable postponed to avoid partial-listen triggering on work change
+            setConfig({ autoProgressPostponed: false });
+            (ap as any).checkAndMark(6); // listening for work 12345
+            expect(mockUpdateReview).toHaveBeenCalledTimes(1);
+            // Simulate a different work
+            bridge.store.state.AudioPlayer.currentTrack = {
+                ...bridge.store.state.AudioPlayer.currentTrack,
+                workId: '99999',
+            };
+            (ap as any).checkAndMark(6); // listening for work 99999
+            expect(mockUpdateReview).toHaveBeenCalledTimes(2);
+        });
+    });
+
+    // =========================================================================
+    // Optimistic rollback
+    // =========================================================================
+
+    describe('optimistic rollback', () => {
+        it('should rollback marks on API failure', async () => {
+            bridge.store.state.User.marks['12345'] = 1; // marked
+            mockUpdateReview.mockRejectedValueOnce(new Error('Server error'));
+
+            (ap as any).setProgress('12345', 'listening');
+            // Optimistic update should have happened immediately
+            expect(bridge.store.state.User.marks['12345']).toBe(2);
+
+            // Wait for rejection to process
+            await vi.waitFor(() => {
+                // Should be rolled back to previous value (marked = 1)
+                expect(bridge.store.state.User.marks['12345']).toBe(1);
+            });
+        });
+
+        it('should delete marks entry on rollback if no previous status', async () => {
+            delete bridge.store.state.User.marks['55555'];
+            mockUpdateReview.mockRejectedValueOnce(new Error('Server error'));
+
+            (ap as any).setProgress('55555', 'marked');
+            expect(bridge.store.state.User.marks['55555']).toBe(1);
+
+            await vi.waitFor(() => {
+                expect(bridge.store.state.User.marks['55555']).toBeUndefined();
+            });
         });
     });
 

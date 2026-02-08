@@ -30,8 +30,12 @@ function isValidProxyUrl(url: string): boolean {
  * Returns empty string if the configured URL is invalid.
  */
 function getProxyBaseUrl(): string {
-    const raw = (String(Config.get('dlsiteProxyUrl') || '')).replace(/\/+$/, '');
+    let raw = (String(Config.get('dlsiteProxyUrl') || '')).replace(/\/+$/, '');
     if (!raw) return '';
+    // Auto-prepend https:// if no protocol is provided
+    if (!/^https?:\/\//i.test(raw)) {
+        raw = 'https://' + raw;
+    }
     if (!isValidProxyUrl(raw)) {
         Logger.warn('[DLsiteService] Invalid proxy URL configured, falling back to direct requests:', raw);
         return '';

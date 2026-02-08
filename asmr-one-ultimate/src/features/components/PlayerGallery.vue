@@ -40,7 +40,9 @@ const touchStartX = ref(0);
 const loadedWorkId = ref<string | null>(null);
 const loadSeq = ref(0);
 const slideshowPaused = ref(false);
+const imageLoaded = ref(true);
 const imageSeen = ref(new Set<string>());
+const excludedUrls = ref(new Set<string>());
 
 // Slideshow timer (non-reactive, just a handle)
 let slideshowTimer: ReturnType<typeof setInterval> | null = null;
@@ -57,6 +59,16 @@ const counterText = computed(() =>
 );
 const currentImageUrl = computed(() => images.value[currentIndex.value] || '');
 const showImage = computed(() => currentImageUrl.value !== '' && (isFullscreen.value || currentIndex.value > 0));
+
+// -- Image load state --
+
+watch(currentImageUrl, () => {
+    imageLoaded.value = false;
+});
+
+function onImageLoad(): void {
+    imageLoaded.value = true;
+}
 
 // -- Slideshow --
 
@@ -103,6 +115,61 @@ function pauseSlideshow(): void {
     }
 }
 
+// -- Slideshow toggle --
+
+const showSlideshowToggle = computed(() =>
+    isFullscreen.value && hasMultipleImages.value && galleryAutoSlideshow.value
+);
+const slideshowIcon = computed(() => slideshowPaused.value ? 'play_arrow' : 'pause');
+const slideshowToggleLabel = computed(() =>
+    t(slideshowPaused.value ? 'gallerySlideshowResume' : 'gallerySlideshowPause')
+);
+
+function toggleSlideshow(e: Event): void {
+    e.preventDefault();
+    e.stopPropagation();
+    if (slideshowPaused.value) {
+        slideshowPaused.value = false;
+        startSlideshow();
+    } else {
+        pauseSlideshow();
+    }
+}
+
+// -- Exclude --
+
+const showExclude = computed(() => hasMultipleImages.value);
+
+function excludeCurrentImage(): void {
+    if (images.value.length < 2) return;
+    const url = images.value[currentIndex.value];
+    if (!url) return;
+
+    excludedUrls.value.add(url);
+    images.value.splice(currentIndex.value, 1);
+
+    // Wrap index if we removed the last item
+    if (currentIndex.value >= images.value.length) {
+        currentIndex.value = 0;
+    }
+
+    syncCoverUrl();
+    syncAlbumart();
+
+    // Stop slideshow if <2 images remain
+    if (images.value.length < 2) {
+        stopSlideshow();
+    }
+
+    Logger.debug('[PlayerGallery] Excluded image, remaining:', images.value.length);
+}
+
+function onExclude(e: Event): void {
+    e.preventDefault();
+    e.stopPropagation();
+    excludeCurrentImage();
+}
+
 // -- Navigation --
 
 function navigate(dir: number): void {
@@ -126,19 +193,16 @@ function onNext(e: Event): void {
 
 // -- Keyboard --
 
-function onKeydown(e: KeyboardEvent): void {
-    if (!isFullscreen.value) return;
-    const target = e.target as HTMLElement;
-    if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) return;
-    if (images.value.length < 2) return;
+/** Handle gallery navigation from KeyboardManager via EventBus */
+function onGalleryNav(payload: { direction: -1 | 1 }): void {
+    if (!isFullscreen.value || images.value.length < 2) return;
+    navigate(payload.direction);
+}
 
-    if (e.key === 'ArrowLeft') {
-        navigate(-1);
-        e.preventDefault();
-    } else if (e.key === 'ArrowRight') {
-        navigate(1);
-        e.preventDefault();
-    }
+/** Handle gallery exclude from KeyboardManager via EventBus */
+function onGalleryExclude(): void {
+    if (!isFullscreen.value) return;
+    excludeCurrentImage();
 }
 
 // -- Touch swipe --
@@ -276,7 +340,7 @@ function attachGalleryObserver(gallery: Element): void {
         const imgs = gallery.querySelectorAll('img');
         for (const el of imgs) {
             const src = (el as HTMLImageElement).src;
-            if (src && !imageSeen.value.has(src)) {
+            if (src && !imageSeen.value.has(src) && !excludedUrls.value.has(src)) {
                 imageSeen.value.add(src);
                 images.value.push(src);
                 added = true;
@@ -362,7 +426,7 @@ async function loadImages(workId: string): Promise<void> {
     imageSeen.value.clear();
 
     const add = (url: string) => {
-        if (!url || imageSeen.value.has(url)) return;
+        if (!url || imageSeen.value.has(url) || excludedUrls.value.has(url)) return;
         imageSeen.value.add(url);
         images.value.push(url);
     };
@@ -461,6 +525,7 @@ function onWorkChange(workId: string): void {
     // Reset slideshow state for the new work
     stopSlideshow();
     slideshowPaused.value = false;
+    excludedUrls.value.clear();
     disconnectGalleryObserver();
 
     if (workId && workId !== loadedWorkId.value) {
@@ -492,7 +557,9 @@ watch(showImage, (show) => {
 let albumartEl: HTMLElement | null = null;
 
 onMounted(() => {
-    document.addEventListener('keydown', onKeydown, true);
+    // Gallery keyboard shortcuts are handled by KeyboardManager via EventBus
+    on('gallery:nav', onGalleryNav);
+    on('gallery:exclude', onGalleryExclude);
 
     // Register click/touch handlers on the parent albumart element
     albumartEl = document.querySelector('.audio-player .albumart') as HTMLElement;
@@ -514,8 +581,6 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
-    document.removeEventListener('keydown', onKeydown, true);
-
     // Clean up albumart event listeners
     if (albumartEl) {
         albumartEl.removeEventListener('click', onAlbumartClick);
@@ -534,9 +599,11 @@ onUnmounted(() => {
     <img
         v-show="showImage"
         class="asmr-gallery-img"
+        :class="{ 'asmr-gallery-img--loaded': imageLoaded }"
         :src="currentImageUrl"
         draggable="false"
         alt=""
+        @load="onImageLoad"
     />
 
     <button
@@ -565,6 +632,26 @@ onUnmounted(() => {
     >
         {{ counterText }}
     </span>
+
+    <button
+        v-show="showSlideshowToggle"
+        class="asmr-gallery-nav asmr-gallery-slideshow-toggle"
+        :aria-label="slideshowToggleLabel"
+        :title="slideshowToggleLabel"
+        @click="toggleSlideshow"
+    >
+        <i class="material-icons" aria-hidden="true">{{ slideshowIcon }}</i>
+    </button>
+
+    <button
+        v-show="showExclude"
+        class="asmr-gallery-nav asmr-gallery-exclude"
+        :aria-label="t('galleryExclude')"
+        :title="t('galleryExclude')"
+        @click="onExclude"
+    >
+        <i class="material-icons" aria-hidden="true">visibility_off</i>
+    </button>
 </template>
 
 <style scoped>
@@ -577,6 +664,12 @@ onUnmounted(() => {
     object-fit: contain;
     z-index: 5;
     pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.3s ease-in-out;
+}
+
+.asmr-gallery-img--loaded {
+    opacity: 1;
 }
 
 /* Navigation arrows */
@@ -622,6 +715,68 @@ onUnmounted(() => {
 .asmr-gallery-nav :deep(.material-icons) {
     font-size: 24px;
     color: #fff;
+}
+
+/* Slideshow pause/play toggle — top-right, next to exclude */
+.asmr-gallery-slideshow-toggle {
+    top: 8px !important;
+    right: 74px;
+    transform: none !important;
+    width: 26px;
+    height: 26px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    opacity: 0;
+}
+
+.asmr-gallery-slideshow-toggle :deep(.material-icons) {
+    font-size: 16px;
+    opacity: 0.5;
+}
+
+.asmr-gallery-slideshow-toggle:hover {
+    background: rgba(255, 255, 255, 0.15);
+    opacity: 1 !important;
+    transform: scale(1.05) !important;
+}
+
+.asmr-gallery-slideshow-toggle:hover :deep(.material-icons) {
+    opacity: 1;
+}
+
+.asmr-gallery-slideshow-toggle:active {
+    transform: scale(0.95) !important;
+}
+
+/* Exclude (hide) button — subtle, top-right near fullscreen exit */
+.asmr-gallery-exclude {
+    top: 8px !important;
+    right: 40px;
+    transform: none !important;
+    width: 26px;
+    height: 26px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    opacity: 0;
+}
+
+.asmr-gallery-exclude :deep(.material-icons) {
+    font-size: 16px;
+    opacity: 0.5;
+}
+
+.asmr-gallery-exclude:hover {
+    background: rgba(255, 255, 255, 0.15);
+    opacity: 1 !important;
+    transform: scale(1.05) !important;
+}
+
+.asmr-gallery-exclude:hover :deep(.material-icons) {
+    opacity: 1;
+}
+
+.asmr-gallery-exclude:active {
+    transform: scale(0.95) !important;
 }
 
 /* Image counter badge */

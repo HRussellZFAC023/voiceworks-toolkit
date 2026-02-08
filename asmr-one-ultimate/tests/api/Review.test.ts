@@ -19,46 +19,51 @@ describe('ReviewApi', () => {
     });
 
     describe('updateReview', () => {
-        it('should try PUT first', async () => {
-            mockAxios.put.mockResolvedValue({});
+        it('should try POST first', async () => {
+            mockAxios.post.mockResolvedValue({});
             await ReviewApi.updateReview({ work_id: 123, progress: 'listening', progressOnly: true });
-            expect(mockAxios.put).toHaveBeenCalledWith('/api/review', {
+            expect(mockAxios.post).toHaveBeenCalledWith('/api/review', {
                 work_id: 123,
                 progress: 'listening',
                 progressOnly: true,
             });
-            expect(mockAxios.post).not.toHaveBeenCalled();
+            expect(mockAxios.put).not.toHaveBeenCalled();
         });
 
-        it('should fallback to POST on 404', async () => {
-            mockAxios.put.mockRejectedValue({ response: { status: 404 } });
-            mockAxios.post.mockResolvedValue({});
+        it('should fallback to PUT on 404', async () => {
+            mockAxios.post.mockRejectedValue({ response: { status: 404 } });
+            mockAxios.put.mockResolvedValue({});
             await ReviewApi.updateReview({ work_id: 123, progress: 'listened', progressOnly: true });
-            expect(mockAxios.put).toHaveBeenCalled();
-            expect(mockAxios.post).toHaveBeenCalledWith('/api/review', expect.objectContaining({ work_id: 123 }));
-        });
-
-        it('should fallback to POST on 405', async () => {
-            mockAxios.put.mockRejectedValue({ response: { status: 405 } });
-            mockAxios.post.mockResolvedValue({});
-            await ReviewApi.updateReview({ work_id: 456, progress: 'marked', progressOnly: true });
             expect(mockAxios.post).toHaveBeenCalled();
+            expect(mockAxios.put).toHaveBeenCalledWith('/api/review', {
+                work_id: 123,
+                progress: 'listened',
+                progressOnly: true,
+            });
         });
 
-        it('should try per-work POST endpoint as third strategy', async () => {
+        it('should fallback to PUT on 405', async () => {
+            mockAxios.post.mockRejectedValue({ response: { status: 405 } });
+            mockAxios.put.mockResolvedValue({});
+            await ReviewApi.updateReview({ work_id: 456, progress: 'marked', progressOnly: true });
+            expect(mockAxios.put).toHaveBeenCalled();
+        });
+
+        it('should only have two strategies (POST then PUT)', async () => {
+            mockAxios.post.mockRejectedValue({ response: { status: 404 } });
             mockAxios.put.mockRejectedValue({ response: { status: 404 } });
-            mockAxios.post
-                .mockRejectedValueOnce({ response: { status: 404 } })  // first POST fails
-                .mockResolvedValueOnce({});  // per-work POST succeeds
-            await ReviewApi.updateReview({ work_id: 789, progress: 'replay', progressOnly: true });
-            expect(mockAxios.post).toHaveBeenCalledWith('/api/work/789/review', expect.anything());
+            await expect(ReviewApi.updateReview({ work_id: 789, progress: 'replay' }))
+                .rejects.toEqual({ response: { status: 404 } });
+            expect(mockAxios.post).toHaveBeenCalledTimes(1);
+            expect(mockAxios.put).toHaveBeenCalledTimes(1);
         });
 
-        it('should stop on 500 error without trying more strategies', async () => {
-            mockAxios.put.mockRejectedValue({ response: { status: 500 } });
-            await ReviewApi.updateReview({ work_id: 123, progress: 'listening', progressOnly: true });
-            // Should not try POST after a 500
-            expect(mockAxios.post).not.toHaveBeenCalled();
+        it('should stop on 500 error without trying PUT fallback', async () => {
+            mockAxios.post.mockRejectedValue({ response: { status: 500 } });
+            await expect(ReviewApi.updateReview({ work_id: 123, progress: 'listening' }))
+                .rejects.toEqual({ response: { status: 500 } });
+            // Should not try PUT after a 500
+            expect(mockAxios.put).not.toHaveBeenCalled();
         });
     });
 
@@ -82,18 +87,16 @@ describe('ReviewApi', () => {
             expect(result).toBeNull();
         });
 
-        it('should return null on error', async () => {
+        it('should throw on error', async () => {
             mockAxios.get.mockRejectedValue(new Error('Network error'));
-            const result = await ReviewApi.getWorkReview(123);
-            expect(result).toBeNull();
+            await expect(ReviewApi.getWorkReview(123)).rejects.toThrow('Network error');
         });
 
-        it('should handle work with only progress set', async () => {
+        it('should return null when work has only progress set', async () => {
             mockAxios.get.mockResolvedValue({ data: { progress: 'marked' } });
             const result = await ReviewApi.getWorkReview(123);
-            expect(result).not.toBeNull();
-            expect(result!.progress).toBe('marked');
-            expect(result!.rating).toBe(0);
+            // Only userRating or review_text trigger a non-null return
+            expect(result).toBeNull();
         });
     });
 
@@ -104,12 +107,10 @@ describe('ReviewApi', () => {
             expect(mockAxios.delete).toHaveBeenCalledWith('/api/review?work_id=123');
         });
 
-        it('should fallback to per-work delete on error', async () => {
-            mockAxios.delete
-                .mockRejectedValueOnce(new Error('Not found'))
-                .mockResolvedValueOnce({});
-            await ReviewApi.deleteReview(456);
-            expect(mockAxios.delete).toHaveBeenCalledWith('/api/work/456/review');
+        it('should throw on error (no fallback)', async () => {
+            mockAxios.delete.mockRejectedValue(new Error('Not found'));
+            await expect(ReviewApi.deleteReview(456)).rejects.toThrow('Not found');
+            expect(mockAxios.delete).toHaveBeenCalledTimes(1);
         });
     });
 

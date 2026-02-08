@@ -46,6 +46,7 @@ export class TranscriptFileInjector {
 
         this.cleanups.push(EventBus.on('work:change', () => this.injectWorkTree()));
         this.cleanups.push(EventBus.on('whisper:cache-updated', () => this.injectWorkTree()));
+        this.cleanups.push(EventBus.on('whisper:complete', () => this.injectWorkTree()));
         this.cleanups.push(EventBus.on('flatview:toggle', (data: { active: boolean }) => {
             if (data.active) {
                 setTimeout(() => this.injectFlatPanel(), 400);
@@ -149,7 +150,7 @@ export class TranscriptFileInjector {
 
     private createButtonGroup(entry: TranscriptIndexEntry, track: PlayerTrack): HTMLElement | null {
         const cached = SharedCache.get<CachedTranscript>(entry.cacheKey);
-        if (!cached || !cached.complete) return null;
+        if (!cached || !cached.segments?.length) return null;
 
         const wrap = document.createElement('div');
         wrap.className = 'q-item__section column q-item__section--side justify-center asmr-transcript-actions';
@@ -163,14 +164,15 @@ export class TranscriptFileInjector {
             this.downloadTextFile(this.buildFileName(track, entry, cached.language, 'lrc'), lrc);
         }));
 
-        // VTT download
-        const vttContent = cached.vtt || this.buildVttFromSegments(cached.segments);
-        if (vttContent) {
-            const vttLabel = I18n.t('vttDownload');
-            wrap.appendChild(this.createDownloadButton(vttLabel, () => {
-                this.downloadTextFile(this.buildFileName(track, entry, cached.language, 'vtt'), vttContent);
-            }));
-        }
+        // VTT download (karaoke-style with word timestamps)
+        const vttLabel = I18n.t('vttDownload');
+        wrap.appendChild(this.createDownloadButton(vttLabel, () => {
+            // Re-read cache at download time to get latest segments
+            const fresh = SharedCache.get<CachedTranscript>(entry.cacheKey);
+            const segs = fresh?.segments || cached.segments;
+            const vtt = this.buildVttFromSegments(segs);
+            if (vtt) this.downloadTextFile(this.buildFileName(track, entry, cached.language, 'vtt'), vtt);
+        }));
 
         const targetLang = ((Config.get('subtitleLang') as string | undefined) || '').toLowerCase();
         const translated = targetLang ? cached.translations?.[targetLang] : undefined;
@@ -240,7 +242,13 @@ export class TranscriptFileInjector {
         const lines = ['WEBVTT', ''];
         for (const seg of segments) {
             lines.push(`${this.formatVttTimestamp(seg.start)} --> ${this.formatVttTimestamp(seg.end)}`);
-            lines.push(seg.text);
+            // Karaoke-style: embed word-level timestamps for progressive display
+            if (seg.words?.length) {
+                const parts = seg.words.map(w => `<${this.formatVttTimestamp(w.start)}>${w.text}`);
+                lines.push(parts.join(''));
+            } else {
+                lines.push(seg.text);
+            }
             lines.push('');
         }
         return lines.join('\n');

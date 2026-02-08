@@ -161,3 +161,8 @@ export class CacheStore {
 }
 
 export const SharedCache = new CacheStore();
+
+// Periodically evict expired entries to free memory (every 5 minutes)
+if (typeof setInterval !== 'undefined') {
+    setInterval(() => SharedCache.evictExpired(), 5 * 60 * 1000);
+}

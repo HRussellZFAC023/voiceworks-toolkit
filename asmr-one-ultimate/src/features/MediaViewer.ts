@@ -12,18 +12,13 @@
  * - Mouse wheel zoom support
  */
 
-import { KikoeruApp } from '../types/store';
 import { KikoeruBridge } from '../infrastructure/KikoeruBridge';
 import { Logger, Config } from '../core/Utils';
-import { I18n } from '../core/Config';
 import { CentralObserver } from '../core/CentralObserver';
+import type { KikoeruApp } from '../types';
 import { WorkService } from '../services/WorkService';
 import { TrackItem, TrackFolder } from '../types/api';
 import { gmRequest, retryWithBackoff } from '../infrastructure/HttpClient';
-import { TranslationService } from '../services/TranslationService';
-import { MediaLightbox } from './media/MediaLightbox';
-import { ThumbnailManager } from './media/ThumbnailManager';
-import type { DragState, MediaFile, TouchState, WorkTreeComponent } from './media/types';
 
 declare const unsafeWindow: Window & typeof globalThis;
 
@@ -34,20 +29,41 @@ const globalWindow = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : windo
 // File extensions
 const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg'];
 const VIDEO_EXTENSIONS = ['.mp4', '.webm', '.mov', '.avi', '.mkv', '.m4v'];
-const PDF_EXTENSIONS = ['.pdf'];
-const TEXT_EXTENSIONS = ['.txt', '.md', '.log', '.nfo', '.csv', '.json', '.srt', '.ass', '.vtt', '.lrc'];
 
 // Zoom constraints
 const ZOOM_MIN = 0.5;
 const ZOOM_MAX = 5;
 const ZOOM_STEP = 0.05; // 5% increments as requested
 
-// Translation batching
-const TRANSLATE_BATCH_MAX_CHARS = 0; // 0 = no per-batch limit
-const TRANSLATE_TOTAL_MAX_CHARS = 0; // 0 = no total cap
-const PDF_TEXT_MAX_PAGES = Infinity; // Infinity = no page limit
-const PDFJS_CDN = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.min.js';
-const PDFJS_WORKER_CDN = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.worker.min.js';
+interface MediaFile {
+    hash: string;
+    title: string;
+    type?: string;
+    mediaStreamUrl?: string;
+    media_stream_url?: string;
+}
+
+interface TouchState {
+    startX: number;
+    startY: number;
+    startTime: number;
+}
+
+interface DragState {
+    isDragging: boolean;
+    didDrag: boolean; // Track if actual dragging occurred (to prevent click)
+    startX: number;
+    startY: number;
+    scrollLeft: number;
+    scrollTop: number;
+}
+
+interface WorkTreeComponent extends KikoeruApp {
+    onClickItem: (item: any) => void;
+    fatherFolder?: any[];
+    path?: any[];
+    $nextTick?: (callback: () => void) => void;
+}
 
 export class MediaViewer {
     private static _instance: MediaViewer | null = null;
@@ -56,20 +72,13 @@ export class MediaViewer {
     private workTreeHooked = false;
     private folderWatcherSetup = false;
     private activeRequestId = 0;
-    private titleTranslationToken = 0;
-    private lightbox: MediaLightbox;
-    private thumbnailManager: ThumbnailManager;
 
     // Lightbox state
     private currentMediaIndex = 0;
     private currentMediaList: MediaFile[] = [];
-    private currentMediaType: 'image' | 'video' | 'pdf' | 'text' = 'image';
+    private currentMediaType: 'image' | 'video' = 'image';
     private touchState: TouchState | null = null;
     private recoveryTimeout: number | undefined;
-
-    // Auto-slideshow state
-    private slideshowTimer: ReturnType<typeof setInterval> | null = null;
-    private slideshowPaused = false;
 
     // Zoom state
     private zoomLevel = 1;
@@ -85,7 +94,6 @@ export class MediaViewer {
     // Preloading
     private preloadedImages: Map<string, HTMLImageElement> = new Map();
     private thumbnailCache: Map<string, string> = new Map();
-    private pdfjsLoadPromise: Promise<unknown> | null = null;
 
     // Bound event handlers (for cleanup)
     private boundHandleKeydown: (e: KeyboardEvent) => void;
@@ -106,56 +114,29 @@ export class MediaViewer {
         this.boundHandleMouseMove = this.handleMouseMove.bind(this);
         this.boundHandleMouseUp = this.handleMouseUp.bind(this);
         this.boundDelegatedClick = this.handleDelegatedClick.bind(this);
-        this.lightbox = new MediaLightbox({
-            getModal: () => this.modal,
-            setModal: (modal) => { this.modal = modal; },
-            hideModal: () => this.hideModal(),
-            navigateMedia: (direction) => this.navigateMedia(direction),
-            zoomIn: () => this.zoomIn(),
-            zoomOut: () => this.zoomOut(),
-            resetZoom: () => this.resetZoom(),
-            setZoom: (level) => this.setZoom(level),
-            toggleFullscreen: () => this.toggleFullscreen(),
-            downloadCurrentMedia: () => this.downloadCurrentMedia(),
-            openRawMedia: () => this.openRawMedia(),
-            handleTouchStart: (e) => this.handleTouchStart(e),
-            handleTouchMove: (e) => this.handleTouchMove(e),
-            handleTouchEnd: (e) => this.handleTouchEnd(e),
-            getBoundHandleKeydown: () => this.boundHandleKeydown,
-            getBoundHandleWheel: () => this.boundHandleWheel,
-            getBoundHandleMouseDown: () => this.boundHandleMouseDown,
-            getBoundHandleMouseMove: () => this.boundHandleMouseMove,
-            getBoundHandleMouseUp: () => this.boundHandleMouseUp,
-        });
-        this.thumbnailManager = new ThumbnailManager({
-            getModal: () => this.modal,
-            findWorkTreeElement: () => this.findWorkTreeElement(),
-            findWorkTreeComponent: () => this.findWorkTreeComponent(),
-            getWorkIdFromUrl: () => this.getWorkIdFromUrl(),
-            flattenTracksResponse: (tracks) => this.flattenTracksResponse(tracks),
-            getWorkTreeTree: () => this.getWorkTreeTree(),
-            getFileExtension: (fileName) => this.getFileExtension(fileName),
-            isImage: (ext) => this.isImage(ext),
-            isVideo: (ext) => this.isVideo(ext),
-            getMediaUrl: (hash, fileData) => this.getMediaUrl(hash, fileData),
-            thumbnailCache: this.thumbnailCache,
-        });
     }
 
-    public static getInstance(): MediaViewer {
+    static getInstance(): MediaViewer {
+        if (globalWindow.__ASMR_MEDIA_VIEWER__) {
+            MediaViewer._instance = globalWindow.__ASMR_MEDIA_VIEWER__;
+            MediaViewer._instance.bridge = KikoeruBridge.getInstance();
+            return MediaViewer._instance;
+        }
+
         if (!MediaViewer._instance) {
             MediaViewer._instance = new MediaViewer();
+            globalWindow.__ASMR_MEDIA_VIEWER__ = MediaViewer._instance;
         }
-        MediaViewer._instance.bridge = KikoeruBridge.getInstance();
         return MediaViewer._instance;
     }
 
     /**
      * Open the lightbox with external image URLs (e.g. DLsite sample images).
+     * These bypass the hash-based media stream and load directly from the URL.
      */
     public showExternalImages(urls: string[], startIndex = 0): void {
         if (!urls.length) return;
-        this.lightbox.ensureModal();
+        if (!this.modal) this.createModal();
 
         // Increment ID to cancel any pending showMedia/populateMediaList results
         this.activeRequestId++;
@@ -183,16 +164,12 @@ export class MediaViewer {
         document.body.style.overflow = 'hidden';
 
         this.minimizePlayer();
-
-        // Start auto-slideshow for image galleries
-        this.slideshowPaused = false;
-        this.startSlideshow();
     }
 
     enable(): void {
         Logger.log('[MediaViewer] Enabling v2.1...');
 
-        this.lightbox.ensureModal();
+        this.createModal();
         this.installDelegatedClick();
         this.hookWorkTree();
         this.setupObserver();
@@ -231,7 +208,7 @@ export class MediaViewer {
         if (this.delegatedClickInstalled) return;
         document.addEventListener('click', this.boundDelegatedClick, true);
         this.delegatedClickInstalled = true;
-        Logger.debug('[MediaViewer] Delegated click handler installed');
+        Logger.log('[MediaViewer] Delegated click handler installed');
     }
 
     private handleDelegatedClick(e: MouseEvent): void {
@@ -262,9 +239,7 @@ export class MediaViewer {
         const ext = this.getFileExtension(title);
         const isImg = this.isImage(ext);
         const isVid = this.isVideo(ext);
-        const isPdf = this.isPdf(ext);
-        const isText = this.isText(ext);
-        if (!isImg && !isVid && !isPdf && !isText) return;
+        if (!isImg && !isVid) return;
 
         // This is a media file click — intercept it
         e.stopPropagation();
@@ -273,26 +248,11 @@ export class MediaViewer {
         let hash = '';
         let itemData: MediaFile | null = null;
 
-        // Check for stashed hash (most reliable, set by injectThumbnails or FlatPanel)
-        if (!itemData) {
-            hash = qItem.dataset.asmrHash || qItem.dataset.asmrFlatHash || '';
+        // For flat panel items, read hash from data attribute
+        if (inFlatPanel) {
+            hash = qItem.dataset.asmrFlatHash || '';
             if (hash) {
-                // If we have a hash, we can build a minimal MediaFile
-                itemData = { hash, title, type: isImg ? 'image' : isVid ? 'video' : isPdf ? 'pdf' : 'text' };
-            }
-        }
-
-        // Try extracting media stream URL from thumbnail as another fallback
-        if (!itemData) {
-            const thumbImg = qItem.querySelector('.media-thumb') as HTMLImageElement;
-            if (thumbImg?.src && thumbImg.classList.contains('loaded')) {
-                // If it's a loaded thumbnail, its SRC is a valid stream URL!
-                itemData = {
-                    hash: `__delegated_stream_${Date.now()}`,
-                    title,
-                    mediaStreamUrl: thumbImg.src,
-                    type: isImg ? 'image' : isVid ? 'video' : 'text'
-                };
+                itemData = { hash, title, type: isImg ? 'image' : 'video' };
             }
         }
 
@@ -300,35 +260,23 @@ export class MediaViewer {
         if (!itemData) {
             const vueEl = qItem as any;
             if (vueEl.__vue__) {
-                // Check multiple common locations for item data
-                const candidates = [
-                    vueEl.__vue__.$attrs?.item,
-                    vueEl.__vue__.item,
-                    vueEl.__vue__.$props?.item,
-                    vueEl.__vue__.file,
-                    vueEl.__vue__.$props?.file,
-                    vueEl.__vue__.node,
-                    vueEl.__vue__.$props?.node
-                ];
-
-                for (const candidate of candidates) {
-                    if (candidate && candidate.hash) {
-                        itemData = candidate;
-                        hash = candidate.hash;
-                        break;
-                    }
+                const vueItem = vueEl.__vue__.$attrs?.item || vueEl.__vue__?.item;
+                if (vueItem) {
+                    itemData = vueItem;
+                    hash = vueItem.hash || '';
                 }
             }
         }
 
-        // Fallback: try to find item from WorkTree component's fatherFolder using robust matching
-        if (!itemData) {
+        // Fallback: try to find item from WorkTree component's fatherFolder
+        if (!hash) {
             const workTree = this.findWorkTreeComponent();
-            const folder = (workTree as any)?.fatherFolder ||
-                (workTree as any)?.$data?.fatherFolder || [];
-
-            if (folder.length > 0) {
-                const match = this.findMatchingMediaItem({ hash: '', title }, folder);
+            if (workTree) {
+                const folder = (workTree as any).fatherFolder ||
+                    (workTree as any).$data?.fatherFolder || [];
+                const match = folder.find((f: MediaFile) =>
+                    f.title === title || f.title?.includes(title)
+                );
                 if (match) {
                     itemData = match;
                     hash = match.hash || '';
@@ -340,10 +288,9 @@ export class MediaViewer {
             itemData = { hash: hash || `__delegated_${Date.now()}`, title };
         }
 
-        const mediaType = isImg ? 'image' : isVid ? 'video' : isPdf ? 'pdf' : 'text';
-        Logger.debug(`[MediaViewer] Delegated click intercepted: ${title} (${mediaType}), hash=${itemData.hash}, source=${inFlatPanel ? 'flat-panel' : 'work-tree'}`);
+        Logger.log(`[MediaViewer] Delegated click intercepted: ${title} (${isImg ? 'image' : 'video'}), hash=${itemData.hash}, source=${inFlatPanel ? 'flat-panel' : 'work-tree'}`);
         const workTreeContext = this.findWorkTreeComponent() || undefined;
-        this.showMedia(itemData, mediaType, workTreeContext).catch(err => {
+        this.showMedia(itemData, isImg ? 'image' : 'video', workTreeContext).catch(err => {
             Logger.error('[MediaViewer] Delegated showMedia failed:', err);
         });
     }
@@ -402,7 +349,7 @@ export class MediaViewer {
             const ext = self.getFileExtension(item.title);
 
             // Log available properties for debugging
-            Logger.debug(`[MediaViewer] WorkTree ref fatherFolder: ${workTreeRef.fatherFolder?.length || 0} items`);
+            Logger.log(`[MediaViewer] WorkTree ref fatherFolder: ${workTreeRef.fatherFolder?.length || 0} items`);
 
             if (self.isImage(ext) || item.type === 'image') {
                 // Pass the workTreeRef instead of 'this' for more reliable access
@@ -411,19 +358,7 @@ export class MediaViewer {
             }
 
             if (self.isVideo(ext)) {
-                // Lightbox shows muted video; native player handles audio
                 self.showMedia(item, 'video', workTreeRef);
-                self.playVideoInNativePlayer(item, workTreeRef);
-                return;
-            }
-
-            if (self.isPdf(ext)) {
-                self.showMedia(item, 'pdf', workTreeRef);
-                return;
-            }
-
-            if (self.isText(ext)) {
-                self.showMedia(item, 'text', workTreeRef);
                 return;
             }
 
@@ -431,32 +366,7 @@ export class MediaViewer {
         };
 
         this.workTreeHooked = true;
-        Logger.debug('[MediaViewer] WorkTree patched successfully');
-    }
-
-    /**
-     * Load a video file into the native audio player by dispatching to the store.
-     * The native <audio> element can play the audio track from .mp4 files.
-     * We build a queue that includes both audio and video files from the current folder.
-     */
-    private playVideoInNativePlayer(item: MediaFile, workTreeRef: WorkTreeComponent): void {
-        const store = this.bridge.store;
-        if (!store.commit) return;
-
-        const allItems = workTreeRef.fatherFolder || [];
-        // Build queue: include audio items + video items (promoted to type 'audio')
-        const queue = allItems.filter(f => {
-            if ((f as any).type === 'audio') return true;
-            const fExt = this.getFileExtension(f.title);
-            return this.isVideo(fExt);
-        }).map(f => ({ ...f, type: 'audio' as const }));
-
-        const index = queue.findIndex(f => f.hash === item.hash);
-        if (index < 0) return;
-
-        store.commit('AudioPlayer/SET_QUEUE', { queue, index });
-        store.commit('AudioPlayer/PLAY');
-        Logger.debug(`[MediaViewer] Playing video in native player: ${item.title} (${index + 1}/${queue.length})`);
+        Logger.log('[MediaViewer] WorkTree patched successfully');
     }
 
     private setupObserver(): void {
@@ -464,7 +374,7 @@ export class MediaViewer {
             if (!this.findWorkTreeElement()) return;
             setTimeout(() => {
                 this.hookWorkTree();
-                this.thumbnailManager.injectThumbnails();
+                this.injectThumbnails();
                 this.watchFolderNavigation();
             }, 100);
         }, 500);
@@ -479,7 +389,7 @@ export class MediaViewer {
         if (workTree.$watch) {
             workTree.$watch('path', () => {
                 // Use Vue's nextTick to wait for DOM update, then inject
-                const doInject = () => this.thumbnailManager.injectThumbnails();
+                const doInject = () => this.injectThumbnails();
                 if (typeof workTree.$nextTick === 'function') {
                     workTree.$nextTick(() => setTimeout(doInject, 50));
                 } else {
@@ -501,7 +411,7 @@ export class MediaViewer {
         if (!router?.beforeEach) return;
 
         this.routeCleanupUnsubscribe = router.beforeEach((_to, _from, next) => {
-            this.thumbnailManager.clearStaleThumbnails();
+            this.clearStaleThumbnails();
             // Reset patching state so WorkTree gets re-patched on the next work page
             this.workTreeHooked = false;
             this.folderWatcherSetup = false;
@@ -514,41 +424,345 @@ export class MediaViewer {
 
         // Watch for player expansion (hide going from true -> false)
         this.playerWatcher = this.bridge.watch(
-            (state) => ({
-                hide: state.AudioPlayer?.hide,
-                playing: state.AudioPlayer?.playing,
-                currentTime: state.AudioPlayer?.currentTime,
-                src: state.AudioPlayer?.currentTrack?.src || state.AudioPlayer?.currentPlayingFile?.src
-            }),
-            (val, oldVal) => {
-                // 1. If player is now expanded (hide: true -> false) AND it was previously minimized
-                if (val.hide === false && oldVal?.hide === true) {
+            (state) => state.AudioPlayer?.hide,
+            (isHidden, wasHidden) => {
+                // If player is now expanded (isHidden === false) AND it was previously minimized (wasHidden === true)
+                // Note: on initial watch, wasHidden might be undefined, so we strictly check for transition
+                if (isHidden === false && wasHidden === true) {
                     // Check if lightbox is open (modal has active class)
                     if (this.modal?.classList.contains('active')) {
-                        Logger.debug('[MediaViewer] Player expanded, closing lightbox');
+                        Logger.log('[MediaViewer] Player expanded, closing lightbox');
                         this.hideModal();
-                    }
-                }
-
-                // 2. Sync video playback state if lightbox is open
-                if (this.modal?.classList.contains('active') && this.currentMediaType === 'video') {
-                    const video = this.modal.querySelector('video');
-                    if (video) {
-                        // Sync playing state
-                        if (val.playing && video.paused) {
-                            video.play().catch(() => { });
-                        } else if (!val.playing && !video.paused) {
-                            video.pause();
-                        }
-
-                        // Sync current time (if significantly out of sync, e.g. > 2s)
-                        if (typeof val.currentTime === 'number' && Math.abs(video.currentTime - val.currentTime) > 2) {
-                            video.currentTime = val.currentTime;
-                        }
                     }
                 }
             }
         );
+    }
+
+    // =========================================================================
+    // Thumbnail Injection
+    // =========================================================================
+
+    private clearStaleThumbnails(): void {
+        const workTreeEl = this.findWorkTreeElement();
+        if (!workTreeEl) return;
+
+        const thumbContainers = workTreeEl.querySelectorAll('.media-thumb-container');
+        thumbContainers.forEach(container => {
+            const iconSection = container.parentElement;
+            container.remove();
+            // Restore the original icon
+            const hiddenIcon = iconSection?.querySelector('.q-icon.hidden');
+            if (hiddenIcon) {
+                hiddenIcon.classList.remove('hidden');
+            }
+        });
+    }
+
+    private async injectThumbnails(): Promise<void> {
+        const workTreeEl = this.findWorkTreeElement();
+        if (!workTreeEl) return;
+
+        // Prevent injection if lightbox is open (fixes race condition with player minimize/expand)
+        if (this.modal?.classList.contains('active')) return;
+
+        // Clear stale thumbnails from previous folder before re-injecting
+        this.clearStaleThumbnails();
+
+        const workTree = this.findWorkTreeComponent();
+        let fatherFolder = workTree?.fatherFolder || [];
+
+        // Fallback: fetch from API if fatherFolder is empty
+        if (fatherFolder.length === 0) {
+            const workId = this.getWorkIdFromUrl();
+            if (workId) {
+                try {
+                    const tracks = await WorkService.getTracks(workId);
+                    if (Array.isArray(tracks)) {
+                        fatherFolder = this.flattenTracksResponse(tracks);
+                        Logger.debug(`[MediaViewer] Thumbnails: fetched ${fatherFolder.length} tracks from API`);
+                    } else {
+                        Logger.warn('[MediaViewer] Thumbnails: tracks is not an array:', typeof tracks);
+                    }
+                } catch (err) {
+                    Logger.warn('[MediaViewer] Thumbnails: failed to fetch tracks', err);
+                }
+            }
+        }
+
+        // Create a map of titles to file data for faster lookup
+        const fileMap = new Map<string, MediaFile>();
+        fatherFolder.forEach(f => {
+            fileMap.set(f.title, f);
+            // Also map without extension for flexibility
+            const baseName = f.title.replace(/\.[^.]+$/, '');
+            fileMap.set(baseName, f);
+        });
+
+        Logger.debug(`[MediaViewer] Thumbnails: fileMap has ${fileMap.size} entries from ${fatherFolder.length} items`);
+
+        const items = workTreeEl.querySelectorAll('.q-item');
+        items.forEach((item) => {
+            const labelEl = item.querySelector('.q-item__section--main');
+            const iconSection = item.querySelector('.q-item__section--avatar');
+            if (!labelEl || !iconSection) return;
+
+            // Skip if already has thumbnail
+            if (iconSection.querySelector('.media-thumb-container')) return;
+
+            // Get the raw title text - prefer .q-item__label if present (folders have nested labels)
+            const labelDirect = item.querySelector('.q-item__label');
+            let title = (labelDirect || labelEl).textContent?.trim() || '';
+
+            // Collapse internal whitespace (from HTML formatting)
+            title = title.replace(/\s+/g, ' ');
+
+            // Strip English translation suffix if present: "file.jpg (Translation)"
+            const translationMatch = title.match(/^(.+?)\s*\([^)]+\)$/);
+            if (translationMatch) {
+                title = translationMatch[1].trim();
+            }
+
+            const ext = this.getFileExtension(title);
+            if (!this.isImage(ext) && !this.isVideo(ext)) return;
+
+            // Look up file data
+            let fileData = fileMap.get(title);
+            if (!fileData) {
+                // Try partial matching
+                for (const [key, value] of fileMap.entries()) {
+                    if (title.includes(key) || key.includes(title)) {
+                        fileData = value;
+                        break;
+                    }
+                }
+            }
+
+            if (!fileData?.hash) {
+                Logger.debug(`[MediaViewer] Thumbnails: no hash for "${title}"`);
+                return;
+            }
+
+            if (this.isImage(ext)) {
+                const thumbUrl = this.getMediaUrl(fileData.hash, fileData);
+                this.createThumbnail(iconSection as HTMLElement, thumbUrl, fileData.hash);
+            } else if (this.isVideo(ext)) {
+                // For videos, replace icon with a video-themed thumbnail
+                this.createVideoThumbnail(iconSection as HTMLElement);
+            }
+        });
+    }
+
+    private createThumbnail(iconSection: HTMLElement, url: string, hash: string): void {
+        // Hide existing icon
+        const existingIcon = iconSection.querySelector('.q-icon');
+        if (existingIcon) {
+            existingIcon.classList.add('hidden');
+        }
+
+        // Create thumbnail container
+        const thumbContainer = document.createElement('div');
+        thumbContainer.className = 'media-thumb-container';
+
+        // Create loading placeholder
+        const placeholder = document.createElement('div');
+        placeholder.className = 'media-thumb-loading';
+        placeholder.innerHTML = '<span class="material-icons">hourglass_empty</span>';
+        thumbContainer.appendChild(placeholder);
+
+        // Create image
+        const thumb = document.createElement('img');
+        thumb.className = 'media-thumb';
+        thumb.alt = 'Thumbnail';
+        thumb.loading = 'lazy';
+
+        // Use cached thumbnail or load new one
+        if (this.thumbnailCache.has(hash)) {
+            thumb.src = this.thumbnailCache.get(hash)!;
+            placeholder.remove();
+        } else {
+            thumb.src = url;
+        }
+
+        thumb.onload = () => {
+            placeholder.remove();
+            thumb.classList.add('loaded');
+            // Cache the URL for this hash
+            this.thumbnailCache.set(hash, url);
+        };
+
+        let retryCount = 0;
+        const maxRetries = 3;
+        thumb.onerror = () => {
+            retryCount++;
+            if (retryCount <= maxRetries) {
+                const delay = retryCount * 1000; // 1s, 2s, 3s backoff
+                Logger.debug(`[MediaViewer] Thumbnail retry ${retryCount}/${maxRetries} for ${hash} in ${delay}ms`);
+                setTimeout(() => {
+                    // Append cache-bust param to force re-fetch
+                    const separator = url.includes('?') ? '&' : '?';
+                    thumb.src = `${url}${separator}_r=${retryCount}`;
+                }, delay);
+            } else {
+                Logger.debug(`[MediaViewer] Thumbnail failed after ${maxRetries} retries: ${hash}`);
+                thumbContainer.remove();
+                if (existingIcon) {
+                    existingIcon.classList.remove('hidden');
+                }
+            }
+        };
+
+        thumbContainer.appendChild(thumb);
+        iconSection.appendChild(thumbContainer);
+    }
+
+    private createVideoThumbnail(iconSection: HTMLElement): void {
+        // Hide existing icon
+        const existingIcon = iconSection.querySelector('.q-icon');
+        if (existingIcon) {
+            existingIcon.classList.add('hidden');
+        }
+
+        // Create thumbnail container with a video icon overlay
+        const thumbContainer = document.createElement('div');
+        thumbContainer.className = 'media-thumb-container media-thumb-video';
+        thumbContainer.innerHTML = '<span class="material-icons" style="font-size:24px;color:rgba(255,255,255,0.9);">play_circle_filled</span>';
+
+        iconSection.appendChild(thumbContainer);
+    }
+
+    // =========================================================================
+    // Modal Creation
+    // =========================================================================
+
+    private createModal(): void {
+        if (this.modal) return;
+
+        this.modal = document.createElement('div');
+        this.modal.id = 'asmr-media-viewer-modal';
+        this.modal.className = 'media-viewer-modal';
+        this.modal.innerHTML = `
+            <div class="media-viewer-backdrop"></div>
+            <div class="media-viewer-container">
+                <div class="media-viewer-header">
+                    <div class="media-viewer-counter">
+                        <span class="media-viewer-current">1</span>
+                        <span class="media-viewer-separator">/</span>
+                        <span class="media-viewer-total">1</span>
+                    </div>
+                    <div class="media-viewer-title"></div>
+                    <div class="media-viewer-actions">
+                        <div class="media-viewer-zoom-controls">
+                            <button class="media-viewer-action media-viewer-zoom-out" aria-label="Zoom out" title="Zoom out (-)">
+                                <span class="material-icons">remove</span>
+                            </button>
+                            <input type="range" class="media-viewer-zoom-slider" min="50" max="400" value="100" step="10" title="Zoom level">
+                            <button class="media-viewer-action media-viewer-zoom-in" aria-label="Zoom in" title="Zoom in (+)">
+                                <span class="material-icons">add</span>
+                            </button>
+                            <div class="media-viewer-zoom-indicator">100%</div>
+                            <button class="media-viewer-action media-viewer-zoom-reset" aria-label="Reset zoom" title="Reset zoom (0)">
+                                <span class="material-icons">fit_screen</span>
+                            </button>
+                        </div>
+                        <button class="media-viewer-action media-viewer-fullscreen" aria-label="Toggle fullscreen" title="Fullscreen (F)">
+                            <span class="material-icons">fullscreen</span>
+                        </button>
+                        <button class="media-viewer-action media-viewer-download" aria-label="Download" title="Download">
+                            <span class="material-icons">download</span>
+                        </button>
+                        <button class="media-viewer-action media-viewer-raw" aria-label="Open raw" title="Open raw image in new tab">
+                            <span class="material-icons">open_in_new</span>
+                        </button>
+                        <button class="media-viewer-action media-viewer-close" aria-label="Close" title="Close (Esc)">
+                            <span class="material-icons">close</span>
+                        </button>
+                    </div>
+                </div>
+                <div class="media-viewer-body">
+                    <button class="media-viewer-nav media-viewer-prev" aria-label="Previous (←)">
+                        <span class="material-icons">chevron_left</span>
+                    </button>
+                    <div class="media-viewer-content">
+                        <div class="media-viewer-loader">
+                            <span class="material-icons spinning">refresh</span>
+                        </div>
+                        <div class="media-viewer-media-wrapper"></div>
+                    </div>
+                    <button class="media-viewer-nav media-viewer-next" aria-label="Next (→)">
+                        <span class="material-icons">chevron_right</span>
+                    </button>
+                </div>
+                <div class="media-viewer-thumbnails"></div>
+            </div>
+        `;
+        document.body.appendChild(this.modal);
+
+        this.setupModalEvents();
+    }
+
+    private setupModalEvents(): void {
+        if (!this.modal) return;
+
+        const backdrop = this.modal.querySelector('.media-viewer-backdrop');
+        const body = this.modal.querySelector('.media-viewer-body');
+        const closeBtn = this.modal.querySelector('.media-viewer-close');
+        const prevBtn = this.modal.querySelector('.media-viewer-prev');
+        const nextBtn = this.modal.querySelector('.media-viewer-next');
+        const zoomInBtn = this.modal.querySelector('.media-viewer-zoom-in');
+        const zoomOutBtn = this.modal.querySelector('.media-viewer-zoom-out');
+        const zoomResetBtn = this.modal.querySelector('.media-viewer-zoom-reset');
+        const zoomSlider = this.modal.querySelector('.media-viewer-zoom-slider') as HTMLInputElement;
+        const fullscreenBtn = this.modal.querySelector('.media-viewer-fullscreen');
+        const downloadBtn = this.modal.querySelector('.media-viewer-download');
+        const content = this.modal.querySelector('.media-viewer-content');
+        const mediaWrapper = this.modal.querySelector('.media-viewer-media-wrapper') as HTMLElement;
+
+        // Close on backdrop click
+        backdrop?.addEventListener('click', () => this.hideModal());
+
+        // Close on body click (outside the image)
+        body?.addEventListener('click', (e) => {
+            const target = e.target as HTMLElement;
+            // Only close if clicking directly on body, not on nav buttons or content
+            if (target === body || target.classList.contains('media-viewer-content')) {
+                this.hideModal();
+            }
+        });
+
+        closeBtn?.addEventListener('click', () => this.hideModal());
+        prevBtn?.addEventListener('click', (e) => { e.stopPropagation(); this.navigateMedia(-1); });
+        nextBtn?.addEventListener('click', (e) => { e.stopPropagation(); this.navigateMedia(1); });
+        zoomInBtn?.addEventListener('click', (e) => { e.stopPropagation(); this.zoomIn(); });
+        zoomOutBtn?.addEventListener('click', (e) => { e.stopPropagation(); this.zoomOut(); });
+        zoomResetBtn?.addEventListener('click', (e) => { e.stopPropagation(); this.resetZoom(); });
+        zoomSlider?.addEventListener('input', (e) => {
+            e.stopPropagation();
+            this.setZoom(parseInt((e.target as HTMLInputElement).value) / 100);
+        });
+        fullscreenBtn?.addEventListener('click', (e) => { e.stopPropagation(); this.toggleFullscreen(); });
+        downloadBtn?.addEventListener('click', (e) => { e.stopPropagation(); this.downloadCurrentMedia(); });
+        const rawBtn = this.modal.querySelector('.media-viewer-raw');
+        rawBtn?.addEventListener('click', (e) => { e.stopPropagation(); this.openRawMedia(); });
+
+        // Touch events for swipe
+        content?.addEventListener('touchstart', (e) => this.handleTouchStart(e as TouchEvent), { passive: true });
+        content?.addEventListener('touchmove', (e) => this.handleTouchMove(e as TouchEvent), { passive: false });
+        content?.addEventListener('touchend', (e) => this.handleTouchEnd(e as TouchEvent));
+
+        // Keyboard navigation
+        document.addEventListener('keydown', this.boundHandleKeydown);
+
+        // Mouse wheel zoom
+        if (mediaWrapper) {
+            mediaWrapper.addEventListener('wheel', this.boundHandleWheel as EventListener, { passive: false });
+            mediaWrapper.addEventListener('mousedown', this.boundHandleMouseDown as EventListener);
+            mediaWrapper.addEventListener('dragstart', (e) => e.preventDefault());
+        }
+
+        // Drag to pan when zoomed (document-level for smooth dragging)
+        document.addEventListener('mousemove', this.boundHandleMouseMove);
+        document.addEventListener('mouseup', this.boundHandleMouseUp);
     }
 
     // =========================================================================
@@ -844,14 +1058,17 @@ export class MediaViewer {
         if (!this.modal) return;
 
         const fullscreenBtn = this.modal.querySelector('.media-viewer-fullscreen .material-icons');
-        const isFullscreen = this.modal.classList.contains('fullscreen-mode');
 
-        if (!isFullscreen) {
-            this.modal.classList.add('fullscreen-mode');
-            if (fullscreenBtn) fullscreenBtn.textContent = 'fullscreen_exit';
+        if (!document.fullscreenElement) {
+            this.modal.requestFullscreen().then(() => {
+                if (fullscreenBtn) fullscreenBtn.textContent = 'fullscreen_exit';
+            }).catch(() => {
+                // Fullscreen not supported or denied
+            });
         } else {
-            this.modal.classList.remove('fullscreen-mode');
-            if (fullscreenBtn) fullscreenBtn.textContent = 'fullscreen';
+            document.exitFullscreen().then(() => {
+                if (fullscreenBtn) fullscreenBtn.textContent = 'fullscreen';
+            }).catch(() => { });
         }
     }
 
@@ -859,9 +1076,9 @@ export class MediaViewer {
     // Media Display
     // =========================================================================
 
-    private async showMedia(item: MediaFile, type: 'image' | 'video' | 'pdf' | 'text', workTreeContext?: WorkTreeComponent): Promise<void> {
+    private async showMedia(item: MediaFile, type: 'image' | 'video', workTreeContext?: any): Promise<void> {
         // Ensure modal exists (fixes race condition where click fires before enable() completes)
-        this.lightbox.ensureModal();
+        if (!this.modal) this.createModal();
         if (!this.modal) return;
 
         // Show the modal IMMEDIATELY with the clicked item (don't block on async data)
@@ -873,7 +1090,7 @@ export class MediaViewer {
         // CRITICAL: Clean up ANY DOM modifications in WorkTree before triggering a store action
         // minimizing the player will cause a layout change and WorkTree re-render.
         // If we leave our thumbnails in, Vue's virtual DOM patching will fail with NotFoundError.
-        this.thumbnailManager.clearStaleThumbnails();
+        this.clearStaleThumbnails();
 
         // Track the initial hash to detect if populateMediaList resolves a better one
         const initialHash = item.hash;
@@ -888,7 +1105,7 @@ export class MediaViewer {
             const wrapper = this.modal.querySelector('.media-viewer-media-wrapper') as HTMLElement;
             if (wrapper) wrapper.innerHTML = '';
             const titleEl = this.modal.querySelector('.media-viewer-title');
-            if (titleEl) this.updateTitle(titleEl as HTMLElement, item.title);
+            if (titleEl) titleEl.textContent = item.title;
         } else {
             this.renderMedia(item, type);
         }
@@ -901,10 +1118,7 @@ export class MediaViewer {
         document.body.classList.add('media-viewer-open');
         document.body.style.overflow = 'hidden';
 
-        // Only minimize player for images; for videos we want both active
-        if (type !== 'video') {
-            this.minimizePlayer();
-        }
+        this.minimizePlayer();
 
         // Now fetch the full media list in the background for navigation
         // If we had a fake hash, render once we have the real data
@@ -917,25 +1131,23 @@ export class MediaViewer {
         }
 
         if (hasFakeHash) {
-            // Find resolved item using the enhanced matching logic
-            const resolvedItem = this.findMatchingMediaItem(item, this.currentMediaList);
-
+            // Find the resolved item by title match (hash will differ from the fake one)
+            const resolvedItem = this.currentMediaList.find(f =>
+                f.title === item.title || f.title?.includes(item.title) || item.title?.includes(f.title)
+            );
             if (resolvedItem && resolvedItem.hash && !resolvedItem.hash.startsWith('__delegated_')) {
                 // Update index to point to the resolved item
                 const resolvedIndex = this.currentMediaList.indexOf(resolvedItem);
                 if (resolvedIndex >= 0) this.currentMediaIndex = resolvedIndex;
-                Logger.debug(`[MediaViewer] Rendering with resolved hash: ${resolvedItem.hash} (was ${initialHash})`);
+                Logger.log(`[MediaViewer] Rendering with resolved hash: ${resolvedItem.hash} (was ${initialHash})`);
                 this.renderMedia(resolvedItem, type);
                 this.updateCounter();
                 this.updateNavButtons();
                 this.renderThumbnailStrip();
                 this.preloadAdjacentImages();
             } else {
-                // Resolution failed — log what we have for debugging
+                // Resolution failed — show error instead of hammering a bad URL
                 Logger.warn(`[MediaViewer] Could not resolve real hash for "${item.title}"`);
-                const normalizedItemTitle = this.normalizeMatchString(item.title);
-                Logger.debug(`[MediaViewer] Normalized title: "${normalizedItemTitle}"`);
-                Logger.debug(`[MediaViewer] Available titles (first 10):`, this.currentMediaList.slice(0, 10).map(f => f.title));
                 const loader = this.modal?.querySelector('.media-viewer-loader');
                 loader?.classList.remove('visible');
                 const wrapper = this.modal?.querySelector('.media-viewer-media-wrapper') as HTMLElement;
@@ -946,46 +1158,20 @@ export class MediaViewer {
                     </div>`;
                 }
             }
-        } else {
-            // Even if hash wasn't fake, check if we found a "better" version of the item (e.g. with mediaStreamUrl)
-            // populateMediaList updates this.currentMediaIndex to point to the matched item in the new list
-            const currentItem = this.currentMediaList[this.currentMediaIndex];
-
-            // If the new item has a direct stream URL but the initial one didn't, we should re-render
-            const initialHadStream = !!(item.mediaStreamUrl || item.media_stream_url);
-            const currentHasStream = !!(currentItem.mediaStreamUrl || currentItem.media_stream_url);
-
-            if (currentHasStream && !initialHadStream) {
-                Logger.debug(`[MediaViewer] Re-rendering enriched item with stream URL: ${currentItem.title}`);
-                this.renderMedia(currentItem, type);
-                // Also update other UI elements since the object reference changed
-                this.renderThumbnailStrip();
-                this.preloadAdjacentImages();
-            }
         }
-
-        // Start auto-slideshow now that the full media list is populated
-        this.slideshowPaused = false;
-        this.startSlideshow();
     }
 
-    private async populateMediaList(item: MediaFile, type: 'image' | 'video' | 'pdf' | 'text', requestId: number, workTreeContext?: WorkTreeComponent): Promise<void> {
+    private async populateMediaList(item: MediaFile, type: 'image' | 'video', requestId: number, workTreeContext?: any): Promise<void> {
         let fatherFolder: MediaFile[] = [];
 
         // Try multiple ways to access the folder contents (synchronous sources first)
         if (workTreeContext) {
-            const ctx = workTreeContext as any;
-            if (Array.isArray(ctx.fatherFolder) && ctx.fatherFolder.length > 0) {
-                fatherFolder = ctx.fatherFolder;
-            } else if (ctx.$data?.fatherFolder && Array.isArray(ctx.$data.fatherFolder)) {
-                fatherFolder = ctx.$data.fatherFolder;
-            } else if (ctx._data?.fatherFolder && Array.isArray(ctx._data.fatherFolder)) {
-                fatherFolder = ctx._data.fatherFolder;
-            }
-            if (fatherFolder.length === 0 && Array.isArray(ctx.tree)) {
-                fatherFolder = this.flattenTracksResponse(ctx.tree);
-            } else if (fatherFolder.length === 0 && Array.isArray(ctx.$data?.tree)) {
-                fatherFolder = this.flattenTracksResponse(ctx.$data.tree);
+            if (Array.isArray(workTreeContext.fatherFolder) && workTreeContext.fatherFolder.length > 0) {
+                fatherFolder = workTreeContext.fatherFolder;
+            } else if (workTreeContext.$data?.fatherFolder && Array.isArray(workTreeContext.$data.fatherFolder)) {
+                fatherFolder = workTreeContext.$data.fatherFolder;
+            } else if (workTreeContext._data?.fatherFolder && Array.isArray(workTreeContext._data.fatherFolder)) {
+                fatherFolder = workTreeContext._data.fatherFolder;
             }
         }
 
@@ -994,11 +1180,6 @@ export class MediaViewer {
             if (workTree) {
                 const wt = workTree as any;
                 fatherFolder = wt.fatherFolder || wt.$data?.fatherFolder || wt._data?.fatherFolder || [];
-                if (fatherFolder.length === 0 && Array.isArray(wt.tree)) {
-                    fatherFolder = this.flattenTracksResponse(wt.tree);
-                } else if (fatherFolder.length === 0 && Array.isArray(wt.$data?.tree)) {
-                    fatherFolder = this.flattenTracksResponse(wt.$data.tree);
-                }
             }
         }
 
@@ -1007,7 +1188,7 @@ export class MediaViewer {
             const workId = this.getWorkIdFromUrl();
             if (workId) {
                 try {
-                    Logger.debug(`[MediaViewer] Fetching tracks for work ${workId} from WorkService...`);
+                    Logger.log(`[MediaViewer] Fetching tracks for work ${workId} from WorkService...`);
                     const tracks = await WorkService.getTracks(workId);
 
                     // Check if request is still active after async call
@@ -1018,7 +1199,7 @@ export class MediaViewer {
 
                     if (Array.isArray(tracks)) {
                         fatherFolder = this.flattenTracksResponse(tracks);
-                        Logger.debug(`[MediaViewer] Fetched ${fatherFolder.length} tracks from API`);
+                        Logger.log(`[MediaViewer] Fetched ${fatherFolder.length} tracks from API`);
                     } else {
                         Logger.warn('[MediaViewer] Tracks is not an array:', typeof tracks);
                     }
@@ -1028,58 +1209,48 @@ export class MediaViewer {
             }
         }
 
-        if (fatherFolder.length === 0) {
-            const tree = this.getWorkTreeTree();
-            if (tree?.length) {
-                fatherFolder = this.flattenTracksResponse(tree);
-                Logger.debug(`[MediaViewer] Fallback tree flatten -> ${fatherFolder.length} tracks`);
-            }
-        }
-
         // Final fallback: scan DOM for media items
         if (fatherFolder.length === 0) {
             fatherFolder = this.scanDomForMediaItems(type);
-            Logger.debug(`[MediaViewer] DOM scan found ${fatherFolder.length} items`);
+            Logger.log(`[MediaViewer] DOM scan found ${fatherFolder.length} items`);
         }
 
         if (fatherFolder.length === 0 || requestId !== this.activeRequestId) return; // Nothing more to add or clobbered
 
-        Logger.debug(`[MediaViewer] fatherFolder has ${fatherFolder.length} items`);
+        Logger.log(`[MediaViewer] fatherFolder has ${fatherFolder.length} items`);
 
         // Filter to only media of the requested type
         const mediaList = fatherFolder.filter((f: MediaFile) => {
             const ext = this.getFileExtension(f.title);
-            if (type === 'image') {
-                return this.isImage(ext) || f.type === 'image';
-            }
-            if (type === 'video') {
-                return this.isVideo(ext);
-            }
-            if (type === 'pdf') {
-                return this.isPdf(ext);
-            }
-            return this.isText(ext);
+            return type === 'image'
+                ? (this.isImage(ext) || f.type === 'image')
+                : this.isVideo(ext);
         });
 
-        if (mediaList.length === 0) return;
+        if (mediaList.length <= 1) return; // No additional items
 
         // Update the list and find current item position
         this.currentMediaList = mediaList;
-
-        // Find matching item using unified helper
-        const matchedItem = this.findMatchingMediaItem(item, mediaList);
-
-        if (matchedItem) {
-            this.currentMediaIndex = mediaList.indexOf(matchedItem);
-        } else {
+        let itemIndex = mediaList.findIndex(f =>
+            f.hash === item.hash || f.title === item.title
+        );
+        // Fuzzy fallback: partial title match (handles whitespace/translation differences)
+        if (itemIndex < 0) {
+            itemIndex = mediaList.findIndex(f =>
+                f.title?.includes(item.title) || item.title?.includes(f.title)
+            );
+        }
+        if (itemIndex < 0) {
             // Only insert the original item if it has a real hash
             if (item.hash && !item.hash.startsWith('__delegated_')) {
                 this.currentMediaList.unshift(item);
             }
             this.currentMediaIndex = 0;
+        } else {
+            this.currentMediaIndex = itemIndex;
         }
 
-        Logger.debug(`[MediaViewer] Updated list: index ${this.currentMediaIndex} of ${this.currentMediaList.length}`);
+        Logger.log(`[MediaViewer] Updated list: index ${this.currentMediaIndex} of ${this.currentMediaList.length}`);
 
         // Update UI with full list info
         this.updateCounter();
@@ -1088,7 +1259,7 @@ export class MediaViewer {
         this.preloadAdjacentImages();
     }
 
-    private renderMedia(item: MediaFile, type: 'image' | 'video' | 'pdf' | 'text'): void {
+    private renderMedia(item: MediaFile, type: 'image' | 'video'): void {
         const wrapper = this.modal?.querySelector('.media-viewer-media-wrapper') as HTMLElement;
         const titleEl = this.modal?.querySelector('.media-viewer-title');
         const loader = this.modal?.querySelector('.media-viewer-loader');
@@ -1122,6 +1293,7 @@ export class MediaViewer {
                 img.src = preloaded.src;
                 loader?.classList.remove('visible');
             } else {
+                img.src = url;
                 img.onload = () => loader?.classList.remove('visible');
 
                 let retryCount = 0;
@@ -1147,8 +1319,6 @@ export class MediaViewer {
                         this.startAutoRecovery(item, wrapper);
                     }
                 };
-
-                img.src = url;
             }
 
             // Click to toggle zoom - Removed as requested, using drag only
@@ -1157,36 +1327,13 @@ export class MediaViewer {
             });
 
             wrapper.appendChild(img);
-        } else if (type === 'video') {
+        } else {
             const video = document.createElement('video');
             video.src = url;
             video.controls = true;
             video.autoplay = true;
-            video.muted = true; // Audio comes from native player
             video.className = 'media-viewer-video';
             video.onloadeddata = () => loader?.classList.remove('visible');
-
-            // Sync lightbox video with native audio player
-            video.onplay = () => {
-                const audio = document.querySelector('audio');
-                if (audio?.paused) audio.play().catch(() => {});
-            };
-            video.onpause = () => {
-                const audio = document.querySelector('audio');
-                if (audio && !audio.paused) audio.pause();
-            };
-            video.onseeked = () => {
-                const audio = document.querySelector('audio');
-                if (audio) audio.currentTime = video.currentTime;
-            };
-            // Keep lightbox video in sync with native audio time
-            const syncInterval = setInterval(() => {
-                const audio = document.querySelector('audio');
-                if (!audio || !video.isConnected) { clearInterval(syncInterval); return; }
-                if (Math.abs(video.currentTime - audio.currentTime) > 0.5) {
-                    video.currentTime = audio.currentTime;
-                }
-            }, 500);
 
             let retryCount = 0;
             const maxRetries = 3;
@@ -1223,120 +1370,10 @@ export class MediaViewer {
             }
 
             wrapper.appendChild(video);
-        } else if (type === 'pdf') {
-            const pdfContainer = document.createElement('div');
-            pdfContainer.className = 'media-viewer-pdf-container';
-            wrapper.appendChild(pdfContainer);
-
-            const renderPdfFallback = () => {
-                pdfContainer.innerHTML = '';
-                const iframe = document.createElement('iframe');
-                iframe.className = 'media-viewer-pdf';
-                iframe.src = `${url}#toolbar=0&navpanes=0&scrollbar=1`;
-                iframe.loading = 'lazy';
-                iframe.referrerPolicy = 'no-referrer';
-                iframe.onload = () => loader?.classList.remove('visible');
-                iframe.onerror = () => {
-                    loader?.classList.remove('visible');
-                    wrapper.innerHTML = `<div class="media-viewer-error">
-                        <span class="material-icons">picture_as_pdf</span>
-                        <span>${I18n.t('mediaViewerPdfLoadFailed')}</span>
-                    </div>`;
-                };
-                pdfContainer.appendChild(iframe);
-            };
-
-            this.extractPdfText(url).then((text) => {
-                if (!text) {
-                    renderPdfFallback();
-                    return;
-                }
-
-                const originalPre = document.createElement('pre');
-                originalPre.className = 'media-viewer-text';
-                originalPre.textContent = text;
-
-                if (Config.get('translateMode')) {
-                    const targetLang = I18n.lang === 'zh' ? 'zh-CN' : I18n.lang;
-                    const { grid, translatedCells } = this.buildTranslationGrid(text);
-                    pdfContainer.innerHTML = '';
-                    pdfContainer.appendChild(grid);
-                    loader?.classList.remove('visible');
-
-                    const fastOptions = text.length > 20000 ? { fastDeadlineMs: 900, maxLines: 80 } : undefined;
-                    this.translateGridCells(text, translatedCells, targetLang, fastOptions).then((ok) => {
-                        if (!ok) {
-                            pdfContainer.innerHTML = '';
-                            pdfContainer.appendChild(originalPre);
-                        }
-                    }).catch(() => renderPdfFallback());
-                } else {
-                    pdfContainer.innerHTML = '';
-                    pdfContainer.appendChild(originalPre);
-                    loader?.classList.remove('visible');
-                }
-            }).catch(() => renderPdfFallback());
-        } else {
-            const originalPre = document.createElement('pre');
-            originalPre.className = 'media-viewer-text';
-            originalPre.textContent = '';
-
-            const loadText = async () => {
-                try {
-                    const res = await retryWithBackoff(
-                        () => gmRequest({ url, responseType: 'text' }),
-                        { attempts: 2, backoffMs: 500 }
-                    );
-                    const rawText = String(res.response || '');
-                    const maxChars = 400000;
-                    const text = rawText.length > maxChars ? rawText.slice(0, maxChars) : rawText;
-                    originalPre.textContent = text;
-
-                    let note: HTMLDivElement | null = null;
-                    if (rawText.length > maxChars) {
-                        note = document.createElement('div');
-                        note.className = 'media-viewer-text-note';
-                        note.textContent = I18n.format('mediaViewerTextTruncated', { count: Math.round(maxChars / 1000) });
-                    }
-
-                    if (Config.get('translateMode')) {
-                        const targetLang = I18n.lang === 'zh' ? 'zh-CN' : I18n.lang;
-                        const { grid, translatedCells } = this.buildTranslationGrid(text);
-
-                        wrapper.innerHTML = '';
-                        wrapper.appendChild(grid);
-                        if (note) wrapper.appendChild(note);
-
-                        const fastOptions = text.length > 20000 ? { fastDeadlineMs: 900, maxLines: 80 } : undefined;
-                        const ok = await this.translateGridCells(text, translatedCells, targetLang, fastOptions);
-                        if (!ok) {
-                            wrapper.innerHTML = '';
-                            wrapper.appendChild(originalPre);
-                            if (note) wrapper.appendChild(note);
-                        }
-                    }
-
-                    if (note && !note.isConnected) {
-                        wrapper.appendChild(note);
-                    }
-
-                    loader?.classList.remove('visible');
-                } catch (err) {
-                    Logger.warn('[MediaViewer] Text load failed:', err);
-                    loader?.classList.remove('visible');
-                    wrapper.innerHTML = `<div class="media-viewer-error">
-                        <span class="material-icons">description</span>
-                        <span>${I18n.t('mediaViewerTextLoadFailed')}</span>
-                    </div>`;
-                }
-            };
-
-            wrapper.appendChild(originalPre);
-            loadText().catch(() => { });
         }
 
         if (titleEl) {
-            this.updateTitle(titleEl as HTMLElement, item.title);
+            titleEl.textContent = item.title;
         }
     }
 
@@ -1409,12 +1446,7 @@ export class MediaViewer {
                 img.loading = 'lazy';
                 thumb.appendChild(img);
             } else {
-                const icon = this.currentMediaType === 'video'
-                    ? 'videocam'
-                    : this.currentMediaType === 'pdf'
-                        ? 'picture_as_pdf'
-                        : 'description';
-                thumb.innerHTML = `<span class="material-icons">${icon}</span>`;
+                thumb.innerHTML = '<span class="material-icons">videocam</span>';
             }
 
             thumb.addEventListener('click', (e) => {
@@ -1490,57 +1522,7 @@ export class MediaViewer {
         }
     }
 
-    // ------------------------------------------------------------------
-    // Auto-slideshow (lightbox mode)
-    // ------------------------------------------------------------------
-
-    private startSlideshow(): void {
-        this.stopSlideshow();
-        if (this.slideshowPaused) return;
-        if (this.currentMediaList.length < 2) return;
-        if (this.currentMediaType !== 'image') return;
-        if (!Config.get('galleryAutoSlideshow')) return;
-
-        const interval = Math.max(2, Number(Config.get('galleryAutoSlideshowInterval')) || 6);
-        this.slideshowTimer = setInterval(() => {
-            if (this.currentMediaList.length < 2) {
-                this.stopSlideshow();
-                return;
-            }
-            // Wrap around to first image
-            const nextIndex = (this.currentMediaIndex + 1) % this.currentMediaList.length;
-            if (nextIndex === this.currentMediaIndex) return;
-            this.currentMediaIndex = nextIndex;
-            const item = this.currentMediaList[nextIndex];
-            this.resetZoom();
-            this.renderMedia(item, this.currentMediaType);
-            this.updateCounter();
-            this.updateNavButtons();
-            this.updateThumbnailStripSelection();
-            this.preloadAdjacentImages();
-        }, interval * 1000);
-        Logger.debug('[MediaViewer] Slideshow started, interval=', interval, 's');
-    }
-
-    private stopSlideshow(): void {
-        if (this.slideshowTimer !== null) {
-            clearInterval(this.slideshowTimer);
-            this.slideshowTimer = null;
-        }
-    }
-
-    private pauseSlideshow(): void {
-        if (!this.slideshowPaused) {
-            this.slideshowPaused = true;
-            this.stopSlideshow();
-            Logger.debug('[MediaViewer] Slideshow paused by user navigation');
-        }
-    }
-
     private navigateMedia(delta: number): void {
-        // Manual navigation pauses auto-slideshow
-        this.pauseSlideshow();
-
         const newIndex = this.currentMediaIndex + delta;
         if (newIndex < 0 || newIndex >= this.currentMediaList.length) return;
 
@@ -1606,9 +1588,6 @@ export class MediaViewer {
     private hideModal(): void {
         if (!this.modal) return;
 
-        // Stop slideshow
-        this.stopSlideshow();
-
         // Stop any playing video
         const video = this.modal.querySelector('video');
         if (video) {
@@ -1626,7 +1605,7 @@ export class MediaViewer {
         document.body.style.overflow = '';
 
         // Restore thumbnails in the list (delayed slightly to allow Vue to settle if it re-renders)
-        setTimeout(() => this.thumbnailManager.injectThumbnails(), 200);
+        setTimeout(() => this.injectThumbnails(), 200);
     }
 
     private handleKeydown(e: KeyboardEvent): void {
@@ -1731,9 +1710,10 @@ export class MediaViewer {
             Logger.debug(`[MediaViewer] Auto-recovery attempt for ${item.title}`);
 
             const img = new Image();
+            img.src = `${url}${url.includes('?') ? '&' : '?'}_recover=${Date.now()}`;
 
             img.onload = () => {
-                Logger.debug(`[MediaViewer] Auto-recovery successful for ${item.title}`);
+                Logger.log(`[MediaViewer] Auto-recovery successful for ${item.title}`);
                 if (this.currentMediaList[this.currentMediaIndex].hash === item.hash) {
                     this.renderMedia(item, 'image');
                 }
@@ -1745,8 +1725,6 @@ export class MediaViewer {
                     this.startAutoRecovery(item, wrapper);
                 }
             };
-
-            img.src = `${url}${url.includes('?') ? '&' : '?'}_recover=${Date.now()}`;
         }, RETRY_DELAY);
     }
 
@@ -1759,7 +1737,7 @@ export class MediaViewer {
      * This is a fallback for when fatherFolder isn't available.
      * Improved fallback to search effectively.
      */
-    private scanDomForMediaItems(type: 'image' | 'video' | 'pdf' | 'text'): MediaFile[] {
+    private scanDomForMediaItems(type: 'image' | 'video'): MediaFile[] {
         const workTreeEl = this.findWorkTreeElement();
         if (!workTreeEl) return [];
 
@@ -1785,11 +1763,7 @@ export class MediaViewer {
             if (!title) return;
 
             const ext = this.getFileExtension(title);
-            let isMedia = false;
-            if (type === 'image') isMedia = this.isImage(ext);
-            else if (type === 'video') isMedia = this.isVideo(ext);
-            else if (type === 'pdf') isMedia = this.isPdf(ext);
-            else isMedia = this.isText(ext);
+            const isMedia = type === 'image' ? this.isImage(ext) : this.isVideo(ext);
             if (!isMedia) return;
 
             // Try to get the Vue component data from the DOM element
@@ -1798,21 +1772,9 @@ export class MediaViewer {
 
             // Try to extract hash from Vue component
             if (vueEl.__vue__) {
-                const candidates = [
-                    vueEl.__vue__.$attrs?.item,
-                    vueEl.__vue__.item,
-                    vueEl.__vue__.$props?.item,
-                    vueEl.__vue__.file,
-                    vueEl.__vue__.$props?.file,
-                    vueEl.__vue__.node,
-                    vueEl.__vue__.$props?.node
-                ];
-
-                for (const candidate of candidates) {
-                    if (candidate && candidate.hash) {
-                        hash = candidate.hash;
-                        break;
-                    }
+                const itemData = vueEl.__vue__.$attrs?.item || vueEl.__vue__?.item;
+                if (itemData?.hash) {
+                    hash = itemData.hash;
                 }
             }
 
@@ -1829,14 +1791,13 @@ export class MediaViewer {
             }
 
             // If we still don't have a hash, we need to get it from the WorkTree component
-            // by matching the title using robust fuzzy logic
+            // by matching the title
             if (!hash) {
                 const workTree = this.findWorkTreeComponent();
-                const folder = (workTree as any)?.fatherFolder ||
-                    (workTree as any)?.$data?.fatherFolder || [];
-
-                if (folder.length > 0) {
-                    const match = this.findMatchingMediaItem({ hash: '', title }, folder);
+                if (workTree) {
+                    const wt = workTree as any;
+                    const folder = wt.fatherFolder || wt.$data?.fatherFolder || [];
+                    const match = folder.find((f: MediaFile) => f.title === title || f.title.includes(title));
                     if (match?.hash) {
                         hash = match.hash;
                     }
@@ -1867,52 +1828,20 @@ export class MediaViewer {
         return VIDEO_EXTENSIONS.includes(ext);
     }
 
-    private isPdf(ext: string): boolean {
-        return PDF_EXTENSIONS.includes(ext);
-    }
-
-    private isText(ext: string): boolean {
-        return TEXT_EXTENSIONS.includes(ext);
-    }
-
     private getMediaUrl(hash: string, item?: MediaFile): string {
         const token = localStorage.getItem('jwt-token') || '';
 
-        const appendToken = (url: string) => {
-            // External URLs or already absolute URLs should not have a token appended by us
-            if (url.startsWith('http') || url.startsWith('//')) return url;
-
-            // Only append token to internal API routes that we know require it
-            if (url.startsWith('/api/')) {
-                const separator = url.includes('?') ? '&' : '?';
-                return `${url}${separator}token=${token}`;
-            }
-
-            return url;
-        };
-
-        // If we have a direct stream URL from the item, use it
         if (item?.mediaStreamUrl) {
-            return appendToken(item.mediaStreamUrl);
+            // External URLs (e.g. DLsite images) don't need a token
+            if (item.mediaStreamUrl.startsWith('http')) return item.mediaStreamUrl;
+            return `${item.mediaStreamUrl}?token=${token}`;
         }
         if (item?.media_stream_url) {
-            return appendToken(item.media_stream_url);
+            if (item.media_stream_url.startsWith('http')) return item.media_stream_url;
+            return `${item.media_stream_url}?token=${token}`;
         }
 
-        // Fallback: use hash. 
-        // If hash looks like a path (contains /), it might be a direct media path
-        if (hash.includes('/')) {
-            // If it starts with media/stream, it's likely a direct stream that doesn't want /api prefix
-            if (hash.startsWith('media/stream/') || hash.startsWith('/media/stream/')) {
-                const path = hash.startsWith('/') ? hash : `/${hash}`;
-                return appendToken(path);
-            }
-            // Otherwise, it might be a workId/trackId style hash for the API
-            return appendToken(`/api/media/stream/${hash}`);
-        }
-
-        // Standard hash ID
-        return appendToken(`/api/media/stream/${hash}`);
+        return `/api/media/stream/${hash}?token=${token}`;
     }
 
 
@@ -1926,7 +1855,7 @@ export class MediaViewer {
         if (!store?.state?.AudioPlayer) return;
 
         if (!store.state.AudioPlayer.hide) {
-            Logger.debug('[MediaViewer] Auto-minimizing audio player via store');
+            Logger.log('[MediaViewer] Auto-minimizing audio player via store');
             store.commit?.('AudioPlayer/TOGGLE_HIDE');
         }
     }
@@ -1976,300 +1905,5 @@ export class MediaViewer {
 
         traverse(nodes);
         return result;
-    }
-
-    /**
-     * Find a media item in the list that matches the target.
-     * Uses robust fuzzy matching strategies.
-     */
-    private findMatchingMediaItem(target: MediaFile, list: MediaFile[]): MediaFile | undefined {
-        // 1. Try Hash (if not fake)
-        if (target.hash && !target.hash.startsWith('__delegated_')) {
-            const match = list.find(f => f.hash === target.hash);
-            if (match) return match;
-        }
-
-        // 2. Strict normalized comparison (extensions stripped, punc -> space)
-        const normTarget = this.normalizeMatchString(target.title);
-        let match = list.find(f => this.normalizeMatchString(f.title) === normTarget);
-        if (match) return match;
-
-        // 3. Original title exact match (fallback)
-        match = list.find(f => f.title === target.title);
-        if (match) return match;
-
-        // 4. Containment (one includes the other)
-        match = list.find(f => {
-            const normF = this.normalizeMatchString(f.title);
-            return (normF.length > 3 && normTarget.length > 3) &&
-                (normF.includes(normTarget) || normTarget.includes(normF));
-        });
-
-        return match;
-    }
-
-    private getWorkTreeTree(): Array<TrackFolder | TrackItem> | null {
-        const workTree = this.findWorkTreeComponent() as any;
-        const tree = workTree?.tree || workTree?.$data?.tree;
-        return Array.isArray(tree) ? tree : null;
-    }
-
-    private updateTitle(titleEl: HTMLElement, title: string): void {
-        this.titleTranslationToken += 1;
-        const token = this.titleTranslationToken;
-
-        titleEl.classList.remove('asmr-translation-pair');
-        titleEl.textContent = title;
-        titleEl.dataset.asmrTitleSource = title;
-        titleEl.dataset.asmrTitleTranslated = '';
-
-        if (!Config.get('translateMode')) return;
-        if (!/[\u3040-\u30ff\u4e00-\u9faf]/.test(title)) return;
-
-        const targetLang = I18n.lang === 'zh' ? 'zh-CN' : I18n.lang;
-        TranslationService.translate(title, targetLang).then(translated => {
-            if (!translated || translated === title) return;
-            if (token !== this.titleTranslationToken) return;
-            if (titleEl.dataset.asmrTitleSource !== title) return;
-
-            titleEl.classList.add('asmr-translation-pair');
-            titleEl.textContent = '';
-
-            const originalSpan = document.createElement('span');
-            originalSpan.className = 'asmr-translation-original';
-            originalSpan.textContent = title;
-
-            const separator = document.createElement('span');
-            separator.className = 'asmr-translation-sep';
-            separator.textContent = ' · ';
-
-            const translatedSpan = document.createElement('span');
-            translatedSpan.className = 'asmr-translation-translated';
-            translatedSpan.textContent = translated;
-
-            titleEl.appendChild(originalSpan);
-            titleEl.appendChild(separator);
-            titleEl.appendChild(translatedSpan);
-            titleEl.dataset.asmrTitleTranslated = translated;
-        }).catch(() => { });
-    }
-
-    private async translateTextInBatches(text: string, targetLang: string): Promise<string> {
-        const trimmed = text.trim();
-        if (!trimmed) return text;
-
-        const capped = TRANSLATE_TOTAL_MAX_CHARS > 0 ? trimmed.slice(0, TRANSLATE_TOTAL_MAX_CHARS) : trimmed;
-        const chunks = TRANSLATE_BATCH_MAX_CHARS > 0
-            ? this.splitTextByLength(capped, TRANSLATE_BATCH_MAX_CHARS)
-            : this.splitTextIntoSentences(capped);
-        if (chunks.length === 0) return text;
-
-        const results = await TranslationService.translateBatch(chunks, targetLang);
-        return results.join('\n');
-    }
-
-    /**
-     * Build a two-column aligned grid: original lines left, translated right.
-     * Single scrollbar, rows auto-size to the taller cell for alignment.
-     */
-    private buildTranslationGrid(text: string): { grid: HTMLElement; translatedCells: HTMLElement[] } {
-        const lines = text.split(/\r?\n/);
-        const grid = document.createElement('div');
-        grid.className = 'media-viewer-text-grid asmr-translation-pair';
-
-        const translatedCells: HTMLElement[] = [];
-        for (const line of lines) {
-            const origCell = document.createElement('pre');
-            origCell.className = 'media-viewer-text-line';
-            origCell.textContent = line || '\u00A0';
-
-            const transCell = document.createElement('pre');
-            transCell.className = 'media-viewer-text-line media-viewer-text-line--translated';
-            transCell.textContent = line || '\u00A0';
-            translatedCells.push(transCell);
-
-            grid.appendChild(origCell);
-            grid.appendChild(transCell);
-        }
-
-        return { grid, translatedCells };
-    }
-
-    /**
-     * Translate line-by-line, updating individual grid cells as translations arrive.
-     * Returns true if at least one line was translated.
-     */
-    private async translateGridCells(
-        text: string,
-        translatedCells: HTMLElement[],
-        targetLang: string,
-        options?: { fastDeadlineMs?: number; maxLines?: number }
-    ): Promise<boolean> {
-        const lines = text.split(/\r?\n/);
-        const indices: number[] = [];
-        const toTranslate: string[] = [];
-
-        lines.forEach((line, idx) => {
-            const trimmed = line.trim();
-            if (!trimmed || !/\p{L}/u.test(trimmed)) return;
-            indices.push(idx);
-            toTranslate.push(trimmed);
-        });
-
-        if (toTranslate.length === 0) return false;
-
-        const maxLines = options?.maxLines
-            ? Math.min(options.maxLines, toTranslate.length)
-            : toTranslate.length;
-        const concurrency = TranslationService.hasLocalTranslator() ? 4 : 2;
-
-        let timedOut = false;
-        if (options?.fastDeadlineMs && options.fastDeadlineMs > 0) {
-            window.setTimeout(() => { timedOut = true; }, options.fastDeadlineMs);
-        }
-
-        let anyTranslated = false;
-        let nextIndex = 0;
-
-        const run = async () => {
-            while (true) {
-                const idx = nextIndex++;
-                if (idx >= maxLines || timedOut) break;
-                try {
-                    const result = await TranslationService.translate(toTranslate[idx], targetLang);
-                    if (result && result !== toTranslate[idx]) {
-                        translatedCells[indices[idx]].textContent = result;
-                        anyTranslated = true;
-                    }
-                } catch { /* ignore per-line errors */ }
-            }
-        };
-
-        const workerCount = Math.min(concurrency, maxLines);
-        await Promise.all(Array.from({ length: workerCount }, () => run()));
-        return anyTranslated;
-    }
-
-    private splitTextByLength(text: string, maxChars: number): string[] {
-        const lines = text.split(/\r?\n/);
-        const chunks: string[] = [];
-        let current = '';
-
-        for (const line of lines) {
-            const candidate = current ? `${current}\n${line}` : line;
-            if (candidate.length <= maxChars) {
-                current = candidate;
-                continue;
-            }
-
-            if (current) {
-                chunks.push(current);
-                current = '';
-            }
-
-            if (line.length > maxChars) {
-                for (let i = 0; i < line.length; i += maxChars) {
-                    chunks.push(line.slice(i, i + maxChars));
-                }
-            } else {
-                current = line;
-            }
-        }
-
-        if (current) chunks.push(current);
-        return chunks;
-    }
-
-    private splitTextIntoSentences(text: string): string[] {
-        const normalized = text.replace(/\r\n/g, '\n');
-        const lines = normalized.split('\n');
-        const chunks: string[] = [];
-
-        for (const line of lines) {
-            const trimmed = line.trim();
-            if (!trimmed) {
-                chunks.push('');
-                continue;
-            }
-
-            const sentences = trimmed.match(/[^.!?。！？]+[.!?。！？]?/g) || [trimmed];
-            sentences.forEach(sentence => chunks.push(sentence.trim()));
-        }
-
-        return chunks;
-    }
-
-    private async ensurePdfJs(): Promise<unknown> {
-        const anyWindow = globalThis as any;
-        if (anyWindow.pdfjsLib) return anyWindow.pdfjsLib;
-
-        if (!this.pdfjsLoadPromise) {
-            this.pdfjsLoadPromise = new Promise((resolve) => {
-                const script = document.createElement('script');
-                script.src = PDFJS_CDN;
-                script.async = true;
-                script.onload = () => resolve((globalThis as any).pdfjsLib || null);
-                script.onerror = () => resolve(null);
-                document.head.appendChild(script);
-            });
-        }
-
-        const lib = await this.pdfjsLoadPromise;
-        if (!lib) return null;
-
-        try {
-            (lib as any).GlobalWorkerOptions.workerSrc = PDFJS_WORKER_CDN;
-        } catch {
-            // ignore
-        }
-
-        return lib;
-    }
-
-    private async extractPdfText(url: string): Promise<string | null> {
-        const pdfjs = await this.ensurePdfJs() as Record<string, any> | null;
-        if (!pdfjs) return null;
-
-        try {
-            const res = await retryWithBackoff(
-                () => gmRequest({ url, responseType: 'arraybuffer' }),
-                { attempts: 2, backoffMs: 500 }
-            );
-            const data = res.response as ArrayBuffer;
-            const doc = await pdfjs.getDocument({ data }).promise;
-            const maxPages = Math.min(doc.numPages, PDF_TEXT_MAX_PAGES);
-            const pages: string[] = [];
-
-            for (let i = 1; i <= maxPages; i++) {
-                const page = await doc.getPage(i);
-                const content = await page.getTextContent();
-                const strings = (content.items || [])
-                    .map((item: { str: string }) => item.str)
-                    .filter((s: string) => s && s.trim().length > 0);
-                if (strings.length) {
-                    pages.push(strings.join(' '));
-                }
-            }
-
-            return pages.join('\n\n');
-        } catch (err) {
-            Logger.warn('[MediaViewer] PDF text extraction failed:', err);
-            return null;
-        }
-    }
-
-    private normalizeMatchString(t: string): string {
-        if (!t) return '';
-        let s = t.normalize('NFC').toLowerCase();
-        // Strip translation suffix like "(Translation)" or "(English)"
-        s = s.replace(/\s*\([^)]+\)\s*$/, '');
-
-        // Aggressively remove file extensions (2-5 alphanumerics, multiple segments)
-        s = s.replace(/(\.[a-z0-9]{2,5})+$/, '');
-
-        // Replace all punctuation AND underscores with spaces
-        s = s.replace(/[\s\-_.]+/g, ' ');
-
-        return s.trim();
     }
 }

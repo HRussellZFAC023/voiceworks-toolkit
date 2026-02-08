@@ -320,8 +320,7 @@ export class CommentSection {
         const handler = (e: Event) => {
             if (this.syncing) return;
 
-            const target = e.target;
-            if (!(target instanceof HTMLElement)) return;
+            const target = e.target as HTMLElement;
             const container = target.closest('.q-rating--editable');
             if (!container) return;
             const iconContainer = target.closest('.q-rating__icon-container');
@@ -424,7 +423,7 @@ export class CommentSection {
                 })
             ));
             this.updateSaveStatus('saved');
-            Logger.debug('[CommentSection] Review saved for works', allIds);
+            Logger.log('[CommentSection] Review saved for works', allIds);
         } catch (e) {
             this.updateSaveStatus('failed');
             Logger.error('[CommentSection] Save failed', e);
@@ -446,15 +445,12 @@ export class CommentSection {
             this.syncRatingToQRating();
 
             // Re-render section
-            // TODO: No-op assignment — wasExpanded is read from this.isExpanded and written back unchanged.
-            // This likely intended to force a re-render or preserve expand state across renderSection(),
-            // but renderSection() reads this.isExpanded directly, so this assignment has no effect.
             const wasExpanded = this.isExpanded;
             this.isExpanded = wasExpanded;
             this.renderSection();
             this.injectInDom();
 
-            Logger.debug('[CommentSection] Review deleted for works', allIds);
+            Logger.log('[CommentSection] Review deleted for works', allIds);
         } catch (e) {
             Logger.error('[CommentSection] Delete failed', e);
         }
@@ -503,7 +499,7 @@ export class CommentSection {
         this.dlsiteLoading = true;
 
         const allCodes = this.extractAllRjCodes();
-        Logger.debug('[CommentSection] Eager fetch starting for', allCodes.length, 'RJ codes:', allCodes);
+        Logger.log('[CommentSection] Eager fetch starting for', allCodes.length, 'RJ codes:', allCodes);
         if (allCodes.length === 0) {
             this.dlsiteLoading = false;
             this.dlsiteLoaded = true;
@@ -545,7 +541,7 @@ export class CommentSection {
             if (fetchedCount === 0 && this.combinedEditionReviewCount > 0) {
                 this.dlsiteFetchFailed = true;
             }
-            Logger.debug(`[CommentSection] Eager fetch complete: ${merged.length} reviews merged from ${allCodes.length} editions`);
+            Logger.log(`[CommentSection] Eager fetch complete: ${merged.length} reviews merged from ${allCodes.length} editions`);
 
             // Eagerly pre-translate all review paragraphs in parallel
             // so translations are cached and ready when the user expands
@@ -558,7 +554,7 @@ export class CommentSection {
             if (this.isExpanded) {
                 const dlsiteArea = this.sectionEl?.querySelector('.asmr-comments-dlsite-area') as HTMLElement | null;
                 if (dlsiteArea) {
-                    Logger.debug('[CommentSection] Section already expanded, rendering reviews now');
+                    Logger.log('[CommentSection] Section already expanded, rendering reviews now');
                     this.renderDLsiteReviews(dlsiteArea);
                 }
             }
@@ -583,7 +579,7 @@ export class CommentSection {
 
         // Already loaded — just render
         if (this.dlsiteLoaded) {
-            Logger.debug(`[CommentSection] lazyLoad: already loaded, rendering ${this.dlsiteReviews.length} reviews`);
+            Logger.log(`[CommentSection] lazyLoad: already loaded, rendering ${this.dlsiteReviews.length} reviews`);
             this.renderDLsiteReviews(dlsiteArea);
             return;
         }
@@ -756,8 +752,7 @@ export class CommentSection {
                             cell.el.textContent = '';
                         }
                     });
-                }).catch((e) => {
-                    Logger.warn('[CommentSection] Batch translation of review paragraphs failed', e);
+                }).catch(() => {
                     transCells.forEach(c => c.el.textContent = '');
                 });
             }
@@ -902,9 +897,9 @@ export class CommentSection {
             }
         }
         if (texts.length === 0) return;
-        Logger.debug(`[CommentSection] Pre-translating ${texts.length} paragraphs in bulk`);
+        Logger.log(`[CommentSection] Pre-translating ${texts.length} paragraphs in bulk`);
         TranslationService.translateBatch(texts).then(() => {
-            Logger.debug(`[CommentSection] Pre-translation complete`);
+            Logger.log(`[CommentSection] Pre-translation complete`);
         }).catch(err => {
             Logger.error(`[CommentSection] Pre-translation failed`, err);
         });
@@ -949,8 +944,7 @@ export class CommentSection {
             try {
                 const res = await axios.get(`/api/work/${edId}`);
                 return (res.data as any)?.review_count || 0;
-            } catch (e) {
-                Logger.warn(`[CommentSection] Failed to fetch review count for edition ${edId}`, e);
+            } catch {
                 return 0;
             }
         });
@@ -959,7 +953,7 @@ export class CommentSection {
         total += counts.reduce((sum: number, c: number) => sum + c, 0);
 
         this.combinedEditionReviewCount = total;
-        Logger.debug(`[CommentSection] Combined review count across ${1 + otherEditions.length} editions: ${total}`);
+        Logger.log(`[CommentSection] Combined review count across ${1 + otherEditions.length} editions: ${total}`);
     }
 
     /**

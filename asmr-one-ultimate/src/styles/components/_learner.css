@@ -13,10 +13,10 @@
     min-height: 80px;
     padding: 12px 16px;
     margin: 4px 0 8px 0;
-    gap: 8px;
+    gap: 4px;
     text-align: center;
     border-bottom: 1px solid var(--asmr-border-color);
-    transition: opacity 0.2s, min-height 0.2s, margin 0.2s;
+    transition: opacity 0.15s, min-height 0.15s, margin 0.15s;
     position: relative;
     z-index: 100;
 }
@@ -47,10 +47,12 @@
     /* Let clicks pass through empty areas */
 }
 
-/* Ensure content is clickable */
+/* Ensure content is clickable and doesn't clip */
 .learner-subs-collapsed .learner-jp,
 .learner-subs-collapsed .learner-en {
     pointer-events: auto;
+    width: 100%;
+    box-sizing: border-box;
 }
 
 .learner-subs-collapsed.hidden {
@@ -70,11 +72,19 @@
     text-align: center;
     transition: opacity 0.2s, max-height 0.2s, margin 0.2s;
     max-height: 200px;
+    max-width: 100%;
+    min-height: 1.55em;
     filter: opacity(1);
+    user-select: text;
+    cursor: text;
+    word-break: keep-all;
+    overflow-wrap: anywhere;
 }
 
 .learner-subs-collapsed .learner-jp {
     font-size: 1.15rem;
+    word-break: normal;
+    overflow-wrap: anywhere;
 }
 
 .hide-jp .learner-jp {
@@ -87,18 +97,32 @@
 .learner-en {
     font-size: 0.8125rem;
     color: var(--asmr-text-tertiary);
-    cursor: pointer;
+    cursor: text;
     text-align: center;
-    user-select: none;
-    transition: opacity 0.2s;
+    user-select: text;
+    transition: opacity 0.15s, filter 0.15s;
     filter: opacity(1);
     position: relative;
     z-index: 101;
+    min-height: 1.2em;
 }
 
 .learner-en.blurred {
     filter: blur(5px);
     opacity: 0.3;
+    cursor: pointer;
+    user-select: none;
+}
+
+/* Karaoke mode */
+.karaoke-spoken {
+    color: var(--asmr-accent, #26a69a);
+}
+.karaoke-upcoming {
+    color: var(--asmr-text-tertiary, rgba(255, 255, 255, 0.38));
+}
+.karaoke-past {
+    color: var(--asmr-text-primary);
 }
 
 /* ============================================

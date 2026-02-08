@@ -7,7 +7,6 @@ import { gmRequest, retryWithBackoff } from '../infrastructure/HttpClient';
 
 const DEFAULT_FAVICON = 'https://images2.imgbox.com/c8/21/h1DhlGPW_o.png';
 const DEFAULT_API_SERVER = 'https://api.asmr-200.com';
-const MAX_FAVICON_CACHE = 50;
 
 /**
  * Get the API base URL from the host app's axios baseURL
@@ -42,8 +41,8 @@ export class FaviconNowPlaying {
     }
 
     public enable(): void {
-        if (!Config.get('enableFavicon')) {
-            Logger.debug('[FaviconNowPlaying] Disabled in settings');
+        if (!Config.get('dynamicFavicon')) {
+            Logger.log('[FaviconNowPlaying] Disabled in settings');
             return;
         }
 
@@ -59,8 +58,8 @@ export class FaviconNowPlaying {
 
         // Initial check - get workId from route or bridge
         const currentWorkId = this.bridge.currentWorkId;
-        Logger.debug('[FaviconNowPlaying] Current workId on init:', currentWorkId);
-        if (currentWorkId && Config.get('enableFavicon')) {
+        Logger.log('[FaviconNowPlaying] Current workId on init:', currentWorkId);
+        if (currentWorkId && Config.get('dynamicFavicon')) {
             this.updateFaviconByWorkId(currentWorkId);
         } else {
             this.setFavicon(DEFAULT_FAVICON);
@@ -72,7 +71,7 @@ export class FaviconNowPlaying {
         if ((this as any).__WATCHER_INIT__) return;
         (this as any).__WATCHER_INIT__ = true;
 
-        watchConfig('enableFavicon', (enabled) => {
+        watchConfig('dynamicFavicon', (enabled) => {
             if (enabled) {
                 this.enable();
             } else {
@@ -87,8 +86,8 @@ export class FaviconNowPlaying {
     private setupEventListeners(): void {
         // Listen for work changes (emitted by KikoeruBridge)
         const workChangeCleanup = EventBus.on('work:change', (data: { workId: string }) => {
-            Logger.debug('[FaviconNowPlaying] work:change event:', data.workId);
-            if (Config.get('enableFavicon') && data.workId) {
+            Logger.log('[FaviconNowPlaying] work:change event:', data.workId);
+            if (Config.get('dynamicFavicon') && data.workId) {
                 this.updateFaviconByWorkId(data.workId);
             }
         });
@@ -96,14 +95,14 @@ export class FaviconNowPlaying {
 
         // Listen for track changes (fallback)
         const trackChangeCleanup = EventBus.on('track:change', (data: { workId: string }) => {
-            Logger.debug('[FaviconNowPlaying] track:change event:', data.workId);
-            if (Config.get('enableFavicon') && data.workId) {
+            Logger.log('[FaviconNowPlaying] track:change event:', data.workId);
+            if (Config.get('dynamicFavicon') && data.workId) {
                 this.updateFaviconByWorkId(data.workId);
             }
         });
         this.eventCleanups.push(trackChangeCleanup);
 
-        Logger.debug('[FaviconNowPlaying] Event listeners registered');
+        Logger.log('[FaviconNowPlaying] Event listeners registered');
     }
 
     /**
@@ -115,8 +114,8 @@ export class FaviconNowPlaying {
             '$route',
             (route: { path?: string; params?: { id?: string } }) => {
                 const workId = route?.params?.id;
-                Logger.debug('[FaviconNowPlaying] Route changed:', route?.path, 'workId:', workId);
-                if (workId && Config.get('enableFavicon')) {
+                Logger.log('[FaviconNowPlaying] Route changed:', route?.path, 'workId:', workId);
+                if (workId && Config.get('dynamicFavicon')) {
                     this.updateFaviconByWorkId(workId);
                 } else {
                     this.setFavicon(DEFAULT_FAVICON);
@@ -125,7 +124,7 @@ export class FaviconNowPlaying {
         ) || null;
 
         if (this.unwatchRoute) {
-            Logger.debug('[FaviconNowPlaying] Route watcher registered');
+            Logger.log('[FaviconNowPlaying] Route watcher registered');
         }
     }
 
@@ -144,7 +143,7 @@ export class FaviconNowPlaying {
         // Extract numeric ID from workId (RJ01382560 -> 1382560)
         const numericId = workId.replace(/^RJ0*/i, '');
         const coverUrl = buildCoverUrl(numericId, 'main', getApiBaseUrl());
-        Logger.debug('[Favicon] Generating by workId:', workId, 'numericId:', numericId);
+        Logger.log('[Favicon] Generating by workId:', workId, 'numericId:', numericId);
         await this.generateFavicon(coverUrl, workId);
     }
 
@@ -173,7 +172,7 @@ export class FaviconNowPlaying {
                     if (node instanceof HTMLLinkElement && node.rel.includes('icon')) {
                         // Site added a new favicon - check if it's ours
                         if (node.href !== this.currentFaviconUrl) {
-                            Logger.debug('[Favicon] Site tried to add favicon, removing it');
+                            Logger.log('[Favicon] Site tried to add favicon, removing it');
                             node.remove();
                             // Re-apply ours
                             this.applyFavicon(this.currentFaviconUrl);
@@ -185,7 +184,7 @@ export class FaviconNowPlaying {
                 if (mutation.type === 'attributes' && mutation.target instanceof HTMLLinkElement) {
                     const link = mutation.target;
                     if (link.rel.includes('icon') && link.href !== this.currentFaviconUrl) {
-                        Logger.debug('[Favicon] Site tried to change favicon, reverting');
+                        Logger.log('[Favicon] Site tried to change favicon, reverting');
                         this.applyFavicon(this.currentFaviconUrl);
                     }
                 }
@@ -219,7 +218,7 @@ export class FaviconNowPlaying {
         try {
             // First, try setting the URL directly (works in some browsers)
             // This avoids CORS issues with cross-origin images
-            Logger.debug('[Favicon] Trying direct URL approach first:', imageUrl);
+            Logger.log('[Favicon] Trying direct URL approach first:', imageUrl);
             this.setFavicon(imageUrl);
 
             // Then try to generate a data URL for better compatibility
@@ -230,14 +229,9 @@ export class FaviconNowPlaying {
             }
 
             const dataUrl = await this.blobToFavicon(blob);
-            // Evict oldest entries if cache is full
-            if (this.faviconCache.size >= MAX_FAVICON_CACHE) {
-                const oldest = this.faviconCache.keys().next().value;
-                if (oldest !== undefined) this.faviconCache.delete(oldest);
-            }
             this.faviconCache.set(workId, dataUrl);
             this.setFavicon(dataUrl);
-            Logger.debug('[Favicon] Successfully updated with data URL for work:', workId);
+            Logger.log('[Favicon] Successfully updated with data URL for work:', workId);
         } catch (e) {
             Logger.warn('[Favicon] Failed to generate data URL, using direct URL:', e);
             // Keep the direct URL that was set initially
@@ -313,7 +307,7 @@ export class FaviconNowPlaying {
         try {
             // Remove ALL existing favicon links
             const existingFavicons = document.querySelectorAll('link[rel*="icon"]');
-            Logger.debug('[Favicon] Removing', existingFavicons.length, 'existing favicon links');
+            Logger.log('[Favicon] Removing', existingFavicons.length, 'existing favicon links');
             existingFavicons.forEach((el) => el.remove());
 
             // Create fresh favicon link
@@ -330,11 +324,11 @@ export class FaviconNowPlaying {
                 head.appendChild(link);
             }
 
-            Logger.debug('[Favicon] Applied to DOM, href length:', url.length, 'isDataUrl:', url.startsWith('data:'));
+            Logger.log('[Favicon] Applied to DOM, href length:', url.length, 'isDataUrl:', url.startsWith('data:'));
 
             // Verify insertion
             const verifyLink = document.querySelector('link[rel="icon"]') as HTMLLinkElement;
-            Logger.debug('[Favicon] Verification - link found:', !!verifyLink, 'href matches:', verifyLink?.href === url);
+            Logger.log('[Favicon] Verification - link found:', !!verifyLink, 'href matches:', verifyLink?.href === url);
         } finally {
             // Reconnect observer
             if (wasObserving && this.faviconObserver) {
@@ -365,7 +359,7 @@ export class FaviconNowPlaying {
      * Tests favicon setting with a simple colored square
      */
     public testWithColor(color = 'red'): void {
-        Logger.debug('[Favicon] Testing with color:', color);
+        Logger.log('[Favicon] Testing with color:', color);
 
         const canvas = document.createElement('canvas');
         canvas.width = 32;
@@ -380,17 +374,17 @@ export class FaviconNowPlaying {
         ctx.fillRect(0, 0, 32, 32);
 
         const dataUrl = canvas.toDataURL('image/png');
-        Logger.debug('[Favicon] Generated test data URL length:', dataUrl.length);
-        Logger.debug('[Favicon] Data URL preview:', dataUrl.substring(0, 100));
+        Logger.log('[Favicon] Generated test data URL length:', dataUrl.length);
+        Logger.log('[Favicon] Data URL preview:', dataUrl.substring(0, 100));
 
         this.setFavicon(dataUrl);
 
         // Verify it was set
         setTimeout(() => {
             const link = document.querySelector('link[rel*="icon"]') as HTMLLinkElement;
-            Logger.debug('[Favicon] After setting - link element:', link);
-            Logger.debug('[Favicon] After setting - href matches:', link?.href === dataUrl);
-            Logger.debug('[Favicon] After setting - href length:', link?.href?.length);
+            Logger.log('[Favicon] After setting - link element:', link);
+            Logger.log('[Favicon] After setting - href matches:', link?.href === dataUrl);
+            Logger.log('[Favicon] After setting - href length:', link?.href?.length);
         }, 100);
     }
 
@@ -399,7 +393,7 @@ export class FaviconNowPlaying {
      */
     public forceUpdate(): void {
         const workId = this.bridge.currentWorkId;
-        Logger.debug('[Favicon] Force update - workId:', workId);
+        Logger.log('[Favicon] Force update - workId:', workId);
         if (workId) {
             this.lastWorkId = null; // Reset to force update
             this.updateFaviconByWorkId(workId);

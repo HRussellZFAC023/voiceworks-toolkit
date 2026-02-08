@@ -19,7 +19,7 @@ interface AudioDB extends DBSchema {
     };
 }
 
-const MAX_OBJECT_URLS = 50;
+const MAX_OBJECT_URLS = 5;
 
 export class AudioCache {
     public static objectUrls = new Map<string, string>();

@@ -54,7 +54,6 @@ body.asmr-fullscreen-active .player-bar-container {
     filter: blur(50px) brightness(0.35);
     z-index: 0 !important;
     opacity: 1;
-    transition: background-image 0.5s ease;
     pointer-events: none;
 }
 
@@ -118,7 +117,11 @@ body.asmr-fullscreen-active .player-bar-container {
     object-fit: contain !important;
     filter: drop-shadow(0 20px 50px rgba(0, 0, 0, 0.7));
     border-radius: 8px !important;
-    transition: opacity 0.3s ease-in-out;
+    transition: opacity 0.3s ease-in-out !important;
+}
+
+.audio-player.asmr-player-fullscreen .albumart .asmr-gallery-img.asmr-gallery-img--loaded {
+    opacity: 1 !important;
 }
 
 /* Hide the original q-img when gallery overlay is showing (prevents double image) */
@@ -156,6 +159,44 @@ body.asmr-fullscreen-active .player-bar-container {
 
 .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-next {
     right: 20px !important;
+}
+
+.audio-player.asmr-player-fullscreen .albumart .asmr-gallery-slideshow-toggle {
+    top: 8px !important;
+    right: 76px !important;
+    width: 26px !important;
+    height: 26px !important;
+    opacity: 0.5;
+    transform: none !important;
+}
+
+.audio-player.asmr-player-fullscreen .albumart .asmr-gallery-slideshow-toggle:hover {
+    background: rgba(255, 255, 255, 0.15) !important;
+    opacity: 1 !important;
+    transform: scale(1.05) !important;
+}
+
+.audio-player.asmr-player-fullscreen .albumart .asmr-gallery-slideshow-toggle .material-icons {
+    font-size: 16px !important;
+}
+
+.audio-player.asmr-player-fullscreen .albumart .asmr-gallery-exclude {
+    top: 8px !important;
+    right: 42px !important;
+    width: 26px !important;
+    height: 26px !important;
+    opacity: 0.5;
+    transform: none !important;
+}
+
+.audio-player.asmr-player-fullscreen .albumart .asmr-gallery-exclude:hover {
+    background: rgba(255, 255, 255, 0.15) !important;
+    opacity: 1 !important;
+    transform: scale(1.05) !important;
+}
+
+.audio-player.asmr-player-fullscreen .albumart .asmr-gallery-exclude .material-icons {
+    font-size: 16px !important;
 }
 
 .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-counter {
@@ -266,4 +307,23 @@ body.asmr-fullscreen-active .player-bar-container {
 
 .audio-player .asmr-fullscreen-btn .material-icons {
     font-size: 16px !important;
+}
+
+/* Learner Subtitles - Larger in Fullscreen */
+.audio-player.asmr-player-fullscreen .learner-subs-expanded {
+    padding: 20px 32px !important;
+    gap: 12px !important;
+    min-height: 120px !important;
+    border-bottom: none !important;
+}
+
+.audio-player.asmr-player-fullscreen .learner-jp {
+    font-size: 2.4rem !important;
+    color: #fff !important;
+    text-shadow: 0 2px 8px rgba(0, 0, 0, 0.8) !important;
+}
+
+.audio-player.asmr-player-fullscreen .learner-en {
+    font-size: 1.15rem !important;
+    color: rgba(255, 255, 255, 0.7) !important;
 }

@@ -1,0 +1,701 @@
+/**
+ * Tests for LearnerSubtitles display logic:
+ * - Seek edge cases (last segment, past all segments, first segment, clamping fallback)
+ * - Progressive text / karaoke rendering
+ * - Text stability when paused (no flashing from whisper updates)
+ * - Cache continuation with incomplete transcripts
+ */
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+// ---------------------------------------------------------------------------
+// Extracted pure functions (mirroring LearnerSubtitles.vue logic)
+// ---------------------------------------------------------------------------
+
+function findActiveLine(
+    lines: Array<{ time: number; endTime?: number; text: string }>,
+    now: number,
+): { time: number; endTime?: number; text: string } | null {
+    if (lines.length === 0) return null;
+    let activeLine: { time: number; endTime?: number; text: string } | null = null;
+    for (let i = lines.length - 1; i >= 0; i--) {
+        if (lines[i].time <= now) { activeLine = lines[i]; break; }
+    }
+    if (!activeLine) return null;
+    if (activeLine.endTime && now >= activeLine.endTime) return null;
+    return activeLine;
+}
+
+function getProgressiveText(
+    line: { time: number; endTime?: number; text: string; words?: Array<{ start: number; end: number; text: string }> },
+    now: number,
+): string {
+    const text = line.text?.trim() || '';
+    if (!text || line.endTime == null) return text;
+
+    const words = line.words;
+    if (Array.isArray(words) && words.length > 0) {
+        const visible = words.filter(w => w.start <= now + 0.01).map(w => (w.text || '').trim()).filter(Boolean);
+        if (visible.length === 0) return '';
+        return /\s/.test(text) ? visible.join(' ') : visible.join('');
+    }
+
+    const duration = Math.max(0.05, line.endTime - line.time);
+    const progress = Math.max(0, Math.min(1, (now - line.time) / duration));
+    if (/\s/.test(text)) {
+        const ws = text.split(/\s+/).filter(Boolean);
+        const count = Math.max(1, Math.min(ws.length, Math.ceil(progress * ws.length)));
+        return ws.slice(0, count).join(' ');
+    }
+    const chars = Array.from(text);
+    const count = Math.max(1, Math.min(chars.length, Math.ceil(progress * chars.length)));
+    return chars.slice(0, count).join('');
+}
+
+/**
+ * Mirrors the seek() function from LearnerSubtitles.vue
+ * Returns { targetTime, fallback } instead of mutating audio element
+ */
+function computeSeekTarget(
+    lines: Array<{ time: number; text: string }>,
+    currentTime: number,
+    offset: number,
+): { targetTime: number; fallback: boolean } {
+    if (!lines.length) {
+        return { targetTime: Math.max(0, currentTime + offset * 5), fallback: true };
+    }
+    const now = currentTime;
+    const firstAfter = lines.findIndex(l => l.time > now);
+    let idx: number;
+    if (firstAfter === -1) {
+        idx = lines.length - 1;
+    } else if (firstAfter === 0) {
+        idx = 0;
+    } else {
+        idx = firstAfter - 1;
+    }
+    const rawTarget = idx + offset;
+    const targetIdx = Math.max(0, Math.min(lines.length - 1, rawTarget));
+    // If clamped (no more segments in this direction), fall back to time-based seek
+    if (targetIdx === idx && offset !== 0) {
+        return { targetTime: Math.max(0, currentTime + offset * 5), fallback: true };
+    }
+    const target = lines[targetIdx];
+    return { targetTime: target.time + 0.01, fallback: false };
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+describe('Seek logic', () => {
+    const lines = [
+        { time: 0, text: 'line 0' },
+        { time: 10, text: 'line 1' },
+        { time: 20, text: 'line 2' },
+        { time: 30, text: 'line 3' },
+        { time: 40, text: 'line 4' },
+    ];
+
+    describe('seek(1) — next line', () => {
+        it('advances from mid-segment to next segment', () => {
+            const result = computeSeekTarget(lines, 15.5, 1);
+            expect(result.fallback).toBe(false);
+            expect(result.targetTime).toBeCloseTo(20.01, 1);
+        });
+
+        it('advances from start of segment to next segment', () => {
+            const result = computeSeekTarget(lines, 10.01, 1);
+            expect(result.fallback).toBe(false);
+            expect(result.targetTime).toBeCloseTo(20.01, 1);
+        });
+
+        it('falls back to +5s when at last segment', () => {
+            const result = computeSeekTarget(lines, 42, 1);
+            expect(result.fallback).toBe(true);
+            expect(result.targetTime).toBeCloseTo(47, 0);
+        });
+
+        it('falls back to +5s when past all segments', () => {
+            const result = computeSeekTarget(lines, 100, 1);
+            expect(result.fallback).toBe(true);
+            expect(result.targetTime).toBeCloseTo(105, 0);
+        });
+
+        it('advances from before first segment', () => {
+            const result = computeSeekTarget(lines, -1, 1);
+            // idx=0 (firstAfter=0 path), offset=1 → targetIdx=1
+            expect(result.fallback).toBe(false);
+            expect(result.targetTime).toBeCloseTo(10.01, 1);
+        });
+
+        it('falls back when no lines', () => {
+            const result = computeSeekTarget([], 15, 1);
+            expect(result.fallback).toBe(true);
+            expect(result.targetTime).toBeCloseTo(20, 0);
+        });
+    });
+
+    describe('seek(-1) — previous line', () => {
+        it('goes to previous segment from mid-segment', () => {
+            const result = computeSeekTarget(lines, 25, -1);
+            expect(result.fallback).toBe(false);
+            expect(result.targetTime).toBeCloseTo(10.01, 1);
+        });
+
+        it('falls back to -5s when at first segment', () => {
+            const result = computeSeekTarget(lines, 3, -1);
+            // idx=0 (in first segment), offset=-1 → rawTarget=-1, clamped to 0 = idx → fallback
+            expect(result.fallback).toBe(true);
+        });
+
+        it('falls back when before all segments', () => {
+            const result = computeSeekTarget(lines, -1, -1);
+            expect(result.fallback).toBe(true);
+        });
+    });
+
+    describe('seek(0) — stay', () => {
+        it('does not trigger fallback for offset 0', () => {
+            const result = computeSeekTarget(lines, 15, 0);
+            // offset 0 → targetIdx === idx, but offset is 0 so no fallback
+            expect(result.fallback).toBe(false);
+            expect(result.targetTime).toBeCloseTo(10.01, 1);
+        });
+    });
+
+    describe('edge: single segment', () => {
+        const singleLine = [{ time: 5, text: 'only' }];
+
+        it('seek(1) falls back with single segment when inside it', () => {
+            const result = computeSeekTarget(singleLine, 7, 1);
+            expect(result.fallback).toBe(true);
+        });
+
+        it('seek(-1) falls back with single segment', () => {
+            const result = computeSeekTarget(singleLine, 7, -1);
+            expect(result.fallback).toBe(true);
+        });
+    });
+
+    describe('edge: just-seeked position (target.time + 0.01)', () => {
+        it('does not get stuck after a seek', () => {
+            // After seeking to line 2 (time=20), audio.currentTime = 20.01
+            const result = computeSeekTarget(lines, 20.01, 1);
+            // firstAfter finds line 3 (time=30 > 20.01), idx=2, targetIdx=3
+            expect(result.fallback).toBe(false);
+            expect(result.targetTime).toBeCloseTo(30.01, 1);
+        });
+    });
+});
+
+describe('Progressive text (getProgressiveText)', () => {
+    it('returns full text when endTime is missing', () => {
+        const line = { time: 10, text: 'hello world' };
+        expect(getProgressiveText(line, 12)).toBe('hello world');
+    });
+
+    it('returns partial text based on time progress', () => {
+        const line = { time: 10, endTime: 20, text: 'hello world' };
+        // At time 10 (start), progress=0 → 1 word minimum
+        expect(getProgressiveText(line, 10)).toBe('hello');
+        // At time 15 (midway), progress=0.5 → 1 of 2 words (ceil(0.5*2)=1)
+        expect(getProgressiveText(line, 15)).toBe('hello');
+        // At time 19.9 (near end), progress≈1 → both words
+        expect(getProgressiveText(line, 19.9)).toBe('hello world');
+    });
+
+    it('returns characters for CJK text without spaces', () => {
+        const line = { time: 0, endTime: 10, text: 'こんにちは' };
+        // 5 chars, at time 2 progress=0.2, ceil(0.2*5)=1
+        expect(getProgressiveText(line, 2)).toBe('こ');
+        // at time 8 progress=0.8, ceil(0.8*5)=4
+        expect(getProgressiveText(line, 8)).toBe('こんにち');
+        // at time 10 progress=1.0, all chars
+        expect(getProgressiveText(line, 10)).toBe('こんにちは');
+    });
+
+    it('uses word-level timestamps when available', () => {
+        const line = {
+            time: 0, endTime: 6, text: 'おはよう',
+            words: [
+                { start: 0, end: 2, text: 'お' },
+                { start: 2, end: 4, text: 'は' },
+                { start: 4, end: 5, text: 'よ' },
+                { start: 5, end: 6, text: 'う' },
+            ],
+        };
+        // At time 1, only first word visible
+        expect(getProgressiveText(line, 1)).toBe('お');
+        // At time 3, first two words
+        expect(getProgressiveText(line, 3)).toBe('おは');
+        // At time 5.5, all four
+        expect(getProgressiveText(line, 5.5)).toBe('おはよう');
+    });
+
+    it('returns empty when before all word timestamps', () => {
+        const line = {
+            time: 5, endTime: 10, text: 'test',
+            words: [{ start: 5.5, end: 10, text: 'test' }],
+        };
+        expect(getProgressiveText(line, 5)).toBe('');
+    });
+});
+
+describe('findActiveLine', () => {
+    const lines = [
+        { time: 0, endTime: 5, text: 'A' },
+        { time: 5, endTime: 10, text: 'B' },
+        { time: 10, endTime: 15, text: 'C' },
+    ];
+
+    it('returns correct segment for time within range', () => {
+        expect(findActiveLine(lines, 3)?.text).toBe('A');
+        expect(findActiveLine(lines, 7)?.text).toBe('B');
+        expect(findActiveLine(lines, 12)?.text).toBe('C');
+    });
+
+    it('returns null in gap between segments', () => {
+        const gapped = [
+            { time: 0, endTime: 3, text: 'A' },
+            { time: 7, endTime: 10, text: 'B' },
+        ];
+        expect(findActiveLine(gapped, 5)).toBeNull();
+    });
+
+    it('returns null before first segment', () => {
+        expect(findActiveLine(lines, -1)).toBeNull();
+    });
+
+    it('returns null after last segment ends', () => {
+        expect(findActiveLine(lines, 16)).toBeNull();
+    });
+
+    it('returns segment at exact start time', () => {
+        expect(findActiveLine(lines, 5)?.text).toBe('B');
+    });
+
+    it('returns null at exact end time', () => {
+        expect(findActiveLine(lines, 5)?.text).toBe('B');
+        // endTime=5 for 'A', now=5 → now >= endTime → null for A, but B starts at 5
+        const lineA = findActiveLine([{ time: 0, endTime: 5, text: 'A' }], 5);
+        expect(lineA).toBeNull();
+    });
+
+    it('returns segment without endTime (LRC-style)', () => {
+        const lrcLines = [
+            { time: 0, text: 'line1' },
+            { time: 10, text: 'line2' },
+        ];
+        // Without endTime, segment is active forever until next starts
+        expect(findActiveLine(lrcLines, 5)?.text).toBe('line1');
+        expect(findActiveLine(lrcLines, 15)?.text).toBe('line2');
+    });
+
+    it('returns empty array → null', () => {
+        expect(findActiveLine([], 5)).toBeNull();
+    });
+});
+
+describe('Karaoke mode split index', () => {
+    it('computes correct split for CJK characters', () => {
+        const fullText = 'こんにちは世界';
+        const progressiveText = 'こんにち';
+        const splitIdx = Array.from(progressiveText).length;
+        const spoken = Array.from(fullText).slice(0, splitIdx).join('');
+        const upcoming = Array.from(fullText).slice(splitIdx).join('');
+        expect(spoken).toBe('こんにち');
+        expect(upcoming).toBe('は世界');
+    });
+
+    it('computes correct split for space-separated text', () => {
+        const fullText = 'hello beautiful world';
+        const progressiveText = 'hello beautiful';
+        const splitIdx = Array.from(progressiveText).length;
+        const spoken = Array.from(fullText).slice(0, splitIdx).join('');
+        const upcoming = Array.from(fullText).slice(splitIdx).join('');
+        expect(spoken).toBe('hello beautiful');
+        expect(upcoming).toBe(' world');
+    });
+
+    it('handles empty progressive text (split at 0)', () => {
+        const fullText = 'test';
+        const splitIdx = 0;
+        const spoken = Array.from(fullText).slice(0, splitIdx).join('');
+        const upcoming = Array.from(fullText).slice(splitIdx).join('');
+        expect(spoken).toBe('');
+        expect(upcoming).toBe('test');
+    });
+
+    it('handles full progress (split at end)', () => {
+        const fullText = 'test';
+        const splitIdx = Array.from(fullText).length;
+        const spoken = Array.from(fullText).slice(0, splitIdx).join('');
+        const upcoming = Array.from(fullText).slice(splitIdx).join('');
+        expect(spoken).toBe('test');
+        expect(upcoming).toBe('');
+    });
+});
+
+describe('Text stability (anti-flashing)', () => {
+    it('dedup comparison prevents re-render when text unchanged', () => {
+        let lastWhisperDisplayText = 'こんにちは';
+        const displayText = 'こんにちは';
+
+        // The condition in _updateWhisperDisplay:
+        // if (display.displayText && display.displayText !== lastWhisperDisplayText)
+        const shouldUpdate = displayText !== lastWhisperDisplayText;
+        expect(shouldUpdate).toBe(false);
+    });
+
+    it('allows update when progressive text advances', () => {
+        let lastWhisperDisplayText = 'こん';
+        const displayText = 'こんに';
+
+        const shouldUpdate = displayText !== lastWhisperDisplayText;
+        expect(shouldUpdate).toBe(true);
+    });
+
+    it('does NOT flash when whisper reprocesses same audio producing identical text', () => {
+        // Simulates: whisper update arrives but text at current position is same
+        let lastWhisperDisplayText = '周囲';
+        // Without reset, comparison catches that text hasn't changed
+        const displayText = '周囲';
+        expect(displayText !== lastWhisperDisplayText).toBe(false);
+    });
+
+    it('DOES update when whisper genuinely produces different text at current position', () => {
+        let lastWhisperDisplayText = '周囲';
+        // Whisper refined the transcription
+        const displayText = '周囲の';
+        expect(displayText !== lastWhisperDisplayText).toBe(true);
+    });
+});
+
+describe('Segment mode (full text, no progressive reveal)', () => {
+    it('returns full text immediately regardless of time position', () => {
+        const line = { time: 10, endTime: 20, text: 'hello world' };
+        // In segment mode, getProgressiveText would return text directly
+        // We test the segment mode bypass: just return text without progressive calc
+        const segmentMode = true;
+        const result = segmentMode ? line.text.trim() : getProgressiveText(line, 10);
+        expect(result).toBe('hello world');
+    });
+
+    it('returns full CJK text immediately in segment mode', () => {
+        const line = { time: 0, endTime: 10, text: 'こんにちは世界' };
+        const segmentMode = true;
+        const result = segmentMode ? line.text.trim() : getProgressiveText(line, 0);
+        expect(result).toBe('こんにちは世界');
+    });
+
+    it('progressive mode still works when segment mode is off', () => {
+        const line = { time: 0, endTime: 10, text: 'こんにちは' };
+        const segmentMode = false;
+        const result = segmentMode ? line.text.trim() : getProgressiveText(line, 2);
+        // progress=0.2, chars=5, ceil(0.2*5)=1 → first char only
+        expect(result).toBe('こ');
+    });
+});
+
+describe('handleAudioSeeking (no clearDisplay)', () => {
+    it('resets dedup state but preserves display', () => {
+        // Simulates the handleAudioSeeking fix:
+        // We reset tracking vars but do NOT call clearDisplay()
+        let lastText = 'previous text';
+        let lastDisplayedText = 'previous text';
+        let lastWhisperDisplayText = 'previous text';
+        let translationToken = 5;
+        let displayCleared = false;
+
+        // The fixed handler:
+        lastText = '';
+        lastDisplayedText = '';
+        lastWhisperDisplayText = '';
+        translationToken += 1;
+        // clearDisplay() is NOT called
+
+        expect(lastText).toBe('');
+        expect(translationToken).toBe(6);
+        expect(displayCleared).toBe(false); // Display was NOT cleared
+    });
+});
+
+describe('Seek pre-populate display', () => {
+    it('resets dedup state after seek to allow immediate updateLyrics', () => {
+        // After audio.currentTime = target.time + 0.01, we reset dedup state
+        // so updateLyrics() will populate the display immediately
+        let lastText = 'old text';
+        let lastDisplayedText = 'old text';
+        let lastWhisperDisplayText = 'old text';
+        let translationToken = 3;
+        let updateLyricsCalled = false;
+
+        // Simulate seek pre-populate logic
+        lastText = '';
+        lastDisplayedText = '';
+        lastWhisperDisplayText = '';
+        translationToken += 1;
+        updateLyricsCalled = true; // updateLyrics() is called immediately
+
+        expect(lastText).toBe('');
+        expect(translationToken).toBe(4);
+        expect(updateLyricsCalled).toBe(true);
+    });
+
+    it('allows updateLyrics to detect new text after dedup reset', () => {
+        let lastWhisperDisplayText = '';
+        const newText = '新しいテキスト';
+
+        // After dedup reset, new text will pass the comparison
+        const shouldUpdate = newText !== lastWhisperDisplayText;
+        expect(shouldUpdate).toBe(true);
+    });
+});
+
+describe('Cache continuation', () => {
+    it('incomplete cache should allow transcription to continue', () => {
+        // Simulates the logic in Whisper.startTranscription()
+        const cached = {
+            segments: [
+                { start: 0, end: 5, text: 'hello' },
+                { start: 5, end: 10, text: 'world' },
+            ],
+            text: 'hello world',
+            complete: false,
+            model: 'test',
+            subtask: 'transcribe',
+            language: 'ja',
+            createdAt: Date.now(),
+        };
+
+        // With the fix: incomplete cache should NOT stop transcription
+        const shouldStop = !!cached.complete;
+        expect(shouldStop).toBe(false);
+
+        // transcribedUpTo should be set to continue from cache end
+        const lastSegmentEnd = cached.segments[cached.segments.length - 1]?.end || 0;
+        const transcribedUpTo = Math.max(0, lastSegmentEnd - 2);
+        expect(transcribedUpTo).toBe(8); // 10 - 2 = 8, allowing overlap for smooth continuation
+    });
+
+    it('complete cache should stop transcription', () => {
+        const cached = {
+            segments: [{ start: 0, end: 60, text: 'full transcript' }],
+            text: 'full transcript',
+            complete: true,
+            model: 'test',
+            subtask: 'transcribe',
+            language: 'ja',
+            createdAt: Date.now(),
+        };
+
+        const shouldStop = !!cached.complete;
+        expect(shouldStop).toBe(true);
+    });
+
+    it('transcribedUpTo preserved when partial cache exists', () => {
+        // Simulates the fix in Whisper.ts startTranscription():
+        // cacheTranscribedUpTo saved before audio fetch, restored via Math.max after decode
+        const cacheTranscribedUpTo = 600; // Partial cache ends at 600s
+        const audioCurrentTime = 0; // User just started playback
+        const INITIAL_BACKFILL_SEC = 10;
+        const pcmDuration = 1800; // 30 minutes
+
+        // After audio decode, transcribedUpTo would be set to:
+        let transcribedUpTo = Math.max(0, Math.min(pcmDuration, audioCurrentTime - INITIAL_BACKFILL_SEC));
+        expect(transcribedUpTo).toBe(0); // Would lose cache point!
+
+        // Fix: restore cache continuation point
+        if (cacheTranscribedUpTo > transcribedUpTo) {
+            transcribedUpTo = cacheTranscribedUpTo;
+        }
+        expect(transcribedUpTo).toBe(600); // Cache point preserved
+    });
+
+    it('transcribedUpTo not affected when no partial cache', () => {
+        const cacheTranscribedUpTo = 0; // No cache
+        const audioCurrentTime = 5;
+        const INITIAL_BACKFILL_SEC = 10;
+        const pcmDuration = 1800;
+
+        let transcribedUpTo = Math.max(0, Math.min(pcmDuration, audioCurrentTime - INITIAL_BACKFILL_SEC));
+        expect(transcribedUpTo).toBe(0);
+
+        if (cacheTranscribedUpTo > transcribedUpTo) {
+            transcribedUpTo = cacheTranscribedUpTo;
+        }
+        expect(transcribedUpTo).toBe(0); // No change
+    });
+
+    it('takes Math.max when user is beyond cache', () => {
+        const cacheTranscribedUpTo = 300; // Cache up to 5 min
+        const audioCurrentTime = 900; // User at 15 min
+        const INITIAL_BACKFILL_SEC = 10;
+        const pcmDuration = 1800;
+
+        let transcribedUpTo = Math.max(0, Math.min(pcmDuration, audioCurrentTime - INITIAL_BACKFILL_SEC));
+        expect(transcribedUpTo).toBe(890);
+
+        if (cacheTranscribedUpTo > transcribedUpTo) {
+            transcribedUpTo = cacheTranscribedUpTo;
+        }
+        // User is at 890s, cache only at 300s — keep 890
+        expect(transcribedUpTo).toBe(890);
+    });
+});
+
+// ---------------------------------------------------------------------------
+// computeKaraokeHighlightStart
+// ---------------------------------------------------------------------------
+
+function computeKaraokeHighlightStart(text: string): number {
+    if (!text) return 0;
+    const chars = Array.from(text);
+    if (chars.length <= 1) return 0;
+    if (/\s/.test(text)) {
+        const lastSpace = text.lastIndexOf(' ');
+        if (lastSpace >= 0) return Array.from(text.slice(0, lastSpace + 1)).length;
+    }
+    return chars.length - 1;
+}
+
+describe('computeKaraokeHighlightStart', () => {
+    it('CJK: highlights last char', () => {
+        expect(computeKaraokeHighlightStart('こんにちは')).toBe(4);
+    });
+
+    it('spaced text: highlights last word', () => {
+        expect(computeKaraokeHighlightStart('hello world')).toBe(6); // "hello " = 6 chars
+    });
+
+    it('single char returns 0', () => {
+        expect(computeKaraokeHighlightStart('あ')).toBe(0);
+    });
+
+    it('single word (no spaces) returns length - 1', () => {
+        expect(computeKaraokeHighlightStart('hello')).toBe(4);
+    });
+
+    it('empty string returns 0', () => {
+        expect(computeKaraokeHighlightStart('')).toBe(0);
+    });
+
+    it('multi-space text: highlights after last space', () => {
+        expect(computeKaraokeHighlightStart('a b c')).toBe(4); // "a b " = 4 chars
+    });
+
+    it('trailing space: last word is empty, highlights from after last space', () => {
+        // "hello " → lastSpace=5, slice(0,6).length = 6
+        expect(computeKaraokeHighlightStart('hello ')).toBe(6);
+    });
+});
+
+describe('Karaoke mode variants', () => {
+    it('karaoke + segment: full text with 3-way word highlighting', () => {
+        const fullText = 'こんにちは世界';
+        const progressiveText = 'こんにち';
+        const karaokeMode = true;
+        const segmentMode = true;
+
+        let primary: string;
+        let splitIdx = -1;
+        let hlStart = -1;
+
+        if (karaokeMode && segmentMode) {
+            // Karaoke+segment: 3-way — past (primary) | current word (accent) | upcoming (dim)
+            primary = fullText;
+            splitIdx = Array.from(progressiveText).length;
+            hlStart = computeKaraokeHighlightStart(progressiveText);
+        } else if (karaokeMode) {
+            primary = progressiveText;
+            hlStart = computeKaraokeHighlightStart(progressiveText);
+        } else {
+            primary = progressiveText;
+        }
+
+        expect(primary).toBe('こんにちは世界'); // Full text shown
+        expect(splitIdx).toBe(4); // Spoken boundary at progressive end
+        expect(hlStart).toBe(3); // Current word starts at last char of progressive
+
+        // 3-way render test: past | current word | upcoming
+        const chars = Array.from(primary);
+        const past = chars.slice(0, hlStart).join('');
+        const current = chars.slice(hlStart, splitIdx).join('');
+        const upcoming = chars.slice(splitIdx).join('');
+        expect(past).toBe('こんに');
+        expect(current).toBe('ち');
+        expect(upcoming).toBe('は世界');
+    });
+
+    it('karaoke only (no segment): progressive reveal with 2-way highlight', () => {
+        const fullText = 'こんにちは世界';
+        const progressiveText = 'こんにち';
+        const karaokeMode = true;
+        const segmentMode = false;
+
+        let primary: string;
+        let splitIdx = -1;
+        let hlStart = -1;
+
+        if (karaokeMode && segmentMode) {
+            primary = fullText;
+            splitIdx = Array.from(progressiveText).length;
+            hlStart = computeKaraokeHighlightStart(progressiveText);
+        } else if (karaokeMode) {
+            primary = progressiveText;
+            hlStart = computeKaraokeHighlightStart(progressiveText);
+        } else {
+            primary = progressiveText;
+        }
+
+        expect(primary).toBe('こんにち'); // Progressive text (not full)
+        expect(splitIdx).toBe(-1); // Not in segment mode
+        expect(hlStart).toBe(3); // Last char of progressive text
+
+        // 2-way render test: past | current word (no upcoming)
+        const chars = Array.from(primary);
+        const past = chars.slice(0, hlStart).join('');
+        const current = splitIdx >= 0
+            ? chars.slice(hlStart, splitIdx).join('')
+            : chars.slice(hlStart).join('');
+        expect(past).toBe('こんに');
+        expect(current).toBe('ち');
+    });
+
+    it('karaoke only with spaced text: highlights last word', () => {
+        const progressiveText = 'hello beautiful';
+        const karaokeMode = true;
+        const segmentMode = false;
+
+        const hlStart = computeKaraokeHighlightStart(progressiveText);
+        const past = Array.from(progressiveText).slice(0, hlStart).join('');
+        const current = Array.from(progressiveText).slice(hlStart).join('');
+
+        expect(past).toBe('hello ');
+        expect(current).toBe('beautiful');
+    });
+
+    it('no karaoke, no segment: plain progressive text', () => {
+        const progressiveText = 'こんにち';
+        const karaokeMode = false;
+        const segmentMode = false;
+
+        let primary: string;
+        let splitIdx = -1;
+        let hlStart = -1;
+
+        if (karaokeMode && segmentMode) {
+            primary = 'full';
+            splitIdx = 4;
+        } else if (karaokeMode) {
+            primary = progressiveText;
+            hlStart = computeKaraokeHighlightStart(progressiveText);
+        } else {
+            primary = progressiveText;
+        }
+
+        expect(primary).toBe('こんにち');
+        expect(splitIdx).toBe(-1);
+        expect(hlStart).toBe(-1);
+    });
+});

@@ -4,27 +4,19 @@ import vue from '@vitejs/plugin-vue';
 import monkey from 'vite-plugin-monkey';
 
 export default defineConfig({
-    build: {
-        minify: false,
-        cssMinify: false,
-    },
     plugins: [
         vue(),
         monkey({
             entry: 'src/main.ts',
             userscript: {
-                name: 'ASMR.one Ultimate',
+                name: 'ASMR.one Ultimate (Radio + Learner)',
                 // @ts-ignore
-                'name:zh-CN': 'ASMR.one \u7ec8\u6781\u589e\u5f3a',
-                // @ts-ignore
-                'name:ja': 'ASMR.one Ultimate',
+                'name:zh-CN': 'ASMR.one \u7ec8\u6781\u589e\u5f3a (\u7535\u53f0 + \u5b66\u4e60\u6a21\u5f0f)',
                 namespace: 'http://tampermonkey.net/',
-                version: '124.1.0',
-                description: 'Enhancement suite for ASMR.one — Radio Mode, Learner Mode, Whisper transcription, semantic search, playlist management, visualizer, and 20+ QoL features. All AI runs locally in your browser.',
+                version: '121',
+                description: 'The ultimate enhancement suite for ASMR.one. Features: Radio Mode (Continuous random playback, smart navigation, shuffling) and Learner Mode (Bilingual subtitles, auto-translation, study mode).',
                 // @ts-ignore
-                'description:zh-CN': '\u793e\u533a\u9a71\u52a8\u7684 ASMR.one \u589e\u5f3a\u5957\u4ef6\uff0c\u63d0\u4f9b\u7535\u53f0\u6a21\u5f0f\u3001\u5b66\u4e60\u6a21\u5f0f\u3001Whisper \u8bed\u97f3\u8f6c\u5f55\u3001\u8bed\u4e49\u641c\u7d22\u3001\u64ad\u653e\u5217\u8868\u7ba1\u7406\u3001\u97f3\u9891\u53ef\u89c6\u5316\u7b49 20+ \u9879\u529f\u80fd\u3002\u6240\u6709 AI \u5747\u5728\u6d4f\u89c8\u5668\u672c\u5730\u8fd0\u884c\u3002',
-                // @ts-ignore
-                'description:ja': 'ASMR.one \u306e\u30b3\u30df\u30e5\u30cb\u30c6\u30a3\u99c6\u52d5\u578b\u62e1\u5f35\u30b9\u30a4\u30fc\u30c8\u3002\u30e9\u30b8\u30aa\u30e2\u30fc\u30c9\u3001\u5b66\u7fd2\u30e2\u30fc\u30c9\u3001Whisper \u6587\u5b57\u8d77\u3053\u3057\u3001\u30bb\u30de\u30f3\u30c6\u30a3\u30c3\u30af\u691c\u7d22\u3001\u30d7\u30ec\u30a4\u30ea\u30b9\u30c8\u7ba1\u7406\u3001\u30aa\u30fc\u30c7\u30a3\u30aa\u30d3\u30b8\u30e5\u30a2\u30e9\u30a4\u30b6\u30fc\u306a\u3069 20 \u4ee5\u4e0a\u306e\u6a5f\u80fd\u3092\u642d\u8f09\u3002\u3059\u3079\u3066\u306e AI \u306f\u30d6\u30e9\u30a6\u30b6\u5185\u3067\u30ed\u30fc\u30ab\u30eb\u5b9f\u884c\u3002',
+                'description:zh-CN': 'ASMR.one \u7684\u7ec8\u6781\u589e\u5f3a\u5957\u4ef6\u3002\u529f\u80fd\uff1a\u7535\u53f0\u6a21\u5f0f\uff08\u8fde\u7eed\u968f\u673a\u64ad\u653e\u3001\u667a\u80fd\u5bfc\u822a\u3001\u6df7\u6d17\uff09\u548c\u5b66\u4e60\u6a21\u5f0f\uff08\u53cc\u8bed\u5b57\u5e55\u3001\u81ea\u52a8\u7ffb\u8bd1\u3001\u5b66\u4e60/\u6a21\u7cca\u6a21\u5f0f\uff09\u3002',
                 author: 'Henry',
                 match: [
                     'https://asmr.one/*',
@@ -68,7 +60,6 @@ export default defineConfig({
         port: 5173,
         strictPort: false,
         cors: true,
-        hmr: false, // Disable hot module replacement / auto-refresh
         headers: {
             'Access-Control-Allow-Origin': '*',
             'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, PATCH, OPTIONS',

@@ -5,7 +5,6 @@ import { I18n, Config } from '../core/Config';
 import { Logger } from '../core/Utils';
 import { EventBus } from '../core/EventBus';
 import { createTranslationWorker } from '../features/TranslationWorkerLoader';
-import { AppStore } from '../store/AppStore';
 import {
     glossaryMap,
     alwaysRegex, alwaysReplacerMap,
@@ -39,20 +38,14 @@ const REMOTE_CONCURRENCY = 12;
 const REMOTE_MIN_INTERVAL_MS = 50;
 const REMOTE_RATE_LIMIT_PAUSE_MS = 60_000;
 
-// Single NLLB model handles all language pairs (~895MB q8, 600M params)
-const NLLB_MODEL = 'Xenova/nllb-200-distilled-600M';
-
-// FLORES-200 language codes required by NLLB
-const FLORES_CODES: Record<string, string> = {
-    ja: 'jpn_Jpan',
-    zh: 'zho_Hans',
-    en: 'eng_Latn',
-};
+// Opus-MT models: ja→en (~105MB fp16) and zh→en (~110MB fp16).
+// Both fit comfortably within the 2048 MB WebGPU buffer limit.
+const OPUS_JA_EN = 'Xenova/opus-mt-ja-en';
+const OPUS_ZH_EN = 'Xenova/opus-mt-zh-en';
 
 interface ModelRoute {
     model: string;
-    srcLang: string;   // FLORES-200 code
-    tgtLang: string;   // FLORES-200 code
+    // MarianMT models have a fixed source→target direction; no language codes needed
 }
 
 // ============================================================================
@@ -79,12 +72,11 @@ function getModelForText(text: string, targetLang: string): ModelRoute | null {
     const src = detectSourceLanguage(text);
     const tgt = normalizeTargetLang(targetLang);
     if (src === tgt) return null; // same language, skip
+    if (tgt !== 'en') return null; // opus-mt only does →EN; remote handles other directions
 
-    const srcCode = FLORES_CODES[src];
-    const tgtCode = FLORES_CODES[tgt];
-    if (!srcCode || !tgtCode) return null; // unsupported language
-
-    return { model: NLLB_MODEL, srcLang: srcCode, tgtLang: tgtCode };
+    if (src === 'ja') return { model: OPUS_JA_EN };
+    if (src === 'zh') return { model: OPUS_ZH_EN };
+    return null; // EN text or unsupported direction — remote handles it
 }
 
 // ============================================================================
@@ -185,6 +177,34 @@ function glossaryPreProcess(text: string, targetLang: string): [string, boolean]
 }
 
 // ============================================================================
+// Bracket Preprocessing
+// ============================================================================
+
+/**
+ * Extract leading 【...】 or [...] bracket tags from text so they can be
+ * translated separately instead of being dropped by the model.
+ * e.g. "【简体中文版】容量MAX！..." → { brackets: ["简体中文版"], rest: "容量MAX！..." }
+ */
+function extractBracketedPrefixes(text: string): { brackets: string[]; rest: string } | null {
+    const brackets: string[] = [];
+    const trimmed = text.trimStart();
+    const re = /^[【\[](.*?)[】\]]\s*/;
+    let remaining = trimmed;
+
+    let match: RegExpExecArray | null;
+    while ((match = re.exec(remaining)) !== null) {
+        const content = match[1].trim();
+        if (content) brackets.push(content);
+        remaining = remaining.slice(match[0].length);
+    }
+
+    if (brackets.length === 0) return null;
+    const rest = remaining.trim();
+    if (!rest) return null; // entire text was brackets — let model handle it
+    return { brackets, rest };
+}
+
+// ============================================================================
 // Cache
 // ============================================================================
 
@@ -198,7 +218,7 @@ function getCached(text: string, lang: string): string | null {
 }
 
 // ============================================================================
-// Worker Pool (single NLLB worker)
+// Worker Pool (opus-mt models)
 // ============================================================================
 
 interface PendingRequest {
@@ -213,7 +233,6 @@ interface WorkerEntry {
     pending: Map<number, PendingRequest>;
     model: string;
     backend?: string;
-    deviceHint?: string;  // 'webnn' for NPU worker, undefined for auto (GPU/WASM)
 }
 
 let workers: WorkerEntry[] = [];
@@ -225,6 +244,27 @@ let rememberedDtype = SharedCache.get<string>(CacheKeys.translationPreferredDtyp
 
 // In-flight dedup: prevent duplicate translate() calls for the same text+lang
 const translateInFlight = new Map<string, Promise<string>>();
+
+// Idle unload: terminate workers after 15 minutes of no translation requests
+const IDLE_UNLOAD_MS = 15 * 60 * 1000;
+let idleUnloadTimer: ReturnType<typeof setTimeout> | null = null;
+
+function resetIdleUnloadTimer(): void {
+    if (idleUnloadTimer) clearTimeout(idleUnloadTimer);
+    idleUnloadTimer = setTimeout(() => {
+        if (workers.length > 0 && workers.every(w => w.pending.size === 0)) {
+            Logger.log('[TranslationService] Idle timeout reached, unloading workers to free memory');
+            terminateWorker();
+        }
+    }, IDLE_UNLOAD_MS);
+}
+
+function clearIdleUnloadTimer(): void {
+    if (idleUnloadTimer) {
+        clearTimeout(idleUnloadTimer);
+        idleUnloadTimer = null;
+    }
+}
 
 function getSingleTimeout(): number {
     return webgpuFailed ? SINGLE_TIMEOUT_WASM_MS : SINGLE_TIMEOUT_MS;
@@ -258,9 +298,7 @@ function terminateWorker(model?: string): void {
 function getWorker(model: string): WorkerEntry | null {
     const ready = workers.filter(w => w.model === model && w.ready);
     if (ready.length === 0) return null;
-    // Least-loaded: route to the worker with fewest pending requests.
-    // When GPU + NPU workers exist, this naturally distributes work.
-    return ready.reduce((best, w) => w.pending.size < best.pending.size ? w : best);
+    return ready[0];
 }
 
 function handleWorkerMessage(entry: WorkerEntry, model: string, onReady: () => void, onError: (e: Error) => void) {
@@ -268,6 +306,12 @@ function handleWorkerMessage(entry: WorkerEntry, model: string, onReady: () => v
 
     return (e: MessageEvent) => {
         const msg = e.data;
+
+        if (msg.status === 'initiate') {
+            // Worker reports its initial backend — track it so we can detect cascade later
+            entry.backend = msg.backend || 'wasm';
+            return;
+        }
 
         if (msg.status === 'ready') {
             if (msg.backend === 'wasm' && entry.backend && entry.backend !== 'wasm') {
@@ -296,7 +340,7 @@ function handleWorkerMessage(entry: WorkerEntry, model: string, onReady: () => v
             }
         } else if (msg.status === 'error') {
             const err = msg.data?.message || 'Unknown worker error';
-            const isGpuError = /createBuffer|RangeError|out of memory|OOM|device lost|GPUDevice|createComputePipeline|createShaderModule/i.test(err);
+            const isGpuError = /createBuffer|RangeError|out of memory|OOM|device lost|GPUDevice|createComputePipeline|createShaderModule|mapAsync|Instance reference|AbortError/i.test(err);
 
             if (msg.id && entry.pending.has(msg.id)) {
                 const req = entry.pending.get(msg.id)!;
@@ -304,12 +348,7 @@ function handleWorkerMessage(entry: WorkerEntry, model: string, onReady: () => v
                 req.reject(new Error(err));
                 entry.pending.delete(msg.id);
 
-                // NPU worker error: just remove it, don't disrupt GPU workers
-                if (entry.deviceHint === 'webnn') {
-                    Logger.warn('[TranslationService] WebNN-NPU inference failed, removing NPU worker');
-                    try { entry.worker.terminate(); } catch { /* ignore */ }
-                    workers = workers.filter(w => w !== entry);
-                } else if (isGpuError && !webgpuFailed) {
+                if (isGpuError && !webgpuFailed) {
                     webgpuFailed = true;
                     Logger.warn('[TranslationService] WebGPU inference failed, restarting on WASM');
                     const models = [...new Set(workers.map(w => w.model))];
@@ -317,20 +356,13 @@ function handleWorkerMessage(entry: WorkerEntry, model: string, onReady: () => v
                     for (const m of models) initWorker(m).catch(() => { });
                 }
             } else if (!resolved) {
-                // Init error — NPU failures are non-fatal (GPU worker handles everything)
-                if (entry.deviceHint === 'webnn') {
-                    Logger.debug('[TranslationService] WebNN-NPU init failed (non-fatal):', err);
-                    resolved = true;
-                    try { entry.worker.terminate(); } catch { /* ignore */ }
-                    workers = workers.filter(w => w !== entry);
-                    onError(new Error(err));
-                } else if (isGpuError && !webgpuFailed) {
+                if (isGpuError && !webgpuFailed) {
                     webgpuFailed = true;
                     Logger.warn('[TranslationService] WebGPU init failed, retrying on WASM');
                     resolved = true;
                     onError(new Error(err));
                     terminateWorker();
-                    initWorker(NLLB_MODEL).catch(() => { });
+                    initWorker(model).catch(() => { });
                 } else {
                     resolved = true;
                     EventBus.emit('translation:progress', {
@@ -362,58 +394,38 @@ function handleWorkerMessage(entry: WorkerEntry, model: string, onReady: () => v
     };
 }
 
-function initWorker(model: string, force = false, deviceHint?: string): Promise<void> {
-    // Keyed by model + device so GPU and NPU workers coexist
-    const key = deviceHint ? `${model}:${deviceHint}` : model;
-
-    if (!force && workers.some(w => w.model === model && w.ready && (!deviceHint || w.deviceHint === deviceHint))) {
-        return initPromises.get(key) || Promise.resolve();
+function initWorker(model: string, force = false): Promise<void> {
+    if (!force && workers.some(w => w.model === model && w.ready)) {
+        return initPromises.get(model) || Promise.resolve();
     }
 
-    const existing = initPromises.get(key);
-    if (!force && existing && workers.some(w => w.model === model && !w.ready && (!deviceHint || w.deviceHint === deviceHint))) {
+    const existing = initPromises.get(model);
+    if (!force && existing && workers.some(w => w.model === model && !w.ready)) {
         return existing;
     }
 
     if (force) {
-        // Only terminate workers matching this device hint
-        if (deviceHint) {
-            const toKill = workers.filter(w => w.model === model && w.deviceHint === deviceHint);
-            for (const w of toKill) {
-                try { w.worker.terminate(); } catch { /* ignore */ }
-                for (const [, req] of w.pending) { clearTimeout(req.timer); req.reject(new Error('Worker terminated')); }
-                w.pending.clear();
-            }
-            workers = workers.filter(w => !(w.model === model && w.deviceHint === deviceHint));
-            initPromises.delete(key);
-        } else {
-            terminateWorker(model);
-        }
+        terminateWorker(model);
     }
 
     const promise = new Promise<void>((resolve, reject) => {
         try {
-            if (!deviceHint) {
-                EventBus.emit('translation:progress', {
-                    percent: 0,
-                    message: I18n.t('downloadModelSub'),
-                    stage: 'model',
-                    model,
-                });
-            }
+            EventBus.emit('translation:progress', {
+                percent: 0,
+                message: I18n.t('downloadModelSub'),
+                stage: 'model',
+                model,
+            });
 
             const entry: WorkerEntry = {
                 worker: createTranslationWorker(),
                 ready: false,
                 pending: new Map(),
                 model,
-                deviceHint,
             };
             workers.push(entry);
 
-            // WebNN worker: skip WebGPU so the cascade falls through to WebNN
-            // Default worker: skip WebGPU only if a previous GPU failure occurred
-            if (deviceHint === 'webnn' || (webgpuFailed && !deviceHint)) {
+            if (webgpuFailed) {
                 entry.worker.postMessage({ type: 'skip-webgpu' });
             }
             if (rememberedDtype) {
@@ -423,14 +435,13 @@ function initWorker(model: string, force = false, deviceHint?: string): Promise<
             entry.worker.onmessage = handleWorkerMessage(entry, model, resolve, reject);
             entry.worker.postMessage({ type: 'init', model });
         } catch (err) {
-            // Only terminate this specific worker on error
-            workers = workers.filter(w => w.deviceHint !== deviceHint || w.model !== model);
-            initPromises.delete(key);
+            workers = workers.filter(w => w.model !== model);
+            initPromises.delete(model);
             reject(err);
         }
     });
 
-    initPromises.set(key, promise);
+    initPromises.set(model, promise);
     return promise;
 }
 
@@ -440,7 +451,6 @@ function initWorker(model: string, force = false, deviceHint?: string): Promise<
 
 function sendToWorker(
     entry: WorkerEntry, text: string | string[], model: string, timeoutMs: number,
-    langOpts?: { srcLang: string; tgtLang: string },
 ): Promise<any> {
     return new Promise((resolve, reject) => {
         const id = ++nextId;
@@ -452,11 +462,7 @@ function sendToWorker(
         }, timeoutMs);
 
         entry.pending.set(id, { resolve, reject, timer });
-        entry.worker.postMessage({
-            type: 'translate', text, id, model,
-            src_lang: langOpts?.srcLang,
-            tgt_lang: langOpts?.tgtLang,
-        });
+        entry.worker.postMessage({ type: 'translate', text, id, model });
     });
 }
 
@@ -464,13 +470,22 @@ async function translateLocal(text: string, targetLang: string): Promise<string 
     const route = getModelForText(text, targetLang);
     if (!route) return null;
 
-    const entry = getWorker(route.model);
+    let entry = getWorker(route.model);
     if (!entry) {
-        initWorker(route.model).catch(() => { });
-        return null;
+        // Worker initializing — wait briefly for it to become ready instead of falling through to remote
+        const pending = initPromises.get(route.model);
+        if (pending) {
+            try {
+                await Promise.race([pending, new Promise((_, rej) => setTimeout(() => rej(new Error('init-wait')), 5000))]);
+                entry = getWorker(route.model);
+            } catch { /* timed out or failed, fall through */ }
+        } else {
+            initWorker(route.model).catch(() => { });
+        }
+        if (!entry) return null;
     }
 
-    const raw = await sendToWorker(entry, text, route.model, getSingleTimeout(), route);
+    const raw = await sendToWorker(entry, text, route.model, getSingleTimeout());
     if (!raw) return null;
 
     const cleaned = TranslationService.cleanQuotes(raw);
@@ -480,13 +495,13 @@ async function translateLocal(text: string, targetLang: string): Promise<string 
 async function translateLocalBatch(texts: string[], targetLang: string): Promise<(string | null)[]> {
     const results: (string | null)[] = new Array(texts.length).fill(null);
 
-    // Group texts by model + language pair (NLLB uses one model for multiple pairs)
+    // Group texts by model (each opus-mt model handles one language pair)
     interface BatchGroup { indices: number[]; texts: string[]; route: ModelRoute }
     const groups = new Map<string, BatchGroup>();
     for (let i = 0; i < texts.length; i++) {
         const route = getModelForText(texts[i], targetLang);
         if (!route) continue;
-        const key = `${route.model}|${route.srcLang}|${route.tgtLang}`;
+        const key = route.model;
         let g = groups.get(key);
         if (!g) { g = { indices: [], texts: [], route }; groups.set(key, g); }
         g.indices.push(i);
@@ -494,10 +509,18 @@ async function translateLocalBatch(texts: string[], targetLang: string): Promise
     }
 
     await Promise.all(Array.from(groups.values()).map(async (group) => {
-        const entry = getWorker(group.route.model);
+        let entry = getWorker(group.route.model);
         if (!entry) {
-            initWorker(group.route.model).catch(() => { });
-            return;
+            const pending = initPromises.get(group.route.model);
+            if (pending) {
+                try {
+                    await Promise.race([pending, new Promise((_, rej) => setTimeout(() => rej(new Error('init-wait')), 5000))]);
+                    entry = getWorker(group.route.model);
+                } catch { /* timed out */ }
+            } else {
+                initWorker(group.route.model).catch(() => { });
+            }
+            if (!entry) return;
         }
 
         // Split into chunks for throughput
@@ -507,7 +530,7 @@ async function translateLocalBatch(texts: string[], targetLang: string): Promise
             const timeoutMs = getBatchTimeout(chunkTexts.length);
 
             try {
-                const translated = await sendToWorker(entry, chunkTexts, group.route.model, timeoutMs, group.route);
+                const translated = await sendToWorker(entry, chunkTexts, group.route.model, timeoutMs);
                 if (Array.isArray(translated)) {
                     for (let j = 0; j < chunkIndices.length; j++) {
                         const raw = translated[j];
@@ -575,20 +598,6 @@ async function translateRemoteSingle(text: string, targetLang: string): Promise<
 }
 
 // ============================================================================
-// WebNN NPU Detection (host-side, for distributed mode)
-// ============================================================================
-
-async function detectWebNNNpu(): Promise<boolean> {
-    try {
-        if (typeof navigator === 'undefined' || !(navigator as any).ml) return false;
-        const ctx = await (navigator as any).ml.createContext({ deviceType: 'npu' });
-        return !!ctx;
-    } catch {
-        return false;
-    }
-}
-
-// ============================================================================
 // Public API
 // ============================================================================
 
@@ -596,38 +605,30 @@ export const TranslationService = {
     ttlMs: CACHE_TTL_MS,
 
     /**
-     * Pre-load the NLLB translation model.
-     * When WebNN-NPU is available alongside WebGPU, starts a second worker
-     * on the NPU for distributed inference (GPU + NPU process concurrently).
+     * Pre-load both opus-mt translation models.
      */
     async ensureLocalModelReady(): Promise<void> {
         if (Config.get('preferLocalTranslation') === false) return;
-        await initWorker(NLLB_MODEL, false);
-
-        // Distributed: try adding an NPU worker alongside the GPU worker.
-        // Only if the primary worker is on WebGPU (not WASM — no point running
-        // two WASM-speed workers) and the user hasn't disabled distributed mode.
-        if (!webgpuFailed && Config.get('distributedTranslation') !== false) {
-            detectWebNNNpu().then(available => {
-                if (available) {
-                    Logger.log('[TranslationService] WebNN NPU detected — starting distributed worker');
-                    initWorker(NLLB_MODEL, false, 'webnn').catch(err => {
-                        Logger.debug('[TranslationService] WebNN NPU worker failed (non-fatal):', err);
-                    });
-                }
-            });
-        }
+        await Promise.all([
+            initWorker(OPUS_JA_EN, false),
+            initWorker(OPUS_ZH_EN, false),
+        ]);
     },
 
     /**
-     * Force-reload the translation model.
+     * Force-reload translation models.
      */
     async warmupLocalModel(): Promise<void> {
-        await initWorker(NLLB_MODEL, true);
+        await Promise.all([
+            initWorker(OPUS_JA_EN, true),
+            initWorker(OPUS_ZH_EN, true),
+        ]);
+        resetIdleUnloadTimer();
     },
 
     disableLocalTranslation(reason = 'user-disabled'): void {
         Logger.warn('[TranslationService] Local translation disabled:', reason);
+        clearIdleUnloadTimer();
         terminateWorker();
     },
 
@@ -643,6 +644,7 @@ export const TranslationService = {
      */
     async translate(text: string, targetLang = 'en'): Promise<string> {
         if (!text) return '';
+        resetIdleUnloadTimer();
 
         const cached = getCached(text, targetLang);
         if (cached) return cached;
@@ -663,6 +665,19 @@ export const TranslationService = {
 
     /** @internal */
     async _translateInner(text: string, targetLang: string): Promise<string> {
+        // 0. Bracket preprocessing — extract leading 【...】 before translation
+        const bracketSplit = extractBracketedPrefixes(text);
+        if (bracketSplit) {
+            const [bracketResults, restResult] = await Promise.all([
+                Promise.all(bracketSplit.brackets.map(b => this.translate(b, targetLang))),
+                this.translate(bracketSplit.rest, targetLang),
+            ]);
+            const bracketStr = bracketResults.map(b => `[${b}]`).join(' ');
+            const result = `${bracketStr} ${restResult}`;
+            SharedCache.set(cacheKey(text, targetLang, 'local'), result, CACHE_TTL_MS);
+            return result;
+        }
+
         // 1. Glossary exact match — bypasses model entirely
         const glossaryResult = applyGlossary(text, targetLang);
         if (glossaryResult) {
@@ -706,23 +721,6 @@ export const TranslationService = {
      */
     async translateBatch(texts: string[], targetLang = 'en'): Promise<string[]> {
         if (texts.length === 0) return [];
-
-        // Whisper-aware scheduling: when Whisper is actively transcribing on WASM,
-        // defer batch work to avoid CPU contention (both compete for WASM threads).
-        // Max wait 60s to prevent permanent blocking if Whisper gets stuck.
-        if (webgpuFailed && AppStore.state.whisper?.isTranscribing) {
-            const waitStart = Date.now();
-            await new Promise<void>(resolve => {
-                const check = () => {
-                    if (!AppStore.state.whisper?.isTranscribing || Date.now() - waitStart > 60_000) {
-                        resolve();
-                        return;
-                    }
-                    setTimeout(check, 2000);
-                };
-                setTimeout(check, 2000);
-            });
-        }
 
         const results = new Array(texts.length).fill('');
         const uncached: { idx: number; text: string }[] = [];
@@ -828,6 +826,7 @@ export const TranslationService = {
     },
 
     isRateLimited(): boolean {
+        if (this.hasLocalTranslator()) return false; // local model is never rate-limited
         const rateLimitUntil = SharedCache.get<number>(CacheKeys.translationRateLimit()) || 0;
         return Date.now() < rateLimitUntil;
     },

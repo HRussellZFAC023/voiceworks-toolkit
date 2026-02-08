@@ -1,5 +1,4 @@
 import { getAxios } from './Client';
-import { Logger } from '../core/Utils';
 
 export interface CreatePlaylistRequest {
     name: string;
@@ -23,10 +22,6 @@ export interface PlaylistEntry {
     description?: string;
     privacy: number;
     works: string[];
-    user_name?: string;
-    worksCount?: number;
-    works_count?: number; // API returns snake_case
-    mainCoverUrl?: string;
     created_at?: string;
     updated_at?: string;
 }
@@ -79,23 +74,12 @@ export const PlaylistApi = {
     },
 
     /**
-     * Get playlists for the current user via /api/playlist/get-playlists.
-     * @param filterBy 'all' (owned + liked), 'liked', or 'owned'
+     * Get all playlists for the current user
      */
-    async getPlaylists(
-        filterBy: 'all' | 'liked' | 'owned' = 'all',
-        page = 1,
-        pageSize = 200,
-    ): Promise<{ playlists: PlaylistEntry[]; pagination?: { page: number; pageSize: number; totalCount: number } }> {
+    async getPlaylists(): Promise<PlaylistEntry[]> {
         const axios = getAxios();
-        const res = await axios.get('/api/playlist/get-playlists', {
-            params: { filterBy, page, pageSize },
-        });
-        const data = (res.data || {}) as any;
-        return {
-            playlists: Array.isArray(data.playlists) ? data.playlists : Array.isArray(data) ? data : [],
-            pagination: data.pagination,
-        };
+        const res = await axios.get('/api/playlists');
+        return (res.data || []) as PlaylistEntry[];
     },
 
 
@@ -171,68 +155,21 @@ export const PlaylistApi = {
     /**
      * Fetch all works from a playlist across all pages.
      */
-    async getAllPlaylistWorks(id: string): Promise<PlaylistWorkItem[]> {
+    async getAllPlaylistWorks(id: string): Promise<Array<{ id: number; source_id: string;[key: string]: any }>> {
         const pageSize = 100;
-        const batchSize = 20;
-        Logger.debug(`[PlaylistApi] Fetching all works for playlist: ${id}`);
-
-        let firstPage: PlaylistWorksResponse;
-        try {
-            firstPage = await this.getPlaylistWorks(id, 1, pageSize);
-        } catch (error) {
-            Logger.error(`[PlaylistApi] Failed to fetch first page of playlist ${id}:`, error);
-            throw error;
-        }
-
+        const firstPage = await this.getPlaylistWorks(id, 1, pageSize);
         const allWorks = [...(firstPage.works || [])];
+
         const totalCount = firstPage.pagination?.totalCount ?? allWorks.length;
         const totalPages = Math.ceil(totalCount / pageSize);
 
-        if (totalPages > 1) {
-            Logger.debug(`[PlaylistApi] Playlist ${id} has ${totalCount} works across ${totalPages} pages. Fetching remaining pages...`);
-
-            const pages: number[] = [];
-            for (let page = 2; page <= totalPages; page++) {
-                pages.push(page);
-            }
-
-            const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-
-            for (let i = 0; i < pages.length; i += batchSize) {
-                const batch = pages.slice(i, i + batchSize);
-                const results = await Promise.allSettled(
-                    batch.map(async (page) => {
-                        const nextPage = await this.getPlaylistWorks(id, page, pageSize);
-                        return { page, works: nextPage.works || [] };
-                    })
-                );
-
-                let hadError = false;
-                let rateLimited = false;
-                results.forEach((result, index) => {
-                    if (result.status === 'fulfilled') {
-                        if (result.value.works.length) {
-                            allWorks.push(...result.value.works);
-                        }
-                    } else {
-                        hadError = true;
-                        const status = (result.reason as any)?.response?.status || (result.reason as any)?.status;
-                        if (status === 429) rateLimited = true;
-                        Logger.error(`[PlaylistApi] Error fetching page ${batch[index]} of playlist ${id}:`, result.reason);
-                    }
-                });
-
-                const fetchedPages = Math.min(i + batchSize, pages.length);
-                Logger.debug(`[PlaylistApi] Fetched ${allWorks.length}/${totalCount} works... (${fetchedPages}/${pages.length} pages)`);
-
-                // Delay between batches to reduce rate limiting risk.
-                if (i + batchSize < pages.length) {
-                    await delay(rateLimited ? 1500 : hadError ? 750 : 200);
-                }
+        for (let page = 2; page <= totalPages; page++) {
+            const nextPage = await this.getPlaylistWorks(id, page, pageSize);
+            if (nextPage.works?.length) {
+                allWorks.push(...nextPage.works);
             }
         }
 
-        Logger.debug(`[PlaylistApi] Successfully fetched ${allWorks.length} works for playlist ${id}`);
         return allWorks;
     },
 };

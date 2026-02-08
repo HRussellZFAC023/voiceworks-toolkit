@@ -207,40 +207,95 @@ export class PlaylistMode {
         Logger.debug('[PlaylistMode] Loading playlist from URL, id:', playlistId);
 
         try {
-            // Fetch metadata for playlist name, and all works via the works endpoint
-            const [metadata, allWorks] = await Promise.all([
+            // Fetch metadata + first page of works in parallel (fast — single API call each)
+            const [metadata, firstPage] = await Promise.all([
                 PlaylistApi.getPlaylistMetadata(playlistId),
-                PlaylistApi.getAllPlaylistWorks(playlistId),
+                PlaylistApi.getPlaylistWorks(playlistId, 1, 100),
             ]);
 
-            Logger.debug('[PlaylistMode] Fetched playlist:', metadata.name, '- works:', allWorks.length);
-
-            if (!allWorks || allWorks.length === 0) {
+            const firstWorks = firstPage.works || [];
+            if (firstWorks.length === 0) {
                 Logger.warn('[PlaylistMode] Playlist has no works');
                 return;
             }
 
-            // Extract work IDs from the works response
-            const workIds = allWorks.map((w: PlaylistWorkItem) => {
+            const extractIds = (works: PlaylistWorkItem[]) => works.map((w) => {
                 if (w.source_id) return w.source_id;
                 if (w.id) return `RJ${String(w.id).padStart(8, '0')}`;
                 return String(w);
             });
 
-            // Safety check: compare allWorks.length with metadata.works_count if available
-            if (metadata.works_count && allWorks.length < metadata.works_count) {
-                Logger.warn(`[PlaylistMode] Fetched works (${allWorks.length}) is less than metadata count (${metadata.works_count}). Some pages might have failed.`);
-            }
+            const firstWorkIds = extractIds(firstWorks);
+            const totalCount = firstPage.pagination?.totalCount ?? firstWorks.length;
+            const totalPages = Math.ceil(totalCount / 100);
 
-            Logger.debug(`[PlaylistMode] Extracted ${workIds.length} work IDs. First few:`, workIds.slice(0, 3).join(', '), '...');
+            Logger.debug(`[PlaylistMode] Fetched first page: ${firstWorkIds.length}/${totalCount} works from "${metadata.name}"`);
 
             this.lastLoadedPlaylistId = playlistId;
-            // Activate without auto-navigating (user is already on the playlist page)
-            this.activate(workIds, playlistId, metadata.name || undefined, false);
+
+            // Activate immediately with the first page so user can interact
+            this.activate(firstWorkIds, playlistId, metadata.name || undefined, false);
+
+            // Fetch remaining pages in background and extend the playlist
+            if (totalPages > 1) {
+                this.fetchRemainingPages(playlistId, totalPages, totalCount, extractIds);
+            }
         } catch (error) {
             Logger.error('[PlaylistMode] Failed to load playlist from URL:', error);
         } finally {
             this.isLoadingFromUrl = false;
+        }
+    }
+
+    /**
+     * Fetch remaining playlist pages in background and extend the work list.
+     */
+    private async fetchRemainingPages(
+        playlistId: string,
+        totalPages: number,
+        totalCount: number,
+        extractIds: (works: PlaylistWorkItem[]) => string[],
+    ): Promise<void> {
+        try {
+            const pages: number[] = [];
+            for (let p = 2; p <= totalPages; p++) pages.push(p);
+
+            const batchSize = 20;
+            const allRemainingWorks: PlaylistWorkItem[] = [];
+
+            for (let i = 0; i < pages.length; i += batchSize) {
+                const batch = pages.slice(i, i + batchSize);
+                const results = await Promise.allSettled(
+                    batch.map(page => PlaylistApi.getPlaylistWorks(playlistId, page, 100))
+                );
+
+                for (const result of results) {
+                    if (result.status === 'fulfilled' && result.value.works?.length) {
+                        allRemainingWorks.push(...result.value.works);
+                    }
+                }
+
+                // Small delay between batches to avoid rate limiting
+                if (i + batchSize < pages.length) {
+                    await new Promise(r => setTimeout(r, 50));
+                }
+            }
+
+            if (allRemainingWorks.length > 0 && this._isActive && this.playlistId === playlistId) {
+                const remainingIds = extractIds(allRemainingWorks);
+                this.workIds.push(...remainingIds);
+
+                Logger.debug(`[PlaylistMode] Extended playlist with ${remainingIds.length} more works (total: ${this.workIds.length}/${totalCount})`);
+
+                // Re-emit progress with updated total
+                EventBus.emit('playlist:progress', {
+                    current: this.currentWorkIndex + 1,
+                    total: this.workIds.length,
+                    workId: this.workIds[this.currentWorkIndex] || '',
+                });
+            }
+        } catch (error) {
+            Logger.warn('[PlaylistMode] Failed to fetch remaining playlist pages:', error);
         }
     }
 

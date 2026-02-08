@@ -18,6 +18,7 @@ import { useEventBus } from '../../composables/useEventBus';
 import { useI18n } from '../../composables/useI18n';
 import { TranslationService } from '../../services/TranslationService';
 import { AppStore } from '../../store/AppStore';
+import { AudioCache } from '../../infrastructure/AudioCache';
 import { getAudioElement, getPlayerBar } from '../../core/DomUtils';
 import { Logger, Config } from '../../core/Utils';
 import type { WhisperUpdatePayload } from '../../types';
@@ -31,6 +32,8 @@ const { on, emit } = useEventBus();
 const { t, format } = useI18n();
 const learnerBlur = useConfig('learnerBlur');
 const showJP = useConfig('showJP');
+const karaokeMode = useConfig('karaokeMode');
+const segmentMode = useConfig('segmentMode');
 
 // ---------------------------------------------------------------------------
 // Reactive subtitle state
@@ -40,6 +43,8 @@ const primaryText = ref('');   // JP / primary line
 const secondaryText = ref(''); // EN / secondary line (blurred)
 const isBlurred = ref(!!learnerBlur.value);
 const isFallback = ref(false); // true when secondary is the untranslated fallback
+const karaokeSplitIndex = ref(-1); // Character index split for karaoke highlighting (-1 = no karaoke)
+const karaokeHighlightStart = ref(-1); // Char index where current word starts (karaoke-only mode, -1 = inactive)
 
 // Visibility
 const isPlayerMinimized = ref(false);
@@ -59,6 +64,7 @@ const overflowStyle = ref<Record<string, string>>({});
 let currentLyrics: Array<{ time: number; endTime?: number; text: string; words?: Array<{ start: number; end: number; text: string }> }> = [];
 let lastText = '';
 let lastDisplayedText = '';
+let lastSecondaryShown = '';  // tracks the actual EN translation text shown (vs empty placeholder)
 let lastTrackKey: string | null = null;
 let translationToken = 0;
 
@@ -112,12 +118,44 @@ let playerObserver: MutationObserver | null = null;
 // Store watchers cleanup
 const storeWatcherCleanups: (() => void)[] = [];
 
+// Microtask-debounced updateLyrics to coalesce multiple store watchers firing in the same tick
+let lyricsUpdateScheduled = false;
+function scheduleUpdateLyrics() {
+    if (lyricsUpdateScheduled) return;
+    lyricsUpdateScheduled = true;
+    queueMicrotask(() => {
+        lyricsUpdateScheduled = false;
+        updateLyrics();
+    });
+}
+
 // ---------------------------------------------------------------------------
 // Computed visibility
 // ---------------------------------------------------------------------------
 
 const showExpanded = computed(() => !isPlayerMinimized.value && hasContent.value);
 const showCollapsed = computed(() => isPlayerMinimized.value && hasContent.value);
+const karaokeSpoken = computed(() => {
+    if (karaokeSplitIndex.value < 0 || !primaryText.value) return '';
+    return Array.from(primaryText.value).slice(0, karaokeSplitIndex.value).join('');
+});
+const karaokeUpcoming = computed(() => {
+    if (karaokeSplitIndex.value < 0 || !primaryText.value) return '';
+    return Array.from(primaryText.value).slice(karaokeSplitIndex.value).join('');
+});
+const karaokePast = computed(() => {
+    if (karaokeHighlightStart.value < 0 || !primaryText.value) return '';
+    return Array.from(primaryText.value).slice(0, karaokeHighlightStart.value).join('');
+});
+const karaokeCurrent = computed(() => {
+    if (karaokeHighlightStart.value < 0 || !primaryText.value) return '';
+    const chars = Array.from(primaryText.value);
+    // When splitIdx is also set (karaoke+segment 3-way), current word ends at splitIdx
+    if (karaokeSplitIndex.value >= 0) {
+        return chars.slice(karaokeHighlightStart.value, karaokeSplitIndex.value).join('');
+    }
+    return chars.slice(karaokeHighlightStart.value).join('');
+});
 
 // ---------------------------------------------------------------------------
 // DOM refs
@@ -134,6 +172,66 @@ const overflowToggleRef = ref<HTMLElement | null>(null);
 function isChinese(text: string): boolean {
     return /[\u4e00-\u9fff]/.test(text) && !/[\u3040-\u309f\u30a0-\u30ff]/.test(text);
 }
+
+/**
+ * Compute word-level karaoke indices from word timings.
+ * Returns { splitIdx, hlStart } where:
+ *   hlStart = char index where the current word starts (in fullText)
+ *   splitIdx = char index where the current word ends (in fullText)
+ * Visual: [past 0..hlStart] [current hlStart..splitIdx] [upcoming splitIdx..end]
+ */
+function computeWordKaraokeIndices(
+    fullText: string,
+    words: Array<{ start: number; end: number; text: string }>,
+    now: number,
+): { splitIdx: number; hlStart: number } {
+    const hasSpaces = /\s/.test(fullText);
+    let charOffset = 0;
+    let hlStart = 0;
+    let splitIdx = 0;
+    let foundAny = false;
+
+    for (let i = 0; i < words.length; i++) {
+        const wText = (words[i].text || '').trim();
+        const wChars = Array.from(wText).length;
+        if (words[i].start <= now + 0.01) {
+            hlStart = charOffset;
+            splitIdx = charOffset + wChars;
+            foundAny = true;
+        }
+        charOffset += wChars;
+        if (hasSpaces && i < words.length - 1) charOffset += 1;
+    }
+
+    return foundAny ? { splitIdx, hlStart } : { splitIdx: 0, hlStart: 0 };
+}
+
+/**
+ * Fallback karaoke indices when no word timings are available.
+ * Uses time-based interpolation over the line duration.
+ */
+function computeTimeFallbackKaraokeIndices(
+    fullText: string,
+    line: { time: number; endTime?: number },
+    now: number,
+): { splitIdx: number; hlStart: number } {
+    if (!line.endTime) return { splitIdx: -1, hlStart: -1 };
+    const duration = Math.max(0.05, line.endTime - line.time);
+    const progress = Math.max(0, Math.min(1, (now - line.time) / duration));
+    if (/\s/.test(fullText)) {
+        const ws = fullText.split(/\s+/).filter(Boolean);
+        const count = Math.max(1, Math.min(ws.length, Math.ceil(progress * ws.length)));
+        const spoken = ws.slice(0, count).join(' ');
+        const spokenChars = Array.from(spoken).length;
+        const prevWords = ws.slice(0, count - 1);
+        const prevLen = prevWords.length > 0 ? Array.from(prevWords.join(' ')).length + 1 : 0;
+        return { splitIdx: spokenChars, hlStart: prevLen };
+    }
+    const chars = Array.from(fullText);
+    const count = Math.max(1, Math.min(chars.length, Math.ceil(progress * chars.length)));
+    return { splitIdx: count, hlStart: Math.max(0, count - 1) };
+}
+
 
 function getTrackKey(): string | null {
     const track = bridge.currentTrack;
@@ -172,8 +270,10 @@ on('config:change', ({ key, value }) => {
 // Primary / secondary line updates
 // ---------------------------------------------------------------------------
 
-function updatePrimaryLine(text: string) {
+function updatePrimaryLine(text: string, splitIdx = -1, hlStart = -1) {
     primaryText.value = text;
+    karaokeSplitIndex.value = karaokeMode.value ? splitIdx : -1;
+    karaokeHighlightStart.value = karaokeMode.value ? hlStart : -1;
 }
 
 function updateSecondaryLine(text: string, fallback: boolean) {
@@ -185,7 +285,10 @@ function updateSecondaryLine(text: string, fallback: boolean) {
 function clearDisplay() {
     primaryText.value = '';
     secondaryText.value = '';
+    karaokeSplitIndex.value = -1;
+    karaokeHighlightStart.value = -1;
     lastDisplayedText = '';
+    lastSecondaryShown = '';
     refreshVisibility();
 }
 
@@ -205,11 +308,14 @@ function handleAudioPlay() {
 }
 
 function handleAudioSeeking() {
+    // Reset dedup state so the next updateLyrics() renders fresh content.
+    // But do NOT clearDisplay() — leave the current text visible to avoid
+    // a blank flash. updateLyrics() on the seeked event will overwrite it.
     lastText = '';
     lastDisplayedText = '';
+    lastSecondaryShown = '';
     lastWhisperDisplayText = '';
     translationToken += 1;
-    clearDisplay();
 }
 
 function handleAudioSeeked() {
@@ -281,6 +387,8 @@ function getProgressiveText(
 ): string {
     const text = line.text?.trim() || '';
     if (!text || line.endTime == null) return text;
+    // Segment mode: show full text at once, no progressive reveal
+    if (segmentMode.value) return text;
 
     const words = (line as any).words as Array<{ start: number; end: number; text: string }> | undefined;
     if (Array.isArray(words) && words.length > 0) {
@@ -329,22 +437,29 @@ function getTextFromTimelineFor(
     return combined;
 }
 
-function getWhisperDisplay(): { displayText: string; fullText: string } {
+interface SubtitleDisplayResult {
+    displayText: string;
+    fullText: string;
+    activeLine?: { time: number; endTime?: number; text: string; words?: Array<{ start: number; end: number; text: string }> };
+    now?: number;
+}
+
+function getWhisperDisplay(): SubtitleDisplayResult {
     const audio = getAudioElement();
     if (!audio || whisperLines.length === 0) return { displayText: '', fullText: '' };
     const now = audio.currentTime + Math.max(0, whisperLeadSec);
     const activeLine = findActiveLine(whisperLines, now);
     if (!activeLine || !activeLine.text) return { displayText: '', fullText: '' };
-    return { displayText: getProgressiveText(activeLine, now), fullText: activeLine.text.trim() };
+    return { displayText: getProgressiveText(activeLine, now), fullText: activeLine.text.trim(), activeLine, now };
 }
 
-function getSubtitleDisplay(): { displayText: string; fullText: string } {
+function getSubtitleDisplay(): SubtitleDisplayResult {
     const audio = getAudioElement();
     if (!audio || currentLyrics.length === 0) return { displayText: '', fullText: '' };
     const now = audio.currentTime + subtitleLeadSec;
     const activeLine = findActiveLine(currentLyrics, now);
     if (!activeLine || !activeLine.text) return { displayText: '', fullText: '' };
-    return { displayText: getProgressiveText(activeLine, now), fullText: activeLine.text.trim() };
+    return { displayText: getProgressiveText(activeLine, now), fullText: activeLine.text.trim(), activeLine, now };
 }
 
 // ---------------------------------------------------------------------------
@@ -707,21 +822,50 @@ function updateLyrics() {
     const display = getSubtitleDisplay();
     const fullText = display.fullText;
     const progressiveText = display.displayText;
-    if (!fullText) { refreshVisibility(); return; }
+    if (!fullText) {
+        // Between timed segments or before first line — clear stale text
+        if (lastWhisperDisplayText) {
+            updatePrimaryLine('');
+            lastWhisperDisplayText = '';
+        }
+        refreshVisibility();
+        return;
+    }
 
     const targetLang = (Config.get('subtitleLang') as string || 'en').toLowerCase();
     const cn = isChinese(fullText);
     let primary: string;
+    let splitIdx = -1;
+    let hlStart = -1;
     if (cn) {
         const ja = TranslationService.peekCached(fullText, 'ja');
         primary = ja || fullText;
+    } else if (karaokeMode.value) {
+        hlStart = 0; // accent all spoken text from the beginning
+        if (segmentMode.value) {
+            // Karaoke + Segment: spoken (accent) | upcoming (dim)
+            primary = fullText;
+            const words = display.activeLine?.words;
+            if (Array.isArray(words) && words.length > 0 && display.now != null) {
+                splitIdx = computeWordKaraokeIndices(fullText, words, display.now).splitIdx;
+            } else if (display.activeLine && display.now != null) {
+                splitIdx = computeTimeFallbackKaraokeIndices(fullText, display.activeLine, display.now).splitIdx;
+            }
+        } else {
+            // Karaoke only: all revealed text in accent
+            primary = progressiveText;
+        }
     } else {
         primary = progressiveText;
     }
 
     if (primary && primary !== lastWhisperDisplayText) {
-        updatePrimaryLine(primary);
+        updatePrimaryLine(primary, splitIdx, hlStart);
         lastWhisperDisplayText = primary;
+    } else if (karaokeMode.value && (splitIdx >= 0 || hlStart >= 0)) {
+        // Text unchanged but karaoke indices may have advanced
+        karaokeSplitIndex.value = splitIdx;
+        karaokeHighlightStart.value = hlStart;
     }
 
     if (fullText !== lastText) {
@@ -769,18 +913,35 @@ function _updateWhisperDisplay() {
             if (!cachedSecondary && whisperLive && shouldTickerTranslate(fullText)) {
                 const token = ++translationToken;
                 TranslationService.translate(fullText, targetLang).then(tr => {
-                    if (tr && lastDisplayedText === fullText && token === translationToken) updateSecondaryLine(tr, false);
+                    if (tr && lastDisplayedText === fullText && token === translationToken) {
+                        updateSecondaryLine(tr, false);
+                        lastSecondaryShown = tr;
+                    }
                 }).catch(() => {});
                 if (isChinese(fullText) && targetLang !== 'ja') TranslationService.translate(fullText, 'ja').catch(() => {});
             }
         }
-        if (fullText && (allowSecondary || cachedSecondary) && fullText !== lastDisplayedText) {
+        if (fullText && fullText !== lastDisplayedText) {
             lastDisplayedText = fullText;
-            updateSecondaryLine(cachedSecondary || '', !cachedSecondary);
+            lastSecondaryShown = '';
+            // Always show cached translation if available; during live transcription
+            // show empty placeholder (the async translate() will fill it in)
+            if (cachedSecondary) {
+                updateSecondaryLine(cachedSecondary, false);
+                lastSecondaryShown = cachedSecondary;
+            } else if (allowSecondary) {
+                updateSecondaryLine('', true);
+            }
+        } else if (fullText && cachedSecondary && cachedSecondary !== lastSecondaryShown) {
+            // Translation became available (e.g. translateAhead filled the cache)
+            updateSecondaryLine(cachedSecondary, false);
+            lastSecondaryShown = cachedSecondary;
         }
         if (display.displayText && display.displayText !== lastWhisperDisplayText) {
             const cn = isChinese(display.displayText);
             let prim = display.displayText;
+            let splitIdx = -1;
+            let hlStart = -1;
             if (cn) {
                 const ja = TranslationService.peekCached(fullText, 'ja');
                 prim = ja || display.displayText || fullText || '';
@@ -789,11 +950,50 @@ function _updateWhisperDisplay() {
                         if (ja2 && lastDisplayedText === fullText) { updatePrimaryLine(ja2); lastWhisperDisplayText = ja2; }
                     }).catch(() => {});
                 }
+            } else if (karaokeMode.value && fullText) {
+                hlStart = 0; // accent all spoken text from the beginning
+                if (segmentMode.value) {
+                    // Karaoke + Segment: spoken (accent) | upcoming (dim)
+                    prim = fullText;
+                    const words = display.activeLine?.words;
+                    if (Array.isArray(words) && words.length > 0 && display.now != null) {
+                        splitIdx = computeWordKaraokeIndices(fullText, words, display.now).splitIdx;
+                    } else if (display.activeLine && display.now != null) {
+                        splitIdx = computeTimeFallbackKaraokeIndices(fullText, display.activeLine, display.now).splitIdx;
+                    }
+                } else {
+                    // Karaoke only: all revealed text in accent
+                    prim = display.displayText;
+                }
             }
-            updatePrimaryLine(prim);
+            updatePrimaryLine(prim, splitIdx, hlStart);
             lastWhisperDisplayText = prim;
-        } else if (!display.displayText && whisperText) {
-            _whisperFallback(targetLang, allowSecondary);
+        } else if (display.displayText && karaokeMode.value) {
+            // Karaoke: text unchanged but indices may have advanced
+            if (segmentMode.value) {
+                const ft = display.fullText || display.displayText;
+                const words = display.activeLine?.words;
+                let newSplitIdx = karaokeSplitIndex.value;
+                if (Array.isArray(words) && words.length > 0 && display.now != null) {
+                    newSplitIdx = computeWordKaraokeIndices(ft, words, display.now).splitIdx;
+                } else if (display.activeLine && display.now != null) {
+                    newSplitIdx = computeTimeFallbackKaraokeIndices(ft, display.activeLine, display.now).splitIdx;
+                }
+                if (newSplitIdx !== karaokeSplitIndex.value) karaokeSplitIndex.value = newSplitIdx;
+                if (karaokeHighlightStart.value !== 0) karaokeHighlightStart.value = 0;
+            } else {
+                if (karaokeHighlightStart.value !== 0) karaokeHighlightStart.value = 0;
+            }
+        } else if (!display.displayText) {
+            // Between segments (gap/silence) — clear stale text.
+            // Whisper segments have precise endTimes, so gaps are intentional.
+            if (lastWhisperDisplayText) {
+                updatePrimaryLine('');
+                updateSecondaryLine('', false);
+                lastWhisperDisplayText = '';
+                lastDisplayedText = '';
+                lastSecondaryShown = '';
+            }
         }
         refreshVisibility();
         return;
@@ -806,13 +1006,25 @@ function _updateWhisperDisplay() {
         if (!cached && whisperLive && shouldTickerTranslate(whisperText)) {
             const token = ++translationToken;
             TranslationService.translate(whisperText, targetLang).then(tr => {
-                if (tr && lastDisplayedText === whisperText && token === translationToken) updateSecondaryLine(tr, false);
+                if (tr && lastDisplayedText === whisperText && token === translationToken) {
+                    updateSecondaryLine(tr, false);
+                    lastSecondaryShown = tr;
+                }
             }).catch(() => {});
             if (isChinese(whisperText) && targetLang !== 'ja') TranslationService.translate(whisperText, 'ja').catch(() => {});
         }
-        if ((allowSecondary || cached) && whisperText !== lastDisplayedText) {
+        if (whisperText !== lastDisplayedText) {
             lastDisplayedText = whisperText;
-            updateSecondaryLine(cached || '', !cached);
+            lastSecondaryShown = '';
+            if (cached) {
+                updateSecondaryLine(cached, false);
+                lastSecondaryShown = cached;
+            } else if (allowSecondary) {
+                updateSecondaryLine('', true);
+            }
+        } else if (cached && cached !== lastSecondaryShown) {
+            updateSecondaryLine(cached, false);
+            lastSecondaryShown = cached;
         }
         if (whisperText !== lastWhisperDisplayText) {
             const cn = isChinese(whisperText);
@@ -831,37 +1043,6 @@ function _updateWhisperDisplay() {
     refreshVisibility();
 }
 
-function _whisperFallback(targetLang: string, allowSecondary: boolean) {
-    if (!whisperFromCache && whisperText.length <= 400) {
-        if (whisperText !== lastText) lastText = whisperText;
-        let cached = TranslationService.peekCached(whisperText, targetLang);
-        if (!cached && whisperLive && shouldTickerTranslate(whisperText)) {
-            const token = ++translationToken;
-            TranslationService.translate(whisperText, targetLang).then(tr => {
-                if (tr && lastDisplayedText === whisperText && token === translationToken) updateSecondaryLine(tr, false);
-            }).catch(() => {});
-            if (isChinese(whisperText) && targetLang !== 'ja') TranslationService.translate(whisperText, 'ja').catch(() => {});
-        }
-        if ((allowSecondary || cached) && whisperText !== lastDisplayedText) {
-            lastDisplayedText = whisperText;
-            updateSecondaryLine(cached || '', !cached);
-        }
-        if (whisperText !== lastWhisperDisplayText) {
-            const cn = isChinese(whisperText);
-            let prim = whisperText;
-            if (cn) {
-                const ja = TranslationService.peekCached(whisperText, 'ja');
-                prim = ja || whisperText;
-                if (!ja) TranslationService.translate(whisperText, 'ja').then(ja2 => {
-                    if (ja2 && lastDisplayedText === whisperText) { updatePrimaryLine(ja2); lastWhisperDisplayText = ja2; }
-                }).catch(() => {});
-            }
-            updatePrimaryLine(prim);
-            lastWhisperDisplayText = prim;
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Whisper event handlers
 // ---------------------------------------------------------------------------
@@ -878,9 +1059,12 @@ function handleWhisperUpdate(payload: WhisperUpdatePayload) {
         const newLines = payload.segments.map(s => ({ time: s.start, endTime: s.end, text: s.text, words: s.words }));
         if (!whisperLive && TranslationService.canPrefetch(newLines.length)) preTranslateAll(newLines);
         whisperLines = newLines;
-        lastWhisperDisplayText = '';
+        // Don't reset lastWhisperDisplayText here — let _updateWhisperDisplay()
+        // naturally detect changes. Resetting forces re-renders that cause flashing
+        // when paused and whisper reprocesses the same audio with slightly different output.
     }
-    lastText = '';
+    // Don't reset lastText either — let the natural dedup comparison handle it.
+    // This prevents unnecessary re-translation and secondary line flicker.
     updateLyrics();
 }
 
@@ -920,6 +1104,7 @@ function clearWhisperTicker() {
 function onTrackOrWorkChange() {
     lastText = '';
     lastDisplayedText = '';
+    lastSecondaryShown = '';
     currentLyrics = [];
     whisperLines = [];
     whisperText = '';
@@ -947,17 +1132,47 @@ function onTrackOrWorkChange() {
 function seek(offset: number) {
     const audio = getAudioElement();
     if (!audio) return;
-    if (!currentLyrics.length) {
+    // Prefer whisperLines when whisper is active (currentLyrics may lag one tick behind)
+    const lines = whisperActive && whisperLines.length > 0 ? whisperLines
+        : currentLyrics.length > 0 ? currentLyrics
+        : whisperLines;
+    if (!lines.length) {
         audio.currentTime = Math.max(0, audio.currentTime + offset * 5);
         return;
     }
     const now = audio.currentTime;
-    let idx = currentLyrics.findIndex(l => l.time > now) - 1;
-    if (idx < 0) idx = 0;
-    const target = currentLyrics[Math.max(0, Math.min(currentLyrics.length - 1, idx + offset))];
+    const firstAfter = lines.findIndex(l => l.time > now);
+    let idx: number;
+    if (firstAfter === -1) {
+        // Past all lines — current is the last line
+        idx = lines.length - 1;
+    } else if (firstAfter === 0) {
+        // Before or exactly at the first line
+        idx = 0;
+    } else {
+        idx = firstAfter - 1;
+    }
+    const rawTarget = idx + offset;
+    const targetIdx = Math.max(0, Math.min(lines.length - 1, rawTarget));
+    // If clamped (no more segments in this direction), fall back to time-based seek
+    if (targetIdx === idx && offset !== 0) {
+        audio.currentTime = Math.max(0, audio.currentTime + offset * 5);
+        if (audio.paused) audio.play().catch(err => Logger.warn('[LearnerMode] Audio play after seek failed:', err));
+        return;
+    }
+    const target = lines[targetIdx];
     if (target) {
+        Logger.debug(`[LearnerMode] seek(${offset}): now=${now.toFixed(2)}, idx=${idx}, target=${targetIdx}/${lines.length}, time=${target.time.toFixed(2)}`);
         audio.currentTime = target.time + 0.01;
-        audio.play().catch(err => Logger.warn('[LearnerMode] Audio play after seek failed:', err));
+        if (audio.paused) audio.play().catch(err => Logger.warn('[LearnerMode] Audio play after seek failed:', err));
+        // Immediately pre-populate display so the user doesn't see a blank flash.
+        // Reset dedup state so updateLyrics() will process the new position.
+        lastText = '';
+        lastDisplayedText = '';
+        lastSecondaryShown = '';
+        lastWhisperDisplayText = '';
+        translationToken += 1;
+        updateLyrics();
     }
 }
 
@@ -1015,8 +1230,10 @@ function downloadCurrentTrack() {
     if (!track) return;
     const url = (track as any).mediaDownloadUrl || (track as any).media_download_url || (track as any).file_url;
     if (!url) return;
+    // Use cached blob URL if already in AudioCache (avoids re-downloading)
+    const href = AudioCache.objectUrls.get(url) || url;
     const a = document.createElement('a');
-    a.href = url; a.download = track.title || ''; a.style.display = 'none';
+    a.href = href; a.download = track.title || ''; a.style.display = 'none';
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
 }
 
@@ -1248,7 +1465,7 @@ function addPermanentOverflowItems() {
         return b;
     };
 
-    overflowMenuEl.appendChild(createItem('record_voice_over', t('aiTranscribe'), () => emit('whisper:toggle', undefined as any), 'asmr-whisper-btn'));
+    overflowMenuEl.appendChild(createItem('record_voice_over', t('aiTranscribe'), () => emit('whisper:toggle', undefined as never), 'asmr-whisper-btn'));
     overflowMenuEl.appendChild(createItem('link', t('openWorkDetail'), () => triggerHostMenuAction('link')));
     overflowMenuEl.appendChild(createItem('folder', t('loadSubtitle'), () => triggerHostMenuAction('subtitles')));
 
@@ -1260,8 +1477,12 @@ function addPermanentOverflowItems() {
     overflowMenuEl.appendChild(speedBtn);
 
     overflowMenuEl.appendChild(createItem('download', t('downloadTrack'), () => downloadCurrentTrack()));
-    overflowMenuEl.appendChild(createItem('casino', t('joiToggle'), () => emit('joi:toggle', undefined as any), 'asmr-joi-btn'));
-    overflowMenuEl.appendChild(createItem('equalizer', t('vizToggle'), () => emit('viz:toggle', undefined as any), 'asmr-viz-btn'));
+    if (Config.get('enableJoiTool')) {
+        overflowMenuEl.appendChild(createItem('casino', t('joiToggle'), () => emit('joi:toggle', undefined as never), 'asmr-joi-btn'));
+    }
+    if (Config.get('enableVisualizer')) {
+        overflowMenuEl.appendChild(createItem('equalizer', t('vizToggle'), () => emit('viz:toggle', undefined as never), 'asmr-viz-btn'));
+    }
 }
 
 function restoreControls() {
@@ -1295,14 +1516,14 @@ function setupStoreWatchers() {
 
     const add = (fn: () => void) => storeWatcherCleanups.push(fn);
 
-    // Lyrics watchers
-    add(store.watch((state: any) => state.AudioPlayer?.lrcLines, () => updateLyrics(), { immediate: true }));
-    add(store.watch((state: any) => state.AudioPlayer?.lyrics, () => updateLyrics(), { immediate: true }));
-    add(store.watch((state: any) => state.AudioPlayer?.lyricLines, () => updateLyrics(), { immediate: true }));
-    add(store.watch((state: any) => state.AudioPlayer?.subtitleLines, () => updateLyrics(), { immediate: true }));
-    add(store.watch((state: any) => state.AudioPlayer?.subtitles, () => updateLyrics(), { immediate: true }));
-    add(store.watch((state: any) => state.AudioPlayer?.subtitle?.lines, () => updateLyrics(), { immediate: true }));
-    add(store.watch((state: any) => state.AudioPlayer?.currentLyric, (lyric: any) => { if (lyric) updateLyrics(); }));
+    // Lyrics watchers — debounced so multiple field changes in one tick trigger a single updateLyrics()
+    add(store.watch((state: any) => state.AudioPlayer?.lrcLines, () => scheduleUpdateLyrics(), { immediate: true }));
+    add(store.watch((state: any) => state.AudioPlayer?.lyrics, () => scheduleUpdateLyrics(), { immediate: true }));
+    add(store.watch((state: any) => state.AudioPlayer?.lyricLines, () => scheduleUpdateLyrics(), { immediate: true }));
+    add(store.watch((state: any) => state.AudioPlayer?.subtitleLines, () => scheduleUpdateLyrics(), { immediate: true }));
+    add(store.watch((state: any) => state.AudioPlayer?.subtitles, () => scheduleUpdateLyrics(), { immediate: true }));
+    add(store.watch((state: any) => state.AudioPlayer?.subtitle?.lines, () => scheduleUpdateLyrics(), { immediate: true }));
+    add(store.watch((state: any) => state.AudioPlayer?.currentLyric, (lyric: any) => { if (lyric) scheduleUpdateLyrics(); }));
 
     // Track change via queue[queueIndex]
     add(store.watch((state: any) => {
@@ -1347,12 +1568,12 @@ onMounted(() => {
     on('track:change', () => onTrackOrWorkChange());
     on('work:change', () => onTrackOrWorkChange());
     on('player:nav-prev', () => {
-        if (currentLyrics.length > 0) seek(-1);
-        else bridge.dispatch('AudioPlayer/playPrev');
+        if (currentLyrics.length > 0 || whisperLines.length > 0) seek(-1);
+        else try { bridge.commit('AudioPlayer/PREVIOUS_TRACK'); } catch { /* mutation unavailable */ }
     });
     on('player:nav-next', () => {
-        if (currentLyrics.length > 0) seek(1);
-        else bridge.dispatch('AudioPlayer/playNext');
+        if (currentLyrics.length > 0 || whisperLines.length > 0) seek(1);
+        else try { bridge.commit('AudioPlayer/NEXT_TRACK'); } catch { /* mutation unavailable */ }
     });
     on('player:rate-change', (payload) => {
         playbackRate.value = payload.rate;
@@ -1457,16 +1678,22 @@ watch(showJP, () => syncPsychologyBtn());
         :class="{ hidden: !showExpanded, 'hide-jp': !showJP }"
         aria-live="polite"
     >
-        <div class="learner-jp" role="status">{{ primaryText }}</div>
+        <div class="learner-jp" lang="ja" role="status">
+            <template v-if="karaokeHighlightStart >= 0 && karaokeSplitIndex >= 0">
+                <span class="karaoke-past">{{ karaokePast }}</span><span class="karaoke-spoken">{{ karaokeCurrent }}</span><span class="karaoke-upcoming">{{ karaokeUpcoming }}</span>
+            </template>
+            <template v-else-if="karaokeHighlightStart >= 0">
+                <span class="karaoke-past">{{ karaokePast }}</span><span class="karaoke-spoken">{{ karaokeCurrent }}</span>
+            </template>
+            <template v-else-if="karaokeSplitIndex >= 0">
+                <span class="karaoke-spoken">{{ karaokeSpoken }}</span><span class="karaoke-upcoming">{{ karaokeUpcoming }}</span>
+            </template>
+            <template v-else>{{ primaryText }}</template>
+        </div>
         <div
             class="learner-en"
             :class="{ blurred: isBlurred && !!secondaryText, 'translation-fallback': isFallback }"
-            role="button"
-            tabindex="0"
-            :aria-label="t('toggleBlur')"
-            @click.prevent.stop="toggleBlur"
-            @keydown.enter.prevent.stop="toggleBlur"
-            @keydown.space.prevent.stop="toggleBlur"
+            @dblclick.stop="toggleBlur"
         >{{ secondaryText }}</div>
     </div>
 
@@ -1479,16 +1706,22 @@ watch(showJP, () => syncPsychologyBtn());
             :style="{ display: showCollapsed ? 'flex' : 'none !important' }"
             aria-live="polite"
         >
-            <div class="learner-jp" role="status">{{ primaryText }}</div>
+            <div class="learner-jp" lang="ja" role="status">
+                <template v-if="karaokeHighlightStart >= 0 && karaokeSplitIndex >= 0">
+                    <span class="karaoke-past">{{ karaokePast }}</span><span class="karaoke-spoken">{{ karaokeCurrent }}</span><span class="karaoke-upcoming">{{ karaokeUpcoming }}</span>
+                </template>
+                <template v-else-if="karaokeHighlightStart >= 0">
+                    <span class="karaoke-past">{{ karaokePast }}</span><span class="karaoke-spoken">{{ karaokeCurrent }}</span>
+                </template>
+                <template v-else-if="karaokeSplitIndex >= 0">
+                    <span class="karaoke-spoken">{{ karaokeSpoken }}</span><span class="karaoke-upcoming">{{ karaokeUpcoming }}</span>
+                </template>
+                <template v-else>{{ primaryText }}</template>
+            </div>
             <div
                 class="learner-en"
                 :class="{ blurred: isBlurred && !!secondaryText, 'translation-fallback': isFallback }"
-                role="button"
-                tabindex="0"
-                :aria-label="t('toggleBlur')"
-                @click.prevent.stop="toggleBlur"
-                @keydown.enter.prevent.stop="toggleBlur"
-                @keydown.space.prevent.stop="toggleBlur"
+                @dblclick.stop="toggleBlur"
             >{{ secondaryText }}</div>
         </div>
     </Teleport>

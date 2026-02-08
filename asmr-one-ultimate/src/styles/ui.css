@@ -272,6 +272,60 @@
   height: 40px;
   border-radius: 8px;
   background: var(--asmr-accent);
+  transition: opacity 0.2s;
+}
+
+.asmr-vector-go:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.asmr-vector-cancel {
+  height: 40px;
+  border-radius: 8px;
+  background: var(--asmr-text-disabled);
+  color: var(--asmr-text-primary);
+  transition: opacity 0.2s;
+  min-width: 96px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.asmr-vector-cancel:hover {
+  opacity: 0.8;
+}
+
+.asmr-vector-input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Search bar busy state - subtle accent glow */
+.asmr-search-bar--busy {
+  border-color: var(--asmr-accent);
+}
+
+/* Indeterminate progress bar under search bar */
+.asmr-search-progress-track {
+  height: 3px;
+  border-radius: 2px;
+  overflow: hidden;
+  background: transparent;
+}
+
+.asmr-search-progress-bar {
+  height: 100%;
+  width: 40%;
+  border-radius: 2px;
+  background: var(--asmr-accent);
+  animation: asmr-progress 1.2s ease-in-out infinite;
+}
+
+@keyframes asmr-progress {
+  0%   { transform: translateX(-100%); }
+  50%  { transform: translateX(150%); }
+  100% { transform: translateX(350%); }
 }
 
 /* Result content column */

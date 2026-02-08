@@ -54,8 +54,8 @@ type PlaylistFilterMode = 'all' | 'mine' | 'public' | 'online';
 const BATCH_SIZE = 12;
 const METADATA_BATCH_SIZE = 4;
 const BATCH_COOLDOWN_MS = 300;
-const COVER_UPDATE_CONCURRENCY = 2;
-const COVER_UPDATE_DELAY_MS = 1000;
+const COVER_UPDATE_CONCURRENCY = 3;
+const COVER_UPDATE_DELAY_MS = 200;
 const WORKS_PAGE_SIZE = 1;
 
 const STORAGE_KEY = 'asmr_ultimate_discovered_playlists';
@@ -979,8 +979,10 @@ async function loadNextBatch(): Promise<void> {
 
         displayedCount.value = endIdx;
 
+        // Fire-and-forget: covers load in the background without blocking rendering.
+        // Playlists appear immediately with placeholder covers.
         if (coverUpdatePromisesList.length > 0) {
-            await Promise.allSettled(coverUpdatePromisesList);
+            void Promise.allSettled(coverUpdatePromisesList);
         }
     } catch (error) {
         Logger.error('[PlaylistDiscovery] Failed to load batch:', error);
@@ -1372,10 +1374,16 @@ async function initializeDiscovery(): Promise<void> {
     // Hide native grid + pagination
     hideNativeGridAndPagination();
 
-    // Fetch user playlists
-    await fetchUserPlaylists();
+    // Fetch user playlists in background — don't block first batch render.
+    // "mine" filter will update when this resolves.
+    void fetchUserPlaylists().then(() => {
+        // Re-apply filter if user had "mine" persisted, now that data is available
+        if (filterMode.value === 'mine') {
+            applyFilterMode();
+        }
+    });
 
-    // Apply filter mode
+    // Apply filter mode (works for 'all'/'public'/'online' without user data)
     applyFilterMode();
 
     Logger.debug(`[PlaylistDiscovery] Found ${publicPlaylists.value.length} playlists to display (filter: ${filterMode.value}).`);

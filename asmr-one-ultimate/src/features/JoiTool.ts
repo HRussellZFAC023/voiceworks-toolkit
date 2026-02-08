@@ -55,7 +55,7 @@ function compilePatterns(defs: Array<{ category: SemanticCategory; patterns: Reg
 }
 
 const SEMANTIC_PATTERNS = compilePatterns([
-    // --- Sexual / Active context ---
+    // --- Sexual / Active context (43 patterns) ---
     {
         category: 'sexual',
         weight: 1.0,
@@ -87,9 +87,25 @@ const SEMANTIC_PATTERNS = compilePatterns([
             /\b(?:wet|hard|throb|throbbing|erect|aroused?|arousal)\b/i,
             /\b(?:fuck|fucking|sex|orgasm|masturbat)/i,
             /\b(?:moan|moaning|groan|panting|gasping)\b/i,
+            // --- Added from h2k frequency corpus + nsfw-glossary ---
+            /くちゅ|ぐちゅ|ぐちょ/i,                          // wet squelching
+            /パンパン|ぱんぱん/i,                              // slapping
+            /ハァハァ|はぁはぁ/i,                              // panting
+            /ずぼずぼ|ズボズボ/i,                              // thrusting
+            /ドクドク|どくどく/i,                              // pulsing
+            /[ビヒピ][クク][ビヒピ][クク]|びくびく/i,          // trembling
+            /ムラムラ|むらむら/i,                              // turned on
+            /快感/i,                                          // pleasure
+            /快楽/i,                                          // pleasure
+            /興奮/i,                                          // arousal
+            /敏感/i,                                          // sensitive
+            /揉[むんで]|もみもみ/i,                           // groping
+            /弄[るぶ]|いじ[るって]/i,                          // fondle
+            /締め[付つ]|しめつ/i,                              // tighten
+            /淫[乱語ら]|いやらし[いく]/i,                      // lewd
         ],
     },
-    // --- Stop / Tease ---
+    // --- Stop / Tease (17 patterns) ---
     {
         category: 'stop',
         weight: 1.5,
@@ -106,9 +122,15 @@ const SEMANTIC_PATTERNS = compilePatterns([
             /\b(?:hold\s*(?:on|it|still)|pause|cease)\b/i,
             /\b(?:endure|resist|deny|denied|forbid|no\s*touching)\b/i,
             /\b(?:too\s*(?:fast|much|soon)|slow\s*down|ease\s*up)\b/i,
+            // --- Added from nsfw-glossary + h2k ---
+            /お預け|おあずけ/i,                               // denial
+            /禁止/i,                                          // forbidden
+            /許さな[いく]/i,                                  // won't allow
+            /見るだけ|見てるだけ/i,                           // just watch
+            /\b(?:forbidden|not\s*allowed|watch\s*only|look\s*(?:but\s*)?don'?t\s*touch)\b/i,
         ],
     },
-    // --- Encouragement / Go ---
+    // --- Encouragement / Go (26 patterns) ---
     {
         category: 'encouragement',
         weight: 1.0,
@@ -127,9 +149,22 @@ const SEMANTIC_PATTERNS = compilePatterns([
             /\b(?:yes|yeah|good|faster|harder|more|keep\s*going|don'?t\s*stop)\b/i,
             /\b(?:that'?s\s*(?:it|right|good)|just\s*like\s*that|perfect)\b/i,
             /\b(?:continue|go\s*on|nice|wonderful|amazing)\b/i,
+            // --- Added from h2k frequency corpus + nsfw-glossary ---
+            /[しシ][コこ][しシ][コこ]|しこしこ|シコシコ/i,    // stroking onomatopoeia
+            /扱[いきく]|しご[いきく]/i,                       // jerk/stroke
+            /欲し[いく]/i,                                    // want it
+            /ゆっくり/i,                                      // slowly (pacing)
+            /どんどん/i,                                      // more and more
+            /もっともっと/i,                                  // more and more
+            /思いっきり|おもいっきり/i,                        // with all your might
+            /一気に|いっきに/i,                               // all at once
+            /ちょうだい/i,                                    // give me
+            /搾[っりる]|しぼ[っりる]/i,                       // squeeze/milk
+            /奉仕[しして]/i,                                  // serve me
+            /\b(?:squeeze|milk|service|slowly|want\s*it)\b/i,
         ],
     },
-    // --- Climax ---
+    // --- Climax (25 patterns) ---
     {
         category: 'climax',
         weight: 2.0,
@@ -149,9 +184,20 @@ const SEMANTIC_PATTERNS = compilePatterns([
             /\b(?:climax|orgasm|coming)\b/i,
             /\b(?:shoot|squirt|explode)\b/i,
             /\b(?:you\s*(?:can|may)\s*cum|permission)\b/i,
+            // --- Added from h2k frequency corpus + nsfw-glossary ---
+            /逝[くっきかせ]|いっ[ちた]/i,                     // cum (alt kanji)
+            /果て[るた]/i,                                    // climax/finish
+            /発射/i,                                          // release
+            /どぴゅ|びゅる|ぴゅー/i,                           // spurting onomatopoeia
+            /噴[きく]出[すし]/i,                              // spurt out
+            /溢[れら]|こぼ[れら]/i,                            // overflow
+            /中出[しす]/i,                                    // creampie
+            /カウントダウン/i,                                 // countdown
+            /解放[しして]/i,                                   // release
+            /\b(?:spurt|erupt|burst|overflow|countdown)\b/i,
         ],
     },
-    // --- Edge / Almost ---
+    // --- Edge / Almost (21 patterns) ---
     {
         category: 'edge',
         weight: 1.3,
@@ -169,9 +215,18 @@ const SEMANTIC_PATTERNS = compilePatterns([
             /\b(?:edge|edging|almost|close|about\s*to|nearly|brink)\b/i,
             /\b(?:hold\s*it|right\s*there|don'?t\s*cum|not\s*yet)\b/i,
             /\b(?:tease|teasing|denial|so\s*close)\b/i,
+            // --- Added from h2k frequency corpus + nsfw-glossary ---
+            /たまらな[いく]/i,                                // can't stand it
+            /我慢[でがき]きな[いく]/i,                         // can't hold back
+            /止まらな[いく]/i,                                // can't stop
+            /耐え[てろきれ]|たえ[きれ]/i,                     // endure
+            /焦ら[しす]|じらし/i,                             // tease
+            /狂[いう]そう|くるいそう/i,                        // about to go crazy
+            /痺[れら]|しび[れら]/i,                            // going numb
+            /\b(?:unbearable|can'?t\s*take|overwhelm|torture)\b/i,
         ],
     },
-    // --- Neutral / Daily life ---
+    // --- Neutral / Daily life (12 patterns) ---
     {
         category: 'neutral',
         weight: 0.5,
@@ -185,6 +240,10 @@ const SEMANTIC_PATTERNS = compilePatterns([
             /\b(?:hello|hi|good\s*(?:morning|evening|night))\b/i,
             /\b(?:eat|drink|cook|food|weather|rain|work|school|study)\b/i,
             /\b(?:walk|shop|trip|meal|sleep)\b/i,
+            // --- Added for neutral balance ---
+            /ただいま|おかえり/i,                              // I'm home / welcome back
+            /準備[しして]|じゅんび/i,                          // preparing
+            /\b(?:prepare|ready|setup|begin|start)\b/i,
         ],
     },
 ]);
@@ -205,11 +264,33 @@ const VOLUME_POLL_MS = 100;        // 10 Hz volume sampling
 const VOLUME_SMOOTHING = 0.15;     // EMA alpha (0 = no smoothing, 1 = instant)
 const SUBTITLE_POLL_MS = 1500;     // 0.67 Hz subtitle DOM polling
 
-// Volume thresholds (RMS 0-1 scale, typical speech is 0.02-0.15)
+// Volume thresholds — defaults / absolute floors (RMS 0-1 scale)
+// Adaptive calibration overrides these once enough data is collected.
 const VOL_QUIET = 0.015;           // Below this = silence
 const VOL_MEDIUM = 0.04;           // Normal calm speech
 const VOL_HIGH = 0.10;             // Elevated / excited
 const VOL_PEAK = 0.20;             // Very intense
+
+// Adaptive volume calibration
+const CALIBRATION_WINDOW = 300;    // 30s at 10Hz
+const CALIBRATION_MIN_SAMPLES = 50; // 5s before adaptive kicks in
+const ADAPTIVE_FLOOR_RATIO = 0.30; // Adaptive thresholds never below 30% of defaults
+
+// Fairness: state duration limits
+const MAX_STOP_MS = 15_000;        // 15s max hands-off
+const MAX_EDGE_MS = 25_000;        // 25s max edge
+const MAX_IDLE_MS = 8_000;         // 8s max waiting at start
+const MIN_GO_MS = 8_000;           // 8s minimum in go before stop/edge allowed
+
+// Fairness: reentry cooldowns
+const STOP_REENTRY_COOLDOWN_MS = 12_000;  // 12s after leaving stop
+const EDGE_REENTRY_COOLDOWN_MS = 15_000;  // 15s after leaving edge
+
+// Fairness: score modifiers
+const STOP_SCORE_MULTIPLIER = 0.6; // Stop scores need 40% more to trigger
+
+// Volume-only cum: requires sustained peak from edge + time buildup
+const VOL_ONLY_CUM_MIN_EDGE_MS = 10_000; // 10s in edge before volume-only cum possible
 
 // ============================================================================
 // State transition rules
@@ -260,6 +341,7 @@ export class JoiTool {
     private barEl: HTMLElement | null = null;
     private expandedBarEl: HTMLElement | null = null;
     private eventCleanups: (() => void)[] = [];
+    private persistentCleanups: (() => void)[] = [];
     private contextWindows: ContextWindow[] = [];
     private lastTransitionAt = 0;
     private instructionIndex = 0;
@@ -281,6 +363,14 @@ export class JoiTool {
     private volumeAvailable = false;            // false if cross-origin blocks analyser
     private connectedAudioEl: HTMLAudioElement | null = null;
 
+    // Adaptive volume calibration (30s rolling window)
+    private volumeCalibration: number[] = [];
+
+    // Fairness: state timing
+    private stateEnteredAt = 0;
+    private lastStopExitAt = 0;
+    private lastEdgeExitAt = 0;
+
     private constructor() {}
 
     public static getInstance(): JoiTool {
@@ -295,10 +385,17 @@ export class JoiTool {
     // ------------------------------------------------------------------------
 
     public enable(): void {
+        this.setupPersistentListeners();
         this.setupEventListeners();
         CentralObserver.register('joi-tool', () => {
             if (this.isActive) this.ensureUI();
         }, 800);
+
+        // Auto-activate if "always show" is enabled
+        if (AppStore.getConfig('alwaysShowJoi') && !this.isActive) {
+            this.activate();
+        }
+
         Logger.log('[JoiTool] Enabled');
     }
 
@@ -329,6 +426,10 @@ export class JoiTool {
         this.volumeSmoothed = 0;
         this.volumePeak = 0;
         this.volumeHistory = [];
+        this.volumeCalibration = [];
+        this.stateEnteredAt = Date.now();
+        this.lastStopExitAt = 0;
+        this.lastEdgeExitAt = 0;
 
         this.ensureUI();
         this.updateDisplay();
@@ -385,15 +486,31 @@ export class JoiTool {
                 this.volumeSmoothed = 0;
                 this.volumePeak = 0;
                 this.volumeHistory = [];
+                this.volumeCalibration = [];
                 this.setState('idle');
                 // Re-connect analyser in case audio element changed
                 this.connectAudioAnalyser();
             }
         }));
+    }
 
-        // Toggle event from overflow menu
-        this.eventCleanups.push(EventBus.on('joi:toggle', () => {
+    /**
+     * Persistent listeners that survive deactivate() — registered once in enable()
+     */
+    private setupPersistentListeners(): void {
+        if (this.persistentCleanups.length > 0) return; // already registered
+
+        // Toggle event from overflow menu — must persist across activate/deactivate cycles
+        this.persistentCleanups.push(EventBus.on('joi:toggle', () => {
             this.toggle();
+        }));
+
+        // React to "always show" setting changes
+        this.persistentCleanups.push(EventBus.on('config:change', ({ key, value }) => {
+            if (key === 'alwaysShowJoi') {
+                if (value && !this.isActive) this.activate();
+                else if (!value && this.isActive) this.deactivate();
+            }
         }));
     }
 
@@ -502,10 +619,47 @@ export class JoiTool {
             this.volumeHistory.shift();
         }
 
+        // Feed calibration window (30s rolling)
+        this.volumeCalibration.push(raw);
+        if (this.volumeCalibration.length > CALIBRATION_WINDOW) {
+            this.volumeCalibration.shift();
+        }
+
         // Evaluate combined signals periodically (every 5th sample = 2Hz)
         if (this.volumeHistory.length % 5 === 0) {
             this.evaluateCombined();
         }
+    }
+
+    /**
+     * Compute adaptive volume thresholds from the calibration window.
+     * Uses percentiles of the rolling 30s window so that a whispering track's
+     * own dynamic range maps correctly to quiet/medium/high/peak.
+     * Falls back to fixed defaults until enough data is collected.
+     */
+    private getAdaptiveThresholds(): { quiet: number; medium: number; high: number; peak: number } {
+        if (this.volumeCalibration.length < CALIBRATION_MIN_SAMPLES) {
+            return { quiet: VOL_QUIET, medium: VOL_MEDIUM, high: VOL_HIGH, peak: VOL_PEAK };
+        }
+
+        const sorted = [...this.volumeCalibration].sort((a, b) => a - b);
+        const len = sorted.length;
+        const pct = (p: number) => sorted[Math.min(len - 1, Math.floor(p * len))];
+
+        const raw = {
+            quiet: pct(0.15),
+            medium: pct(0.45),
+            high: pct(0.75),
+            peak: pct(0.92),
+        };
+
+        // Enforce minimum floor at 30% of defaults to prevent degenerate thresholds
+        return {
+            quiet: Math.max(raw.quiet, VOL_QUIET * ADAPTIVE_FLOOR_RATIO),
+            medium: Math.max(raw.medium, VOL_MEDIUM * ADAPTIVE_FLOOR_RATIO),
+            high: Math.max(raw.high, VOL_HIGH * ADAPTIVE_FLOOR_RATIO),
+            peak: Math.max(raw.peak, VOL_PEAK * ADAPTIVE_FLOOR_RATIO),
+        };
     }
 
     /**
@@ -522,6 +676,7 @@ export class JoiTool {
     } {
         const level = this.volumeSmoothed;
         const h = this.volumeHistory;
+        const thresh = this.getAdaptiveThresholds();
 
         // Calculate trend from last ~1s vs previous ~1s
         let trend = 0;
@@ -531,16 +686,16 @@ export class JoiTool {
             trend = recent - previous;
         }
 
-        // Normalize intensity to 0-1
-        const intensity = Math.min(1, level / VOL_PEAK);
+        // Normalize intensity to 0-1 using adaptive peak
+        const intensity = Math.min(1, level / thresh.peak);
 
         return {
             level,
             trend,
             intensity,
-            isSilent: level < VOL_QUIET,
-            isHigh: level > VOL_HIGH,
-            isPeak: level > VOL_PEAK,
+            isSilent: level < thresh.quiet,
+            isHigh: level > thresh.high,
+            isPeak: level > thresh.peak,
         };
     }
 
@@ -707,11 +862,37 @@ export class JoiTool {
 
         const now = Date.now();
         const vol = this.getVolumeDynamics();
+        const thresh = this.getAdaptiveThresholds();
+        const timeInState = now - this.stateEnteredAt;
+
+        // --- Fairness: state duration limits ---
+        // Force transitions when a state has been held too long
+        if (this.state === 'idle' && timeInState > MAX_IDLE_MS) {
+            this.setState('go');
+            EventBus.emit('joi:trigger', { state: 'go', keyword: 'timeout', source: 'jp' });
+            return;
+        }
+        if (this.state === 'stop' && timeInState > MAX_STOP_MS) {
+            this.setState('go');
+            EventBus.emit('joi:trigger', { state: 'go', keyword: 'timeout', source: 'jp' });
+            return;
+        }
+        if (this.state === 'edge' && timeInState > MAX_EDGE_MS) {
+            this.setState('go');
+            EventBus.emit('joi:trigger', { state: 'go', keyword: 'timeout', source: 'jp' });
+            return;
+        }
+
+        // --- Fairness: minimum go protection ---
+        // Block transitions out of go for MIN_GO_MS to guarantee stroking time
+        if (this.state === 'go' && timeInState < MIN_GO_MS) {
+            return;
+        }
 
         // --- Volume-only path (works without subtitles) ---
         if (this.volumeAvailable) {
             // Transition idle → go when volume rises above quiet threshold
-            if (this.state === 'idle' && vol.level > VOL_MEDIUM && !vol.isSilent) {
+            if (this.state === 'idle' && vol.level > thresh.medium && !vol.isSilent) {
                 if (now - this.lastTransitionAt > TRANSITION_COOLDOWN_MS) {
                     this.setState('go');
                     EventBus.emit('joi:trigger', { state: 'go', keyword: 'volume', source: 'jp' });
@@ -743,28 +924,47 @@ export class JoiTool {
             }
         }
 
-        // --- Volume boost: amplify text scores based on audio energy ---
-        if (this.volumeAvailable && vol.level > VOL_QUIET) {
-            const volBoost = 1 + vol.intensity * 2; // 1x at silence → 3x at peak
-            // Boost sexual/climax/edge/encouragement proportional to volume
-            aggregated.sexual *= volBoost;
-            aggregated.climax *= volBoost;
-            aggregated.edge *= volBoost;
-            aggregated.encouragement *= volBoost;
+        // --- Fairness: de-boost stop scores ---
+        aggregated.stop *= STOP_SCORE_MULTIPLIER;
 
-            // Volume trend modifiers
-            if (vol.trend > 0.005) {
-                // Rising volume → boost climax/edge
-                aggregated.climax += vol.trend * 20;
-                aggregated.edge += vol.trend * 15;
-            }
-            if (vol.isPeak) {
-                // At peak volume → strong climax signal
-                aggregated.climax += 1.5;
-            }
-            if (vol.isSilent && this.state === 'go') {
-                // Sudden silence during go → could be a tease
-                aggregated.stop += 0.5;
+        // --- Volume-text agreement: fuzzy confidence adjustments ---
+        // Audio energy confirms or dampens text signals for accuracy.
+        // "いく" during peak volume = real climax. During silence = just teasing.
+        // "だめ" during high volume = dramatic acting. During silence = real stop.
+        if (this.volumeAvailable) {
+            if (!vol.isSilent) {
+                const volBoost = 1 + vol.intensity * 2; // 1x at quiet → 3x at peak
+                // Proportional boost to active categories
+                aggregated.sexual *= volBoost;
+                aggregated.climax *= volBoost;
+                aggregated.edge *= volBoost;
+                aggregated.encouragement *= volBoost;
+
+                // Rising volume → confirm edge intensity; confirm climax only when text present
+                if (vol.trend > 0.005) {
+                    aggregated.edge += vol.trend * 20;
+                    aggregated.encouragement += vol.trend * 10;
+                    // Volume confirms existing text climax signal (amplify, don't inject)
+                    if (aggregated.climax > 0) aggregated.climax += vol.trend * 15;
+                }
+                // Peak volume → strong edge; confirm text climax if already present
+                if (vol.isPeak) {
+                    aggregated.edge += 1.0;
+                    if (aggregated.climax > 0) aggregated.climax += 1.5;
+                }
+                // High volume + stop text = dramatic acting, not a real stop
+                if (vol.isHigh) {
+                    aggregated.stop *= 0.5;
+                }
+            } else {
+                // Silence: active signals dampened — saying it ≠ doing it
+                aggregated.climax *= 0.25;   // very unlikely to climax during silence
+                aggregated.encouragement *= 0.5;
+                aggregated.sexual *= 0.5;
+                // Silence during go = probable stop/tease
+                if (this.state === 'go') {
+                    aggregated.stop += 0.5;
+                }
             }
         }
 
@@ -783,7 +983,7 @@ export class JoiTool {
 
         // Below threshold: allow idle→go on light signal
         if (maxScore < CONTEXT_THRESHOLD) {
-            if (this.state === 'idle' && (aggregated.sexual > 0.5 || (this.volumeAvailable && vol.level > VOL_MEDIUM))) {
+            if (this.state === 'idle' && (aggregated.sexual > 0.5 || (this.volumeAvailable && vol.level > thresh.medium))) {
                 this.setState('go');
             }
             return;
@@ -794,6 +994,15 @@ export class JoiTool {
 
         // Cooldown
         if (now - this.lastTransitionAt < TRANSITION_COOLDOWN_MS) return;
+
+        // --- Fairness: reentry cooldowns ---
+        // Prevent rapid cycling back into punishing states
+        if (dominant === 'stop' && this.lastStopExitAt > 0 && (now - this.lastStopExitAt) < STOP_REENTRY_COOLDOWN_MS) {
+            return;
+        }
+        if (dominant === 'edge' && this.lastEdgeExitAt > 0 && (now - this.lastEdgeExitAt) < EDGE_REENTRY_COOLDOWN_MS) {
+            return;
+        }
 
         // Constrained transition
         const allowedTransitions = TRANSITIONS[this.state];
@@ -814,38 +1023,48 @@ export class JoiTool {
         if (now - this.lastTransitionAt < TRANSITION_COOLDOWN_MS) return;
 
         const state = this.state;
+        const thresh = this.getAdaptiveThresholds();
+        const timeInState = now - this.stateEnteredAt;
 
         // idle → go: any non-silent audio
-        if (state === 'idle' && vol.level > VOL_MEDIUM) {
+        if (state === 'idle' && vol.level > thresh.medium) {
             this.setState('go');
             return;
         }
 
-        // go → edge: sustained high volume with rising trend
-        if (state === 'go' && vol.isHigh && vol.trend > 0.002 && this.volumeHistory.length >= 15) {
-            this.setState('edge');
-            return;
-        }
+        // Minimum go protection
+        if (state === 'go' && timeInState < MIN_GO_MS) return;
 
-        // go → stop: sudden drop to silence (tease)
-        if (state === 'go' && vol.isSilent && this.volumeHistory.length >= 10) {
-            const recentAvg = this.volumeHistory.slice(-10).reduce((a, b) => a + b, 0) / 10;
-            if (recentAvg < VOL_QUIET) {
-                this.setState('stop');
+        // go → edge: sustained high volume with rising trend (with reentry cooldown)
+        if (state === 'go' && vol.isHigh && vol.trend > 0.002 && this.volumeHistory.length >= 15) {
+            if (this.lastEdgeExitAt === 0 || (now - this.lastEdgeExitAt) >= EDGE_REENTRY_COOLDOWN_MS) {
+                this.setState('edge');
                 return;
             }
         }
 
+        // go → stop: sudden drop to silence (with reentry cooldown)
+        if (state === 'go' && vol.isSilent && this.volumeHistory.length >= 10) {
+            const recentAvg = this.volumeHistory.slice(-10).reduce((a, b) => a + b, 0) / 10;
+            if (recentAvg < thresh.quiet) {
+                if (this.lastStopExitAt === 0 || (now - this.lastStopExitAt) >= STOP_REENTRY_COOLDOWN_MS) {
+                    this.setState('stop');
+                    return;
+                }
+            }
+        }
+
         // stop → go: volume picks back up
-        if (state === 'stop' && vol.level > VOL_HIGH) {
+        if (state === 'stop' && vol.level > thresh.high) {
             this.setState('go');
             return;
         }
 
-        // edge → cum: peak volume sustained
-        if (state === 'edge' && vol.isPeak && this.volumeHistory.length >= 10) {
-            const peakCount = this.volumeHistory.slice(-10).filter(v => v > VOL_PEAK).length;
-            if (peakCount >= 5) { // 5 out of last 10 samples above peak
+        // edge → cum: sustained peak volume after buildup in edge
+        // Stricter than text path — needs 10s in edge + 60% of last 2s at peak
+        if (state === 'edge' && vol.isPeak && timeInState > VOL_ONLY_CUM_MIN_EDGE_MS && this.volumeHistory.length >= 20) {
+            const peakCount = this.volumeHistory.slice(-20).filter(v => v > thresh.peak).length;
+            if (peakCount >= 12) { // 60% of last 2s above peak = sustained climax
                 this.setState('cum');
                 return;
             }
@@ -872,8 +1091,15 @@ export class JoiTool {
 
     private setState(newState: JoiState): void {
         const prevState = this.state;
+        const now = Date.now();
+
+        // Record exit timestamps for reentry cooldowns
+        if (prevState === 'stop') this.lastStopExitAt = now;
+        if (prevState === 'edge') this.lastEdgeExitAt = now;
+
         this.state = newState;
-        this.lastTransitionAt = Date.now();
+        this.lastTransitionAt = now;
+        this.stateEnteredAt = now;
         this.instructionIndex = 0;
         this.clearTimers();
 

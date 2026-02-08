@@ -53,35 +53,32 @@ describe('PlaylistApi', () => {
     });
 
     describe('getPlaylists', () => {
-        it('should GET playlists with default params', async () => {
+        it('should GET playlists from /api/playlists', async () => {
             mockAxios.get.mockResolvedValue({
-                data: { playlists: [{ id: 'p1' }], pagination: { page: 1 } },
+                data: [{ id: 'p1' }],
             });
             const result = await PlaylistApi.getPlaylists();
-            expect(mockAxios.get).toHaveBeenCalledWith('/api/playlist/get-playlists', {
-                params: { filterBy: 'all', page: 1, pageSize: 200 },
-            });
-            expect(result.playlists).toHaveLength(1);
+            expect(mockAxios.get).toHaveBeenCalledWith('/api/playlists');
+            expect(result).toHaveLength(1);
         });
 
-        it('should handle array response (no wrapper)', async () => {
+        it('should handle array response', async () => {
             mockAxios.get.mockResolvedValue({ data: [{ id: 'p1' }, { id: 'p2' }] });
-            const result = await PlaylistApi.getPlaylists('owned');
-            expect(result.playlists).toHaveLength(2);
+            const result = await PlaylistApi.getPlaylists();
+            expect(result).toHaveLength(2);
         });
 
         it('should handle empty/null response', async () => {
             mockAxios.get.mockResolvedValue({ data: null });
             const result = await PlaylistApi.getPlaylists();
-            expect(result.playlists).toEqual([]);
+            expect(result).toEqual([]);
         });
 
-        it('should pass custom filter and pagination', async () => {
-            mockAxios.get.mockResolvedValue({ data: { playlists: [] } });
-            await PlaylistApi.getPlaylists('liked', 2, 50);
-            expect(mockAxios.get).toHaveBeenCalledWith('/api/playlist/get-playlists', {
-                params: { filterBy: 'liked', page: 2, pageSize: 50 },
-            });
+        it('should return empty array when data is falsy', async () => {
+            mockAxios.get.mockResolvedValue({ data: undefined });
+            const result = await PlaylistApi.getPlaylists();
+            expect(mockAxios.get).toHaveBeenCalledWith('/api/playlists');
+            expect(result).toEqual([]);
         });
     });
 
@@ -195,7 +192,7 @@ describe('PlaylistApi', () => {
             expect(mockAxios.get).toHaveBeenCalledTimes(2);
         });
 
-        it('should handle errors on subsequent pages gracefully', async () => {
+        it('should throw when subsequent page fails', async () => {
             mockAxios.get.mockResolvedValueOnce({
                 data: {
                     works: Array.from({ length: 100 }, (_, i) => ({ id: i, source_id: `RJ${i}`, title: `W${i}` })),
@@ -205,9 +202,7 @@ describe('PlaylistApi', () => {
             // Page 2 fails
             mockAxios.get.mockRejectedValueOnce(new Error('Server error'));
 
-            const result = await PlaylistApi.getAllPlaylistWorks('p1');
-            // Should still have the first page
-            expect(result).toHaveLength(100);
+            await expect(PlaylistApi.getAllPlaylistWorks('p1')).rejects.toThrow('Server error');
         });
 
         it('should throw when first page fails', async () => {

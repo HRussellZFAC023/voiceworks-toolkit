@@ -1,13 +1,14 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue';
+import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue';
 import { openDB, deleteDB, type DBSchema } from 'idb';
-import { useBridge, useI18n, useConfig, useEventBus } from '../../composables';
+import { useBridge, useI18n, useEventBus } from '../../composables';
 import { SharedCache } from '../../core/Cache';
 import { TranslationService } from '../../services/TranslationService';
 import { WorksApi } from '../../api';
 import { buildCoverUrl } from '../../types/api';
 import { Config, Logger, I18n } from '../../core/Utils';
-import { gmRequest, retryWithBackoff, HttpError } from '../../infrastructure/HttpClient';
+import { HttpError } from '../../infrastructure/HttpClient';
+import { EmbeddingService } from '../../services/EmbeddingService';
 import type { TagEntry } from '../../types/api';
 
 // ============================================================================
@@ -26,6 +27,10 @@ export interface VectorEntry {
     searchText?: string;
     cover?: string;
     vector: number[];
+    dlCount?: number;
+    rating?: number;
+    nsfw?: boolean;
+    hasSubtitle?: boolean;
 }
 
 interface VectorDB extends DBSchema {
@@ -52,17 +57,17 @@ interface ScoredResult {
 // ============================================================================
 
 const DEFAULT_API_SERVER = 'https://api.asmr-200.com';
-const EMBED_CONCURRENCY = 2;
+const EMBED_CONCURRENCY = 3;
 const RESULT_LIMIT = 40;
-const VECTOR_INDEX_VERSION = 2;
-const EMBEDDING_MODEL = 'jina-embeddings-v3';
-const EMBEDDING_TASK_QUERY = 'retrieval.query';
-const EMBEDDING_TASK_DOC = 'retrieval.passage';
-const EMBEDDING_NORMALIZED = true;
-const JINA_FREE_RPM = 500;
-const EMBEDDING_MIN_INTERVAL_MS = Math.ceil(60000 / JINA_FREE_RPM);
-const MAX_DESCRIPTION_CHARS = 2000;
-const MAX_PAYLOAD_CHARS = 8000;
+const VECTOR_INDEX_VERSION = 4; // Force re-index: enriched metadata (dl_count, rating, age_category)
+const EMBEDDING_MODEL = 'Xenova/multilingual-e5-small';
+const EMBEDDING_TASK_QUERY = 'query';
+const EMBEDDING_TASK_DOC = 'passage';
+const MAX_DESCRIPTION_CHARS = 1500;
+const MAX_PAYLOAD_CHARS = 5000;
+const MIN_SCORE_THRESHOLD = 0.25;
+const SEARCH_TIMEOUT_MS = 15_000;
+const TRANSLATION_TIMEOUT_MS = 5_000;
 
 // ============================================================================
 // Composables & Reactive State
@@ -71,14 +76,13 @@ const MAX_PAYLOAD_CHARS = 8000;
 const bridge = useBridge();
 const { t, format } = useI18n();
 const { on } = useEventBus();
-const apiKey = useConfig('vectorSearchApiKey');
 
 // Dialog state
 const visible = ref(false);
 const query = ref('');
-const keyInput = ref('');
 const statusMessage = ref('');
 const statusLoading = ref(false);
+const searching = ref(false);
 const indexCount = ref(0);
 
 // Results & pagination
@@ -91,7 +95,6 @@ const pageResults = computed(() => {
 });
 const showPagination = computed(() => allResults.value.length > RESULT_LIMIT);
 const hasResults = computed(() => allResults.value.length > 0);
-const hasApiKey = computed(() => !!apiKey.value);
 
 // Template refs
 const inputRef = ref<HTMLInputElement | null>(null);
@@ -108,14 +111,11 @@ let autoWatchTimer: number | null = null;
 let autoBatchTimer: number | null = null;
 let autoIndexExhausted = false;
 let bulkIndexCursor = Math.max(1, Number(Config.get('vectorIndexCursor') || 1));
-const embeddingInflight = new Map<string, Promise<number[] | null>>();
-let embeddingMinIntervalMs = EMBEDDING_MIN_INTERVAL_MS;
-let embeddingCooldownUntil = 0;
-let embeddingRateLimited = false;
-let embeddingNextAt = 0;
-let embeddingQueue: Promise<void> = Promise.resolve();
 let indexReady = false;
+let indexReadyPromise: Promise<void> | null = null;
 let tagIndexReady: Promise<void> | null = null;
+let searchPriority = false;
+let searchAbort: AbortController | null = null;
 const tagById = new Map<number, TagEntry>();
 const tagByName = new Map<string, TagEntry[]>();
 
@@ -155,68 +155,24 @@ function getApiBaseUrl(): string {
 // Index management
 // ============================================================================
 
-function hashKey(input: string): string {
-    let hash = 2166136261;
-    for (let i = 0; i < input.length; i++) {
-        hash ^= input.charCodeAt(i);
-        hash += (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
-    }
-    return (hash >>> 0).toString(36);
-}
-
-async function ensureIndexReady(): Promise<void> {
-    if (indexReady) return;
-    const storedVersion = Number(Config.get('vectorIndexVersion') || 0);
-    const storedModel = String(Config.get('vectorSearchModel') || '');
-    if (storedVersion !== VECTOR_INDEX_VERSION || storedModel !== EMBEDDING_MODEL) {
-        await resetVectorIndex('model-change', { storedVersion, storedModel });
-    }
-    Config.set('vectorIndexVersion', VECTOR_INDEX_VERSION);
-    Config.set('vectorSearchModel', EMBEDDING_MODEL);
-    indexReady = true;
-}
-
-async function ensureApiKeySynced(): Promise<void> {
-    const key = String(Config.get('vectorSearchApiKey') || '').trim();
-    if (!key) {
-        if (Config.get('vectorSearchApiKeyHash')) {
-            Config.set('vectorSearchApiKeyHash', '');
+function ensureIndexReady(): Promise<void> {
+    if (indexReady) return Promise.resolve();
+    if (indexReadyPromise) return indexReadyPromise;
+    indexReadyPromise = (async () => {
+        const storedVersion = Number(Config.get('vectorIndexVersion') || 0);
+        const storedModel = String(Config.get('vectorSearchModel') || '');
+        if (storedVersion !== VECTOR_INDEX_VERSION || storedModel !== EMBEDDING_MODEL) {
+            await resetVectorIndex('model-change', { storedVersion, storedModel });
         }
-        return;
-    }
-    const nextHash = hashKey(key);
-    const storedHash = String(Config.get('vectorSearchApiKeyHash') || '');
-    if (!storedHash) {
-        Config.set('vectorSearchApiKeyHash', nextHash);
-        return;
-    }
-    if (nextHash !== storedHash) {
-        Config.set('vectorSearchApiKeyHash', nextHash);
-        await resetVectorIndex('api-key-change');
-    }
+        Config.set('vectorIndexVersion', VECTOR_INDEX_VERSION);
+        Config.set('vectorSearchModel', EMBEDDING_MODEL);
+        indexReady = true;
+    })();
+    return indexReadyPromise;
 }
 
-function clearRateLimitState(): void {
-    embeddingCooldownUntil = 0;
-    embeddingRateLimited = false;
-    Config.set('vectorRateLimitCooldownUntil', 0);
-    resetRateLimitBackoff();
-}
-
-async function handleApiKeyChange(nextKey: string, prevKey: string): Promise<void> {
-    const next = nextKey.trim();
-    const prev = prevKey.trim();
-    if (next === prev) return;
-    if (next) {
-        Config.set('vectorSearchApiKeyHash', hashKey(next));
-    } else {
-        Config.set('vectorSearchApiKeyHash', '');
-    }
-    clearRateLimitState();
-    await resetVectorIndex('api-key-change');
-    if (next) {
-        await scheduleAutoIndex();
-    }
+async function ensureModelSynced(): Promise<void> {
+    // No additional sync needed — model/version checking is done in ensureIndexReady()
 }
 
 async function resetVectorIndex(reason: string, details?: Record<string, unknown>): Promise<void> {
@@ -307,138 +263,17 @@ async function ensureTagIndex(): Promise<void> {
 }
 
 // ============================================================================
-// Embedding API
+// Embedding (local model via EmbeddingService)
 // ============================================================================
 
-function checkPersistedRateLimit(): void {
-    const persistedCooldown = Number(Config.get('vectorRateLimitCooldownUntil') || 0);
-    if (persistedCooldown > Date.now()) {
-        embeddingCooldownUntil = persistedCooldown;
-        embeddingRateLimited = true;
-    } else if (persistedCooldown > 0) {
-        Config.set('vectorRateLimitBackoff', 1);
-        Config.set('vectorRateLimitCooldownUntil', 0);
-    }
-}
-
-function resetRateLimitBackoff(): void {
-    if (Config.get('vectorRateLimitBackoff') !== 1) {
-        Config.set('vectorRateLimitBackoff', 1);
-    }
-}
-
-function applyRateLimit(delayMs: number): void {
-    const currentBackoff = Number(Config.get('vectorRateLimitBackoff') || 1);
-    const backoffMultiplier = Math.min(currentBackoff * 2, 8);
-    const cooldownMs = Math.max(1000, delayMs * backoffMultiplier);
-
-    embeddingCooldownUntil = Date.now() + cooldownMs;
-    embeddingRateLimited = true;
-
-    Config.set('vectorRateLimitCooldownUntil', embeddingCooldownUntil);
-    Config.set('vectorRateLimitBackoff', backoffMultiplier);
-
-    const waitSecs = Math.round(cooldownMs / 1000);
-    setStatus(format('magicSearchRateLimitedRetry', { wait: waitSecs }), false);
-    Logger.warn(`[VectorSearch] Rate limited by Jina. Cooling down for ${waitSecs}s (backoff: ${backoffMultiplier}x)`);
-}
-
-async function waitForEmbeddingSlot(): Promise<void> {
-    let release: ((value?: void | PromiseLike<void>) => void) | null = null;
-    const previous = embeddingQueue;
-    embeddingQueue = new Promise<void>((resolve) => {
-        release = resolve;
-    });
-    await previous;
-
-    const now = Date.now();
-    const waitUntil = Math.max(embeddingCooldownUntil, embeddingNextAt);
-    const delay = Math.max(0, waitUntil - now);
-    const nextBase = Math.max(now, waitUntil);
-    embeddingNextAt = nextBase + embeddingMinIntervalMs;
-    if (delay > 0) {
-        await new Promise(resolve => window.setTimeout(resolve, delay));
-    }
-    if (release) (release as any)();
-}
-
-async function fetchEmbedding(text: string, task: string): Promise<number[] | null> {
-    Logger.debug('[VectorSearch] fetchEmbedding');
-    const url = 'https://api.jina.ai/v1/embeddings';
-    const headers = {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${Config.get('vectorSearchApiKey')}`,
-    };
-    const body = JSON.stringify({
-        model: EMBEDDING_MODEL,
-        task,
-        input: [text],
-        normalized: EMBEDDING_NORMALIZED,
-        embedding_type: 'float',
-    });
-
-    try {
-        const res = await retryWithBackoff(
-            () => gmRequest({ method: 'POST', url, headers, data: body, responseType: 'json' }),
-            {
-                attempts: 3,
-                backoffMs: 1000,
-                multiplier: 2,
-                shouldRetry: (err) => {
-                    if (err instanceof HttpError && err.status === 429) {
-                        applyRateLimit(60000);
-                        return false;
-                    }
-                    return true;
-                },
-            },
-        );
-
-        const data = typeof res.response === 'object' && res.response
-            ? (res.response as Record<string, unknown>)
-            : (JSON.parse(res.responseText) as Record<string, unknown>);
-
-        const dataArr = data?.data as Array<Record<string, unknown>> | undefined;
-        const embedding: number[] | null = (dataArr?.[0]?.embedding as number[] | undefined) || null;
-        Logger.debug(`[VectorSearch] Embedding received: dim=${embedding?.length || 0}`);
-        if (embedding) resetRateLimitBackoff();
-        return embedding;
-    } catch (err) {
-        if (err instanceof HttpError && err.status === 429) {
-            return null;
-        }
-        Logger.warn('[VectorSearch] fetchEmbedding failed:', err);
-        return null;
-    }
-}
-
 async function getEmbedding(text: string, task: string): Promise<number[] | null> {
-    if (!Config.get('vectorSearchApiKey')) {
-        Logger.warn('[VectorSearch] Missing Jina API key.');
+    try {
+        const embTask = task === EMBEDDING_TASK_QUERY ? 'query' : 'passage';
+        return await EmbeddingService.embed(text, embTask);
+    } catch (err) {
+        Logger.warn('[VectorSearch] getEmbedding failed:', err);
         return null;
     }
-    const cacheKey = `embedding:${EMBEDDING_MODEL}:${task}:${text}`;
-    const cached = SharedCache.getMemory<number[]>(cacheKey);
-    if (cached) {
-        Logger.debug(`[VectorSearch] Embedding cache hit (dim=${cached.length})`);
-        return cached;
-    }
-    const inflightKey = `${task}:${text}`;
-    if (embeddingInflight.has(inflightKey)) {
-        Logger.debug('[VectorSearch] Embedding in-flight, waiting...');
-        return embeddingInflight.get(inflightKey)!;
-    }
-    Logger.debug(`[VectorSearch] Fetching embedding for text (${text.length} chars)`);
-
-    const taskPromise = waitForEmbeddingSlot().then(() => fetchEmbedding(text, task)).then((vector) => {
-        if (vector) SharedCache.setMemory(cacheKey, vector, 1000 * 60 * 60);
-        return vector;
-    }).finally(() => {
-        embeddingInflight.delete(inflightKey);
-    });
-
-    embeddingInflight.set(inflightKey, taskPromise);
-    return taskPromise;
 }
 
 // ============================================================================
@@ -496,12 +331,24 @@ async function prepareWorkEntry(work: any): Promise<{ entry: VectorEntry; payloa
     const searchTags = tagInfo.searchTags;
     const displayTags = tagInfo.displayTags;
 
+    // Extract metadata for storage and embedding enrichment
+    const dlCount = typeof work.dl_count === 'number' ? work.dl_count : undefined;
+    const rating = typeof work.rate_average_2dp === 'number' ? work.rate_average_2dp : undefined;
+    const nsfw = typeof work.nsfw === 'boolean' ? work.nsfw : undefined;
+    const hasSubtitle = typeof work.has_subtitle === 'boolean' ? work.has_subtitle : undefined;
+    const ageCategory = work.age_category_string || '';
+    const langEditions: string[] = Array.isArray(work.language_editions)
+        ? work.language_editions.map((e: any) => e?.lang || e?.label || '').filter(Boolean)
+        : [];
+
     const payloadParts: string[] = [];
     if (title) payloadParts.push(`Title: ${title}`);
     if (circle) payloadParts.push(`Circle: ${circle}`);
     if (series) payloadParts.push(`Series: ${series}`);
     if (vas.length) payloadParts.push(`VAs: ${vas.join(', ')}`);
     if (searchTags.length) payloadParts.push(`Tags: ${searchTags.join(', ')}`);
+    if (ageCategory) payloadParts.push(`Category: ${ageCategory}`);
+    if (langEditions.length) payloadParts.push(`Languages: ${langEditions.join(', ')}`);
     if (description) payloadParts.push(`Description: ${description}`);
 
     const payload = truncateText(payloadParts.join('\n'), MAX_PAYLOAD_CHARS);
@@ -521,6 +368,10 @@ async function prepareWorkEntry(work: any): Promise<{ entry: VectorEntry; payloa
         vas: vas.length ? vas : undefined,
         searchText,
         vector: [],
+        dlCount,
+        rating,
+        nsfw,
+        hasSubtitle,
     };
 
     return { entry, payload };
@@ -528,9 +379,13 @@ async function prepareWorkEntry(work: any): Promise<{ entry: VectorEntry; payloa
 
 async function indexWork(work: any): Promise<boolean> {
     if (!work?.id) return false;
+    // Yield to search when search is active
+    if (searchPriority) {
+        await new Promise(resolve => setTimeout(resolve, 200));
+    }
     const id = String(work.id);
     await ensureIndexReady();
-    await ensureApiKeySynced();
+    await ensureModelSynced();
     await ensureTagIndex();
     const db = await dbPromise;
     const existing = await db.get('vectors', id);
@@ -570,15 +425,20 @@ async function indexWorks(works: any[]): Promise<number> {
 async function indexCurrentWork(): Promise<void> {
     const work = (bridge.store.state.AudioPlayer?.work as any);
     if (!work?.id) return;
-    if (!Config.get('vectorSearchApiKey')) return;
     const id = String(work.id);
 
     await ensureIndexReady();
-    await ensureApiKeySynced();
+    await ensureModelSynced();
     await ensureTagIndex();
     const db = await dbPromise;
     const existing = await db.get('vectors', id);
-    if (existing) return;
+
+    // Enrich existing entries when richer data (e.g. description) is now available
+    const workHasDescription = !!(work.description || work.summary);
+    if (existing) {
+        if (!workHasDescription || existing.description) return;
+        Logger.debug('[VectorSearch] Enriching entry with description:', id);
+    }
 
     const prepared = await prepareWorkEntry(work);
     if (!prepared) return;
@@ -588,7 +448,7 @@ async function indexCurrentWork(): Promise<void> {
 
     const cover = resolveCoverUrl(work, id) || undefined;
     await db.put('vectors', { ...prepared.entry, cover, vector });
-    Logger.debug('[VectorSearch] Indexed work:', id, prepared.entry.title);
+    Logger.debug(`[VectorSearch] ${existing ? 'Enriched' : 'Indexed'} work:`, id, prepared.entry.title);
 }
 
 // ============================================================================
@@ -597,12 +457,8 @@ async function indexCurrentWork(): Promise<void> {
 
 async function bulkIndex(opts?: { maxPages?: number; maxWorks?: number; order?: string; sort?: string; startPage?: number }) {
     if (autoIndexRunning) return;
-    if (!Config.get('vectorSearchApiKey')) {
-        setStatus(t('magicSearchKeyMissingSettings'), false);
-        return;
-    }
     await ensureIndexReady();
-    await ensureApiKeySynced();
+    await ensureModelSynced();
     await ensureTagIndex();
     autoIndexRunning = true;
     setStatus(t('magicSearchFetchingLatest'), true);
@@ -654,14 +510,6 @@ async function bulkIndex(opts?: { maxPages?: number; maxWorks?: number; order?: 
             const pageWorks = works.slice(0, remaining);
             setStatus(format('magicSearchIndexingPage', { page, count: pageWorks.length }), true);
             indexed += await indexWorks(pageWorks);
-            if (embeddingRateLimited) {
-                embeddingRateLimited = false;
-                autoIndexExhausted = false;
-                const delay = Math.max(0, embeddingCooldownUntil - Date.now());
-                setStatus(t('magicSearchRateLimitedJinaCooldown'), false);
-                scheduleNextBatch(delay || 60000);
-                return;
-            }
             if (indexed >= maxWorks) break;
         }
         if (exhausted) {
@@ -713,7 +561,6 @@ function startIndexWatcher(): void {
 
 async function checkForNewWorks(): Promise<void> {
     if (autoIndexRunning) return;
-    if (!Config.get('vectorSearchApiKey')) return;
     const res = await WorksApi.getWorks({ order: 'release', sort: 'desc', page: 1 });
     const works = res.works || [];
     if (!works.length || !works[0]?.id) return;
@@ -781,14 +628,19 @@ async function buildSearchContext(queryText: string): Promise<SearchContext> {
 
     let usedTranslation = false;
     if (!containsJapanese(trimmed)) {
-        const hasJapaneseHint = tagHints.some(hint => containsJapanese(hint));
-        if (!hasJapaneseHint) {
-            const translated = await TranslationService.translate(trimmed, 'ja');
+        try {
+            const translated = await Promise.race([
+                TranslationService.translate(trimmed, 'ja'),
+                new Promise<null>((_, reject) => setTimeout(() => reject(new Error('Translation timeout')), TRANSLATION_TIMEOUT_MS)),
+            ]);
             const normalized = translated?.trim() || '';
             if (normalized && normalized !== trimmed) {
                 expansions.push(normalized);
                 usedTranslation = true;
             }
+        } catch {
+            // Translation timed out or failed — E5-small handles English natively
+            Logger.debug('[VectorSearch] Translation timed out or failed, proceeding without');
         }
     }
 
@@ -811,18 +663,24 @@ async function buildSearchContext(queryText: string): Promise<SearchContext> {
     };
 }
 
-function cosineSimilarity(vecA: number[], vecB: number[]): number {
+function dotProduct(vecA: number[], vecB: number[]): number {
     if (vecA.length !== vecB.length) return 0;
     let dot = 0.0;
-    let normA = 0.0;
-    let normB = 0.0;
     for (let i = 0; i < vecA.length; i++) {
         dot += vecA[i] * vecB[i];
-        normA += vecA[i] * vecA[i];
-        normB += vecB[i] * vecB[i];
     }
-    if (normA === 0 || normB === 0) return 0;
-    return dot / (Math.sqrt(normA) * Math.sqrt(normB));
+    return dot;
+}
+
+function isLatinToken(token: string): boolean {
+    return /^[a-z0-9]+$/.test(token);
+}
+
+function textContainsToken(text: string, token: string): boolean {
+    if (isLatinToken(token)) {
+        return new RegExp(`\\b${token}\\b`).test(text);
+    }
+    return text.includes(token);
 }
 
 function calculateKeywordBoost(entry: VectorEntry, searchMeta: SearchContext): number {
@@ -845,14 +703,14 @@ function calculateKeywordBoost(entry: VectorEntry, searchMeta: SearchContext): n
     const normalizedTokens = tokens.map(token => normalizeText(token)).filter(Boolean);
 
     for (const token of normalizedTokens) {
-        if (searchTagSet.has(token)) { boost += 0.15; matched += 1; continue; }
-        if (tagsText.includes(token)) { boost += 0.1; matched += 1; continue; }
-        if (title.includes(token)) { boost += 0.06; matched += 1; continue; }
-        if (circle.includes(token) || series.includes(token) || vas.includes(token)) { boost += 0.05; matched += 1; continue; }
-        if (description.includes(token)) { boost += 0.03; }
+        if (searchTagSet.has(token)) { boost += 0.08; matched += 1; continue; }
+        if (textContainsToken(tagsText, token)) { boost += 0.05; matched += 1; continue; }
+        if (textContainsToken(title, token)) { boost += 0.04; matched += 1; continue; }
+        if (textContainsToken(circle, token) || textContainsToken(series, token) || textContainsToken(vas, token)) { boost += 0.03; matched += 1; continue; }
+        if (textContainsToken(description, token)) { boost += 0.02; }
     }
 
-    if (matched >= Math.min(2, normalizedTokens.length)) boost += 0.05;
+    if (matched >= Math.min(2, normalizedTokens.length)) boost += 0.03;
 
     if (searchMeta.tagHints.length) {
         const hintSet = new Set(searchMeta.tagHints.map(hint => normalizeText(hint)).filter(Boolean));
@@ -861,87 +719,131 @@ function calculateKeywordBoost(entry: VectorEntry, searchMeta: SearchContext): n
             if (searchTagSet.has(hint)) hintMatches += 1;
         }
         if (hintMatches > 0) {
-            boost += 0.08 + Math.min(0.12, hintMatches * 0.04);
+            boost += 0.04 + Math.min(0.06, hintMatches * 0.02);
         }
     }
 
     return boost;
 }
 
+function calculatePopularityBoost(entry: VectorEntry): number {
+    if (!entry.dlCount || entry.dlCount <= 0) return 0;
+    // Logarithmic scale: 1000 downloads = +0.01, 10000 = +0.02, 100000 = +0.03
+    return Math.min(0.04, Math.log10(Math.max(1, entry.dlCount)) * 0.01 - 0.02);
+}
+
 function scoreEntry(entry: VectorEntry, vector: number[], searchMeta: SearchContext): number {
-    const similarity = cosineSimilarity(vector, entry.vector);
-    const boost = calculateKeywordBoost(entry, searchMeta);
-    return similarity + boost;
+    const similarity = dotProduct(vector, entry.vector);
+    const keywordBoost = calculateKeywordBoost(entry, searchMeta);
+    const popularityBoost = calculatePopularityBoost(entry);
+    return similarity + keywordBoost + popularityBoost;
+}
+
+function cancelSearch(): void {
+    if (searchAbort) {
+        searchAbort.abort();
+        searchAbort = null;
+    }
 }
 
 async function doSearch(): Promise<void> {
+    if (searching.value) return;
     const val = query.value.trim();
-    if (keyInput.value.trim()) {
-        Config.set('vectorSearchApiKey', keyInput.value.trim());
-    }
     if (!val) return;
 
+    // Cancel any previous search
+    cancelSearch();
+    const abort = new AbortController();
+    searchAbort = abort;
+
     Logger.debug('[VectorSearch] Search query:', val);
-    if (embeddingRateLimited) {
-        const wait = Math.max(0, Math.ceil((embeddingCooldownUntil - Date.now()) / 1000));
-        Logger.warn(`[VectorSearch] Rate limited, ${wait}s remaining`);
-        setStatus(format('magicSearchCooldown', { wait }), false);
-        return;
-    }
+    searching.value = true;
+    searchPriority = true;
     setStatus(t('magicSearchPreparing'), true);
     allResults.value = [];
     currentPage.value = 1;
 
-    await ensureIndexReady();
-    await ensureApiKeySynced();
-    await ensureTagIndex();
-    const searchMeta = await buildSearchContext(val);
-    Logger.debug('[VectorSearch] Search context:', searchMeta);
-    const searchLabel = searchMeta.usedTranslation ? t('magicSearchSearchingJP') : t('magicSearchSearching');
-    setStatus(searchLabel, true);
-    const queryVector = await getEmbedding(searchMeta.payload, EMBEDDING_TASK_QUERY);
-    if (!queryVector) {
-        setStatus(t('magicSearchEmbedFail'), false);
-        return;
-    }
-
-    const db = await dbPromise;
-    let entries = await db.getAll('vectors');
-    if (entries.length === 0) {
-        Logger.warn('[VectorSearch] Index empty. Starting auto-index.');
-        setStatus(t('magicSearchIndexEmpty'), true);
-        await scheduleAutoIndex();
-        entries = await db.getAll('vectors');
-        if (entries.length === 0) {
-            setStatus(t('magicSearchIndexEmptyCheck'), false);
+    const searchBody = async () => {
+        await ensureIndexReady();
+        if (abort.signal.aborted) return;
+        await ensureModelSynced();
+        if (abort.signal.aborted) return;
+        await ensureTagIndex();
+        if (abort.signal.aborted) return;
+        const searchMeta = await buildSearchContext(val);
+        if (abort.signal.aborted) return;
+        Logger.debug('[VectorSearch] Search context:', searchMeta);
+        const searchLabel = searchMeta.usedTranslation ? t('magicSearchSearchingJP') : t('magicSearchSearching');
+        setStatus(searchLabel, true);
+        const queryVector = await getEmbedding(searchMeta.payload, EMBEDDING_TASK_QUERY);
+        if (abort.signal.aborted) return;
+        if (!queryVector) {
+            setStatus(t('magicSearchEmbedFail'), false);
             return;
         }
+
+        const db = await dbPromise;
+        const entries = await db.getAll('vectors');
+        if (entries.length === 0) {
+            Logger.warn('[VectorSearch] Index empty. Starting auto-index.');
+            setStatus(t('magicSearchIndexEmpty'), false);
+            void scheduleAutoIndex(); // Fire-and-forget: don't block search on bulk indexing
+            return;
+        }
+
+        if (abort.signal.aborted) return;
+
+        const scored = entries.map(entry => ({
+            entry,
+            score: scoreEntry(entry, queryVector, searchMeta)
+        }))
+        .filter(r => r.score >= MIN_SCORE_THRESHOLD)
+        .sort((a, b) => b.score - a.score);
+
+        Logger.debug(`[VectorSearch] Search completed: ${scored.length} relevant results from ${entries.length} indexed entries (threshold: ${MIN_SCORE_THRESHOLD})`, {
+            topResults: scored.slice(0, 5).map(r => ({ id: r.entry.id, title: r.entry.title, score: r.score.toFixed(3) })),
+        });
+
+        allResults.value = scored;
+        currentPage.value = 1;
+        titleTranslations.value = new Map();
+
+        if (scored.length === 0) {
+            setStatus(entries.length > 0 ? t('magicSearchNoRelevantMatches') : t('magicSearchNoMatches'), false);
+        } else {
+            const start = 1;
+            const end = Math.min(RESULT_LIMIT, scored.length);
+            setStatus(format('magicSearchShowing', { start, end, total: scored.length }), false);
+        }
+
+        // Trigger translations for visible results
+        await nextTick();
+        translateVisibleTitles();
+    };
+
+    try {
+        await Promise.race([
+            searchBody(),
+            new Promise<void>((_, reject) => {
+                const timer = setTimeout(() => reject(new Error('Search timeout')), SEARCH_TIMEOUT_MS);
+                abort.signal.addEventListener('abort', () => {
+                    clearTimeout(timer);
+                    reject(new Error('Search cancelled'));
+                });
+            }),
+        ]);
+    } catch (err: any) {
+        if (abort.signal.aborted) {
+            setStatus(t('magicSearchCancelled'), false);
+        } else {
+            Logger.warn('[VectorSearch] Search failed:', err);
+            setStatus(t('magicSearchTimeout'), false);
+        }
+    } finally {
+        searching.value = false;
+        searchPriority = false;
+        if (searchAbort === abort) searchAbort = null;
     }
-
-    const scored = entries.map(entry => ({
-        entry,
-        score: scoreEntry(entry, queryVector, searchMeta)
-    })).sort((a, b) => b.score - a.score);
-
-    Logger.debug(`[VectorSearch] Search completed: ${scored.length} results from ${entries.length} indexed entries`, {
-        topResults: scored.slice(0, 5).map(r => ({ id: r.entry.id, title: r.entry.title, score: r.score.toFixed(3) })),
-    });
-
-    allResults.value = scored;
-    currentPage.value = 1;
-    titleTranslations.value = new Map();
-
-    if (scored.length === 0) {
-        setStatus(t('magicSearchNoMatches'), false);
-    } else {
-        const start = 1;
-        const end = Math.min(RESULT_LIMIT, scored.length);
-        setStatus(format('magicSearchShowing', { start, end, total: scored.length }), false);
-    }
-
-    // Trigger translations for visible results
-    await nextTick();
-    translateVisibleTitles();
 }
 
 // ============================================================================
@@ -1029,6 +931,7 @@ function open(): void {
 }
 
 function close(): void {
+    cancelSearch();
     visible.value = false;
 }
 
@@ -1047,7 +950,6 @@ function onKeydown(e: KeyboardEvent): void {
 // Lifecycle & initialization
 // ============================================================================
 
-checkPersistedRateLimit();
 void ensureIndexReady();
 
 // Watch for route changes to index current work
@@ -1060,10 +962,6 @@ onMounted(() => {
     // Schedule background indexing
     if (!autoSeedTimer) {
         autoSeedTimer = window.setTimeout(async () => {
-            if (!Config.get('vectorSearchApiKey')) {
-                Logger.warn('[VectorSearch] API key missing, background index skipped.');
-                return;
-            }
             Logger.log('[VectorSearch] Auto-indexing in background...');
             await scheduleAutoIndex();
             startIndexWatcher();
@@ -1083,13 +981,6 @@ onUnmounted(() => {
     if (autoSeedTimer) { window.clearTimeout(autoSeedTimer); autoSeedTimer = null; }
     if (autoWatchTimer) { window.clearInterval(autoWatchTimer); autoWatchTimer = null; }
     if (autoBatchTimer) { window.clearTimeout(autoBatchTimer); autoBatchTimer = null; }
-});
-
-// Listen for config changes (API key)
-on('config:change', (payload) => {
-    if (payload?.key === 'vectorSearchApiKey') {
-        void handleApiKeyChange(String(payload.value || ''), String(payload.oldValue || ''));
-    }
 });
 
 // Listen for language changes
@@ -1135,28 +1026,8 @@ defineExpose({ open });
                     </button>
                 </div>
 
-                <!-- API key warning (when missing) -->
-                <div v-if="!hasApiKey" class="text-caption text-negative q-mb-md">
-                    {{ t('magicSearchKeyMissing') }}
-                </div>
-
-                <!-- API key input (when missing) -->
-                <template v-if="!hasApiKey">
-                    <input
-                        v-model="keyInput"
-                        class="q-input q-pa-sm rounded-borders full-width q-mb-xs asmr-vector-key"
-                        :placeholder="t('magicSearchKeyPlaceholder')"
-                        :aria-label="t('magicSearchKeyPlaceholder')"
-                    />
-                    <div class="text-caption text-grey-7 q-mb-md asmr-settings-hint-text">
-                        {{ t('magicSearchKeyHint') }}
-                        <a href="https://jina.ai/" target="_blank" rel="noopener noreferrer"
-                           class="text-primary asmr-settings-link">jina.ai</a>
-                    </div>
-                </template>
-
                 <!-- Search bar -->
-                <div class="row no-wrap items-center q-mb-sm rounded-borders asmr-search-bar">
+                <div class="row no-wrap items-center rounded-borders asmr-search-bar" :class="{ 'asmr-search-bar--busy': searching }">
                     <i class="material-icons q-mx-sm text-grey">search</i>
                     <input
                         ref="inputRef"
@@ -1164,15 +1035,28 @@ defineExpose({ open });
                         class="q-input full-width asmr-vector-input col text-body1"
                         :placeholder="t('magicSearchPlaceholder')"
                         :aria-label="t('magicSearchPlaceholder')"
+                        :disabled="searching"
                         @keydown.enter="doSearch"
                     />
                     <button
+                        v-if="!searching"
                         class="q-btn q-btn-unelevated q-px-lg text-white asmr-vector-go q-mr-xs shadow-1"
                         :title="t('magicSearchGo')"
                         @click="doSearch"
                     >
                         <span class="q-btn__content">{{ t('magicSearchGo') }}</span>
                     </button>
+                    <button
+                        v-else
+                        class="q-btn q-btn-unelevated q-px-lg asmr-vector-cancel q-mr-xs shadow-1"
+                        :title="t('magicSearchCancel')"
+                        @click="cancelSearch"
+                    >
+                        <span class="q-btn__content">{{ t('magicSearchCancel') }}</span>
+                    </button>
+                </div>
+                <div class="asmr-search-progress-track q-mb-sm">
+                    <div v-if="searching" class="asmr-search-progress-bar"></div>
                 </div>
 
                 <!-- Meta line: index count + status -->

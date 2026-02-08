@@ -428,7 +428,8 @@ export class TranslatedTags {
         scopeKey?: string
     ): void {
         if (!translated || translated === original) {
-            const retryDelay = TranslationService.isRateLimited() ? 60000 : 15000;
+            const retryDelay = TranslationService.hasLocalTranslator() ? 2000
+                : TranslationService.isRateLimited() ? 60000 : 15000;
             Logger.debug('[TranslatedTags] Translation unchanged or empty, will retry', {
                 original: original.slice(0, 50),
                 retryInMs: retryDelay,

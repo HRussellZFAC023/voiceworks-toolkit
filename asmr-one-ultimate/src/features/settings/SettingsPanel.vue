@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { ref, reactive, computed, onMounted, onUnmounted } from 'vue';
 import SettingsToggle from './SettingsToggle.vue';
 import SettingsInput from './SettingsInput.vue';
+import SettingsHotkeyInput from './SettingsHotkeyInput.vue';
 import { useI18n } from '../../composables/useI18n';
 import { useConfig } from '../../composables/useConfig';
 import { useEventBus } from '../../composables/useEventBus';
@@ -144,23 +145,33 @@ function downloadWhisperModel() {
 // Translation status
 // ============================================================================
 
-const translationStatus = ref({
-    isLoading: false,
-    progress: 0,
-    message: '',
-    model: '',
-    cached: false,
+interface ModelProgress { isLoading: boolean; progress: number; message: string; }
+const modelProgressMap = reactive(new Map<string, ModelProgress>());
+
+/** Aggregate: is ANY model currently loading? */
+const translationIsLoading = computed(() => {
+    for (const v of modelProgressMap.values()) { if (v.isLoading) return true; }
+    return false;
+});
+/** Aggregate: are ALL models done? */
+const translationAllDone = computed(() => {
+    if (modelProgressMap.size === 0) return TranslationService.hasLocalTranslator();
+    for (const v of modelProgressMap.values()) { if (v.isLoading || v.progress < 100) return false; }
+    return true;
 });
 
 const translationDownloadLabel = computed(() => {
-    const status = translationStatus.value;
-    if (status.isLoading) {
-        const capped = Math.min(99, Math.max(0, status.progress || 0));
+    if (translationIsLoading.value) {
         const baseMessage = t('downloadTranslationModelLoading');
-        const modelLabel = status.model || '';
-        const suffixModel = modelLabel && modelLabel !== 'auto' ? ` - ${modelLabel}` : '';
-        return `${baseMessage}${suffixModel}${capped > 0 ? ` (${Math.round(capped)}%)` : ''}`;
-    } else if (status.progress === 100 || TranslationService.hasLocalTranslator()) {
+        const parts: string[] = [];
+        for (const [model, status] of modelProgressMap) {
+            if (!status.isLoading) continue;
+            const short = model.replace('Xenova/', '').replace('opus-mt-', '');
+            const capped = Math.min(99, Math.max(0, status.progress || 0));
+            parts.push(capped > 0 ? `${short} (${Math.round(capped)}%)` : short);
+        }
+        return parts.length > 0 ? `${baseMessage} - ${parts.join(', ')}` : baseMessage;
+    } else if (translationAllDone.value) {
         const loadedModels = TranslationService.getLoadedModels();
         if (loadedModels.length > 0) {
             const modelNames = loadedModels
@@ -171,25 +182,26 @@ const translationDownloadLabel = computed(() => {
         }
         return t('downloadModelReady') || 'Ready';
     }
-    return status.message || t('autoModelSelection');
+    // Fallback: show first message if available
+    for (const v of modelProgressMap.values()) { if (v.message) return v.message; }
+    return t('autoModelSelection');
 });
 
 const translationDownloadIcon = computed(() => {
-    const status = translationStatus.value;
-    if (status.isLoading) return 'hourglass_empty';
-    if (status.progress === 100 || TranslationService.hasLocalTranslator()) return 'check';
+    if (translationIsLoading.value) return 'hourglass_empty';
+    if (translationAllDone.value) return 'check';
     return 'download';
 });
 
-const translationDownloadDisabled = computed(() => translationStatus.value.isLoading);
+const translationDownloadDisabled = computed(() => translationIsLoading.value);
 
 function downloadTranslationModel() {
-    translationStatus.value = { isLoading: true, progress: 0, message: t('downloadModelSub'), model: 'auto', cached: false };
+    modelProgressMap.set('auto', { isLoading: true, progress: 0, message: t('downloadModelSub') });
     TranslationService.warmupLocalModel().then(() => {
-        translationStatus.value = { isLoading: false, progress: 100, message: '', model: '', cached: false };
+        modelProgressMap.delete('auto');
     }).catch((e) => {
         Logger.warn('[SettingsPanel] Failed to warmup translation model:', e);
-        translationStatus.value = { isLoading: false, progress: 0, message: e.message || 'Error', model: '', cached: false };
+        modelProgressMap.set('auto', { isLoading: false, progress: 0, message: e.message || 'Error' });
     });
 }
 
@@ -223,24 +235,15 @@ async function factoryReset() {
 
 function onToggleChange(key: ConfigKey, newVal: boolean) {
     if (key === 'preferLocalTranslation' && newVal) {
-        const hasTranslator = TranslationService.hasLocalTranslator();
-        translationStatus.value = hasTranslator
-            ? { isLoading: false, progress: 100, message: '', model: 'auto', cached: true }
-            : { isLoading: true, progress: 0, message: t('downloadModelSub'), model: 'auto', cached: false };
-        if (!hasTranslator) {
+        if (!TranslationService.hasLocalTranslator()) {
+            modelProgressMap.set('auto', { isLoading: true, progress: 0, message: t('downloadModelSub') });
             TranslationService.ensureLocalModelReady().catch((e) => {
                 Logger.warn('[SettingsPanel] Failed to ensure translation model ready:', e);
             });
         }
     } else if (key === 'preferLocalTranslation' && !newVal) {
         TranslationService.disableLocalTranslation('user-disabled');
-        translationStatus.value = {
-            isLoading: false,
-            progress: 0,
-            message: t('autoModelSelection'),
-            model: 'auto',
-            cached: false,
-        };
+        modelProgressMap.clear();
     }
 }
 
@@ -294,24 +297,19 @@ on('whisper:fallback', (payload) => {
 });
 
 on('translation:progress', (payload) => {
+    const model = payload?.model || 'unknown';
     if (payload?.stage === 'ready') {
-        translationStatus.value = {
-            isLoading: false,
-            progress: 100,
-            message: '',
-            model: payload?.model || translationStatus.value.model || '',
-            cached: false,
-        };
+        modelProgressMap.set(model, { isLoading: false, progress: 100, message: '' });
+        modelProgressMap.delete('auto'); // clear the placeholder
         return;
     }
-    if (translationStatus.value.cached && payload?.stage === 'model') return;
-    translationStatus.value = {
+    const existing = modelProgressMap.get(model);
+    if (existing && !existing.isLoading && existing.progress === 100 && payload?.stage === 'model') return; // already done
+    modelProgressMap.set(model, {
         isLoading: payload?.stage === 'model',
         progress: payload?.percent ?? 0,
         message: payload?.message || '',
-        model: payload?.model || translationStatus.value.model || '',
-        cached: translationStatus.value.cached,
-    };
+    });
 });
 
 // ============================================================================
@@ -327,15 +325,13 @@ onMounted(() => {
 
     // Auto-load translation models if local translation is enabled
     if (preferLocalTranslation.value !== false) {
-        if (TranslationService.hasLocalTranslator()) {
-            translationStatus.value = { isLoading: false, progress: 100, message: '', model: '', cached: false };
-        } else {
-            translationStatus.value = { isLoading: true, progress: 0, message: t('downloadModelSub'), model: 'auto', cached: false };
+        if (!TranslationService.hasLocalTranslator()) {
+            modelProgressMap.set('auto', { isLoading: true, progress: 0, message: t('downloadModelSub') });
             TranslationService.ensureLocalModelReady().then(() => {
-                translationStatus.value = { isLoading: false, progress: 100, message: '', model: '', cached: false };
+                modelProgressMap.delete('auto');
             }).catch((e) => {
                 Logger.warn('[SettingsPanel] Failed to auto-load translation models:', e);
-                translationStatus.value = { isLoading: false, progress: 0, message: e.message || 'Failed', model: '', cached: false };
+                modelProgressMap.set('auto', { isLoading: false, progress: 0, message: e.message || 'Failed' });
             });
         }
     }
@@ -380,7 +376,6 @@ const credits = [
     { name: 'Tampermonkey', url: 'https://www.tampermonkey.net', descKey: 'creditsTampermonkey' },
     // AI & ML Models
     { name: 'OpenAI Whisper', url: 'https://github.com/openai/whisper', descKey: 'creditsWhisper' },
-    { name: 'Meta NLLB-200', url: 'https://ai.meta.com/research/no-language-left-behind/', descKey: 'creditsNLLB' },
     { name: 'Helsinki-NLP / Opus-MT', url: 'https://github.com/Helsinki-NLP/Opus-MT', descKey: 'creditsOpusMT' },
     { name: 'Xenova / onnx-community', url: 'https://huggingface.co/onnx-community', descKey: 'creditsXenova' },
     { name: 'Jina AI', url: 'https://jina.ai', descKey: 'creditsJina' },
@@ -430,7 +425,15 @@ const credits = [
         <div id="asmr-feature-settings-section" class="asmr-settings-section rounded-borders q-list q-list--bordered q-list--dark bg-black" role="group" aria-labelledby="asmr-feature-settings-section-header">
             <SettingsToggle config-key="enablePlaylistDiscovery" :label="t('enablePlaylistDiscovery')" :sublabel="t('enablePlaylistDiscoverySub')" icon="manage_search" />
             <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <SettingsToggle config-key="enableContinueListening" :label="t('enableContinueListening')" :sublabel="t('enableContinueListeningSub')" icon="headset" />
+            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <SettingsToggle config-key="enableVisitCounter" :label="t('enableVisitCounter')" :sublabel="t('enableVisitCounterSub')" icon="visibility" />
+            <hr class="q-separator q-separator--horizontal q-separator--dark">
             <SettingsToggle config-key="enableLearnerMode" :label="t('enableLearnerMode')" :sublabel="t('enableLearnerModeSub')" icon="school" />
+            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <SettingsToggle config-key="karaokeMode" :label="t('karaokeMode')" :sublabel="t('karaokeModeSub')" icon="music_note" />
+            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <SettingsToggle config-key="segmentMode" :label="t('segmentMode')" :sublabel="t('segmentModeSub')" icon="segment" />
             <hr class="q-separator q-separator--horizontal q-separator--dark">
             <SettingsToggle config-key="enableAdvancedSearch" :label="t('enableAdvancedSearch')" :sublabel="t('enableAdvancedSearchSub')" icon="search" />
             <hr class="q-separator q-separator--horizontal q-separator--dark">
@@ -476,11 +479,63 @@ const credits = [
             <hr class="q-separator q-separator--horizontal q-separator--dark">
             <SettingsToggle config-key="enableJoiTool" :label="t('enableJoiTool')" :sublabel="t('enableJoiToolSub')" icon="casino" />
             <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <SettingsToggle config-key="alwaysShowJoi" :label="t('alwaysShowJoi')" :sublabel="t('alwaysShowJoiSub')" icon="casino" />
+            <hr class="q-separator q-separator--horizontal q-separator--dark">
             <SettingsToggle config-key="enableVisualizer" :label="t('enableVisualizer')" :sublabel="t('enableVisualizerSub')" icon="graphic_eq" />
+            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <SettingsToggle config-key="alwaysShowVisualizer" :label="t('alwaysShowVisualizer')" :sublabel="t('alwaysShowVisualizerSub')" icon="graphic_eq" />
             <hr class="q-separator q-separator--horizontal q-separator--dark">
             <SettingsToggle config-key="galleryAutoSlideshow" :label="t('galleryAutoSlideshow')" :sublabel="t('galleryAutoSlideshowSub')" icon="slideshow" />
             <hr class="q-separator q-separator--horizontal q-separator--dark">
             <SettingsInput config-key="galleryAutoSlideshowInterval" :label="t('galleryAutoSlideshowInterval')" :sublabel="t('galleryAutoSlideshowIntervalSub')" placeholder="6" icon="timer" />
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- Keyboard Shortcuts                                           -->
+        <!-- ============================================================ -->
+        <span class="text-weight-medium text-center flex q-my-md asmr-settings-header" id="asmr-hotkey-settings-section-header">{{ t('keyboardShortcuts') }}</span>
+        <div id="asmr-hotkey-settings-section" class="asmr-settings-section rounded-borders q-list q-list--bordered q-list--dark bg-black" role="group" aria-labelledby="asmr-hotkey-settings-section-header">
+            <SettingsHotkeyInput config-key="hotkeyPlayPause" :label="t('hotkeyPlayPause')" placeholder="Space" icon="play_arrow" />
+            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <SettingsHotkeyInput config-key="hotkeyMute" :label="t('hotkeyMute')" placeholder="m" icon="volume_off" />
+            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <SettingsHotkeyInput config-key="hotkeyFullscreen" :label="t('hotkeyFullscreen')" placeholder="f" icon="fullscreen" />
+            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <SettingsHotkeyInput config-key="hotkeySeekBack" :label="t('hotkeySeekBack')" placeholder="←" icon="fast_rewind" />
+            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <SettingsHotkeyInput config-key="hotkeySeekForward" :label="t('hotkeySeekForward')" placeholder="→" icon="fast_forward" />
+            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <SettingsHotkeyInput config-key="hotkeySeekBackLong" :label="t('hotkeySeekBackLong')" placeholder="j" icon="fast_rewind" />
+            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <SettingsHotkeyInput config-key="hotkeySeekForwardLong" :label="t('hotkeySeekForwardLong')" placeholder="l" icon="fast_forward" />
+            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <SettingsHotkeyInput config-key="hotkeyVolumeUp" :label="t('hotkeyVolumeUp')" placeholder="↑" icon="volume_up" />
+            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <SettingsHotkeyInput config-key="hotkeyVolumeDown" :label="t('hotkeyVolumeDown')" placeholder="↓" icon="volume_down" />
+            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <SettingsHotkeyInput config-key="hotkeyPrevLine" :label="t('hotkeyPrevLine')" placeholder="[" icon="skip_previous" />
+            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <SettingsHotkeyInput config-key="hotkeyNextLine" :label="t('hotkeyNextLine')" placeholder="]" icon="skip_next" />
+            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <SettingsHotkeyInput config-key="hotkeyPrevTrack" :label="t('hotkeyPrevTrack')" placeholder="p" icon="skip_previous" />
+            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <SettingsHotkeyInput config-key="hotkeyNextTrack" :label="t('hotkeyNextTrack')" placeholder="n" icon="skip_next" />
+            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <SettingsHotkeyInput config-key="hotkeySpeedUp" :label="t('hotkeySpeedUp')" placeholder=">" icon="speed" />
+            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <SettingsHotkeyInput config-key="hotkeySpeedDown" :label="t('hotkeySpeedDown')" placeholder="<" icon="speed" />
+            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <SettingsHotkeyInput config-key="hotkeySpeedReset" :label="t('hotkeySpeedReset')" placeholder="=" icon="speed" />
+            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <SettingsHotkeyInput config-key="hotkeyToggleBlur" :label="t('hotkeyToggleBlur')" placeholder="b" icon="blur_on" />
+            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <SettingsHotkeyInput config-key="hotkeyToggleJP" :label="t('hotkeyToggleJP')" placeholder="J" icon="translate" />
+            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <SettingsHotkeyInput config-key="hotkeyGalleryPrev" :label="t('hotkeyGalleryPrev')" placeholder="←" icon="navigate_before" />
+            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <SettingsHotkeyInput config-key="hotkeyGalleryNext" :label="t('hotkeyGalleryNext')" placeholder="→" icon="navigate_next" />
+            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <SettingsHotkeyInput config-key="hotkeyGalleryExclude" :label="t('hotkeyGalleryExclude')" placeholder="Del" icon="visibility_off" />
         </div>
 
         <!-- ============================================================ -->
@@ -502,17 +557,7 @@ const credits = [
         <!-- ============================================================ -->
         <!-- Magic Search (Vector Search)                                 -->
         <!-- ============================================================ -->
-        <template v-if="sectionVisibility.magic">
-            <span class="text-weight-medium text-center flex q-my-md asmr-settings-header" id="asmr-magic-settings-section-header">{{ t('magicSearch') }}</span>
-            <div id="asmr-magic-settings-section" class="asmr-settings-section rounded-borders q-list q-list--bordered q-list--dark bg-black" role="group" aria-labelledby="asmr-magic-settings-section-header">
-                <SettingsInput config-key="vectorSearchApiKey" :label="t('magicSearchKey')" :sublabel="t('magicSearchKeySub')" :placeholder="t('magicSearchKeyPlaceholder')" icon="vpn_key" />
-                <div class="q-px-md q-pb-md asmr-settings-hint">
-                    <div class="text-caption text-grey-7 asmr-settings-hint-text">
-                        {{ t('magicSearchKeyHint') }} <a href="https://jina.ai/" target="_blank" rel="noopener noreferrer" class="text-primary asmr-settings-link">jina.ai</a>
-                    </div>
-                </div>
-            </div>
-        </template>
+        <!-- Semantic Search uses local embeddings (multilingual-e5-small) — no API key needed -->
 
         <!-- ============================================================ -->
         <!-- Whisper Settings                                             -->
@@ -521,7 +566,7 @@ const credits = [
             <span class="text-weight-medium text-center flex q-my-md asmr-settings-header" id="asmr-whisper-settings-section-header">{{ t('whisperSettings') }}</span>
             <div id="asmr-whisper-settings-section" class="asmr-settings-section rounded-borders q-list q-list--bordered q-list--dark bg-black" role="group" aria-labelledby="asmr-whisper-settings-section-header">
                 <!-- Download Whisper Model -->
-                <div role="listitem" class="q-py-sm q-item q-item-type row no-wrap">
+                <div role="listitem" class="q-py-sm q-item q-item-type row no-wrap q-item--dark">
                     <div class="q-item__section column q-item__section--avatar q-item__section--side justify-center">
                         <i class="q-icon notranslate material-icons asmr-settings-icon" aria-hidden="true" role="presentation">cloud_download</i>
                     </div>
@@ -565,11 +610,10 @@ const credits = [
             <span class="text-weight-medium text-center flex q-my-md asmr-settings-header" id="asmr-translation-settings-section-header">{{ t('translationSettings') }}</span>
             <div id="asmr-translation-settings-section" class="asmr-settings-section rounded-borders q-list q-list--bordered q-list--dark bg-black" role="group" aria-labelledby="asmr-translation-settings-section-header">
                 <SettingsToggle config-key="preferLocalTranslation" :label="t('preferLocalTranslation')" :sublabel="t('preferLocalTranslationSub')" icon="offline_bolt" @change="onToggleChange" />
-                <SettingsToggle config-key="distributedTranslation" :label="t('distributedTranslation')" :sublabel="t('distributedTranslationSub')" icon="memory" @change="onToggleChange" />
                 <hr class="q-separator q-separator--horizontal q-separator--dark">
 
                 <!-- Download Translation Model -->
-                <div role="listitem" class="q-py-sm q-item q-item-type row no-wrap">
+                <div role="listitem" class="q-py-sm q-item q-item-type row no-wrap q-item--dark">
                     <div class="q-item__section column q-item__section--avatar q-item__section--side justify-center">
                         <i class="q-icon notranslate material-icons asmr-settings-icon" aria-hidden="true" role="presentation">cloud_download</i>
                     </div>
@@ -598,7 +642,7 @@ const credits = [
                 <hr class="q-separator q-separator--horizontal q-separator--dark">
 
                 <!-- Clear Translation Cache -->
-                <div role="listitem" class="q-py-sm q-item q-item-type row no-wrap">
+                <div role="listitem" class="q-py-sm q-item q-item-type row no-wrap q-item--dark">
                     <div class="q-item__section column q-item__section--avatar q-item__section--side justify-center">
                         <i class="q-icon notranslate material-icons asmr-settings-icon" aria-hidden="true" role="presentation">delete_sweep</i>
                     </div>
@@ -643,7 +687,7 @@ const credits = [
                 <hr class="q-separator q-separator--horizontal q-separator--dark">
                 <SettingsToggle config-key="autoProgressRadioGuard" :label="t('autoProgressRadioGuard')" :sublabel="t('autoProgressRadioGuardDesc')" icon="radio" />
                 <hr class="q-separator q-separator--horizontal q-separator--dark">
-                <SettingsInput config-key="autoProgressRadioSkipThreshold" :label="t('autoProgressRadioSkipThreshold')" :sublabel="t('autoProgressRadioSkipThresholdDesc')" placeholder="3" icon="skip_next" />
+                <SettingsInput config-key="autoProgressRadioSkipThreshold" :label="t('autoProgressRadioSkipThreshold')" :sublabel="t('autoProgressRadioSkipThresholdDesc')" placeholder="3" icon="visibility_off" />
             </div>
         </template>
 
@@ -654,7 +698,7 @@ const credits = [
             <span class="text-weight-medium text-center flex q-my-md asmr-settings-header" id="asmr-storage-settings-section-header">{{ t('storageData') }}</span>
             <div id="asmr-storage-settings-section" class="asmr-settings-section rounded-borders q-list q-list--bordered q-list--dark bg-black" role="group" aria-labelledby="asmr-storage-settings-section-header">
                 <!-- Backup -->
-                <div role="listitem" class="q-py-sm q-item row no-wrap">
+                <div role="listitem" class="q-py-sm q-item q-item-type row no-wrap q-item--dark">
                     <div class="q-item__section column q-item__section--avatar q-item__section--side justify-center">
                         <i class="q-icon notranslate material-icons asmr-settings-icon" aria-hidden="true">save_alt</i>
                     </div>
@@ -671,7 +715,7 @@ const credits = [
                 <hr class="q-separator q-separator--horizontal q-separator--dark">
 
                 <!-- Restore -->
-                <div role="listitem" class="q-py-sm q-item row no-wrap">
+                <div role="listitem" class="q-py-sm q-item q-item-type row no-wrap q-item--dark">
                     <div class="q-item__section column q-item__section--avatar q-item__section--side justify-center">
                         <i class="q-icon notranslate material-icons asmr-settings-icon" aria-hidden="true">upload</i>
                     </div>
@@ -688,7 +732,7 @@ const credits = [
                 <hr class="q-separator q-separator--horizontal q-separator--dark">
 
                 <!-- Factory Reset -->
-                <div role="listitem" class="q-py-sm q-item row no-wrap">
+                <div role="listitem" class="q-py-sm q-item q-item-type row no-wrap q-item--dark">
                     <div class="q-item__section column q-item__section--avatar q-item__section--side justify-center">
                         <i class="q-icon notranslate material-icons asmr-settings-icon" aria-hidden="true">delete_forever</i>
                     </div>
@@ -738,7 +782,7 @@ const credits = [
         <!-- ============================================================ -->
         <span class="text-weight-medium text-center flex q-my-md asmr-settings-header" id="asmr-about-section-header">{{ t('aboutHeader') }}</span>
         <div id="asmr-about-section" class="asmr-settings-section rounded-borders q-list q-list--bordered q-list--dark bg-black" role="group" aria-labelledby="asmr-about-section-header">
-            <div role="listitem" class="q-py-sm q-item q-item-type row no-wrap">
+            <div role="listitem" class="q-py-sm q-item q-item-type row no-wrap q-item--dark">
                 <div class="q-item__section column q-item__section--avatar q-item__section--side justify-center">
                     <i class="q-icon notranslate material-icons asmr-settings-icon" aria-hidden="true" role="presentation">menu_book</i>
                 </div>
@@ -755,7 +799,7 @@ const credits = [
                 </div>
             </div>
             <hr class="q-separator q-separator--horizontal q-separator--dark">
-            <div role="listitem" class="q-py-sm q-item q-item-type row no-wrap">
+            <div role="listitem" class="q-py-sm q-item q-item-type row no-wrap q-item--dark">
                 <div class="q-item__section column q-item__section--avatar q-item__section--side justify-center">
                     <i class="q-icon notranslate material-icons asmr-settings-icon" aria-hidden="true" role="presentation">bug_report</i>
                 </div>
@@ -772,7 +816,7 @@ const credits = [
                 </div>
             </div>
             <hr class="q-separator q-separator--horizontal q-separator--dark">
-            <div role="listitem" class="q-py-sm q-item q-item-type row no-wrap">
+            <div role="listitem" class="q-py-sm q-item q-item-type row no-wrap q-item--dark">
                 <div class="q-item__section column q-item__section--avatar q-item__section--side justify-center">
                     <i class="q-icon notranslate material-icons asmr-settings-icon" aria-hidden="true" role="presentation" style="color: #7289da">forum</i>
                 </div>

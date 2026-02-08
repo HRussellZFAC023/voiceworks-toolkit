@@ -29,10 +29,11 @@ const { t } = useI18n();
 // Constants
 // ---------------------------------------------------------------------------
 
-const BAR_COUNT = 40;
+const HALF_BARS = 24;          // bars per side (mirrored = 48 total)
 const BAR_GAP = 2;
 const BAR_RADIUS = 2;
 const POSITION_POLL_MS = 500;
+const SMOOTHING = 0.35;        // lerp factor toward new value (lower = smoother)
 
 // ---------------------------------------------------------------------------
 // Reactive state
@@ -58,17 +59,21 @@ let analyserAvailable = false;
 let animFrameId: number | null = null;
 let positionPollId: number | null = null;
 let audioCleanups: (() => void)[] = [];
+let smoothBars = new Float32Array(HALF_BARS);  // smoothed bar heights [0..1]
+let phase = 0;                                  // slow phase for idle sway
 
 // ---------------------------------------------------------------------------
 // Computed
 // ---------------------------------------------------------------------------
 
-const isPlayerMinimized = computed(() =>
-    !!AppStore.state?.player?.hide || !!AppStore.player?.hide,
-);
+const isPlayerMinimized = ref(false);
 
 const showExpanded = computed(() => isActive.value && !isPlayerMinimized.value);
 const showCollapsed = computed(() => isActive.value && isPlayerMinimized.value);
+
+function refreshMinimizedState() {
+    isPlayerMinimized.value = !!AppStore.state?.player?.hide || !!AppStore.player?.hide;
+}
 
 // ---------------------------------------------------------------------------
 // Toggle
@@ -85,6 +90,7 @@ function toggle() {
 function activate() {
     isActive.value = true;
     isPaused.value = false;
+    refreshMinimizedState();
     connectAudioAnalyser();
     syncPauseState();
     startRendering();
@@ -163,18 +169,52 @@ function stopRendering() {
     }
 }
 
+/**
+ * Sample frequency data into HALF_BARS buckets using logarithmic scaling.
+ * Low frequencies get fewer bins (they're spaced wider in log-space),
+ * high frequencies get more — this balances the visual energy across bars.
+ */
+function sampleLogBuckets(data: Uint8Array): Float32Array {
+    const n = data.length;
+    const out = new Float32Array(HALF_BARS);
+    // Map each bar to a logarithmically-spaced frequency range
+    for (let i = 0; i < HALF_BARS; i++) {
+        const loFrac = i / HALF_BARS;
+        const hiFrac = (i + 1) / HALF_BARS;
+        // Exponential mapping: bin = n^(frac)  scaled to [1..n]
+        const lo = Math.floor(Math.pow(n, loFrac));
+        const hi = Math.max(lo + 1, Math.floor(Math.pow(n, hiFrac)));
+        let sum = 0;
+        let count = 0;
+        for (let j = lo; j < hi && j < n; j++) {
+            sum += data[j];
+            count++;
+        }
+        out[i] = count > 0 ? (sum / count) / 255 : 0;
+    }
+    return out;
+}
+
 function renderFrame() {
     if (!analyser || !analyserAvailable) return;
 
     const data = new Uint8Array(analyser.frequencyBinCount);
     analyser.getByteFrequencyData(data);
 
+    // Log-scale into HALF_BARS buckets
+    const raw = sampleLogBuckets(data);
+
+    // Smooth toward new values + advance idle sway phase
+    phase += 0.015;
+    for (let i = 0; i < HALF_BARS; i++) {
+        smoothBars[i] += (raw[i] - smoothBars[i]) * SMOOTHING;
+    }
+
     const canvases: (HTMLCanvasElement | null)[] = [expandedCanvas.value, collapsedCanvas.value];
     for (const canvas of canvases) {
         if (!canvas || !canvas.isConnected) continue;
-        // Skip if parent is hidden
-        const parent = canvas.closest('.asmr-viz-bar') as HTMLElement | null;
-        if (parent && (parent.style.display === 'none' || parent.classList.contains('hidden'))) continue;
+        const parentEl = canvas.closest('.asmr-viz-bar') as HTMLElement | null;
+        if (parentEl && (parentEl.style.display === 'none' || parentEl.classList.contains('hidden'))) continue;
 
         const ctx = canvas.getContext('2d');
         if (!ctx) continue;
@@ -192,51 +232,72 @@ function renderFrame() {
 
         ctx.clearRect(0, 0, w, h);
 
-        const step = Math.floor(data.length / BAR_COUNT);
-        const barWidth = Math.max(1, (w - BAR_GAP * (BAR_COUNT - 1)) / BAR_COUNT);
-        const accentRGB = getAccentColor(canvas);
+        const totalBars = HALF_BARS * 2;
+        const barWidth = Math.max(1, (w - BAR_GAP * (totalBars - 1)) / totalBars);
+        const [r1, g1, b1] = getAccentRGB(canvas);    // primary accent
+        const [r2, g2, b2] = [r1 + 60, g1 - 20, b1];  // shifted hue for gradient
 
-        for (let i = 0; i < BAR_COUNT; i++) {
-            let sum = 0;
-            for (let j = 0; j < step; j++) {
-                sum += data[i * step + j] || 0;
-            }
-            const avg = sum / step;
-            const normalised = avg / 255;
-            const barHeight = Math.max(2 * dpr, normalised * h * 0.9);
+        // Soft glow behind bars
+        ctx.shadowColor = `rgba(${r1}, ${g1}, ${b1}, 0.35)`;
+        ctx.shadowBlur = 8 * dpr;
 
-            const x = i * (barWidth + BAR_GAP);
-            const y = h - barHeight;
+        // Draw mirrored: center outward.  Index 0 = center, HALF_BARS-1 = edge.
+        for (let i = 0; i < HALF_BARS; i++) {
+            // Idle sway: gentle sine wave that ripples across bars
+            const sway = 0.03 * Math.sin(phase + i * 0.25);
+            const val = Math.min(1, Math.max(0, smoothBars[i] + sway));
+            const barH = Math.max(2 * dpr, val * h * 0.92);
 
-            const alpha = 0.4 + normalised * 0.6;
-            ctx.fillStyle = `rgba(${accentRGB}, ${alpha})`;
+            // Lerp colour from accent → shifted based on distance from center
+            const t = i / (HALF_BARS - 1);
+            const cr = Math.round(r1 + (r2 - r1) * t);
+            const cg = Math.round(g1 + (g2 - g1) * t);
+            const cb = Math.round(b1 + (b2 - b1) * t);
+            const alpha = 0.45 + val * 0.55;
 
-            const r = Math.min(BAR_RADIUS * dpr, barWidth / 2, barHeight / 2);
-            ctx.beginPath();
-            ctx.moveTo(x, y + barHeight);
-            ctx.lineTo(x, y + r);
-            ctx.quadraticCurveTo(x, y, x + r, y);
-            ctx.lineTo(x + barWidth - r, y);
-            ctx.quadraticCurveTo(x + barWidth, y, x + barWidth, y + r);
-            ctx.lineTo(x + barWidth, y + barHeight);
-            ctx.closePath();
-            ctx.fill();
+            ctx.fillStyle = `rgba(${cr}, ${cg}, ${cb}, ${alpha})`;
+
+            // Right half: center → right
+            const xR = (HALF_BARS + i) * (barWidth + BAR_GAP);
+            drawRoundedBar(ctx, xR, h - barH, barWidth, barH, BAR_RADIUS * dpr);
+
+            // Left half: center → left  (mirror)
+            const xL = (HALF_BARS - 1 - i) * (barWidth + BAR_GAP);
+            drawRoundedBar(ctx, xL, h - barH, barWidth, barH, BAR_RADIUS * dpr);
         }
+
+        // Reset shadow so it doesn't leak
+        ctx.shadowColor = 'transparent';
+        ctx.shadowBlur = 0;
     }
 }
 
-let cachedAccentRGB: string | null = null;
-function getAccentColor(el: HTMLElement): string {
+function drawRoundedBar(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, radius: number) {
+    const r = Math.min(radius, w / 2, h / 2);
+    ctx.beginPath();
+    ctx.moveTo(x, y + h);
+    ctx.lineTo(x, y + r);
+    ctx.quadraticCurveTo(x, y, x + r, y);
+    ctx.lineTo(x + w - r, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+    ctx.lineTo(x + w, y + h);
+    ctx.closePath();
+    ctx.fill();
+}
+
+let cachedAccentRGB: [number, number, number] | null = null;
+function getAccentRGB(el: HTMLElement): [number, number, number] {
     if (cachedAccentRGB) return cachedAccentRGB;
     const accent = getComputedStyle(el).getPropertyValue('--asmr-accent').trim();
     if (accent.startsWith('#') && accent.length >= 7) {
-        const r = parseInt(accent.slice(1, 3), 16);
-        const g = parseInt(accent.slice(3, 5), 16);
-        const b = parseInt(accent.slice(5, 7), 16);
-        cachedAccentRGB = `${r}, ${g}, ${b}`;
+        cachedAccentRGB = [
+            parseInt(accent.slice(1, 3), 16),
+            parseInt(accent.slice(3, 5), 16),
+            parseInt(accent.slice(5, 7), 16),
+        ];
         return cachedAccentRGB;
     }
-    return '124, 77, 255';
+    return [124, 77, 255];
 }
 
 // ---------------------------------------------------------------------------
@@ -287,6 +348,8 @@ function stopPositionPolling() {
 }
 
 function updatePosition() {
+    refreshMinimizedState();
+
     const bar = collapsedBar.value;
     if (!bar?.isConnected || !isActive.value) return;
 
@@ -332,6 +395,15 @@ on('track:change', () => {
         analyser = null;
         connectAudioAnalyser();
         syncPauseState();
+    } else if (AppStore.getConfig('alwaysShowVisualizer')) {
+        activate();
+    }
+});
+
+on('config:change', ({ key, value }) => {
+    if (key === 'alwaysShowVisualizer') {
+        if (value && !isActive.value) activate();
+        else if (!value && isActive.value) deactivate();
     }
 });
 
@@ -341,6 +413,9 @@ on('track:change', () => {
 
 onMounted(() => {
     Logger.debug('[Visualizer] Mounted');
+    if (AppStore.getConfig('alwaysShowVisualizer') && !isActive.value) {
+        activate();
+    }
 });
 
 onUnmounted(() => {

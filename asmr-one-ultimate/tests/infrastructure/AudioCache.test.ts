@@ -129,16 +129,16 @@ describe('AudioCache', () => {
             expect(URL.revokeObjectURL).not.toHaveBeenCalled();
         });
 
-        it('should evict oldest entries when over MAX_OBJECT_URLS (50)', () => {
-            // Fill up to 50
-            for (let i = 0; i < 50; i++) {
+        it('should evict oldest entries when over MAX_OBJECT_URLS (5)', () => {
+            // Fill up to 5
+            for (let i = 0; i < 5; i++) {
                 (AudioCache as any).trackObjectUrl(`src-${i}`, `blob:${i}`);
             }
-            expect(AudioCache.objectUrls.size).toBe(50);
+            expect(AudioCache.objectUrls.size).toBe(5);
 
-            // Adding 51st should evict oldest
+            // Adding 6th should evict oldest
             (AudioCache as any).trackObjectUrl('src-new', 'blob:new');
-            expect(AudioCache.objectUrls.size).toBe(50);
+            expect(AudioCache.objectUrls.size).toBe(5);
             expect(AudioCache.objectUrls.has('src-0')).toBe(false); // oldest evicted
             expect(AudioCache.objectUrls.has('src-new')).toBe(true);
             expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:0');

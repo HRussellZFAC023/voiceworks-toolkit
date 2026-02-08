@@ -39,23 +39,36 @@ const NUMBER_TO_STATUS: Record<number, ProgressStatus> = {
 
 /** GM storage key for persisting play counts across sessions */
 const PLAY_COUNTS_KEY = 'autoProgressPlayCounts';
+/** GM storage key for visits-without-listening counter */
+const VISITS_NO_PLAY_KEY = 'autoProgress:visitsNoPlay';
 
 export class AutoProgress {
     private bridge: KikoeruBridge;
     private listenedTracks: Set<string> = new Set();
     private pollId: number | null = null;
-    private lastUpdatedKey: string | null = null;
+    private sentUpdates: Set<string> = new Set();
 
     /** Cached flattened audio tracks for isLastTrackInWork (invalidated on work change) */
     private cachedFlatTracks: any[] | null = null;
     private cachedFlatTracksWorkId: string | null = null;
 
-    /** Per-work radio skip counts (session-only) */
-    private radioSkips: Map<string, number> = new Map();
+    /** In-memory cache for play counts (avoids JSON.parse from GM storage on every read) */
+    private playCountsCache: Record<string, number> | null = null;
+
+    /** Persistent visits-without-listening counter (replaces in-memory radio skip counter) */
+    private visitsNoPlay: Record<string, number> = {};
+
+    /** Work ID the user is currently visiting (via route, not audio player) */
+    private currentVisitWorkId: string | null = null;
+    /** Whether the user has played audio during the current visit */
+    private currentVisitPlayed = false;
 
     /** Track the work being listened to for partial-listen detection */
     private currentListeningWorkId: string | null = null;
-    private currentListeningMaxProgress = 0;
+    /** Tracks played >50% per workId — used for per-work partial-listen detection */
+    private playedTracksInWork: Map<string, Set<string>> = new Map();
+    /** Whether the current track has >5s playback (distinguishes "actually started" from "just browsed") */
+    private currentTrackStarted = false;
 
     /** EventBus cleanup functions */
     private cleanups: (() => void)[] = [];
@@ -68,6 +81,7 @@ export class AutoProgress {
 
     constructor() {
         this.bridge = KikoeruBridge.getInstance();
+        this.loadVisitsNoPlay();
     }
 
     public enable(): void {
@@ -98,6 +112,7 @@ export class AutoProgress {
         }
         for (const cleanup of this.cleanups) cleanup();
         this.cleanups = [];
+        this.sentUpdates.clear();
         CentralObserver.unregister('auto-progress-checkmarks');
     }
 
@@ -201,18 +216,26 @@ export class AutoProgress {
     // =========================================================================
 
     private handleRouteChange(route: any): void {
-        if (!Config.get('autoProgress') || !Config.get('autoProgressMarked')) return;
-
         const path: string = route?.path || '';
         const workIdMatch = path.match(/\/work\/(?:RJ)?(\d+)/i);
-        if (!workIdMatch) return;
+        const newWorkId = workIdMatch?.[1] || null;
 
-        const workId = workIdMatch[1];
-        const currentStatus = this.getCurrentStatus(workId);
+        // Check if leaving a work page without having played anything
+        if (this.currentVisitWorkId && this.currentVisitWorkId !== newWorkId && !this.currentVisitPlayed) {
+            this.recordVisitWithoutPlay(this.currentVisitWorkId);
+        }
 
-        // Only mark if the work has no status at all
-        if (currentStatus === null || currentStatus === 0) {
-            this.setProgress(workId, 'marked');
+        // Update current visit tracking
+        this.currentVisitWorkId = newWorkId;
+        this.currentVisitPlayed = false;
+
+        // Mark on visit (existing logic)
+        if (!Config.get('autoProgress') || !Config.get('autoProgressMarked')) return;
+        if (newWorkId) {
+            const currentStatus = this.getCurrentStatus(newWorkId);
+            if (currentStatus === null || currentStatus === 0) {
+                this.setProgress(newWorkId, 'marked');
+            }
         }
     }
 
@@ -264,14 +287,34 @@ export class AutoProgress {
             Logger.debug(`[AutoProgress] Checking: workId=${workId}, currentTime=${currentTime.toFixed(1)}, duration=${duration.toFixed(1)}, progress=${(progress * 100).toFixed(1)}%`);
         }
 
-        // Track max progress for partial-listen detection
-        if (workId === this.currentListeningWorkId) {
-            this.currentListeningMaxProgress = Math.max(this.currentListeningMaxProgress, progress);
-        } else {
-            // Check if the previous work was a partial listen
+        // Per-work partial-listen tracking
+        if (workId !== this.currentListeningWorkId) {
+            // Switched to a different work — check if previous work was a partial listen
             this.checkPartialListen();
             this.currentListeningWorkId = workId;
-            this.currentListeningMaxProgress = progress;
+            this.currentTrackStarted = false;
+        }
+
+        // Track whether the user actually started listening (>5s)
+        if (currentTime > 5) {
+            this.currentTrackStarted = true;
+            // Mark the route visit as "played" and clear visits-without-play counter
+            if (workId === this.currentVisitWorkId && !this.currentVisitPlayed) {
+                this.currentVisitPlayed = true;
+                if (this.visitsNoPlay[workId]) {
+                    delete this.visitsNoPlay[workId];
+                    this.saveVisitsNoPlay();
+                }
+            }
+        }
+
+        // When a track reaches >50%, record it as "played" for this work
+        const trackKey = this.getTrackKey(track);
+        if (trackKey && progress > 0.50) {
+            if (!this.playedTracksInWork.has(workId)) {
+                this.playedTracksInWork.set(workId, new Set());
+            }
+            this.playedTracksInWork.get(workId)!.add(trackKey);
         }
 
         // 1. Mark as "listening" after 5 seconds of playback
@@ -335,7 +378,7 @@ export class AutoProgress {
         this.checkPartialListen();
         // Reset tracking for the new work
         this.currentListeningWorkId = newWorkId;
-        this.currentListeningMaxProgress = 0;
+        this.currentTrackStarted = false;
         // Invalidate cached flat tracks so isLastTrackInWork re-builds for new work
         this.cachedFlatTracks = null;
         this.cachedFlatTracksWorkId = null;
@@ -344,38 +387,73 @@ export class AutoProgress {
     private checkPartialListen(): void {
         if (!Config.get('autoProgress') || !Config.get('autoProgressPostponed')) return;
         if (!this.currentListeningWorkId) return;
+        // Must have actually started a track (>5s playback) to count as partial
+        if (!this.currentTrackStarted) return;
 
         const workId = this.currentListeningWorkId;
-        const maxProgress = this.currentListeningMaxProgress;
+        const playedTracks = this.playedTracksInWork.get(workId);
+        const playedCount = playedTracks?.size ?? 0;
 
-        // Only mark postponed if user actually started listening (>1%) but didn't get far (<30%)
-        if (maxProgress > 0.01 && maxProgress < 0.30) {
+        // Get total tracks in the work
+        const work = this.bridge.store.state.AudioPlayer?.work;
+        const totalTracks = work ? this.flattenAudioTracks(work).length : 0;
+
+        // Compute per-work progress as fraction of tracks played >50%
+        const workProgress = totalTracks > 0 ? playedCount / totalTracks : 0;
+
+        // Mark postponed if <30% of tracks played
+        if (workProgress < 0.30) {
             const currentStatus = this.getCurrentStatus(workId);
             const currentStatusStr = currentStatus ? NUMBER_TO_STATUS[currentStatus] : null;
             // Don't downgrade: only apply postponed if status is <= listening
             const rank = currentStatusStr ? (PROGRESS_RANK[currentStatusStr] ?? 0) : 0;
             if (rank <= (PROGRESS_RANK['listening'] ?? 0)) {
-                Logger.debug(`[AutoProgress] Partial listen (${(maxProgress * 100).toFixed(0)}%) for ${workId}, marking postponed`);
+                Logger.debug(`[AutoProgress] Partial listen (${playedCount}/${totalTracks} tracks) for ${workId}, marking postponed`);
                 this.setProgress(workId, 'postponed', true);
             }
         }
     }
 
     // =========================================================================
-    // Radio skip detection: Postponed
+    // Visits without listening: Postponed
     // =========================================================================
 
-    private handleRadioSkip(fromWorkId: string): void {
+    /**
+     * Record that the user visited a work without listening.
+     * Triggered by: leaving a work page without playing, or radio skip.
+     * Persistent across sessions via GM storage.
+     */
+    private recordVisitWithoutPlay(workId: string): void {
         if (!Config.get('autoProgress') || !Config.get('autoProgressPostponed')) return;
 
-        const count = (this.radioSkips.get(fromWorkId) || 0) + 1;
-        this.radioSkips.set(fromWorkId, count);
+        this.visitsNoPlay[workId] = (this.visitsNoPlay[workId] || 0) + 1;
+        this.saveVisitsNoPlay();
 
         const threshold = Config.get('autoProgressRadioSkipThreshold') || 3;
-        if (count >= threshold) {
-            Logger.debug(`[AutoProgress] Radio skip threshold reached (${count}) for ${fromWorkId}`);
-            this.setProgress(fromWorkId, 'postponed', true);
+        if (this.visitsNoPlay[workId] >= threshold) {
+            Logger.debug(`[AutoProgress] Visit-without-play threshold reached (${this.visitsNoPlay[workId]}) for ${workId}`);
+            this.setProgress(workId, 'postponed', true);
         }
+    }
+
+    /**
+     * Handle radio skip — also counts as a visit without listening.
+     */
+    private handleRadioSkip(fromWorkId: string): void {
+        this.recordVisitWithoutPlay(fromWorkId);
+    }
+
+    private loadVisitsNoPlay(): void {
+        try {
+            const raw = GM_getValue(VISITS_NO_PLAY_KEY, '{}');
+            this.visitsNoPlay = typeof raw === 'string' ? JSON.parse(raw) : (raw || {});
+        } catch {
+            this.visitsNoPlay = {};
+        }
+    }
+
+    private saveVisitsNoPlay(): void {
+        GM_setValue(VISITS_NO_PLAY_KEY, JSON.stringify(this.visitsNoPlay));
     }
 
     // =========================================================================
@@ -406,11 +484,12 @@ export class AutoProgress {
 
         // Dedup: don't re-send the same status
         const dedupKey = `${workId}-${progress}`;
-        if (this.lastUpdatedKey === dedupKey) return;
+        if (this.sentUpdates.has(dedupKey)) return;
 
         Logger.debug(`[AutoProgress] ${workId}: ${currentStatusStr || 'none'} -> ${progress}`);
 
-        // Optimistic update
+        // Optimistic update (capture previous value for rollback)
+        const previousStatusNum = currentStatusNum;
         if (this.bridge.store.state.User) {
             if (!this.bridge.store.state.User.marks) {
                 this.bridge.store.state.User.marks = {};
@@ -418,7 +497,7 @@ export class AutoProgress {
             this.bridge.store.state.User.marks[workId] = newStatusNum;
         }
 
-        this.lastUpdatedKey = dedupKey;
+        this.sentUpdates.add(dedupKey);
 
         // Emit event for other features
         EventBus.emit('progress:update', {
@@ -435,7 +514,15 @@ export class AutoProgress {
             Logger.debug(`[AutoProgress] API Success: ${workId} -> ${progress}`);
         }).catch((err: any) => {
             Logger.error(`[AutoProgress] API Failed for ${workId}:`, err);
-            this.lastUpdatedKey = null; // Allow retry
+            this.sentUpdates.delete(dedupKey); // Allow retry
+            // Rollback optimistic update
+            if (this.bridge.store.state.User?.marks) {
+                if (previousStatusNum) {
+                    this.bridge.store.state.User.marks[workId] = previousStatusNum;
+                } else {
+                    delete this.bridge.store.state.User.marks[workId];
+                }
+            }
         });
     }
 
@@ -444,18 +531,22 @@ export class AutoProgress {
     // =========================================================================
 
     private getPlayCounts(): Record<string, number> {
+        if (this.playCountsCache) return this.playCountsCache;
         try {
             const raw = typeof GM_getValue === 'function'
                 ? GM_getValue(PLAY_COUNTS_KEY, '{}')
                 : localStorage.getItem(PLAY_COUNTS_KEY) || '{}';
-            return JSON.parse(raw as string);
+            this.playCountsCache = JSON.parse(raw as string);
+            return this.playCountsCache!;
         } catch (err) {
             Logger.warn('[AutoProgress] Failed to parse play counts from storage', err);
-            return {};
+            this.playCountsCache = {};
+            return this.playCountsCache;
         }
     }
 
     private savePlayCounts(counts: Record<string, number>): void {
+        this.playCountsCache = counts;
         const json = JSON.stringify(counts);
         if (typeof GM_setValue === 'function') {
             GM_setValue(PLAY_COUNTS_KEY, json);

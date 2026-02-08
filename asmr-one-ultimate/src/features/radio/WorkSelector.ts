@@ -64,7 +64,7 @@ export class WorkSelector {
 
                 // Check if we should skip this work
                 if (candidateId === currentWorkId || this.isRecentlyPlayed(candidateId)) {
-                    Logger.debug(`[WorkSelector] Skipping recent work ${candidateId} (attempt ${attempt + 1}/${MAX_SELECTION_ATTEMPTS})`);
+                    Logger.log(`[WorkSelector] Skipping recent work ${candidateId} (attempt ${attempt + 1}/${MAX_SELECTION_ATTEMPTS})`);
                     continue;
                 }
 

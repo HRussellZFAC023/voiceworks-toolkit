@@ -181,10 +181,155 @@ describe('VectorSearch bulk indexing', () => {
         const payload = await (vectorSearch as any).buildSearchContext('ear cleaning');
 
         expect(payload).toEqual({
-            payload: 'ear cleaning\nRelated: ear cleaning-translated',
+            payload: 'ear cleaning\near cleaning-translated',
             usedTranslation: true,
             tokens: ['ear', 'cleaning', 'translated'],
-            tagHints: []
+        });
+    });
+});
+
+describe('VectorSearch scoring', () => {
+    let bridge: KikoeruBridge;
+    let vectorSearch: VectorSearch;
+
+    beforeEach(() => {
+        (KikoeruBridge as any).instance = null;
+        document.body.innerHTML = '<div id="q-app"></div>';
+        const app = document.getElementById('q-app');
+        if (app) {
+            (app as any).__vue__ = {
+                $store: { state: { AudioPlayer: {} } },
+                $router: {},
+                $axios: { get: vi.fn() }
+            };
+        }
+        bridge = KikoeruBridge.getInstance();
+        vectorSearch = new VectorSearch();
+    });
+
+    describe('cosineSimilarity', () => {
+        it('returns correct value for unit vectors', () => {
+            const a = [0.6, 0.8, 0];
+            const b = [0.8, 0.6, 0];
+            const result = (vectorSearch as any).cosineSimilarity(a, b);
+            // cosine similarity = dot(a,b) / (|a| * |b|) = 0.96 / (1.0 * 1.0) = 0.96
+            expect(result).toBeCloseTo(0.96, 5);
+        });
+
+        it('returns 0 for orthogonal vectors', () => {
+            const a = [1, 0, 0];
+            const b = [0, 1, 0];
+            expect((vectorSearch as any).cosineSimilarity(a, b)).toBe(0);
+        });
+
+        it('returns 1 for identical unit vectors', () => {
+            const v = [1 / Math.sqrt(3), 1 / Math.sqrt(3), 1 / Math.sqrt(3)];
+            expect((vectorSearch as any).cosineSimilarity(v, v)).toBeCloseTo(1.0, 5);
+        });
+
+        it('returns 0 for zero vectors', () => {
+            expect((vectorSearch as any).cosineSimilarity([0, 0, 0], [1, 2, 3])).toBe(0);
+        });
+    });
+
+    describe('calculateKeywordBoost', () => {
+        function makeEntry(overrides: Partial<any> = {}): any {
+            return {
+                id: 'RJ001',
+                title: 'テスト作品',
+                description: 'テスト説明',
+                tags: ['耳かき', 'ASMR'],
+                vector: [],
+                ...overrides,
+            };
+        }
+
+        it('returns 0 with no tokens', () => {
+            const boost = (vectorSearch as any).calculateKeywordBoost(
+                makeEntry(), []
+            );
+            expect(boost).toBe(0);
+        });
+
+        it('gives highest boost for tag match', () => {
+            // 'asmr' matches tag 'ASMR' (lowercased) => 0.08
+            // matched=1 >= Math.min(2, tokens.length=1)=1, so multi-match bonus +0.04
+            const boost = (vectorSearch as any).calculateKeywordBoost(
+                makeEntry(), ['asmr']
+            );
+            expect(boost).toBeCloseTo(0.12, 2);
+        });
+
+        it('gives title boost for title match', () => {
+            const boost = (vectorSearch as any).calculateKeywordBoost(
+                makeEntry({ title: 'futanari teacher adventure' }),
+                ['futanari']
+            );
+            // title match = 0.05 + multi-match bonus 0.04 (matched=1 >= min(2,1)=1)
+            expect(boost).toBeCloseTo(0.09, 2);
+        });
+
+        it('max boost is significantly lower than old max of 0.40', () => {
+            // Maximize every possible boost with many tokens
+            const entry = makeEntry({
+                title: 'ear cleaning asmr binaural',
+                description: 'relaxing ear cleaning session',
+                tags: ['ear cleaning', 'ASMR', 'binaural'],
+            });
+            const tokens = ['ear', 'cleaning', 'asmr', 'binaural'];
+            const boost = (vectorSearch as any).calculateKeywordBoost(entry, tokens);
+            // New weights should keep it well below 0.40
+            expect(boost).toBeLessThan(0.40);
+            // Typical single-token boost should be modest
+            const singleBoost = (vectorSearch as any).calculateKeywordBoost(
+                makeEntry(), ['asmr']
+            );
+            expect(singleBoost).toBeLessThan(0.15);
+        });
+
+        it('gives multi-match bonus when 2+ tokens match', () => {
+            // Both '耳かき' and 'asmr' match tags => 0.08 + 0.08 + 0.04 (multi bonus) = 0.20
+            const boost = (vectorSearch as any).calculateKeywordBoost(
+                makeEntry(), ['耳かき', 'asmr']
+            );
+            expect(boost).toBeGreaterThan(0.15);
+        });
+    });
+
+    describe('scoreEntry', () => {
+        it('combines cosine similarity with keyword boost', () => {
+            const entry = {
+                id: 'RJ001', title: 'test', description: '', tags: ['asmr'],
+                vector: [0.6, 0.8, 0],
+            };
+            const queryVector = [0.8, 0.6, 0];
+            const meta = { tokens: ['asmr'] };
+
+            const score = (vectorSearch as any).scoreEntry(entry, queryVector, meta);
+            // cosineSimilarity ≈ 0.96, plus keyword boost for 'asmr' tag match (0.08)
+            expect(score).toBeGreaterThan(0.96);
+            expect(score).toBeLessThan(1.2);
+        });
+
+        it('semantic similarity dominates over keyword boost', () => {
+            // High similarity, no keyword match
+            const semanticEntry = {
+                id: 'RJ001', title: '意味的に近い', description: '', tags: ['別のタグ'],
+                vector: [0.0, 1.0, 0.0],
+            };
+            // Low similarity, keyword match
+            const keywordEntry = {
+                id: 'RJ002', title: 'ear cleaning', description: '', tags: ['ear cleaning'],
+                vector: [0.9, 0.0, 0.44],
+            };
+            const queryVector = [0.0, 1.0, 0.0]; // identical to semanticEntry
+            const meta = { tokens: ['ear', 'cleaning'] };
+
+            const semanticScore = (vectorSearch as any).scoreEntry(semanticEntry, queryVector, meta);
+            const keywordScore = (vectorSearch as any).scoreEntry(keywordEntry, queryVector, meta);
+
+            // Semantic match (sim=1.0) should beat keyword match (sim≈0.0 + boost≈0.15)
+            expect(semanticScore).toBeGreaterThan(keywordScore);
         });
     });
 });

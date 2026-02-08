@@ -287,6 +287,8 @@ const COVER_REGEX = /封面|cover|illust|ジャケット/i;
 const SCRIPT_REGEX = /script|台本|剧本|脚本/i;
 const IMAGE_REGEX = /画像|image file|images?$/i;
 const SE_REGEX = /\bSE\b|^SE[なな有無し]|Sound Effect|音効|効果音/;
+const SE_ARI_REGEX = /あり/;
+const SE_NASHI_REGEX = /無し|なし/;
 const FORMAT_PRIORITY = ['wav', 'mp3', 'flac', 'opus', 'm4a', 'aac'];
 
 export interface FolderCandidate {
@@ -304,7 +306,8 @@ export function calculateFolderScore(
     caption: string,
     isSample: boolean,
     formatPriority: string[] = FORMAT_PRIORITY,
-    childFormats: string[] = []
+    childFormats: string[] = [],
+    sePreference?: boolean
 ): number {
     let score = 0;
     const lowerName = (name || '').toLowerCase();
@@ -332,8 +335,16 @@ export function calculateFolderScore(
         score += SCORING.IMAGE_FOLDER_PENALTY;
     }
 
-    // SE folders: small penalty (not the main content, but not terrible)
-    if (SE_REGEX.test(name)) {
+    // SE preference: boost folders matching the user's あり/無し preference
+    if (sePreference != null && (SE_ARI_REGEX.test(name) || SE_NASHI_REGEX.test(name))) {
+        if (sePreference && SE_ARI_REGEX.test(name)) {
+            score += SCORING.SE_PREF_BONUS;
+        } else if (!sePreference && SE_NASHI_REGEX.test(name)) {
+            score += SCORING.SE_PREF_BONUS;
+        } else {
+            score += SCORING.SE_FOLDER_PENALTY;
+        }
+    } else if (SE_REGEX.test(name)) {
         score += SCORING.SE_FOLDER_PENALTY;
     }
 

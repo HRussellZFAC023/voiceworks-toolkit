@@ -9,7 +9,6 @@
 
 import { GM_getValue, GM_setValue } from '$';
 import { EventBus } from '../core/EventBus';
-import { Logger } from '../core/Utils';
 import { getAudioElement } from '../core/DomUtils';
 import type {
     PluginConfig,
@@ -20,7 +19,6 @@ import type {
     WhisperState,
     AudioPlayerState,
     KikoeruStore,
-    KikoeruStoreState,
     PlayerTrack,
     WorkDetail,
     SearchState,
@@ -42,21 +40,34 @@ const CONFIG_DEFAULTS: PluginConfig = {
     playAllInFolder: false,
     shuffle: false,
     autoFilterFolders: true,
+    radioUseFlatTracks: false,
 
     // Learner Mode
     showJP: true,
     subtitleLang: 'en',
     primarySubtitleLang: 'ja',
+    karaokeMode: false,
+    segmentMode: false,
 
     // AI Features
+    whisperModel: 'onnx-community/kotoba-whisper-v2.2-ONNX',
+    whisperTask: 'transcribe',
+    whisperQuantized: false,
+    whisperOverrideSubs: true,
+    whisperLiveChunkSec: 15,
+    whisperLiveOverlapSec: 0,
+    whisperCacheTranscripts: true,
+    whisperAutoWarmup: true,
+    whisperAllowWasmFallback: false,
+    alwaysTranscribe: false,
     vectorSearchApiKey: '',
-    vectorSearchApiKeyHash: '',
-    vectorSearchModel: 'jina-embeddings-v3',
-    vectorIndexVersion: 2,
     vectorIndexCursor: 1,
     vectorIndexLatestWorkId: '',
+    vectorIndexVersion: 0,
+    vectorSearchModel: '',
+    vectorSearchApiKeyHash: '',
+    vectorRateLimitBackoff: 1,
     vectorRateLimitCooldownUntil: 0,
-    vectorRateLimitBackoff: 1000,
 
     // Cache
     cacheLimitGB: 5,
@@ -67,15 +78,17 @@ const CONFIG_DEFAULTS: PluginConfig = {
     transcriptSyncApiKey: '',
     transcriptSyncCollection: 'transcripts',
 
+    // Translation
+    preferLocalTranslation: true,
+
     // UI
     autoProgress: false,
+    dynamicFavicon: true,
     flatView: false,
     playbackRate: 1.0,
     learnerBlur: false,
     sfwMode: false,
     translateMode: true,
-    preferLocalTranslation: true,
-    distributedTranslation: true,
 
     // Auto Progress (enhanced)
     autoProgressMarked: false,
@@ -89,57 +102,76 @@ const CONFIG_DEFAULTS: PluginConfig = {
 
     // Radio Runtime (persisted for refresh survival)
     radioManuallyPaused: false,
-    radioUseFlatTracks: false,
 
+    // Feature Toggles
+    enableAdvancedSearch: true,
+    enableCommentSection: true,
+    enableContinueListening: true,
+    enableFavicon: true,
+    enableHVDBLink: true,
+    enableInfiniteScroll: true,
+    enableInterfaceTranslator: true,
+    enableJoiTool: true,
+    enableKeyboardManager: true,
+    enableLearnerMode: true,
+    enableMediaSession: true,
+    enableMediaViewer: true,
+    enableMenuIconFixer: true,
+    enablePageTitleManager: true,
+    enablePlayerFullscreen: true,
+    enablePlayerGallery: true,
+    enablePlayerTranslator: true,
+    enablePlaylistDiscovery: true,
+    enableRouteStateSync: true,
+    enableStoreBackup: true,
+    enableSupportButton: true,
+    enableTagFilters: true,
+    enableVectorSearch: true,
+    enableVisitCounter: true,
+    enableVisualizer: true,
+    enableWhisper: true,
+    enableWorkMetadata: true,
+    enableWorkTreeCopy: true,
+    enableWorkTreeManager: true,
+
+    // Feature Options
+    alwaysShowJoi: false,
+    alwaysShowVisualizer: false,
+    galleryAutoSlideshow: false,
+    galleryAutoSlideshowInterval: 6,
+
+    // Keyboard Shortcuts
+    hotkeyPlayPause: 'Space',
+    hotkeyMute: 'm',
+    hotkeyFullscreen: 'f',
+    hotkeySeekBack: 'ArrowLeft',
+    hotkeySeekForward: 'ArrowRight',
+    hotkeySeekBackLong: 'j',
+    hotkeySeekForwardLong: 'l',
+    hotkeyVolumeUp: 'ArrowUp',
+    hotkeyVolumeDown: 'ArrowDown',
+    hotkeyPrevLine: 'a',
+    hotkeyNextLine: 'd',
+    hotkeyPrevTrack: 'p',
+    hotkeyNextTrack: 'n',
+    hotkeySpeedUp: '>',
+    hotkeySpeedDown: '<',
+    hotkeySpeedReset: '=',
+    hotkeyToggleBlur: 'b',
+    hotkeyToggleJP: 'J',
+    hotkeyGalleryPrev: '',
+    hotkeyGalleryNext: '',
+    hotkeyGalleryExclude: '',
+
+    // Debug
     debug: false,
     enableLogging: false,
     dlsiteProxyUrl: '',
-
-    // Feature Toggles (Defaults)
-    enablePlaylistDiscovery: true,
-    enableLearnerMode: true,
-    enableAdvancedSearch: true,
-    enableWorkMetadata: true,
-    enablePlayerTranslator: true,
-    enableSupportButton: true,
-    enableWorkTreeManager: true,
-    enableTagFilters: true,
-    enableVectorSearch: true,
-    enableWhisper: true,
-    enableFavicon: true,
-    enableMediaSession: true,
-    enableMenuIconFixer: true,
-    enableStoreBackup: true,
-    enableHVDBLink: true,
-    enableInterfaceTranslator: true,
-    enablePageTitleManager: true,
-    enableKeyboardManager: true,
-    enableRouteStateSync: true,
-
-    enableMediaViewer: true,
-    enablePlayerFullscreen: true,
-    enablePlayerGallery: true,
-    enableWorkTreeCopy: true,
-    enableCommentSection: true,
-    enableInfiniteScroll: false,
-    enableJoiTool: true,
-    enableVisualizer: true,
-
-    // Gallery
-    galleryAutoSlideshow: true,
-    galleryAutoSlideshowInterval: 6,
-
-    // Note: apiServerUrl is no longer needed - we read from the host app's "Select server" setting
 };
 
 // ============================================================================
 // State Defaults
 // ============================================================================
-
-const DEFAULT_PLAYER_STATE: AudioPlayerState = {
-    currentTime: 0,
-    duration: 0,
-};
 
 const DEFAULT_RADIO_STATE: RadioModeState = {
     isActive: false,
@@ -193,44 +225,35 @@ class AppStoreImpl {
     private _state: AppState = { ...DEFAULT_APP_STATE };
     private _hostStore: KikoeruStore | null = null;
     private _stateListeners: Set<(state: AppState) => void> = new Set();
-    private _configCache: PluginConfig | null = null;
 
     // =========================================================================
     // Configuration Management
     // =========================================================================
 
     /**
-     * Get a config value. Reads from in-memory cache if available,
-     * otherwise falls back to GM storage.
+     * Get a config value
      */
     getConfig<K extends ConfigKey>(key: K): PluginConfig[K] {
-        if (this._configCache) return this._configCache[key];
         return GM_getValue(key, CONFIG_DEFAULTS[key]) as PluginConfig[K];
     }
 
     /**
-     * Set a config value. Updates both in-memory cache and GM storage.
+     * Set a config value
      */
     setConfig<K extends ConfigKey>(key: K, value: PluginConfig[K]): void {
         const oldValue = this.getConfig(key);
         GM_setValue(key, value);
-        if (this._configCache) {
-            (this._configCache as unknown as Record<string, unknown>)[key] = value;
-        }
         EventBus.emit('config:change', { key, value, oldValue });
     }
 
     /**
-     * Get all config values. First call populates the in-memory cache;
-     * subsequent getConfig() calls read from memory instead of GM storage.
+     * Get all config values
      */
     getAllConfig(): PluginConfig {
-        if (this._configCache) return { ...this._configCache };
         const config = {} as PluginConfig;
         for (const key of Object.keys(CONFIG_DEFAULTS) as ConfigKey[]) {
-            (config as unknown as Record<string, unknown>)[key] = GM_getValue(key, CONFIG_DEFAULTS[key]);
+            (config as unknown as Record<string, unknown>)[key] = this.getConfig(key);
         }
-        this._configCache = { ...config } as PluginConfig;
         return config;
     }
 
@@ -355,19 +378,18 @@ class AppStoreImpl {
     }
 
     /**
-     * Get audio player state from host.
-     * Returns a safe default when the host store is not yet available.
+     * Get audio player state from host
      */
     get player(): AudioPlayerState {
-        return this.host.state.AudioPlayer || DEFAULT_PLAYER_STATE;
+        return this.host.state.AudioPlayer || {} as AudioPlayerState;
     }
 
     /**
-     * Get current track from host via queue[queueIndex].
+     * Get current track from host
      */
     get currentTrack(): PlayerTrack | undefined {
-        const p = this.player;
-        return p.queue?.[p.queueIndex ?? 0] ?? p.currentTrack ?? p.currentPlayingFile;
+        const player = this.player;
+        return player.currentTrack || player.currentPlayingFile;
     }
 
     /**
@@ -427,7 +449,7 @@ class AppStoreImpl {
         callback: (value: T, oldValue: T) => void,
         options?: { immediate?: boolean }
     ): (() => void) | undefined {
-        return this._hostStore?.watch?.(getter as (state: KikoeruStoreState) => T, callback, options);
+        return this._hostStore?.watch?.(getter as (state: any) => T, callback, options);
     }
 
     /**
@@ -495,7 +517,7 @@ class AppStoreImpl {
             try {
                 listener(this._state);
             } catch (error) {
-                Logger.error('[AppStore] Error in state listener:', error);
+                console.error('[AppStore] Error in state listener:', error);
             }
         }
     }

@@ -1,19 +1,24 @@
 import { CentralObserver } from '../core/CentralObserver';
 import { TranslationService } from '../services/TranslationService';
-import { CacheKeys, SharedCache } from '../core/Cache';
 import { I18n } from '../core/Utils';
 import { PLAYER_BAR_SELECTOR } from '../core/DomUtils';
 import { AppStore } from '../store/AppStore';
-
-const PLAYER_TRANSLATION_TTL = 1000 * 60 * 60 * 24 * 7; // 7 days
+import { EventBus } from '../core/EventBus';
 
 export class PlayerTranslator {
+    private trackChangeCleanup?: () => void;
+
     public enable(): void {
         if (!AppStore.getConfig('translateMode')) {
             return;
         }
         // Register with central observer instead of own MutationObserver
         CentralObserver.register('PlayerTranslator', () => this.checkPlayer(), 500);
+
+        // Translate immediately on track change instead of waiting for observer debounce
+        this.trackChangeCleanup = EventBus.on('track:change', () => {
+            setTimeout(() => this.checkPlayer(), 50);
+        });
     }
 
     private async checkPlayer() {
@@ -26,8 +31,8 @@ export class PlayerTranslator {
         const titleEl = playerBar.querySelector('.q-toolbar__title, .text-h6, .text-weight-bold.text-body1') as HTMLElement;
         const artistEl = playerBar.querySelector('.text-subtitle2, .text-caption, .text-grey-5') as HTMLElement;
 
-        // Specific selector for the mini player shown in screenshot 2
-        // It seems to be formatted as "01 . Title.mp3"
+        // Track filename: "1,残業で爆睡…ダウナー系な職場の後輩が迫る….mp3"
+        const trackNameEl = playerBar.querySelector('.ellipsis-2-lines') as HTMLElement;
 
         if (titleEl) {
             await this.translateElement(titleEl, 'title');
@@ -35,6 +40,10 @@ export class PlayerTranslator {
 
         if (artistEl) {
             await this.translateElement(artistEl, 'artist');
+        }
+
+        if (trackNameEl) {
+            await this.translateTrackName(trackNameEl);
         }
     }
 
@@ -63,6 +72,58 @@ export class PlayerTranslator {
             }
         } catch {
             this.markOriginal(el, text);
+        }
+    }
+
+    /**
+     * Translate the track filename shown in the player.
+     * Strips number prefix and file extension, translates the core text,
+     * then displays English only with the original as a tooltip.
+     */
+    private async translateTrackName(el: HTMLElement) {
+        const rawText = el.textContent?.trim() || '';
+        if (!rawText) return;
+
+        // Already translated — skip if showing our translation or source hasn't changed
+        if (el.dataset.asmrTranslated === 'true') {
+            const source = el.dataset.asmrSource;
+            const translated = el.dataset.asmrTranslatedText;
+            // Vue may re-render the original text over our translation — re-apply
+            if (source && rawText === source && translated) {
+                el.textContent = translated;
+                el.title = source;
+                return;
+            }
+            // Still showing our translated text
+            if (translated && rawText === translated) return;
+        }
+
+        // Detect Japanese content
+        if (!/[\u3040-\u30ff\u4e00-\u9faf]/.test(rawText)) return;
+
+        // Strip track number prefix (e.g. "1," or "01." or "01 ") and file extension
+        const stripped = rawText
+            .replace(/^\d+[\s.,、\-_·]+/, '')   // number prefix
+            .replace(/\.[a-z0-9]{2,5}$/i, '');  // file extension
+        if (!stripped) return;
+
+        const targetLang = I18n.lang === 'zh' ? 'zh-CN' : I18n.lang;
+        try {
+            const translated = await TranslationService.translate(stripped, targetLang);
+            if (translated && translated !== stripped) {
+                // Show English only, original as tooltip
+                el.dataset.asmrTranslated = 'true';
+                el.dataset.asmrSource = rawText;
+                el.dataset.asmrTranslatedText = translated;
+                el.textContent = TranslationService.cleanQuotes(translated);
+                el.title = rawText;
+            } else {
+                el.dataset.asmrTranslated = 'false';
+                el.dataset.asmrSource = rawText;
+            }
+        } catch {
+            el.dataset.asmrTranslated = 'false';
+            el.dataset.asmrSource = rawText;
         }
     }
 

@@ -25,7 +25,7 @@ const { mockScraper, mockSharedCache, mockCacheKeys } = vi.hoisted(() => {
         mockCacheKeys: {
             dlsite: vi.fn((code) => `dlsite:${code}`),
             dlsiteReviews: vi.fn((code) => `dlsiteReviews:${code}`),
-            translation: vi.fn((text, lang, source) => `trans:${source}:${lang}:${text}`),
+            translation: vi.fn((text, lang, source = 'auto') => `trans:${source}:${lang}:${text}`),
         }
     };
 });
@@ -169,12 +169,10 @@ describe('WorkMetadata Refresh', () => {
         // Title in workData is 'Translated Work', but loadMetadata might fetch from scraper?
         // Wait, scraper returns: { rjcode: 'RJ12345678', title: 'Localized Title', ... }
         // renderPanel uses the scraper result (merged).
-        expect(mockCacheKeys.translation).toHaveBeenCalledWith('Translated Work', 'en', 'local');
-        expect(mockCacheKeys.translation).toHaveBeenCalledWith('Translated Work', 'en', 'remote');
-        const expectedTransKeyLocal = `trans:local:en:Translated Work`;
-        const expectedTransKeyRemote = `trans:remote:en:Translated Work`;
-        expect(mockSharedCache.set).toHaveBeenCalledWith(expectedTransKeyLocal, null as any, 0);
-        expect(mockSharedCache.set).toHaveBeenCalledWith(expectedTransKeyRemote, null as any, 0);
+        // Source code calls CacheKeys.translation(text, 'en') with no source arg (defaults to 'auto')
+        expect(mockCacheKeys.translation).toHaveBeenCalledWith('Translated Work', 'en');
+        const expectedTransKey = `trans:auto:en:Translated Work`;
+        expect(mockSharedCache.set).toHaveBeenCalledWith(expectedTransKey, null as any, 0);
     });
 
     it('invalidates the same code if no original workno found', async () => {

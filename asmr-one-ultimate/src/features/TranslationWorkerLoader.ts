@@ -1,10 +1,8 @@
 /**
  * TranslationWorkerLoader - Local translation worker (Transformers.js)
  *
- * Runs NLLB-200 model in a Web Worker. Supports WebGPU, WebNN-NPU, and WASM.
- * When both GPU and NPU are available, the host can create two workers
- * (one per device) for distributed inference. Greedy decoding for speed.
- * Supports all JA/ZH/EN pairs via FLORES-200 language codes.
+ * Runs opus-mt translation models in a Web Worker. Supports WebGPU and WASM.
+ * Greedy decoding for speed. MarianMT architecture (fixed source→target direction).
  */
 
 function getWorkerCode(): string {
@@ -14,7 +12,7 @@ self.addEventListener('unhandledrejection', (event) => {
     const message = reason && reason.message ? reason.message : String(reason || 'Unknown error');
     // ONNX Runtime may reject internally during WebGPU EP creation but retry/fallback
     // on its own. Suppress these so we don't kill the worker before ONNX can recover.
-    if (/WebGPU Context Provider|context.*provider|device lost|GPUDevice|createComputePipeline|createShaderModule/i.test(message)) {
+    if (/WebGPU Context Provider|context.*provider|device lost|GPUDevice|createComputePipeline|createShaderModule|mapAsync|Instance reference|AbortError/i.test(message)) {
         console.warn('[Translation Worker] Suppressed non-fatal WebGPU error:', message);
         return;
     }
@@ -81,35 +79,68 @@ async function clearModelCache(modelName) {
     }
 }
 
+// ---- WebGPU adapter/device patches (dual-GPU + shader-f16 fixes) ----
+// Fixes: (1) Chrome using wrong GPU on dual-GPU laptops (AMD iGPU + Intel Arc dGPU)
+//        (2) ONNX Runtime requesting shader-f16 which fails on some D3D12 backends
+(function patchWebGPU() {
+    if (typeof navigator === 'undefined' || !navigator.gpu) return;
+    const origRA = navigator.gpu.requestAdapter.bind(navigator.gpu);
+    navigator.gpu.requestAdapter = async function(options) {
+        const adapter = await origRA({ ...options, powerPreference: 'high-performance' });
+        if (!adapter) return adapter;
+        const origRD = adapter.requestDevice.bind(adapter);
+        adapter.requestDevice = async function(desc) {
+            try {
+                return await origRD(desc);
+            } catch (err) {
+                const feats = [...(desc?.requiredFeatures || [])];
+                if (feats.includes('shader-f16')) {
+                    console.warn('[Translation Worker] requestDevice failed with shader-f16, retrying without:', err?.message);
+                    const fresh = await origRA({ ...options, powerPreference: 'high-performance' });
+                    if (!fresh) throw err;
+                    return fresh.requestDevice({ ...desc, requiredFeatures: feats.filter(f => f !== 'shader-f16') });
+                }
+                throw err;
+            }
+        };
+        return adapter;
+    };
+})();
+
+const isFirefox = typeof navigator !== 'undefined' && /firefox/i.test(navigator.userAgent);
+if (isFirefox) console.log('[Translation Worker] Firefox detected');
+
+function withTimeout(promise, ms, label) {
+    let timer;
+    return Promise.race([
+        promise,
+        new Promise((_, reject) => {
+            timer = setTimeout(() => reject(new Error(label + ' timed out after ' + ms + 'ms')), ms);
+        }),
+    ]).finally(() => clearTimeout(timer));
+}
+
 // ---- Backend detection ----
 
 let currentBackend = 'wasm';
 let currentVendor = '';
 let currentDtype = '';
 let skipWebgpu = false;
-let skipWebnn = false;
 let preferredDtype = '';
-
-async function detectWebNN() {
-    if (typeof navigator === 'undefined' || !navigator.ml) return null;
-    try {
-        const ctx = await navigator.ml.createContext();
-        if (!ctx) return null;
-        console.log('[Translation Worker] WebNN available');
-        return { device: 'webnn', vendor: 'webnn', maxBuf: 0 };
-    } catch (err) {
-        console.warn('[Translation Worker] WebNN not available:', err?.message);
-        return null;
-    }
-}
 
 async function detectWebGPU() {
     if (typeof navigator === 'undefined' || !('gpu' in navigator)) return null;
     try {
         // Prefer discrete GPU; fall back to integrated if unavailable
-        let adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+        let adapter = await withTimeout(
+            navigator.gpu.requestAdapter({ powerPreference: 'high-performance' }),
+            10000, 'requestAdapter'
+        );
         if (!adapter) {
-            adapter = await navigator.gpu.requestAdapter({ powerPreference: 'low-power' });
+            adapter = await withTimeout(
+                navigator.gpu.requestAdapter({ powerPreference: 'low-power' }),
+                10000, 'requestAdapter(low-power)'
+            );
         }
         if (!adapter) return null;
         const info = adapter.info || {};
@@ -120,6 +151,14 @@ async function detectWebGPU() {
             console.warn('[Translation Worker] maxBufferSize too small for translation models');
             return null;
         }
+        // Verify device creation actually works (adapter detection alone fails on dual-GPU systems)
+        try {
+            const testDevice = await withTimeout(adapter.requestDevice(), 10000, 'requestDevice');
+            testDevice.destroy();
+        } catch (deviceErr) {
+            console.warn('[Translation Worker] WebGPU device creation failed:', deviceErr?.message);
+            return null;
+        }
         return { device: 'webgpu', vendor, maxBuf };
     } catch {
         return null;
@@ -127,45 +166,23 @@ async function detectWebGPU() {
 }
 
 async function detectBackend() {
-    // Standard cascade: WebGPU > WebNN > WASM
+    // Cascade: WebGPU > WASM
     if (!skipWebgpu) {
         const webgpu = await detectWebGPU();
         if (webgpu) return webgpu;
-    }
-    if (!skipWebnn) {
-        const webnn = await detectWebNN();
-        if (webnn) return webnn;
     }
     return { device: 'wasm', vendor: '', maxBuf: 0 };
 }
 
 function getDtypeCandidates(device, vendor, maxBuf) {
-    if (device === 'webnn') {
-        // WebNN: fp16 preferred (good perf/memory), fp32 fallback
-        const webnnCandidates = ['fp16', 'fp32'];
-        if (preferredDtype && webnnCandidates.includes(preferredDtype)) {
-            return [preferredDtype, ...webnnCandidates.filter(d => d !== preferredDtype)];
-        }
-        return webnnCandidates;
-    }
     if (device === 'webgpu') {
-        // q8: produces gibberish on WebGPU decoders (transformers.js#1317).
-        const isIntel = /intel|xe|arc/i.test(vendor);
-        const isQualcomm = /qualcomm|adreno/i.test(vendor);
-        // fp32 models (~236MB) need >= 256MB maxBufferSize
-        const canFp32 = maxBuf === 0 || maxBuf >= 268435456;
-
-        let candidates;
-        if (isIntel || isQualcomm) {
-            // Intel Xe-2 HPG: fp16 shaders produce garbage output.
-            // Adreno: lacks shader-f16 (uniformAndStorageBuffer16BitAccess).
-            // Prefer fp32; fall back to fp16 with validation if buffer too small.
-            candidates = canFp32 ? ['fp32', 'fp16'] : ['fp16'];
-        } else {
-            // Apple Silicon, NVIDIA, AMD, Mali: fp16 works well, uses less memory.
-            candidates = canFp32 ? ['fp16', 'fp32'] : ['fp16'];
+        // Firefox: fp16 shader compilation hangs on Firefox WebGPU
+        if (isFirefox) {
+            console.log('[Translation Worker] Firefox: using fp32 only (fp16 hangs)');
+            return ['fp32'];
         }
-
+        // opus-mt models are small (~52MB fp16) — fp16 works on virtually any GPU
+        const candidates = ['fp16', 'fp32'];
         if (preferredDtype && candidates.includes(preferredDtype)) {
             return [preferredDtype, ...candidates.filter(d => d !== preferredDtype)];
         }
@@ -176,6 +193,25 @@ function getDtypeCandidates(device, vendor, maxBuf) {
         return [preferredDtype, ...wasmCandidates.filter(d => d !== preferredDtype)];
     }
     return wasmCandidates;
+}
+
+// ---- GPU memory cleanup ----
+
+/**
+ * Release GPU memory after failed pipeline creation.
+ * When pipeline() throws partway through, ONNX sessions (encoder/decoder) may
+ * have allocated GPU buffers we can't reach. Yield to GC + release ONNX EP.
+ */
+async function releaseGpuResources() {
+    // 1. Try to release ONNX Runtime's execution provider resources
+    try {
+        if (typeof globalThis.ort !== 'undefined' && globalThis.ort.env?.webgpu?.device) {
+            // Force ONNX RT to drop its device reference
+            globalThis.ort.env.webgpu.device = undefined;
+        }
+    } catch {}
+    // 2. Yield to event loop so browser GC can reclaim orphaned GPU buffers
+    await new Promise(r => setTimeout(r, 100));
 }
 
 // ---- Pipeline management ----
@@ -224,6 +260,14 @@ async function ensurePipeline(modelName, _cascadeDepth) {
 
     const dtypeCandidates = getDtypeCandidates(currentBackend, currentVendor, backend.maxBuf);
 
+    // No viable dtypes for this backend (e.g. Intel/Qualcomm iGPU) — skip directly
+    // without clearing cache (nothing was downloaded for this backend)
+    if (dtypeCandidates.length === 0) {
+        console.log('[Translation Worker] No viable dtypes for', currentBackend, '— cascading');
+        if (currentBackend === 'webgpu') skipWebgpu = true;
+        return ensurePipeline(modelName, _cascadeDepth + 1);
+    }
+
     for (const dtype of dtypeCandidates) {
         for (let hubIdx = 0; hubIdx < HUB_BASE_URLS.length; hubIdx++) {
             const hubUrl = HUB_BASE_URLS[hubIdx];
@@ -232,16 +276,21 @@ async function ensurePipeline(modelName, _cascadeDepth) {
             env.hub.allowRemoteModels = true;
 
             try {
-                const candidate = await pipeline('translation', modelName, {
-                    progress_callback: progressCb,
-                    device: currentBackend,
-                    dtype,
-                });
+                const PIPELINE_TIMEOUT_MS = 120000;
+                const candidate = await withTimeout(
+                    pipeline('translation', modelName, {
+                        progress_callback: progressCb,
+                        device: currentBackend,
+                        dtype,
+                    }),
+                    PIPELINE_TIMEOUT_MS,
+                    'Pipeline creation (' + dtype + ')'
+                );
                 console.log('[Translation Worker] Model loaded on', currentBackend,
                     '(' + currentVendor + ') [' + dtype + ']:', modelName);
 
                 // Validate output quality (fp16/q8 can produce gibberish on some backends)
-                if (currentBackend === 'webgpu' || currentBackend === 'webnn') {
+                if (currentBackend === 'webgpu') {
                     const valid = await validatePipeline(candidate, modelName);
                     if (!valid) {
                         console.warn('[Translation Worker] Dtype', dtype, 'failed validation, trying next...');
@@ -259,8 +308,17 @@ async function ensurePipeline(modelName, _cascadeDepth) {
                 const msg = String(err?.message || err || '');
                 const isMemErr = /allocation|out of memory|OOM|RangeError|createbuffer/i.test(msg);
                 const isContextErr = /WebGPU Context Provider|context.*provider|device lost|GPUDevice|createComputePipeline|createShaderModule/i.test(msg);
+                const isTimeout = /timed out/i.test(msg);
+                // ONNX Runtime sometimes throws bare numeric errors (buffer size) on session creation failure
+                const isOrtNumericErr = /^\\d+$/.test(msg.trim());
+                const isGpuErr = isMemErr || isContextErr || isTimeout || isOrtNumericErr;
 
                 console.warn('[Translation Worker] Load error:', dtype, hubUrl, msg, err);
+
+                // Release leaked GPU resources from partially-created ONNX sessions
+                if (currentBackend === 'webgpu' && isGpuErr) {
+                    await releaseGpuResources();
+                }
 
                 // WebGPU context failed — cascade to next backend
                 if (isContextErr && currentBackend === 'webgpu') {
@@ -269,25 +327,20 @@ async function ensurePipeline(modelName, _cascadeDepth) {
                     return ensurePipeline(modelName, _cascadeDepth + 1);
                 }
 
-                // Memory error — skip remaining hubs, try next dtype
-                if (isMemErr) break;
+                // Memory/session error or pipeline timeout — skip remaining hubs, try next dtype
+                if (isGpuErr) break;
                 // Other errors (network, WASM abort) — try next hub URL
             }
         }
     }
 
-    // All candidates for current backend exhausted — clear potentially corrupt
-    // cache entries before cascading to the next backend
+    // All candidates for current backend exhausted — release GPU memory and clear
+    // potentially corrupt cache entries before cascading to the next backend
     if (currentBackend === 'webgpu') {
-        console.warn('[Translation Worker] All WebGPU candidates failed, clearing cache');
+        console.warn('[Translation Worker] All WebGPU candidates failed, releasing GPU and clearing cache');
+        await releaseGpuResources();
         await clearModelCache(modelName);
         skipWebgpu = true;
-        return ensurePipeline(modelName, _cascadeDepth + 1);
-    }
-    if (currentBackend === 'webnn') {
-        console.warn('[Translation Worker] All WebNN candidates failed, clearing cache');
-        await clearModelCache(modelName);
-        skipWebnn = true;
         return ensurePipeline(modelName, _cascadeDepth + 1);
     }
 
@@ -299,10 +352,6 @@ async function ensurePipeline(modelName, _cascadeDepth) {
 const VALIDATION_TESTS = {
     'Xenova/opus-mt-ja-en': { input: 'テスト', expect: /test/i },
     'Xenova/opus-mt-zh-en': { input: '测试', expect: /test/i },
-    'Xenova/nllb-200-distilled-600M': {
-        input: 'テスト', expect: /test/i,
-        src_lang: 'jpn_Jpan', tgt_lang: 'eng_Latn',
-    },
 };
 
 async function validatePipeline(pipe, modelName) {
@@ -310,9 +359,16 @@ async function validatePipeline(pipe, modelName) {
     if (!test) return true; // no test available, assume OK
     try {
         const opts = { num_beams: 1, max_new_tokens: 32 };
-        if (test.src_lang) opts.src_lang = test.src_lang;
-        if (test.tgt_lang) opts.tgt_lang = test.tgt_lang;
-        const out = await pipe(test.input, opts);
+
+        // Timeout: inference can hang forever on some GPU/driver combos (Intel Xe-2, etc.)
+        const VALIDATION_TIMEOUT_MS = 30000;
+        const out = await Promise.race([
+            pipe(test.input, opts),
+            new Promise((_, reject) =>
+                setTimeout(() => reject(new Error('Validation timed out after ' + VALIDATION_TIMEOUT_MS + 'ms')), VALIDATION_TIMEOUT_MS)
+            ),
+        ]);
+
         const text = out?.[0]?.translation_text || out?.translation_text || '';
         if (!text || !test.expect.test(text)) {
             console.warn('[Translation Worker] Validation FAILED for', modelName,
@@ -360,28 +416,25 @@ async function translate(msg) {
         no_repeat_ngram_size: 3,
     };
 
-    // NLLB requires explicit language codes
-    if (msg.src_lang) options.src_lang = msg.src_lang;
-    if (msg.tgt_lang) options.tgt_lang = msg.tgt_lang;
-
     try {
         const output = await pipelineInstance(text, options);
         return extractResult(text, output);
     } catch (err) {
         const errMsg = String(err?.message || err || '');
-        const isGpuError = /createBuffer|RangeError|out of memory|OOM|allocation|shader|device lost|GPUDevice|createComputePipeline|createShaderModule/i.test(errMsg);
+        const isGpuError = /createBuffer|RangeError|out of memory|OOM|allocation|shader|device lost|GPUDevice|createComputePipeline|createShaderModule/i.test(errMsg)
+            || /^\\d+$/.test(errMsg.trim());
 
-        // GPU inference failed — dispose pipeline, switch backend, retry once
+        // GPU inference failed — dispose pipeline, release GPU memory, switch backend, retry once
         if (currentBackend !== 'wasm' && isGpuError) {
             console.warn('[Translation Worker] GPU inference failed, falling back to WASM:', errMsg);
-            if (currentBackend === 'webgpu') skipWebgpu = true;
-            if (currentBackend === 'webnn') skipWebnn = true;
-            // Dispose the broken GPU pipeline
+            skipWebgpu = true;
+            // Dispose the broken GPU pipeline and release GPU memory
             if (pipelineInstance) {
                 try { pipelineInstance.dispose?.(); } catch {}
                 pipelineInstance = null;
                 pipelineReady = false;
             }
+            await releaseGpuResources();
             // Notify host about backend change
             self.postMessage({ status: 'initiate', backend: 'wasm', vendor: '' });
             // Retry: ensurePipeline will now pick WASM
@@ -413,26 +466,18 @@ async function processBatch() {
     const batches = jobs.filter(j => Array.isArray(j.text));
 
     if (singles.length > 0) {
-        // Sub-group by src_lang|tgt_lang so NLLB batches have consistent language codes
-        const langGroups = new Map();
-        for (const job of singles) {
-            const key = (job.src_lang || '') + '|' + (job.tgt_lang || '');
-            if (!langGroups.has(key)) langGroups.set(key, []);
-            langGroups.get(key).push(job);
-        }
-        for (const [, group] of langGroups) {
-            const texts = group.map(j => j.text);
-            try {
-                const results = await translate({ ...group[0], text: texts });
-                group.forEach((job, i) => {
-                    self.postMessage({ status: 'complete', data: results[i], id: job.id });
-                });
-            } catch (err) {
-                const errMsg = err instanceof Error ? err.message : String(err);
-                group.forEach(job => {
-                    self.postMessage({ status: 'error', data: { message: errMsg }, id: job.id });
-                });
-            }
+        // All singles for this worker share the same model/direction — batch them
+        const texts = singles.map(j => j.text);
+        try {
+            const results = await translate({ ...singles[0], text: texts });
+            singles.forEach((job, i) => {
+                self.postMessage({ status: 'complete', data: results[i], id: job.id });
+            });
+        } catch (err) {
+            const errMsg = err instanceof Error ? err.message : String(err);
+            singles.forEach(job => {
+                self.postMessage({ status: 'error', data: { message: errMsg }, id: job.id });
+            });
         }
     }
 
@@ -472,12 +517,6 @@ self.addEventListener('message', async (event) => {
     if (msg.type === 'skip-webgpu') {
         skipWebgpu = true;
         console.log('[Translation Worker] WebGPU disabled by host');
-        return;
-    }
-
-    if (msg.type === 'skip-webnn') {
-        skipWebnn = true;
-        console.log('[Translation Worker] WebNN disabled by host');
         return;
     }
 

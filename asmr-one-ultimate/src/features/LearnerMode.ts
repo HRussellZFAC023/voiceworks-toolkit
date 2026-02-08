@@ -14,6 +14,7 @@ export class LearnerMode {
     private currentLyrics: any[] = [];
     private lastText = '';
     private lastDisplayedText = ''; // Track what's actually shown to prevent flashing
+    private lastSecondaryShown = ''; // Track actual EN translation shown (vs empty placeholder)
     private lastTrackKey: string | null = null;
     private translationToken = 0;
     private whisperLines: { time: number; endTime?: number; text: string; words?: Array<{ start: number; end: number; text: string }> }[] = [];
@@ -103,14 +104,14 @@ export class LearnerMode {
                 if (this.currentLyrics.length > 0) {
                     this.seek(-1);
                 } else {
-                    this.bridge.dispatch('AudioPlayer/playPrev');
+                    try { this.bridge.commit('AudioPlayer/PREVIOUS_TRACK'); } catch { /* mutation unavailable */ }
                 }
             }));
             this.eventCleanups.push(EventBus.on('player:nav-next', () => {
                 if (this.currentLyrics.length > 0) {
                     this.seek(1);
                 } else {
-                    this.bridge.dispatch('AudioPlayer/playNext');
+                    try { this.bridge.commit('AudioPlayer/NEXT_TRACK'); } catch { /* mutation unavailable */ }
                 }
             }));
 
@@ -323,6 +324,7 @@ export class LearnerMode {
     private onTrackOrWorkChange(): void {
         this.lastText = '';
         this.lastDisplayedText = '';
+        this.lastSecondaryShown = '';
         this.currentLyrics = [];
         this.whisperLines = [];
         this.whisperText = '';
@@ -422,9 +424,11 @@ export class LearnerMode {
     private handleAudioSeeking = () => {
         this.lastText = '';
         this.lastDisplayedText = '';
+        this.lastSecondaryShown = '';
         this.lastWhisperDisplayText = '';
         this.translationToken += 1;
-        this.clearDisplay();
+        // Don't clearDisplay() — leave current text visible to avoid blank flash
+        // The seeked handler and next updateLyrics() will populate the correct text
     };
 
     private seekedDebounceTimer: number | null = null;
@@ -578,17 +582,21 @@ export class LearnerMode {
         });
         this.overflowMenu.appendChild(downloadBtn);
 
-        // 6. JOI Tool Toggle
-        const joiBtn = createItem('casino', I18n.t('joiToggle'), () => {
-            EventBus.emit('joi:toggle', undefined);
-        }, 'asmr-joi-btn');
-        this.overflowMenu.appendChild(joiBtn);
+        // 6. JOI Tool Toggle (only if feature enabled)
+        if (Config.get('enableJoiTool')) {
+            const joiBtn = createItem('casino', I18n.t('joiToggle'), () => {
+                EventBus.emit('joi:toggle', undefined);
+            }, 'asmr-joi-btn');
+            this.overflowMenu.appendChild(joiBtn);
+        }
 
-        // 7. Visualizer Toggle
-        const vizBtn = createItem('graphic_eq', I18n.t('vizToggle'), () => {
-            EventBus.emit('viz:toggle', undefined);
-        }, 'asmr-viz-btn');
-        this.overflowMenu.appendChild(vizBtn);
+        // 7. Visualizer Toggle (only if feature enabled)
+        if (Config.get('enableVisualizer')) {
+            const vizBtn = createItem('graphic_eq', I18n.t('vizToggle'), () => {
+                EventBus.emit('viz:toggle', undefined);
+            }, 'asmr-viz-btn');
+            this.overflowMenu.appendChild(vizBtn);
+        }
     }
 
     private downloadCurrentTrack() {
@@ -955,6 +963,7 @@ export class LearnerMode {
                             // Guard: text still current (lastText tracks whisper text, lastDisplayedText tracks displayed)
                             if (translated && (this.lastDisplayedText === fullText || this.lastText === fullText) && token === this.translationToken) {
                                 this.updateSecondaryLine(translated, false);
+                                this.lastSecondaryShown = translated;
                             }
                         }).catch(() => { });
 
@@ -966,12 +975,27 @@ export class LearnerMode {
                     }
                 }
 
-                if (fullText && (allowSecondary || cachedSecondary) && fullText !== this.lastDisplayedText) {
-                    this.displaySubtitle(fullText, cachedSecondary || undefined, { skipPrimary: true });
+                if (fullText && fullText !== this.lastDisplayedText) {
+                    this.lastDisplayedText = fullText;
+                    this.lastSecondaryShown = '';
+                    if (cachedSecondary) {
+                        this.updateSecondaryLine(cachedSecondary, false);
+                        this.lastSecondaryShown = cachedSecondary;
+                    } else if (allowSecondary) {
+                        this.updateSecondaryLine('', true);
+                    }
+                } else if (fullText && cachedSecondary && cachedSecondary !== this.lastSecondaryShown) {
+                    // Translation became available (e.g. translateAhead filled the cache)
+                    this.updateSecondaryLine(cachedSecondary, false);
+                    this.lastSecondaryShown = cachedSecondary;
                 }
                 if (display.displayText && display.displayText !== this.lastWhisperDisplayText) {
                     const isCNPrimary = this.isChinese(display.displayText);
                     let primaryForDisplay = display.displayText;
+                    let wSplitIdx = -1;
+                    let wHlStart = -1;
+                    const wKaraoke = !!Config.get('karaokeMode');
+                    const wSegment = !!Config.get('segmentMode');
                     if (isCNPrimary) {
                         const jaCache = TranslationService.peekCached(fullText, 'ja');
                         primaryForDisplay = jaCache || display.displayText || fullText || '';
@@ -983,53 +1007,48 @@ export class LearnerMode {
                                 }
                             }).catch(() => {});
                         }
+                    } else if (wKaraoke && fullText) {
+                        wHlStart = 0; // accent all spoken text from the beginning
+                        if (wSegment) {
+                            // Karaoke + Segment: spoken (accent) | upcoming (dim)
+                            primaryForDisplay = fullText;
+                            const words = display.activeLine?.words;
+                            if (Array.isArray(words) && words.length > 0 && display.now != null) {
+                                wSplitIdx = this.computeWordKaraokeIndices(fullText, words, display.now).splitIdx;
+                            } else if (display.activeLine && display.now != null) {
+                                wSplitIdx = this.computeTimeFallbackKaraokeIndices(fullText, display.activeLine, display.now).splitIdx;
+                            }
+                        } else {
+                            // Karaoke only: all revealed text in accent
+                            primaryForDisplay = display.displayText;
+                        }
                     }
-                    this.updatePrimaryLine(primaryForDisplay);
+                    this.updatePrimaryLine(primaryForDisplay, wSplitIdx, wHlStart);
                     this.lastWhisperDisplayText = primaryForDisplay;
-                } else if (!display.displayText && this.whisperText) {
-                    // P1-01 FIX: When timeline lookup fails (e.g., audio time doesn't match any segment),
-                    // use whisperText as a fallback to ensure transcription is always visible
-                    if (!this.whisperFromCache && this.whisperText.length <= 400) {
-                        if (this.whisperText !== this.lastText) {
-                            this.lastText = this.whisperText;
+                } else if (display.displayText && !!Config.get('karaokeMode')) {
+                    // Karaoke: text unchanged but indices may have advanced
+                    if (!!Config.get('segmentMode')) {
+                        const ft = display.fullText || display.displayText;
+                        const words = display.activeLine?.words;
+                        let newSplitIdx = -1;
+                        if (Array.isArray(words) && words.length > 0 && display.now != null) {
+                            newSplitIdx = this.computeWordKaraokeIndices(ft, words, display.now).splitIdx;
+                        } else if (display.activeLine && display.now != null) {
+                            newSplitIdx = this.computeTimeFallbackKaraokeIndices(ft, display.activeLine, display.now).splitIdx;
                         }
-                        let cachedFallback: string | null = null;
-                        cachedFallback = TranslationService.peekCached(this.whisperText, targetLang);
-                        if (!cachedFallback && this.whisperLive && this.shouldTickerTranslate(this.whisperText)) {
-                            const token = ++this.translationToken;
-                            TranslationService.translate(this.whisperText, targetLang).then(translated => {
-                                if (translated && (this.lastDisplayedText === this.whisperText || this.lastText === this.whisperText) && token === this.translationToken) {
-                                    this.updateSecondaryLine(translated, false);
-                                }
-                            }).catch(() => { });
-
-                            // For CN text, also prefetch JA translation for primary display
-                            const isCN = this.isChinese(this.whisperText);
-                            if (isCN && targetLang !== 'ja') {
-                                TranslationService.translate(this.whisperText, 'ja').catch(() => { });
-                            }
-                        }
-                        if ((allowSecondary || cachedFallback) && this.whisperText !== this.lastDisplayedText) {
-                            this.displaySubtitle(this.whisperText, cachedFallback || undefined, { skipPrimary: true });
-                        }
-                        if (this.whisperText !== this.lastWhisperDisplayText) {
-                            const isCNFallback = this.isChinese(this.whisperText);
-                            let primaryFallback = this.whisperText;
-                            if (isCNFallback) {
-                                const jaCache = TranslationService.peekCached(this.whisperText, 'ja');
-                                primaryFallback = jaCache || this.whisperText || '';
-                                if (!jaCache) {
-                                    TranslationService.translate(this.whisperText, 'ja').then(ja => {
-                                        if (ja && (this.lastDisplayedText === this.whisperText || this.lastText === this.whisperText)) {
-                                            this.updatePrimaryLine(ja);
-                                            this.lastWhisperDisplayText = ja;
-                                        }
-                                    }).catch(() => {});
-                                }
-                            }
-                            this.updatePrimaryLine(primaryFallback);
-                            this.lastWhisperDisplayText = primaryFallback;
-                        }
+                        this.updatePrimaryLine(this.lastWhisperDisplayText, newSplitIdx, 0);
+                    } else {
+                        this.updatePrimaryLine(display.displayText, -1, 0);
+                    }
+                } else if (!display.displayText) {
+                    // Between segments (gap/silence) — clear stale text.
+                    // Whisper segments have precise endTimes, so gaps are intentional.
+                    if (this.lastWhisperDisplayText) {
+                        this.updatePrimaryLine('');
+                        this.updateSecondaryLine('', false);
+                        this.lastWhisperDisplayText = '';
+                        this.lastDisplayedText = '';
+                        this.lastSecondaryShown = '';
                     }
                 }
                 this.updateVisibility();
@@ -1046,6 +1065,7 @@ export class LearnerMode {
                     TranslationService.translate(this.whisperText, targetLang).then(translated => {
                         if (translated && (this.lastDisplayedText === this.whisperText || this.lastText === this.whisperText) && token === this.translationToken) {
                             this.updateSecondaryLine(translated, false);
+                            this.lastSecondaryShown = translated;
                         }
                     }).catch(() => { });
 
@@ -1055,8 +1075,18 @@ export class LearnerMode {
                         TranslationService.translate(this.whisperText, 'ja').catch(() => { });
                     }
                 }
-                if ((allowSecondary || cachedFallback) && this.whisperText !== this.lastDisplayedText) {
-                    this.displaySubtitle(this.whisperText, cachedFallback || undefined, { skipPrimary: true });
+                if (this.whisperText !== this.lastDisplayedText) {
+                    this.lastDisplayedText = this.whisperText;
+                    this.lastSecondaryShown = '';
+                    if (cachedFallback) {
+                        this.updateSecondaryLine(cachedFallback, false);
+                        this.lastSecondaryShown = cachedFallback;
+                    } else if (allowSecondary) {
+                        this.updateSecondaryLine('', true);
+                    }
+                } else if (cachedFallback && cachedFallback !== this.lastSecondaryShown) {
+                    this.updateSecondaryLine(cachedFallback, false);
+                    this.lastSecondaryShown = cachedFallback;
                 }
                 if (this.whisperText !== this.lastWhisperDisplayText) {
                     const isCNWhisper = this.isChinese(this.whisperText);
@@ -1140,17 +1170,39 @@ export class LearnerMode {
 
         // For Chinese subtitles, show JP translation as primary (never raw CN)
         let primaryText: string;
+        let splitIdx = -1;
+        let hlStart = -1;
+        const karaokeEnabled = !!Config.get('karaokeMode');
+        const segmentEnabled = !!Config.get('segmentMode');
         if (isCN) {
             const jaTranslation = TranslationService.peekCached(fullText, 'ja');
             primaryText = jaTranslation || fullText || '';
+        } else if (karaokeEnabled) {
+            hlStart = 0; // accent all spoken text from the beginning
+            if (segmentEnabled) {
+                // Karaoke + Segment: spoken (accent) | upcoming (dim)
+                primaryText = fullText;
+                const words = display.activeLine?.words;
+                if (Array.isArray(words) && words.length > 0 && display.now != null) {
+                    splitIdx = this.computeWordKaraokeIndices(fullText, words, display.now).splitIdx;
+                } else if (display.activeLine && display.now != null) {
+                    splitIdx = this.computeTimeFallbackKaraokeIndices(fullText, display.activeLine, display.now).splitIdx;
+                }
+            } else {
+                // Karaoke only: all revealed text in accent
+                primaryText = progressiveText;
+            }
         } else {
             primaryText = progressiveText;
         }
 
         // Update JP line
         if (primaryText && primaryText !== this.lastWhisperDisplayText) {
-            this.updatePrimaryLine(primaryText);
+            this.updatePrimaryLine(primaryText, splitIdx, hlStart);
             this.lastWhisperDisplayText = primaryText;
+        } else if (karaokeEnabled && (splitIdx >= 0 || hlStart >= 0)) {
+            // Text unchanged but karaoke index may have advanced
+            this.updatePrimaryLine(primaryText, splitIdx, hlStart);
         }
 
         // Update EN line with cached translation of full segment
@@ -1239,9 +1291,11 @@ export class LearnerMode {
                 this.preTranslateAll(newWhisperLines);
             }
             this.whisperLines = newWhisperLines;
-            this.lastWhisperDisplayText = '';
+            // Don't reset lastWhisperDisplayText here — let _updateWhisperDisplay()
+            // naturally detect changes. Resetting forces re-renders that cause flashing
+            // when paused and whisper reprocesses the same audio with slightly different output.
         }
-        this.lastText = '';
+        // Don't reset lastText either — let the natural dedup comparison handle it.
 
         // Immediately trigger display update — don't wait for next timeupdate event
         // This prevents progress events from overwriting before text is shown
@@ -1262,6 +1316,7 @@ export class LearnerMode {
         this.clearWhisperTicker();
         this.lastText = '';
         this.lastDisplayedText = '';
+        this.lastSecondaryShown = '';
 
         // Remove whisper-active class
         this.expanded?.classList.remove('whisper-active');
@@ -1945,19 +2000,45 @@ export class LearnerMode {
         const audio = getAudioElement();
         if (!audio) return;
 
-        // Fallback: seek +/- 5s if no lyrics available
-        if (!this.currentLyrics.length) {
+        // Prefer whisperLines when whisper is active (currentLyrics may lag one tick behind)
+        const lines = this.whisperActive && this.whisperLines.length > 0 ? this.whisperLines
+            : this.currentLyrics.length > 0 ? this.currentLyrics
+            : this.whisperLines;
+
+        if (!lines.length) {
             audio.currentTime = Math.max(0, audio.currentTime + (offset * 5));
             return;
         }
 
         const now = audio.currentTime;
-        let idx = this.currentLyrics.findIndex(l => l.time > now) - 1;
-        if (idx < 0) idx = 0;
-        const target = this.currentLyrics[Math.max(0, Math.min(this.currentLyrics.length - 1, idx + offset))];
+        const firstAfter = lines.findIndex(l => l.time > now);
+        let idx: number;
+        if (firstAfter === -1) {
+            idx = lines.length - 1;
+        } else if (firstAfter === 0) {
+            idx = 0;
+        } else {
+            idx = firstAfter - 1;
+        }
+        const rawTarget = idx + offset;
+        const targetIdx = Math.max(0, Math.min(lines.length - 1, rawTarget));
+        // If clamped (no more segments in this direction), fall back to time-based seek
+        if (targetIdx === idx && offset !== 0) {
+            audio.currentTime = Math.max(0, audio.currentTime + offset * 5);
+            if (audio.paused) audio.play().catch(err => Logger.warn('[LearnerMode] Audio play after seek failed:', err));
+            return;
+        }
+        const target = lines[targetIdx];
         if (target) {
             audio.currentTime = target.time + 0.01;
-            audio.play().catch((err) => { Logger.warn('[LearnerMode] Audio play after seek failed:', err); });
+            if (audio.paused) audio.play().catch(err => Logger.warn('[LearnerMode] Audio play after seek failed:', err));
+            // Immediately pre-populate display to avoid blank flash
+            this.lastText = '';
+            this.lastDisplayedText = '';
+            this.lastSecondaryShown = '';
+            this.lastWhisperDisplayText = '';
+            this.translationToken += 1;
+            this.updateLyrics();
         }
     }
 
@@ -1970,6 +2051,7 @@ export class LearnerMode {
         for (const e of this.getJpEls()) e.textContent = '';
         for (const e of this.getEnEls()) e.textContent = '';
         this.lastDisplayedText = '';
+        this.lastSecondaryShown = '';
         this.updateVisibility();
     }
 
@@ -2168,7 +2250,7 @@ export class LearnerMode {
         return this.getTextFromTimelineFor(this.whisperLines, this.whisperLeadSec, true);
     }
 
-    private getWhisperDisplay(): { displayText: string; fullText: string } {
+    private getWhisperDisplay(): { displayText: string; fullText: string; activeLine?: any; now?: number } {
         const audio = getAudioElement();
         if (!audio || this.whisperLines.length === 0) return { displayText: '', fullText: '' };
         const now = audio.currentTime + Math.max(0, this.whisperLeadSec);
@@ -2176,14 +2258,14 @@ export class LearnerMode {
         if (!activeLine || !activeLine.text) return { displayText: '', fullText: '' };
         const fullText = activeLine.text.trim();
         const displayText = this.getProgressiveText(activeLine, now);
-        return { displayText, fullText };
+        return { displayText, fullText, activeLine, now };
     }
 
     /**
      * Get progressive subtitle display for regular lyrics (VTT/LRC).
      * Returns both the progressive (word-by-word) text and the full segment text.
      */
-    private getSubtitleDisplay(): { displayText: string; fullText: string } {
+    private getSubtitleDisplay(): { displayText: string; fullText: string; activeLine?: any; now?: number } {
         const audio = getAudioElement();
         if (!audio || this.currentLyrics.length === 0) return { displayText: '', fullText: '' };
         const now = audio.currentTime + this.subtitleLeadSec;
@@ -2192,12 +2274,14 @@ export class LearnerMode {
         const fullText = activeLine.text.trim();
         // Always use progressive display for word-by-word reveal
         const displayText = this.getProgressiveText(activeLine, now);
-        return { displayText, fullText };
+        return { displayText, fullText, activeLine, now };
     }
 
     private getProgressiveText(line: { time: number; endTime?: number; text: string }, now: number): string {
         const text = line.text?.trim() || '';
         if (!text || line.endTime == null || line.endTime === undefined) return text;
+        // Segment mode: show full text immediately, no progressive reveal
+        if (Config.get('segmentMode')) return text;
         const words = (line as { words?: Array<{ start: number; end: number; text: string }> }).words;
         if (Array.isArray(words) && words.length > 0) {
             // Trim leading spaces from Whisper word outputs (e.g., " hello" → "hello")
@@ -2220,10 +2304,115 @@ export class LearnerMode {
         return chars.slice(0, count).join('');
     }
 
-    private updatePrimaryLine(text: string): void {
+    /**
+     * Update the primary (JP) line with optional karaoke highlighting.
+     * Both splitIdx >= 0 AND hlStart >= 0: karaoke+segment 3-way — past | current word (accent) | upcoming (dim)
+     * splitIdx >= 0 only: 2-way — spoken (accent) | upcoming (dim)
+     * hlStart >= 0 only:  karaoke-only — past (primary) | current word (accent)
+     */
+    private updatePrimaryLine(text: string, splitIdx = -1, hlStart = -1): void {
+        const karaokeEnabled = !!Config.get('karaokeMode');
         for (const e of this.getJpEls()) {
-            e.textContent = text;
+            const isCollapsed = !!e.closest('.learner-subs-collapsed');
+            if (karaokeEnabled && !isCollapsed && splitIdx >= 0 && hlStart >= 0 && text) {
+                // 3-way: past (primary) | current word (accent) | upcoming (dim)
+                const chars = Array.from(text);
+                const past = chars.slice(0, hlStart).join('');
+                const current = chars.slice(hlStart, splitIdx).join('');
+                const upcoming = chars.slice(splitIdx).join('');
+                e.textContent = '';
+                const pastSpan = document.createElement('span');
+                pastSpan.className = 'karaoke-past';
+                pastSpan.textContent = past;
+                const currentSpan = document.createElement('span');
+                currentSpan.className = 'karaoke-spoken';
+                currentSpan.textContent = current;
+                const upcomingSpan = document.createElement('span');
+                upcomingSpan.className = 'karaoke-upcoming';
+                upcomingSpan.textContent = upcoming;
+                e.appendChild(pastSpan);
+                e.appendChild(currentSpan);
+                e.appendChild(upcomingSpan);
+            } else if (karaokeEnabled && !isCollapsed && splitIdx >= 0 && text) {
+                // 2-way: spoken (accent) | upcoming (dim)
+                const chars = Array.from(text);
+                const spoken = chars.slice(0, splitIdx).join('');
+                const upcoming = chars.slice(splitIdx).join('');
+                e.textContent = '';
+                const spokenSpan = document.createElement('span');
+                spokenSpan.className = 'karaoke-spoken';
+                spokenSpan.textContent = spoken;
+                const upcomingSpan = document.createElement('span');
+                upcomingSpan.className = 'karaoke-upcoming';
+                upcomingSpan.textContent = upcoming;
+                e.appendChild(spokenSpan);
+                e.appendChild(upcomingSpan);
+            } else if (karaokeEnabled && !isCollapsed && hlStart >= 0 && text) {
+                // 2-way: past (primary) | current word (accent)
+                const chars = Array.from(text);
+                const past = chars.slice(0, hlStart).join('');
+                const current = chars.slice(hlStart).join('');
+                e.textContent = '';
+                const pastSpan = document.createElement('span');
+                pastSpan.className = 'karaoke-past';
+                pastSpan.textContent = past;
+                const currentSpan = document.createElement('span');
+                currentSpan.className = 'karaoke-spoken';
+                currentSpan.textContent = current;
+                e.appendChild(pastSpan);
+                e.appendChild(currentSpan);
+            } else {
+                e.textContent = text;
+            }
         }
+    }
+
+    /** Compute word-level karaoke indices from word timings. */
+    private computeWordKaraokeIndices(
+        fullText: string,
+        words: Array<{ start: number; end: number; text: string }>,
+        now: number,
+    ): { splitIdx: number; hlStart: number } {
+        const hasSpaces = /\s/.test(fullText);
+        let charOffset = 0;
+        let hlStart = 0;
+        let splitIdx = 0;
+        let foundAny = false;
+        for (let i = 0; i < words.length; i++) {
+            const wText = (words[i].text || '').trim();
+            const wChars = Array.from(wText).length;
+            if (words[i].start <= now + 0.01) {
+                hlStart = charOffset;
+                splitIdx = charOffset + wChars;
+                foundAny = true;
+            }
+            charOffset += wChars;
+            if (hasSpaces && i < words.length - 1) charOffset += 1;
+        }
+        return foundAny ? { splitIdx, hlStart } : { splitIdx: 0, hlStart: 0 };
+    }
+
+    /** Fallback karaoke indices when no word timings are available. */
+    private computeTimeFallbackKaraokeIndices(
+        fullText: string,
+        line: { time: number; endTime?: number },
+        now: number,
+    ): { splitIdx: number; hlStart: number } {
+        if (!line.endTime) return { splitIdx: -1, hlStart: -1 };
+        const duration = Math.max(0.05, line.endTime - line.time);
+        const progress = Math.max(0, Math.min(1, (now - line.time) / duration));
+        if (/\s/.test(fullText)) {
+            const ws = fullText.split(/\s+/).filter(Boolean);
+            const count = Math.max(1, Math.min(ws.length, Math.ceil(progress * ws.length)));
+            const spoken = ws.slice(0, count).join(' ');
+            const spokenChars = Array.from(spoken).length;
+            const prevWords = ws.slice(0, count - 1);
+            const prevLen = prevWords.length > 0 ? Array.from(prevWords.join(' ')).length + 1 : 0;
+            return { splitIdx: spokenChars, hlStart: prevLen };
+        }
+        const chars = Array.from(fullText);
+        const count = Math.max(1, Math.min(chars.length, Math.ceil(progress * chars.length)));
+        return { splitIdx: count, hlStart: Math.max(0, count - 1) };
     }
 
     /** Lazily refresh cached .learner-jp / .learner-en references */

@@ -10,14 +10,14 @@ export class HVDBLink {
     }
 
     public enable(): void {
-        Logger.debug('[HVDBLink] Enabling...');
+        Logger.log('[HVDBLink] Enabling...');
 
         // Use bridge to watch for work changes
         this.bridge.watch(
             (state) => state.AudioPlayer?.work?.id,
             (newId) => {
                 if (newId) {
-                    Logger.debug('[HVDBLink] Work changed, scheduling injection');
+                    Logger.log('[HVDBLink] Work changed, scheduling injection');
                     this.scheduleInjection();
                 }
             }
@@ -25,7 +25,7 @@ export class HVDBLink {
 
         // Also watch for route changes (important for SPA navigation)
         this.bridge.$watch('$route', () => {
-            Logger.debug('[HVDBLink] Route changed, scheduling injection');
+            Logger.log('[HVDBLink] Route changed, scheduling injection');
             this.scheduleInjection();
         });
 
@@ -128,6 +128,6 @@ export class HVDBLink {
         container.appendChild(hvdbEl);
         container.appendChild(chobitEl);
 
-        Logger.debug(`[HVDBLink] Successfully injected HVDB and Chobit links for ${rjCode}`);
+        Logger.log(`[HVDBLink] Successfully injected HVDB and Chobit links for ${rjCode}`);
     }
 }

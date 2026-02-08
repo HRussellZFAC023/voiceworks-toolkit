@@ -33,6 +33,7 @@ export class Visualizer {
     private barEl: HTMLElement | null = null;
     private expandedBarEl: HTMLElement | null = null;
     private eventCleanups: (() => void)[] = [];
+    private persistentCleanups: (() => void)[] = [];
     private positionPollId: number | null = null;
     private animFrameId: number | null = null;
     private isPaused = false;
@@ -43,6 +44,9 @@ export class Visualizer {
     private sourceNode: MediaElementAudioSourceNode | null = null;
     private connectedAudioEl: HTMLAudioElement | null = null;
     private analyserAvailable = false;
+
+    // Cached accent color (invalidated on config:change)
+    private cachedAccentRGB: string | null = null;
 
     private constructor() {}
 
@@ -58,10 +62,17 @@ export class Visualizer {
     // ------------------------------------------------------------------------
 
     public enable(): void {
+        this.setupPersistentListeners();
         this.setupEventListeners();
         CentralObserver.register('visualizer', () => {
             if (this.isActive) this.ensureUI();
         }, 800);
+
+        // Auto-activate if "always show" is enabled
+        if (AppStore.getConfig('alwaysShowVisualizer') && !this.isActive) {
+            this.activate();
+        }
+
         Logger.log('[Visualizer] Enabled');
     }
 
@@ -113,16 +124,34 @@ export class Visualizer {
     // ------------------------------------------------------------------------
 
     private setupEventListeners(): void {
-        // Reset on track change
+        // Reset on track change — re-activate if "always show" is on
         this.eventCleanups.push(EventBus.on('track:change', () => {
             if (this.isActive) {
                 this.connectAudioAnalyser();
+            } else if (AppStore.getConfig('alwaysShowVisualizer')) {
+                this.activate();
             }
         }));
+    }
 
-        // Toggle event from overflow menu
-        this.eventCleanups.push(EventBus.on('viz:toggle', () => {
+    /**
+     * Persistent listeners that survive deactivate() — registered once in enable()
+     */
+    private setupPersistentListeners(): void {
+        if (this.persistentCleanups.length > 0) return; // already registered
+
+        // Toggle event from overflow menu — must persist across activate/deactivate cycles
+        this.persistentCleanups.push(EventBus.on('viz:toggle', () => {
             this.toggle();
+        }));
+
+        // React to "always show" setting changes + invalidate accent cache
+        this.persistentCleanups.push(EventBus.on('config:change', ({ key, value }) => {
+            this.cachedAccentRGB = null;
+            if (key === 'alwaysShowVisualizer') {
+                if (value && !this.isActive) this.activate();
+                else if (!value && this.isActive) this.deactivate();
+            }
         }));
     }
 
@@ -193,7 +222,7 @@ export class Visualizer {
         const data = new Uint8Array(this.analyser.frequencyBinCount);
         this.analyser.getByteFrequencyData(data);
 
-        for (const bar of this.getBars()) {
+        for (const bar of this.getConnectedBars()) {
             const canvas = bar.querySelector('canvas') as HTMLCanvasElement | null;
             if (!canvas) continue;
 
@@ -250,6 +279,7 @@ export class Visualizer {
     }
 
     private getAccentColor(): string {
+        if (this.cachedAccentRGB) return this.cachedAccentRGB;
         // Read --asmr-accent from CSS and convert to RGB components
         const el = this.barEl || document.documentElement;
         const accent = getComputedStyle(el).getPropertyValue('--asmr-accent').trim();
@@ -257,7 +287,8 @@ export class Visualizer {
             const r = parseInt(accent.slice(1, 3), 16);
             const g = parseInt(accent.slice(3, 5), 16);
             const b = parseInt(accent.slice(5, 7), 16);
-            return `${r}, ${g}, ${b}`;
+            this.cachedAccentRGB = `${r}, ${g}, ${b}`;
+            return this.cachedAccentRGB;
         }
         // Fallback: purple
         return '124, 77, 255';
@@ -467,6 +498,12 @@ export class Visualizer {
         for (const bar of this.getBars()) {
             bar.classList.add('hidden');
         }
+    }
+
+    /** Yields connected bars without allocating an array (used in 60Hz render path) */
+    private *getConnectedBars(): Generator<HTMLElement> {
+        if (this.barEl?.isConnected) yield this.barEl;
+        if (this.expandedBarEl?.isConnected) yield this.expandedBarEl;
     }
 
     private getBars(): HTMLElement[] {

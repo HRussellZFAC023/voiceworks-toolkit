@@ -60,6 +60,7 @@ export const SCORING = {
     SCRIPT_FOLDER_PENALTY: -300_000,
     IMAGE_FOLDER_PENALTY: -400_000,
     SE_FOLDER_PENALTY: -50_000,
+    SE_PREF_BONUS: 150_000,
     BGM_BONUS: 100_000,
     NO_AUDIO_PENALTY: -2_000_000,
     /** Folders scoring below this are rejected entirely. */
