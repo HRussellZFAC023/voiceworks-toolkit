@@ -29,6 +29,7 @@ const { on } = useEventBus();
 
 const sfwMode = useConfig('sfwMode');
 const translateMode = useConfig('translateMode');
+const shuffleEnabled = useConfig('shuffle');
 
 // ============================================================================
 // Local reactive state
@@ -141,12 +142,10 @@ function ensurePlaylistControls() {
     container.querySelector('.asmr-playlist-shuffle')?.addEventListener('click', (e) => {
         e.stopPropagation();
         PlaylistMode.getInstance().shuffle();
-        const icon = container.querySelector('.asmr-playlist-shuffle .material-icons');
-        if (icon) {
-            icon.classList.add('asmr-accent');
-            setTimeout(() => icon.classList.remove('asmr-accent'), 1000);
-        }
     });
+
+    // Initialize shuffle button active state
+    updateShuffleButton(container, shuffleEnabled.value);
 
     // Get current progress
     const pm = PlaylistMode.getInstance();
@@ -156,6 +155,13 @@ function ensurePlaylistControls() {
     }
 
     Logger.debug('[SidebarMenu] Playlist controls injected into player bar');
+}
+
+function updateShuffleButton(container: HTMLElement, isActive: boolean) {
+    const btn = container.querySelector('.asmr-playlist-shuffle');
+    if (btn) {
+        btn.classList.toggle('asmr-playlist-shuffle-active', isActive);
+    }
 }
 
 function updatePlayerBarProgress(current: number, total: number) {
@@ -241,10 +247,10 @@ on('playlist:progress', (payload) => {
     updatePlayerBarProgress(payload.current, payload.total);
 });
 
-on('playlist:shuffled', (payload) => {
-    playlistCurrent.value = payload.currentWorkIndex + 1;
-    playlistTotal.value = payload.workIds.length;
-    updatePlayerBarProgress(playlistCurrent.value, playlistTotal.value);
+on('playlist:shuffleToggled', (payload) => {
+    if (playlistControlsEl) {
+        updateShuffleButton(playlistControlsEl, payload.enabled);
+    }
 });
 
 // ============================================================================

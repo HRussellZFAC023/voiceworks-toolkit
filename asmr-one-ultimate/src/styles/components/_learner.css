@@ -47,12 +47,13 @@
     /* Let clicks pass through empty areas */
 }
 
-/* Ensure content is clickable and doesn't clip */
+/* Ensure content is clickable, centered, and doesn't clip */
 .learner-subs-collapsed .learner-jp,
 .learner-subs-collapsed .learner-en {
     pointer-events: auto;
     width: 100%;
     box-sizing: border-box;
+    text-align: center !important;
 }
 
 .learner-subs-collapsed.hidden {
@@ -97,7 +98,7 @@
 .learner-en {
     font-size: 0.8125rem;
     color: var(--asmr-text-tertiary);
-    cursor: text;
+    cursor: pointer;
     text-align: center;
     user-select: text;
     transition: opacity 0.15s, filter 0.15s;
@@ -110,7 +111,6 @@
 .learner-en.blurred {
     filter: blur(5px);
     opacity: 0.3;
-    cursor: pointer;
     user-select: none;
 }
 

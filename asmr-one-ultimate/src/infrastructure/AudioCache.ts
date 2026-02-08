@@ -29,7 +29,6 @@ export class AudioCache {
     private bridge: KikoeruBridge;
     private inFlight = new Map<string, Promise<void>>();
     private lastUrl: string | null = null;
-    private pollId: number | null = null;
     /** Serializes eviction so concurrent quota-exceeded callers share one eviction pass */
     private evictionPromise: Promise<void> | null = null;
 
@@ -49,20 +48,10 @@ export class AudioCache {
 
     public enable(): void {
         Logger.log('[AudioCache] Enabling audio cache');
-        const store = this.bridge.store;
-        if (store.watch) {
-            Logger.debug('[AudioCache] Using store.watch for track changes');
-            store.watch(
-                (state: any) => state.AudioPlayer?.currentTrack || state.AudioPlayer?.currentPlayingFile,
-                (track: any) => this.handleTrackChange(track)
-            );
-        } else if (this.pollId === null) {
-            Logger.debug('[AudioCache] Using polling for track changes (store.watch unavailable)');
-            this.pollId = window.setInterval(() => {
-                const track = store.state.AudioPlayer?.currentTrack || store.state.AudioPlayer?.currentPlayingFile;
-                this.handleTrackChange(track);
-            }, 1000);
-        }
+        // Use centralized track:change events from KikoeruBridge instead of polling
+        EventBus.on('track:change', ({ track }) => {
+            this.handleTrackChange(track);
+        });
     }
 
     public async getBlob(url: string): Promise<Blob | null> {

@@ -168,7 +168,6 @@ export class Whisper {
     private idleUnloadTimer: number | null = null;
     private static readonly IDLE_UNLOAD_MS = 10 * 60 * 1000; // 10 minutes
     private _audioCache: AudioCache | null = null;
-    private autoStartCheckTimer: number | null = null;
 
     private getAudioCache(): AudioCache | null {
         if (!AudioCache.objectUrls) return null;
@@ -197,59 +196,19 @@ export class Whisper {
             this.initWorker(settings);
         }
 
-        const alwaysOn = Config.get('alwaysTranscribe');
-        Logger.log('[Whisper] alwaysTranscribe =', alwaysOn);
-
-        // If alwaysTranscribe is on, start watching for audio to auto-start
-        if (alwaysOn) {
-            this.startAutoTranscribeCheck();
+        // If alwaysTranscribe is on, try to auto-start for the current track.
+        // If audio isn't playing yet, the track:change handler in setupEventListeners
+        // will catch it when the user starts playback.
+        if (Config.get('alwaysTranscribe')) {
+            this.tryAutoStartForCurrentTrack();
         }
 
-        // Also listen for config changes to auto-start when toggled on mid-session
+        // When alwaysTranscribe is toggled on mid-session, try to auto-start immediately
         EventBus.on('config:change', (payload) => {
-            if (payload.key === 'alwaysTranscribe') {
-                if (payload.value === true) {
-                    this.startAutoTranscribeCheck();
-                } else {
-                    this.stopAutoTranscribeCheck();
-                }
+            if (payload.key === 'alwaysTranscribe' && payload.value === true) {
+                this.tryAutoStartForCurrentTrack();
             }
         });
-    }
-
-    /**
-     * Simple recurring check: every 1s, see if audio is playing and we should
-     * auto-start transcription. Runs indefinitely until it succeeds or
-     * alwaysTranscribe is turned off. No fragile event listeners or race
-     * conditions — just poll until conditions are met.
-     */
-    private startAutoTranscribeCheck(): void {
-        this.stopAutoTranscribeCheck();
-
-        // Try immediately
-        if (this.tryAutoStartForCurrentTrack()) return;
-
-        Logger.log('[Whisper] Auto-transcribe: waiting for audio to start playing...');
-        this.autoStartCheckTimer = window.setInterval(() => {
-            // Stop if config was turned off
-            if (!Config.get('alwaysTranscribe')) {
-                this.stopAutoTranscribeCheck();
-                return;
-            }
-            // Skip if already transcribing
-            if (this.transcribing) {
-                this.stopAutoTranscribeCheck();
-                return;
-            }
-            this.tryAutoStartForCurrentTrack();
-        }, 1000);
-    }
-
-    private stopAutoTranscribeCheck(): void {
-        if (this.autoStartCheckTimer) {
-            clearInterval(this.autoStartCheckTimer);
-            this.autoStartCheckTimer = null;
-        }
     }
 
     /**
@@ -264,10 +223,9 @@ export class Whisper {
         const audio = getAudioElement();
         if (!audio || audio.paused) return false;
 
-        Logger.log('[Whisper] Always-transcribe: auto-starting for current track');
+        Logger.debug('[Whisper] Always-transcribe: auto-starting for current track');
         this.currentTrackSrc = src;
         this.autoTranscribeWorkId = this.bridge.currentWorkId || null;
-        this.stopAutoTranscribeCheck();
         setTimeout(() => {
             void this.startTranscription();
         }, 500);

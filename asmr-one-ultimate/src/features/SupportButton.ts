@@ -1,9 +1,9 @@
 import { HeaderActions } from '../ui/HeaderActions';
 import { SafeUtils } from '../core/Utils';
+import { CentralObserver } from '../core/CentralObserver';
 
 export class SupportButton {
     private button: HTMLElement | null = null;
-    private intervalId: number | null = null;
     // Link from P2-04 task
     private readonly link = 'https://paypal.me/HenryRussell163';
 
@@ -12,10 +12,13 @@ export class SupportButton {
         await SafeUtils.waitFor(() => !!HeaderActions.ensure(), 30000);
         this.inject();
 
-        // Simple polling to keep it alive (since Vue might re-render header)
-        if (this.intervalId === null) {
-            this.intervalId = window.setInterval(() => this.inject(), 2000);
-        }
+        // Re-inject when Vue re-renders the header (detected by CentralObserver)
+        CentralObserver.register('support-button', () => {
+            if (this.button && !document.contains(this.button)) {
+                this.button = null;
+                this.inject();
+            }
+        }, 500);
     }
 
     private inject(): void {
@@ -42,7 +45,7 @@ export class SupportButton {
         `;
 
         // Prepend to container to be prominent? or append?
-        // HeaderActions container is usually populated by ensure(). 
+        // HeaderActions container is usually populated by ensure().
         // If we append, it's on the right.
         container.appendChild(btn);
         this.button = btn;

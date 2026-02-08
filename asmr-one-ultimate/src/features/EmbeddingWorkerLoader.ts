@@ -441,9 +441,31 @@ self.addEventListener('message', async (event) => {
             const results = await embed(msg.texts);
             self.postMessage({ status: 'complete', data: results, id: msg.id });
         } catch (err) {
+            const errMsg = String(err?.message || err || '');
+            const isGpuError = /createBuffer|RangeError|out of memory|OOM|allocation|shader|device lost|GPUDevice|createComputePipeline|createShaderModule/i.test(errMsg);
+
+            if (currentBackend !== 'wasm' && isGpuError) {
+                console.warn('[Embedding Worker] GPU batch inference failed, falling back to WASM:', errMsg);
+                skipWebgpu = true;
+                if (pipelineInstance) {
+                    try { pipelineInstance.dispose?.(); } catch {}
+                    pipelineInstance = null;
+                    pipelineReady = false;
+                }
+                await releaseGpuResources();
+                self.postMessage({ status: 'initiate', backend: 'wasm', vendor: '' });
+                try {
+                    const results = await embed(msg.texts);
+                    self.postMessage({ status: 'complete', data: results, id: msg.id });
+                    return;
+                } catch (retryErr) {
+                    self.postMessage({ status: 'error', data: { message: String(retryErr?.message || retryErr) }, id: msg.id });
+                    return;
+                }
+            }
             self.postMessage({
                 status: 'error',
-                data: { message: String(err?.message || err || '') },
+                data: { message: errMsg },
                 id: msg.id,
             });
         }

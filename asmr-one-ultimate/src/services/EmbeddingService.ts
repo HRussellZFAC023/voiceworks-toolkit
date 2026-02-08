@@ -15,6 +15,10 @@ const SINGLE_TIMEOUT_MS = 30_000;
 const BATCH_TIMEOUT_BASE_MS = 30_000;
 const BATCH_TIMEOUT_PER_ITEM_MS = 200;
 
+// Circuit breaker: kill & recreate worker after consecutive GPU errors
+const CIRCUIT_BREAKER_THRESHOLD = 3;
+const GPU_ERROR_PATTERN = /createBuffer|RangeError|out of memory|OOM|allocation|device lost|GPUDevice|mapAsync|Instance reference/i;
+
 // ============================================================================
 // Worker State
 // ============================================================================
@@ -35,6 +39,11 @@ let nextId = 0;
 
 // In-flight dedup
 const embedInFlight = new Map<string, Promise<number[]>>();
+
+// Circuit breaker state
+let consecutiveGpuErrors = 0;
+let circuitRecoveryAttempted = false;
+let serviceDead = false;
 
 // Idle unload
 let idleTimer: ReturnType<typeof setTimeout> | null = null;
@@ -61,6 +70,49 @@ function terminateWorker(): void {
         worker = null;
         workerReady = false;
         initPromise = null;
+    }
+}
+
+function isGpuError(msg: string): boolean {
+    return GPU_ERROR_PATTERN.test(msg);
+}
+
+function handleCircuitBreaker(errorMsg: string): void {
+    if (!isGpuError(errorMsg)) {
+        // Non-GPU error — don't count toward circuit breaker
+        return;
+    }
+
+    consecutiveGpuErrors++;
+    Logger.warn(`[EmbeddingService] GPU error ${consecutiveGpuErrors}/${CIRCUIT_BREAKER_THRESHOLD}: ${errorMsg}`);
+
+    if (consecutiveGpuErrors >= CIRCUIT_BREAKER_THRESHOLD) {
+        if (circuitRecoveryAttempted) {
+            // Already tried WASM recovery once — service is dead
+            Logger.error('[EmbeddingService] WASM recovery also failed — service degraded');
+            serviceDead = true;
+            // Reject all pending requests immediately
+            for (const [id, req] of pending) {
+                clearTimeout(req.timer);
+                req.reject(new Error('Embedding service unavailable (GPU and WASM failed)'));
+                pending.delete(id);
+            }
+            EventBus.emit('embedding:dead', {});
+            return;
+        }
+
+        // Circuit breaker tripped — kill worker and recreate on WASM
+        Logger.warn('[EmbeddingService] Circuit breaker tripped — killing worker, will recreate on WASM');
+        webgpuFailed = true;
+        SharedCache.set('asmr-ult:embed:preferred-dtype', '', CACHE_TTL_MS); // Clear GPU dtype preference
+        circuitRecoveryAttempted = true;
+        consecutiveGpuErrors = 0;
+
+        // Terminate kills worker and rejects all pending requests
+        terminateWorker();
+
+        // Emit event so other systems (Whisper, Translation) know GPU is dead
+        EventBus.emit('embedding:gpu-failed', {});
     }
 }
 
@@ -108,6 +160,8 @@ function handleMessage(e: MessageEvent): void {
         } else {
             Logger.error('[EmbeddingService] Worker error:', err);
         }
+        // Check circuit breaker for GPU errors
+        handleCircuitBreaker(err);
         return;
     }
 
@@ -118,6 +172,8 @@ function handleMessage(e: MessageEvent): void {
             req.resolve(msg.data);
             pending.delete(msg.id);
         }
+        // Success — reset GPU error counter
+        consecutiveGpuErrors = 0;
     }
 }
 
@@ -220,6 +276,7 @@ export const EmbeddingService = {
      * @returns Normalized 384-dim float32 vector
      */
     async embed(text: string, task: 'query' | 'passage' = 'query'): Promise<number[]> {
+        if (serviceDead) throw new Error('Embedding service unavailable');
         resetIdleTimer();
         const prefixed = task === 'query' ? `query: ${text}` : `passage: ${text}`;
 
@@ -248,6 +305,7 @@ export const EmbeddingService = {
      * @returns Array of normalized 384-dim float32 vectors
      */
     async embedBatch(texts: string[], task: 'query' | 'passage' = 'passage'): Promise<number[][]> {
+        if (serviceDead) throw new Error('Embedding service unavailable');
         if (texts.length === 0) return [];
         resetIdleTimer();
 
@@ -262,6 +320,10 @@ export const EmbeddingService = {
 
     isReady(): boolean {
         return workerReady;
+    },
+
+    isDead(): boolean {
+        return serviceDead;
     },
 
     terminate(): void {

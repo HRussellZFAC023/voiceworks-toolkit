@@ -136,7 +136,9 @@ export class KikoeruBridge {
         // Watch for track changes
         store.watch?.(
             (state) => {
-                const track = state.AudioPlayer?.currentTrack || state.AudioPlayer?.currentPlayingFile;
+                const ap = state.AudioPlayer;
+                const track = ap?.currentTrack || ap?.currentPlayingFile
+                    || (ap?.queue || ap?.playlist)?.[ap?.queueIndex ?? -1];
                 return track?.src || track?.mediaStreamUrl || track?.hash || null;
             },
             (newSrc) => {
@@ -331,7 +333,7 @@ export class KikoeruBridge {
      */
     public get currentTrack(): PlayerTrack | undefined {
         const player = this.player;
-        return player.currentTrack || player.currentPlayingFile;
+        return player.currentTrack || player.currentPlayingFile || this.queue[this.queueIndex];
     }
 
     /**

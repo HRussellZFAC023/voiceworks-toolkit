@@ -1,4 +1,4 @@
-import { I18n, SafeUtils, Logger } from '../core/Utils';
+import { I18n, SafeUtils, Logger, Config } from '../core/Utils';
 import { EventBus } from '../core/EventBus';
 import { PlaylistMode } from '../features/playlist';
 import { PLAYER_BAR_SELECTOR } from '../core/DomUtils';
@@ -68,9 +68,9 @@ export class SidebarMenu {
             this.updatePlaylistProgress(payload.current, payload.total);
         });
 
-        // Listen for shuffle
-        EventBus.on('playlist:shuffled', (payload) => {
-            this.updatePlaylistProgress(payload.currentWorkIndex + 1, payload.workIds.length);
+        // Listen for shuffle toggle
+        EventBus.on('playlist:shuffleToggled', (payload) => {
+            this.updateShuffleButton(payload.enabled);
         });
 
         Logger.log('[SidebarMenu] Enabled');
@@ -210,6 +210,12 @@ export class SidebarMenu {
         }
     }
 
+    public updateShuffleButton(isActive: boolean): void {
+        if (this.playlistShuffleBtn) {
+            this.playlistShuffleBtn.classList.toggle('asmr-playlist-shuffle-active', isActive);
+        }
+    }
+
     /**
      * Inject playlist controls into the player bar (footer).
      * Controls appear next to the existing player transport buttons.
@@ -278,14 +284,10 @@ export class SidebarMenu {
             e.stopPropagation();
             const pm = PlaylistMode.getInstance();
             pm.shuffle();
-            
-            // Visual feedback
-            const icon = this.playlistShuffleBtn?.querySelector('.material-icons');
-            if (icon) {
-                icon.classList.add('asmr-accent');
-                setTimeout(() => icon.classList.remove('asmr-accent'), 1000);
-            }
         });
+
+        // Initialize shuffle button active state from config
+        this.updateShuffleButton(Config.get('shuffle'));
 
         // Get current progress
         const pm = PlaylistMode.getInstance();

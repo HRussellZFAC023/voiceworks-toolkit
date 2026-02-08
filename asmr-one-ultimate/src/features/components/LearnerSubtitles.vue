@@ -1693,7 +1693,7 @@ watch(showJP, () => syncPsychologyBtn());
         <div
             class="learner-en"
             :class="{ blurred: isBlurred && !!secondaryText, 'translation-fallback': isFallback }"
-            @dblclick.stop="toggleBlur"
+            @click.stop="toggleBlur"
         >{{ secondaryText }}</div>
     </div>
 
@@ -1721,7 +1721,7 @@ watch(showJP, () => syncPsychologyBtn());
             <div
                 class="learner-en"
                 :class="{ blurred: isBlurred && !!secondaryText, 'translation-fallback': isFallback }"
-                @dblclick.stop="toggleBlur"
+                @click.stop="toggleBlur"
             >{{ secondaryText }}</div>
         </div>
     </Teleport>

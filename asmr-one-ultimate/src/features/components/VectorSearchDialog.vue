@@ -403,18 +403,52 @@ async function indexWork(work: any): Promise<boolean> {
     return false;
 }
 
+const MAX_CONSECUTIVE_FAILURES = 5;
+const BACKOFF_BASE_MS = 1000;
+
 async function indexWorks(works: any[]): Promise<number> {
     if (works.length === 0) return 0;
     let added = 0;
     let index = 0;
     const workerCount = Math.min(EMBED_CONCURRENCY, works.length);
     const workers = Array.from({ length: workerCount }).map(async () => {
+        let consecutiveFails = 0;
         while (index < works.length) {
+            // Stop if embedding service is dead (circuit breaker tripped permanently)
+            if (EmbeddingService.isDead()) {
+                Logger.warn('[VectorSearch] Embedding service dead, stopping indexer');
+                break;
+            }
             const work = works[index++];
             try {
-                if (await indexWork(work)) added += 1;
+                if (await indexWork(work)) {
+                    added += 1;
+                    consecutiveFails = 0;
+                } else {
+                    // indexWork returns false if embedding failed or work already indexed
+                    // Only count as failure if it's a new work that failed
+                    const id = String(work?.id);
+                    if (id) {
+                        const db = await dbPromise;
+                        const existing = await db.get('vectors', id);
+                        if (!existing) {
+                            consecutiveFails++;
+                        } else {
+                            consecutiveFails = 0; // Already indexed, not a failure
+                        }
+                    }
+                }
             } catch (e) {
                 Logger.warn('[VectorSearch] Index work failed', e);
+                consecutiveFails++;
+            }
+            if (consecutiveFails >= MAX_CONSECUTIVE_FAILURES) {
+                Logger.warn(`[VectorSearch] ${consecutiveFails} consecutive embedding failures, pausing indexer worker`);
+                break;
+            }
+            if (consecutiveFails > 0) {
+                const delay = BACKOFF_BASE_MS * Math.pow(2, consecutiveFails - 1);
+                await new Promise(resolve => setTimeout(resolve, Math.min(delay, 16000)));
             }
         }
     });

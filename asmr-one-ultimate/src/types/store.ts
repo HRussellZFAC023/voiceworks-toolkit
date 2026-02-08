@@ -384,7 +384,7 @@ export interface AppEvents {
     'gallery:nav': { direction: -1 | 1 };
     'gallery:exclude': {};
     // Playlist supplementary
-    'playlist:shuffled': { workIds: string[] };
+    'playlist:shuffleToggled': { enabled: boolean };
 }
 
 export type AppEventName = keyof AppEvents;

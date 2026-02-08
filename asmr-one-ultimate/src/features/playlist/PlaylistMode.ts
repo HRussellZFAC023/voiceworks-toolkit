@@ -11,7 +11,7 @@
 
 import { KikoeruBridge } from '../../infrastructure/KikoeruBridge';
 import { EventBus } from '../../core/EventBus';
-import { Logger } from '../../core/Utils';
+import { Logger, Config } from '../../core/Utils';
 import { RadioMode } from '../radio';
 import { PlaybackController } from '../radio/PlaybackController';
 import { PlaylistApi, PlaylistWorkItem } from '../../api/Playlist';
@@ -339,6 +339,22 @@ export class PlaylistMode {
     async next(): Promise<void> {
         if (!this._isActive) return;
 
+        if (Config.get('shuffle') && this.workIds.length > 1) {
+            // Pick a random index excluding the current one
+            let randomIndex: number;
+            do {
+                randomIndex = Math.floor(Math.random() * this.workIds.length);
+            } while (randomIndex === this.currentWorkIndex);
+
+            Logger.debug('[PlaylistMode] Shuffle: advancing to random work in playlist', {
+                index: randomIndex + 1,
+                total: this.workIds.length,
+                workId: this.workIds[randomIndex]
+            });
+            this.navigateToWork(randomIndex);
+            return;
+        }
+
         if (this.currentWorkIndex >= this.workIds.length - 1) {
             Logger.debug('[PlaylistMode] End of playlist reached');
             // Don't deactivate - let user manually navigate or deactivate
@@ -394,37 +410,14 @@ export class PlaylistMode {
     }
 
     /**
-     * Shuffle the playlist
+     * Toggle shuffle mode on/off
      */
     shuffle(): void {
-        if (!this._isActive || this.workIds.length <= 1) return;
+        const newValue = !Config.get('shuffle');
+        Config.set('shuffle', newValue);
+        Logger.debug('[PlaylistMode] Shuffle toggled:', newValue);
 
-        Logger.debug('[PlaylistMode] Shuffling playlist');
-
-        // Save current work
-        const currentWorkId = this.workIds[this.currentWorkIndex];
-
-        // Fisher-Yates shuffle
-        for (let i = this.workIds.length - 1; i > 0; i--) {
-            const j = Math.floor(Math.random() * (i + 1));
-            [this.workIds[i], this.workIds[j]] = [this.workIds[j], this.workIds[i]];
-        }
-
-        // Find new index of current work to maintain state
-        if (currentWorkId) {
-            this.currentWorkIndex = this.workIds.indexOf(currentWorkId);
-        }
-
-        EventBus.emit('playlist:shuffled', {
-            workIds: this.workIds,
-            currentWorkIndex: this.currentWorkIndex
-        });
-
-        EventBus.emit('playlist:progress', {
-            current: this.currentWorkIndex + 1,
-            total: this.workIds.length,
-            workId: this.workIds[this.currentWorkIndex],
-        });
+        EventBus.emit('playlist:shuffleToggled', { enabled: newValue });
     }
 
     /**
