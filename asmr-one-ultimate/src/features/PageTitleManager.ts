@@ -109,7 +109,7 @@ export class PageTitleManager {
         this.observer = new MutationObserver(() => {
             const title = document.title;
             if (title.includes('undefined')) {
-                Logger.warn('[PageTitleManager] Detected "undefined" in title, fixing...');
+                Logger.debug('[PageTitleManager] Detected "undefined" in title, fixing...');
                 if (this.currentTitle) {
                     this.updateTitle(this.currentTitle);
                 } else {

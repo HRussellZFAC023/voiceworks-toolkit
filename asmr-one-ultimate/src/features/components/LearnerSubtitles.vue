@@ -21,7 +21,8 @@ import { AppStore } from '../../store/AppStore';
 import { AudioCache } from '../../infrastructure/AudioCache';
 import { getAudioElement, getPlayerBar } from '../../core/DomUtils';
 import { Logger, Config } from '../../core/Utils';
-import type { WhisperUpdatePayload } from '../../types';
+import type { WhisperUpdatePayload, JPDBToken } from '../../types';
+import { buildSegments, sliceSegments, type FuriganaSegment } from '../../lib/jpdb-segments';
 
 // ---------------------------------------------------------------------------
 // Composables
@@ -34,6 +35,10 @@ const learnerBlur = useConfig('learnerBlur');
 const showJP = useConfig('showJP');
 const karaokeMode = useConfig('karaokeMode');
 const segmentMode = useConfig('segmentMode');
+const enablePlayerTranslator = useConfig('enablePlayerTranslator');
+const enableJpdb = useConfig('enableJpdb');
+const jpdbSubtitleFurigana = useConfig('jpdbSubtitleFurigana');
+const jpdbShowFurigana = useConfig('jpdbShowFurigana');
 
 // ---------------------------------------------------------------------------
 // Reactive subtitle state
@@ -45,6 +50,10 @@ const isBlurred = ref(!!learnerBlur.value);
 const isFallback = ref(false); // true when secondary is the untranslated fallback
 const karaokeSplitIndex = ref(-1); // Character index split for karaoke highlighting (-1 = no karaoke)
 const karaokeHighlightStart = ref(-1); // Char index where current word starts (karaoke-only mode, -1 = inactive)
+
+// JPDB Furigana state
+const jpdbTokens = ref<JPDBToken[] | null>(null);
+let lastJpdbText = '';  // Track which text was parsed to avoid re-parsing
 
 // Visibility
 const isPlayerMinimized = ref(false);
@@ -166,6 +175,36 @@ const karaokeCurrent = computed(() => {
 });
 
 // ---------------------------------------------------------------------------
+// JPDB Furigana computed properties
+// ---------------------------------------------------------------------------
+
+const jpdbEnabled = computed(() =>
+    enableJpdb.value && jpdbSubtitleFurigana.value && jpdbShowFurigana.value && jpdbTokens.value !== null,
+);
+
+const furiganaSegments = computed<FuriganaSegment[] | null>(() => {
+    if (!jpdbTokens.value || !primaryText.value) return null;
+    return buildSegments(primaryText.value, jpdbTokens.value);
+});
+
+const furiganaPast = computed(() =>
+    sliceSegments(furiganaSegments.value, 0, karaokeHighlightStart.value),
+);
+
+const furiganaCurrent = computed(() =>
+    sliceSegments(furiganaSegments.value, karaokeHighlightStart.value, karaokeSplitIndex.value),
+);
+
+const furiganaUpcoming = computed(() =>
+    sliceSegments(furiganaSegments.value, karaokeSplitIndex.value, Infinity),
+);
+
+// Non-karaoke: all segments (when no karaoke active)
+const furiganaAll = computed(() =>
+    sliceSegments(furiganaSegments.value, 0, Infinity),
+);
+
+// ---------------------------------------------------------------------------
 // DOM refs
 // ---------------------------------------------------------------------------
 
@@ -284,6 +323,28 @@ function updatePrimaryLine(text: string, splitIdx = -1, hlStart = -1) {
     primaryText.value = text;
     karaokeSplitIndex.value = karaokeMode.value ? splitIdx : -1;
     karaokeHighlightStart.value = karaokeMode.value ? hlStart : -1;
+
+    // Parse with JPDB for furigana (async, non-blocking)
+    if (enableJpdb.value && jpdbSubtitleFurigana.value && jpdbShowFurigana.value && text && text !== lastJpdbText) {
+        lastJpdbText = text;
+        parseForFurigana(text);
+    } else if (!text) {
+        jpdbTokens.value = null;
+        lastJpdbText = '';
+    }
+}
+
+async function parseForFurigana(text: string): Promise<void> {
+    try {
+        const { JpdbService } = await import('../../services/JpdbService');
+        const tokens = await JpdbService.parseSingle(text);
+        // Only update if text hasn't changed while we were parsing
+        if (primaryText.value === text) {
+            jpdbTokens.value = tokens;
+        }
+    } catch {
+        // Silently fail — furigana is optional enhancement
+    }
 }
 
 function updateSecondaryLine(text: string, fallback: boolean) {
@@ -297,6 +358,8 @@ function clearDisplay() {
     secondaryText.value = '';
     karaokeSplitIndex.value = -1;
     karaokeHighlightStart.value = -1;
+    jpdbTokens.value = null;
+    lastJpdbText = '';
     lastDisplayedText = '';
     lastSecondaryShown = '';
     refreshVisibility();
@@ -1786,12 +1849,23 @@ watch(showJP, () => syncPsychologyBtn());
         aria-live="polite"
     >
         <div class="learner-jp" lang="ja" role="status">
-            <template v-if="karaokeHighlightStart >= 0 && karaokeSplitIndex >= 0">
+            <!-- Karaoke with JPDB furigana -->
+            <template v-if="karaokeHighlightStart >= 0 && karaokeSplitIndex >= 0 && jpdbEnabled">
+                <span class="karaoke-past"><template v-for="(seg, i) in furiganaPast" :key="'p'+i"><span v-if="seg.vid !== undefined" class="jpdb-word" :class="[seg.stateClass, seg.pitchClass]" :data-vid="seg.vid" :data-sid="seg.sid" data-jpdb="true"><ruby v-if="seg.rt">{{ seg.base }}<rt class="jpdb-furi">{{ seg.rt }}</rt></ruby><template v-else>{{ seg.base }}</template></span><template v-else>{{ seg.base }}</template></template></span><span class="karaoke-spoken"><template v-for="(seg, i) in furiganaCurrent" :key="'c'+i"><span v-if="seg.vid !== undefined" class="jpdb-word" :class="[seg.stateClass, seg.pitchClass]" :data-vid="seg.vid" :data-sid="seg.sid" data-jpdb="true"><ruby v-if="seg.rt">{{ seg.base }}<rt class="jpdb-furi">{{ seg.rt }}</rt></ruby><template v-else>{{ seg.base }}</template></span><template v-else>{{ seg.base }}</template></template></span><span class="karaoke-upcoming" :class="{ 'karaoke-hidden': !segmentMode }"><template v-for="(seg, i) in furiganaUpcoming" :key="'u'+i"><span v-if="seg.vid !== undefined" class="jpdb-word" :class="[seg.stateClass, seg.pitchClass]" :data-vid="seg.vid" :data-sid="seg.sid" data-jpdb="true"><ruby v-if="seg.rt">{{ seg.base }}<rt class="jpdb-furi">{{ seg.rt }}</rt></ruby><template v-else>{{ seg.base }}</template></span><template v-else>{{ seg.base }}</template></template></span>
+            </template>
+            <!-- Non-karaoke with JPDB furigana -->
+            <template v-else-if="jpdbEnabled && furiganaAll.length > 0">
+                <template v-for="(seg, i) in furiganaAll" :key="'a'+i"><span v-if="seg.vid !== undefined" class="jpdb-word" :class="[seg.stateClass, seg.pitchClass]" :data-vid="seg.vid" :data-sid="seg.sid" data-jpdb="true"><ruby v-if="seg.rt">{{ seg.base }}<rt class="jpdb-furi">{{ seg.rt }}</rt></ruby><template v-else>{{ seg.base }}</template></span><template v-else>{{ seg.base }}</template></template>
+            </template>
+            <!-- Plain karaoke (no JPDB) -->
+            <template v-else-if="karaokeHighlightStart >= 0 && karaokeSplitIndex >= 0">
                 <span class="karaoke-past">{{ karaokePast }}</span><span class="karaoke-spoken">{{ karaokeCurrent }}</span><span class="karaoke-upcoming" :class="{ 'karaoke-hidden': !segmentMode }">{{ karaokeUpcoming }}</span>
             </template>
+            <!-- Plain text -->
             <template v-else>{{ primaryText }}</template>
         </div>
         <div
+            v-show="enablePlayerTranslator"
             class="learner-en"
             :class="{ blurred: isBlurred && !!secondaryText, 'translation-fallback': isFallback }"
             @click.stop="toggleBlur"
@@ -1808,12 +1882,23 @@ watch(showJP, () => syncPsychologyBtn());
             aria-live="polite"
         >
             <div class="learner-jp" lang="ja" role="status">
-                <template v-if="karaokeHighlightStart >= 0 && karaokeSplitIndex >= 0">
+                <!-- Karaoke with JPDB furigana -->
+                <template v-if="karaokeHighlightStart >= 0 && karaokeSplitIndex >= 0 && jpdbEnabled">
+                    <span class="karaoke-past"><template v-for="(seg, i) in furiganaPast" :key="'p'+i"><span v-if="seg.vid !== undefined" class="jpdb-word" :class="[seg.stateClass, seg.pitchClass]" :data-vid="seg.vid" :data-sid="seg.sid" data-jpdb="true"><ruby v-if="seg.rt">{{ seg.base }}<rt class="jpdb-furi">{{ seg.rt }}</rt></ruby><template v-else>{{ seg.base }}</template></span><template v-else>{{ seg.base }}</template></template></span><span class="karaoke-spoken"><template v-for="(seg, i) in furiganaCurrent" :key="'c'+i"><span v-if="seg.vid !== undefined" class="jpdb-word" :class="[seg.stateClass, seg.pitchClass]" :data-vid="seg.vid" :data-sid="seg.sid" data-jpdb="true"><ruby v-if="seg.rt">{{ seg.base }}<rt class="jpdb-furi">{{ seg.rt }}</rt></ruby><template v-else>{{ seg.base }}</template></span><template v-else>{{ seg.base }}</template></template></span><span class="karaoke-upcoming" :class="{ 'karaoke-hidden': !segmentMode }"><template v-for="(seg, i) in furiganaUpcoming" :key="'u'+i"><span v-if="seg.vid !== undefined" class="jpdb-word" :class="[seg.stateClass, seg.pitchClass]" :data-vid="seg.vid" :data-sid="seg.sid" data-jpdb="true"><ruby v-if="seg.rt">{{ seg.base }}<rt class="jpdb-furi">{{ seg.rt }}</rt></ruby><template v-else>{{ seg.base }}</template></span><template v-else>{{ seg.base }}</template></template></span>
+                </template>
+                <!-- Non-karaoke with JPDB furigana -->
+                <template v-else-if="jpdbEnabled && furiganaAll.length > 0">
+                    <template v-for="(seg, i) in furiganaAll" :key="'a'+i"><span v-if="seg.vid !== undefined" class="jpdb-word" :class="[seg.stateClass, seg.pitchClass]" :data-vid="seg.vid" :data-sid="seg.sid" data-jpdb="true"><ruby v-if="seg.rt">{{ seg.base }}<rt class="jpdb-furi">{{ seg.rt }}</rt></ruby><template v-else>{{ seg.base }}</template></span><template v-else>{{ seg.base }}</template></template>
+                </template>
+                <!-- Plain karaoke (no JPDB) -->
+                <template v-else-if="karaokeHighlightStart >= 0 && karaokeSplitIndex >= 0">
                     <span class="karaoke-past">{{ karaokePast }}</span><span class="karaoke-spoken">{{ karaokeCurrent }}</span><span class="karaoke-upcoming" :class="{ 'karaoke-hidden': !segmentMode }">{{ karaokeUpcoming }}</span>
                 </template>
+                <!-- Plain text -->
                 <template v-else>{{ primaryText }}</template>
             </div>
             <div
+                v-show="enablePlayerTranslator"
                 class="learner-en"
                 :class="{ blurred: isBlurred && !!secondaryText, 'translation-fallback': isFallback }"
                 @click.stop="toggleBlur"

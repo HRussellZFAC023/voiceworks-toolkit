@@ -26,6 +26,7 @@ const featureSectionMap: Record<string, string> = {
     enableVectorSearch: 'magic',
     enableWhisper: 'whisper',
     enablePlayerTranslator: 'translation',
+    enableJpdb: 'jpdb',
     autoProgress: 'autoprogress',
     enableStoreBackup: 'storage',
 };
@@ -37,11 +38,13 @@ const enablePlayerTranslator = useConfig('enablePlayerTranslator');
 const autoProgress = useConfig('autoProgress');
 const enableStoreBackup = useConfig('enableStoreBackup');
 const preferLocalTranslation = useConfig('preferLocalTranslation');
+const enableJpdb = useConfig('enableJpdb');
 
 const sectionVisibility = computed(() => ({
     magic: enableVectorSearch.value,
     whisper: enableWhisper.value,
     translation: enablePlayerTranslator.value,
+    jpdb: enableJpdb.value,
     autoprogress: autoProgress.value,
     storage: enableStoreBackup.value,
 }));
@@ -50,7 +53,7 @@ const sectionVisibility = computed(() => ({
 // Whisper status
 // ============================================================================
 
-const WHISPER_MODEL = 'onnx-community/whisper-small';
+const WHISPER_MODEL = 'onnx-community/whisper-small_timestamped';
 
 const whisperDownloadStatus = ref({
     isLoading: false,
@@ -72,7 +75,7 @@ const whisperDownloadLabel = computed(() => {
     if (isLoading) {
         const capped = Math.min(99, Math.max(0, progress || 0));
         const baseMessage = t('downloadWhisperModelLoading');
-        const modelLabel = 'onnx-community/whisper-small';
+        const modelLabel = WHISPER_MODEL;
         const progressSuffix = capped > 0 ? ` (${Math.round(capped)}%)` : '';
         return `${baseMessage} - ${modelLabel}${progressSuffix}`;
     } else if (progress === 100) {
@@ -380,6 +383,8 @@ const credits = [
     { name: 'Xenova / onnx-community', url: 'https://huggingface.co/onnx-community', descKey: 'creditsXenova' },
     { name: 'Jina AI', url: 'https://jina.ai', descKey: 'creditsJina' },
     { name: 'Google Translate', url: 'https://translate.google.com', descKey: 'creditsGoogleTranslate' },
+    { name: 'jpdb.io', url: 'https://jpdb.io', descKey: 'jpdbCredits' },
+    { name: 'anki-jpdb.reader', url: 'https://github.com/Kagu-chan/anki-jpdb.reader', descKey: 'jpdbCreditsReader' },
     // Libraries & Frameworks
     { name: 'Transformers.js', url: 'https://huggingface.co/docs/transformers.js', descKey: 'creditsTransformers' },
     { name: 'ONNX Runtime', url: 'https://onnxruntime.ai', descKey: 'creditsONNXRuntime' },
@@ -430,6 +435,8 @@ const credits = [
             <SettingsToggle config-key="enableVisitCounter" :label="t('enableVisitCounter')" :sublabel="t('enableVisitCounterSub')" icon="visibility" />
             <hr class="q-separator q-separator--horizontal q-separator--dark">
             <SettingsToggle config-key="enableLearnerMode" :label="t('enableLearnerMode')" :sublabel="t('enableLearnerModeSub')" icon="school" />
+            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <SettingsToggle config-key="enableJpdb" :label="t('enableJpdb')" :sublabel="t('enableJpdbSub')" icon="menu_book" @change="onToggleChange" />
             <hr class="q-separator q-separator--horizontal q-separator--dark">
             <SettingsToggle config-key="learnerBlur" :label="t('learnerBlurLabel')" :sublabel="t('learnerBlurSub')" icon="blur_on" />
             <hr class="q-separator q-separator--horizontal q-separator--dark">
@@ -538,6 +545,8 @@ const credits = [
             <SettingsHotkeyInput config-key="hotkeyGalleryNext" :label="t('hotkeyGalleryNext')" placeholder="→" icon="navigate_next" />
             <hr class="q-separator q-separator--horizontal q-separator--dark">
             <SettingsHotkeyInput config-key="hotkeyGalleryExclude" :label="t('hotkeyGalleryExclude')" placeholder="Del" icon="visibility_off" />
+            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <SettingsHotkeyInput config-key="hotkeyJpdbPopover" :label="t('hotkeyJpdbPopover')" placeholder="Shift+D" icon="menu_book" />
         </div>
 
         <!-- ============================================================ -->
@@ -550,6 +559,8 @@ const credits = [
             <SettingsToggle config-key="autoFilterFolders" :label="t('autoFilterFolders')" :sublabel="t('autoFilterFoldersSub')" icon="folder_open" />
             <hr class="q-separator q-separator--horizontal q-separator--dark">
             <SettingsToggle config-key="shuffle" :label="t('shuffle')" :sublabel="t('shuffleSub')" icon="shuffle" />
+            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <SettingsToggle config-key="loopPlaylist" :label="t('loopPlaylist')" :sublabel="t('loopPlaylistSub')" icon="repeat" />
             <hr class="q-separator q-separator--horizontal q-separator--dark">
             <SettingsToggle config-key="radioUseFlatTracks" :label="t('radioFlatTracks')" :sublabel="t('radioFlatTracksSub')" icon="view_list" />
             <hr class="q-separator q-separator--horizontal q-separator--dark">
@@ -666,6 +677,44 @@ const credits = [
                         </button>
                     </div>
                 </div>
+            </div>
+        </template>
+
+        <!-- ============================================================ -->
+        <!-- JPDB Integration Settings                                    -->
+        <!-- ============================================================ -->
+        <template v-if="sectionVisibility.jpdb">
+            <span class="text-weight-medium text-center flex q-my-md asmr-settings-header" id="asmr-jpdb-settings-section-header">{{ t('jpdbSection') }}</span>
+            <div id="asmr-jpdb-settings-section" class="asmr-settings-section rounded-borders q-list q-list--bordered q-list--dark bg-black" role="group" aria-labelledby="asmr-jpdb-settings-section-header">
+                <SettingsInput config-key="jpdbApiToken" :label="t('jpdbApiToken')" :sublabel="t('jpdbApiTokenSub')" :placeholder="t('jpdbApiTokenPlaceholder')" icon="key" input-type="password" />
+                <div class="q-item q-item--dark" style="min-height: 36px; padding: 4px 16px;">
+                    <a href="https://jpdb.io/settings#:~:text=in%20the%20future.-,Account%20information,-Username" target="_blank" rel="noopener noreferrer" class="q-btn q-btn-item non-selectable no-outline q-btn--standard q-btn--rectangle q-btn--actionable q-focusable q-hoverable" style="text-decoration: none; font-size: 0.85em;">
+                        <span class="q-btn__content text-center col items-center q-anchor--skip justify-center row">
+                            <i class="q-icon notranslate material-icons" aria-hidden="true" role="presentation" style="font-size: 18px;">open_in_new</i>
+                            <span class="q-ml-xs">{{ t('jpdbGetApiKey') }}</span>
+                        </span>
+                    </a>
+                </div>
+                <hr class="q-separator q-separator--horizontal q-separator--dark">
+                <SettingsToggle config-key="jpdbShowFurigana" :label="t('jpdbShowFurigana')" :sublabel="t('jpdbShowFuriganaSub')" icon="translate" />
+                <hr class="q-separator q-separator--horizontal q-separator--dark">
+                <SettingsToggle config-key="jpdbSiteFurigana" :label="t('jpdbSiteFurigana')" :sublabel="t('jpdbSiteFuriganaSub')" icon="language" />
+                <hr class="q-separator q-separator--horizontal q-separator--dark">
+                <SettingsToggle config-key="jpdbSubtitleFurigana" :label="t('jpdbSubtitleFurigana')" :sublabel="t('jpdbSubtitleFuriganaSub')" icon="subtitles" />
+                <hr class="q-separator q-separator--horizontal q-separator--dark">
+                <SettingsToggle config-key="jpdbShowPitchAccent" :label="t('jpdbShowPitchAccent')" :sublabel="t('jpdbShowPitchAccentSub')" icon="graphic_eq" />
+                <hr class="q-separator q-separator--horizontal q-separator--dark">
+                <SettingsInput config-key="jpdbMiningDeck" :label="t('jpdbMiningDeck')" :sublabel="t('jpdbMiningDeckSub')" placeholder="Mining" icon="style" />
+                <hr class="q-separator q-separator--horizontal q-separator--dark">
+                <SettingsToggle config-key="jpdbAddToForq" :label="t('jpdbAddToForq')" :sublabel="t('jpdbAddToForqSub')" icon="priority_high" />
+                <hr class="q-separator q-separator--horizontal q-separator--dark">
+                <SettingsToggle config-key="jpdbDisableReviews" :label="t('jpdbDisableReviews')" :sublabel="t('jpdbDisableReviewsSub')" icon="grading" />
+                <hr class="q-separator q-separator--horizontal q-separator--dark">
+                <SettingsToggle config-key="jpdbUseTwoGrades" :label="t('jpdbUseTwoGrades')" :sublabel="t('jpdbUseTwoGradesSub')" icon="thumbs_up_down" />
+                <hr class="q-separator q-separator--horizontal q-separator--dark">
+                <SettingsInput config-key="jpdbNeverForgetDeck" :label="t('jpdbNeverForgetDeck')" :sublabel="t('jpdbNeverForgetDeckSub')" placeholder="never-forget" icon="favorite" />
+                <hr class="q-separator q-separator--horizontal q-separator--dark">
+                <SettingsInput config-key="jpdbBlacklistDeck" :label="t('jpdbBlacklistDeck')" :sublabel="t('jpdbBlacklistDeckSub')" placeholder="blacklist" icon="block" />
             </div>
         </template>
 

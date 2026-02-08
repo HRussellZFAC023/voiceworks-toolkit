@@ -577,6 +577,13 @@ onMounted(() => {
     // Sync albumart on mount
     nextTick(() => syncAlbumart());
 
+    // Detect currently playing work (we may have missed the work:change event
+    // if the host app rendered .albumart before CentralObserver mounted us)
+    const currentWorkId = detectWorkId();
+    if (currentWorkId && currentWorkId !== loadedWorkId.value) {
+        loadImages(currentWorkId);
+    }
+
     Logger.log('[PlayerGallery] Mounted');
 });
 

@@ -4,3 +4,10 @@
     pointer-events: none;
     z-index: 1;
 }
+
+.asmr-visit-badge .q-chip {
+    background: var(--q-color-deep-purple) !important;
+    border: none;
+    box-shadow: none;
+    outline: none;
+}

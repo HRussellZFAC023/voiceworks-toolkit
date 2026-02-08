@@ -39,6 +39,7 @@ const CONFIG_DEFAULTS: PluginConfig = {
     // Radio Mode
     playAllInFolder: false,
     shuffle: false,
+    loopPlaylist: false,
     autoFilterFolders: true,
     radioUseFlatTracks: false,
 
@@ -101,6 +102,22 @@ const CONFIG_DEFAULTS: PluginConfig = {
 
     // Radio Runtime (persisted for refresh survival)
     radioManuallyPaused: false,
+
+    // JPDB Integration
+    enableJpdb: false,
+    jpdbApiToken: '',
+    jpdbShowFurigana: true,
+    jpdbShowPitchAccent: true,
+    jpdbPitchStyle: 'underline',
+    jpdbSubtitleFurigana: true,
+    jpdbSiteFurigana: true,
+    jpdbMiningDeck: '',
+    jpdbAddToForq: false,
+    jpdbDisableReviews: false,
+    jpdbUseTwoGrades: false,
+    jpdbNeverForgetDeck: 'never-forget',
+    jpdbBlacklistDeck: 'blacklist',
+    hotkeyJpdbPopover: 'Shift+D',
 
     // Feature Toggles
     enableAdvancedSearch: true,

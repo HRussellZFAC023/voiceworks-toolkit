@@ -142,6 +142,7 @@ export interface PluginConfig {
     // Radio Mode
     playAllInFolder: boolean;
     shuffle: boolean;
+    loopPlaylist: boolean;
     autoFilterFolders: boolean;
     radioUseFlatTracks: boolean;
 
@@ -204,6 +205,22 @@ export interface PluginConfig {
 
     // Radio Runtime (persisted for refresh survival)
     radioManuallyPaused: boolean;
+
+    // JPDB Integration
+    enableJpdb: boolean;
+    jpdbApiToken: string;
+    jpdbShowFurigana: boolean;
+    jpdbShowPitchAccent: boolean;
+    jpdbPitchStyle: string;
+    jpdbSubtitleFurigana: boolean;
+    jpdbSiteFurigana: boolean;
+    jpdbMiningDeck: string;
+    jpdbAddToForq: boolean;
+    jpdbDisableReviews: boolean;
+    jpdbUseTwoGrades: boolean;
+    jpdbNeverForgetDeck: string;
+    jpdbBlacklistDeck: string;
+    hotkeyJpdbPopover: string;
 
     // Feature Toggles
     enableAdvancedSearch: boolean;
@@ -384,8 +401,12 @@ export interface AppEvents {
     'gallery:exclude': {};
     // Playlist supplementary
     'playlist:shuffleToggled': { enabled: boolean };
+    'playlist:loopToggled': { enabled: boolean };
     // GPU coordination
     'webgpu:failed': { source: string };
+    'gpu:device-lost': { worker: 'translation' | 'embedding' | 'whisper' };
+    'gpu:device-lost-broadcast': { source: 'translation' | 'embedding' | 'whisper' };
+    'gpu:recovered': void;
     'whisper:transcribing': { active: boolean };
     'embedding:dead': {};
     'embedding:gpu-failed': {};

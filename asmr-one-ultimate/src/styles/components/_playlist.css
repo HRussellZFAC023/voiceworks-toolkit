@@ -235,7 +235,8 @@
     white-space: nowrap;
 }
 
-.asmr-playlist-shuffle-active {
+.asmr-playlist-shuffle-active,
+.asmr-playlist-loop-active {
     color: var(--asmr-accent);
     background: rgba(var(--asmr-accent-rgb, 255, 152, 0), 0.15);
 }

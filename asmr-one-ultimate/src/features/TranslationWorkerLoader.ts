@@ -364,7 +364,8 @@ async function translate(msg) {
 
     const options = {
         return_tensors: false,
-        // Greedy decoding: ~3-4x faster than beam search, minimal quality loss on short text
+        // Greedy decoding: 3-4x faster than beam search, minimal quality loss on short CJK text.
+        // num_beams > 1 doubles GPU time per call, causing contention with Whisper worker.
         num_beams: 1,
         do_sample: false,
         max_new_tokens: Math.min(384, Math.max(64, maxInputLen * 3)),

@@ -20,6 +20,7 @@ import './styles/components/_player_fullscreen.css';
 import './styles/components/_joi_tool.css';
 import './styles/components/_visualizer.css';
 import './styles/components/_visit_counter.css';
+import './styles/components/_jpdb.css';
 
 import { KikoeruBridge } from './infrastructure/KikoeruBridge';
 import { getAudioElement, hasPlayerBar } from './core/DomUtils';
@@ -229,9 +230,10 @@ async function initialize(): Promise<void> {
         // Initialize GPU scheduler before any worker creation
         GpuScheduler.initialize();
 
-        // Eagerly warm up ML models — staggered to avoid GPU device exhaustion.
-        // Translation workers load first (sequential ja-en → zh-en inside),
-        // then embedding worker starts only after translation is done.
+        // Eagerly warm up ML models — serialized via GpuScheduler load leases.
+        // Each worker acquires a load lease before model loading (requestAdapter +
+        // requestDevice + ONNX compile). Only one model loads at a time to prevent
+        // "Failed to create WebGPU Context Provider" and OOM tab crashes.
         const budget = DeviceCapabilities.budget;
         const warmTranslation = Config.get('preferLocalTranslation') !== false &&
             (Config.get('enablePlayerTranslator') || Config.get('enableLearnerMode'));
@@ -242,9 +244,9 @@ async function initialize(): Promise<void> {
         }
 
         if (DeviceCapabilities.shouldWarmup && (warmTranslation || warmEmbedding)) {
-            // Serialized warmup: Translation → Embedding → Whisper
-            // Each worker gets exclusive GPU access to prevent "Failed to create WebGPU Context Provider"
-            Logger.log('[Warmup] Starting serialized ML warmup (Translation → Embedding → Whisper)');
+            // Sequential warmup: Translation → Embedding (Whisper loads on first use).
+            // GpuScheduler load leases enforce exclusivity even for lazy/on-demand loading.
+            Logger.log('[Warmup] Starting serialized ML warmup (Translation → Embedding)');
             if (warmTranslation) {
                 Logger.log('[Warmup] Loading translation models...');
                 await TranslationService.ensureLocalModelReady().catch((e) => {
@@ -473,6 +475,12 @@ async function initializeAIFeatures(): Promise<void> {
     registerLazyFeature('enableMenuIconFixer', async () => {
         const { MenuIconFixer } = await import('./features/MenuIconFixer');
         return new MenuIconFixer();
+    });
+
+    // JPDB Integration (furigana, vocabulary tracking, pitch accent)
+    registerLazyFeature('enableJpdb', async () => {
+        const { JpdbController } = await import('./features/JpdbController');
+        return new JpdbController();
     });
 
     Logger.debug('[Init] All AI features initialized');

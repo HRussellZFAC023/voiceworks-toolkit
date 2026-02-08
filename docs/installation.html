@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Installation — Voiceworks Toolkit</title>
+  <meta name="description" content="Step-by-step installation guide for Voiceworks Toolkit. Set up Tampermonkey, build the userscript, and start studying Japanese.">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+  <!-- Navigation -->
+  <nav class="nav">
+    <div class="nav-inner">
+      <a href="index.html" class="nav-brand">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+        Voiceworks Toolkit
+      </a>
+      <button class="nav-toggle" onclick="document.querySelector('.nav-links').classList.toggle('open')" aria-label="Toggle navigation">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12h18M3 6h18M3 18h18"/></svg>
+      </button>
+      <ul class="nav-links">
+        <li><a href="index.html">Home</a></li>
+        <li><a href="features.html">Features</a></li>
+        <li><a href="installation.html" class="active">Installation</a></li>
+        <li><a href="manual.html">Manual</a></li>
+      </ul>
+      <a href="https://github.com/HRussellZFAC023/voiceworks-toolkit" class="nav-github" aria-label="GitHub">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+      </a>
+    </div>
+  </nav>
+
+  <main>
+    <section class="content" style="padding-top: calc(var(--nav-height) + 48px);">
+      <div class="container">
+        <h1>Installation</h1>
+        <p class="lead">Get up and running in under 5 minutes. Requires a modern browser with Tampermonkey and Node.js for building.</p>
+
+        <h2>Prerequisites</h2>
+
+        <div class="feature-list" style="margin-bottom: 48px;">
+          <div class="feature-item">
+            <h3>Browser</h3>
+            <p>A Chromium-based browser (Chrome, Edge, Brave, etc.) or Firefox. WebGPU support is recommended for optimal AI performance but not required &mdash; the toolkit automatically falls back to WASM on older hardware.</p>
+          </div>
+          <div class="feature-item">
+            <h3>Tampermonkey</h3>
+            <p>Install the <a href="https://www.tampermonkey.net/" target="_blank" rel="noopener">Tampermonkey</a> browser extension. On Chromium-based browsers, you must also go to the extension details page and enable <strong>Allow access to file URLs</strong> for local script installation.</p>
+          </div>
+          <div class="feature-item">
+            <h3>Node.js</h3>
+            <p>Node.js 18 or later is required for building the userscript. Download from <a href="https://nodejs.org/" target="_blank" rel="noopener">nodejs.org</a>.</p>
+          </div>
+        </div>
+
+        <h2>Setup</h2>
+
+        <div class="steps">
+          <div class="step">
+            <h3>Clone the Repository</h3>
+            <p>Clone the project and navigate to the userscript directory:</p>
+            <pre><code>git clone https://github.com/HRussellZFAC023/voiceworks-toolkit.git
+cd voiceworks-toolkit/asmr-one-ultimate</code></pre>
+          </div>
+
+          <div class="step">
+            <h3>Install Dependencies</h3>
+            <p>Install all required packages using npm:</p>
+            <pre><code>npm install</code></pre>
+          </div>
+
+          <div class="step">
+            <h3>Build or Develop</h3>
+            <p>Choose between a production build or development mode with hot module replacement:</p>
+
+            <p><strong>Production build:</strong></p>
+            <pre><code>npm run build</code></pre>
+            <p>This outputs <code>dist/asmr-one-ultimate.user.js</code>. Open this file in your browser and Tampermonkey will prompt you to install it.</p>
+
+            <p><strong>Development mode (HMR):</strong></p>
+            <pre><code>npm run dev</code></pre>
+            <p>Open <code>http://localhost:5173/asmr-one-ultimate.user.js</code> in your browser to install the dev script. Keep the dev server running while browsing &mdash; changes will hot-reload automatically.</p>
+          </div>
+
+          <div class="step">
+            <h3>Configure (Optional)</h3>
+            <p>Visit the Settings page to customize your experience. Key options include:</p>
+            <ul style="margin-top: 8px; padding-left: 20px; color: var(--text-secondary);">
+              <li>Whisper model selection and language</li>
+              <li>Translation model download</li>
+              <li>Jina API key for semantic search</li>
+              <li>Radio mode and playlist preferences</li>
+              <li>Learner mode display settings</li>
+            </ul>
+          </div>
+        </div>
+
+        <h2>Chromium: Allow User Scripts</h2>
+
+        <div class="callout">
+          <p><strong>Important:</strong> On Chromium-based browsers (Chrome, Edge, Brave), you need to enable user script support. Go to your browser's extension management page, click on Tampermonkey's details, and toggle on <strong>"Allow access to file URLs"</strong>. Without this, locally-built scripts will not load.</p>
+        </div>
+
+        <h2>AI Model Downloads</h2>
+
+        <p>AI features (transcription and translation) require downloading models on first use. This happens automatically when you enable each feature:</p>
+
+        <div class="feature-list">
+          <div class="feature-item">
+            <h3>Whisper (Transcription)</h3>
+            <p>Downloads the Whisper model (~150 MB) when you first enable live transcription. The model is cached in the browser and reused across sessions. You can choose the model size and quantization in Settings.</p>
+          </div>
+          <div class="feature-item">
+            <h3>Translation Models</h3>
+            <p>Downloads the Opus-MT translation model (~80 MB) when you click "Download Model" in Translation Settings. WebGPU uses fp16 precision; WASM fallback uses quantized variants for reduced memory usage.</p>
+          </div>
+          <div class="feature-item">
+            <h3>Semantic Search</h3>
+            <p>Requires a free Jina API key for generating vector embeddings. Enter your key in Settings to enable semantic search. Embeddings are computed remotely but stored locally in IndexedDB.</p>
+          </div>
+        </div>
+
+        <h2>Running Tests</h2>
+
+        <p>The project includes comprehensive test suites to verify functionality:</p>
+
+        <pre><code># Unit tests (Vitest)
+npm test
+
+# E2E tests (Playwright, headless Chromium)
+npm run test:e2e
+
+# E2E with visible browser (for debugging)
+npm run test:e2e:headed
+
+# Playwright UI mode
+npm run test:e2e:ui
+
+# Step-through debugging
+npm run test:e2e:debug</code></pre>
+
+        <p>E2E tests run in a headless Chromium browser with automatic userscript injection &mdash; no manual browser setup or Tampermonkey installation needed. GM_* APIs are stubbed using localStorage.</p>
+
+        <h2>Updating</h2>
+
+        <p>To update to the latest version:</p>
+
+        <pre><code>cd voiceworks-toolkit
+git pull
+cd asmr-one-ultimate
+npm install
+npm run build</code></pre>
+
+        <p>Open the newly built <code>dist/asmr-one-ultimate.user.js</code> in your browser to update the installed script. Tampermonkey will detect the existing installation and offer to update it.</p>
+
+        <h2>Troubleshooting</h2>
+
+        <div class="feature-list">
+          <div class="feature-item">
+            <h3>Script not loading</h3>
+            <p>Ensure Tampermonkey is enabled and the script is active in Tampermonkey's dashboard. On Chromium, verify that "Allow access to file URLs" is enabled in the extension settings.</p>
+          </div>
+          <div class="feature-item">
+            <h3>WebGPU not available</h3>
+            <p>WebGPU requires a compatible browser and GPU drivers. If WebGPU is unavailable, the toolkit automatically falls back to WASM for all AI features. Performance will be slower but functional.</p>
+          </div>
+          <div class="feature-item">
+            <h3>Build errors</h3>
+            <p>Ensure you're using Node.js 18+ and have run <code>npm install</code> in the <code>asmr-one-ultimate</code> directory. Delete <code>node_modules</code> and reinstall if you encounter dependency issues.</p>
+          </div>
+        </div>
+
+      </div>
+    </section>
+  </main>
+
+  <!-- Footer -->
+  <footer class="footer">
+    <div class="container">
+      <div class="footer-links">
+        <a href="https://github.com/HRussellZFAC023/voiceworks-toolkit">GitHub</a>
+        <a href="features.html">Features</a>
+        <a href="installation.html">Installation</a>
+        <a href="manual.html">Manual</a>
+      </div>
+      <p>Voiceworks Toolkit &mdash; MIT License</p>
+    </div>
+  </footer>
+
+</body>
+</html>

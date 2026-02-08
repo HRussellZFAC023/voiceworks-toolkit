@@ -9,6 +9,10 @@
 !voiceworks-renamer/
 !voiceworks-renamer/**
 
+# Whitelist docs (GitHub Pages)
+!docs/
+!docs/**
+
 # Whitelist root files
 !.gitignore
 !README.md

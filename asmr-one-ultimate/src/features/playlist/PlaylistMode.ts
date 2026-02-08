@@ -43,6 +43,9 @@ export class PlaylistMode {
     private isInitialized = false;
     private hasAdvanced = false; // Prevents double-trigger from queue monitor + track:end
 
+    // Shuffle visited tracking: indices already played in this cycle
+    private visitedIndices: Set<number> = new Set();
+
     // Watchers/Timers
     private _routeWatcher: (() => void) | null = null; // stored for future cleanup
     private checkInterval: number | null = null;
@@ -154,6 +157,7 @@ export class PlaylistMode {
         }
         this.isNavigating = false;
         this.hasAdvanced = false;
+        this.visitedIndices.clear();
 
         this._isActive = true;
         this.workIds = [...workIds];
@@ -315,6 +319,7 @@ export class PlaylistMode {
         this.playlistName = null;
         this.isNavigating = false;
         this.hasAdvanced = false;
+        this.visitedIndices.clear();
 
         // Clear route watcher
         this._routeWatcher?.();
@@ -338,35 +343,82 @@ export class PlaylistMode {
     }
 
     /**
-     * Skip to next work in playlist
+     * Skip to next work in playlist.
+     *
+     * Shuffle mode: picks a random unvisited index. Once all have been visited,
+     * resets the visited set and loops (if loopPlaylist is on) or stops.
+     *
+     * Sequential mode: advances index by 1. At the end, loops back to 0
+     * (if loopPlaylist is on) or stops.
      */
     async next(): Promise<void> {
         if (!this._isActive) return;
 
-        if (Config.get('shuffle') && this.workIds.length > 1) {
-            // Pick a random index excluding the current one
-            let randomIndex: number;
-            do {
-                randomIndex = Math.floor(Math.random() * this.workIds.length);
-            } while (randomIndex === this.currentWorkIndex);
+        const loop = Config.get('loopPlaylist');
 
-            Logger.debug('[PlaylistMode] Shuffle: advancing to random work in playlist', {
+        if (Config.get('shuffle') && this.workIds.length > 1) {
+            // Mark current as visited
+            this.visitedIndices.add(this.currentWorkIndex);
+
+            // Build list of unvisited indices (excluding current)
+            const unvisited = this.workIds
+                .map((_, i) => i)
+                .filter(i => !this.visitedIndices.has(i));
+
+            if (unvisited.length === 0) {
+                // All works visited
+                if (!loop) {
+                    Logger.debug('[PlaylistMode] Shuffle: all works visited, loop off — stopping');
+                    EventBus.emit('playlist:progress', {
+                        current: this.currentWorkIndex + 1,
+                        total: this.workIds.length,
+                        workId: this.workIds[this.currentWorkIndex],
+                    });
+                    return;
+                }
+                // Loop: reset visited set and pick from all except current
+                Logger.debug('[PlaylistMode] Shuffle: all works visited, looping — resetting visited set');
+                this.visitedIndices.clear();
+                this.visitedIndices.add(this.currentWorkIndex);
+                const allExceptCurrent = this.workIds
+                    .map((_, i) => i)
+                    .filter(i => i !== this.currentWorkIndex);
+                const randomIndex = allExceptCurrent[Math.floor(Math.random() * allExceptCurrent.length)];
+                Logger.debug('[PlaylistMode] Shuffle+Loop: advancing to random work', {
+                    index: randomIndex + 1,
+                    total: this.workIds.length,
+                    workId: this.workIds[randomIndex],
+                });
+                this.navigateToWork(randomIndex);
+                return;
+            }
+
+            const randomIndex = unvisited[Math.floor(Math.random() * unvisited.length)];
+            Logger.debug('[PlaylistMode] Shuffle: advancing to random unvisited work', {
                 index: randomIndex + 1,
                 total: this.workIds.length,
-                workId: this.workIds[randomIndex]
+                visited: this.visitedIndices.size,
+                remaining: unvisited.length,
+                workId: this.workIds[randomIndex],
             });
             this.navigateToWork(randomIndex);
             return;
         }
 
+        // Sequential mode
         if (this.currentWorkIndex >= this.workIds.length - 1) {
-            Logger.debug('[PlaylistMode] End of playlist reached');
-            // Don't deactivate - let user manually navigate or deactivate
-            EventBus.emit('playlist:progress', {
-                current: this.workIds.length,
-                total: this.workIds.length,
-                workId: this.workIds[this.currentWorkIndex],
-            });
+            if (!loop) {
+                Logger.debug('[PlaylistMode] End of playlist reached, loop off — stopping');
+                EventBus.emit('playlist:progress', {
+                    current: this.workIds.length,
+                    total: this.workIds.length,
+                    workId: this.workIds[this.currentWorkIndex],
+                });
+                return;
+            }
+            // Loop back to start
+            Logger.debug('[PlaylistMode] End of playlist reached, looping to start');
+            this.navigateToWork(0);
             return;
         }
 
@@ -374,7 +426,7 @@ export class PlaylistMode {
         Logger.debug('[PlaylistMode] Advancing to next work in playlist', {
             index: nextIndex + 1,
             total: this.workIds.length,
-            workId: this.workIds[nextIndex]
+            workId: this.workIds[nextIndex],
         });
         this.navigateToWork(nextIndex);
     }
@@ -414,14 +466,27 @@ export class PlaylistMode {
     }
 
     /**
-     * Toggle shuffle mode on/off
+     * Toggle shuffle mode on/off.
+     * Resets the visited-indices tracker when toggled.
      */
     shuffle(): void {
         const newValue = !Config.get('shuffle');
         Config.set('shuffle', newValue);
+        this.visitedIndices.clear();
         Logger.debug('[PlaylistMode] Shuffle toggled:', newValue);
 
         EventBus.emit('playlist:shuffleToggled', { enabled: newValue });
+    }
+
+    /**
+     * Toggle loop mode on/off
+     */
+    toggleLoop(): void {
+        const newValue = !Config.get('loopPlaylist');
+        Config.set('loopPlaylist', newValue);
+        Logger.debug('[PlaylistMode] Loop toggled:', newValue);
+
+        EventBus.emit('playlist:loopToggled', { enabled: newValue });
     }
 
     /**

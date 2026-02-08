@@ -9,14 +9,18 @@ export default defineConfig({
         monkey({
             entry: 'src/main.ts',
             userscript: {
-                name: 'ASMR.one Ultimate (Radio + Learner)',
+                name: 'ASMR.one Ultimate — AI Transcription, Translation & 30+ Features',
                 // @ts-ignore
-                'name:zh-CN': 'ASMR.one \u7ec8\u6781\u589e\u5f3a (\u7535\u53f0 + \u5b66\u4e60\u6a21\u5f0f)',
+                'name:zh-CN': 'ASMR.one 终极增强 — AI语音转录・神经翻译・30+功能',
+                // @ts-ignore
+                'name:ja': 'ASMR.one Ultimate — AI文字起こし・翻訳・30以上の機能',
                 namespace: 'http://tampermonkey.net/',
                 version: '121',
-                description: 'The ultimate enhancement suite for ASMR.one. Features: Radio Mode (Continuous random playback, smart navigation, shuffling) and Learner Mode (Bilingual subtitles, auto-translation, study mode).',
+                description: 'All-in-one enhancement suite for asmr.one. On-device Whisper speech-to-text, local neural JA/CN→EN translation, AI semantic search, radio mode, learner mode with dual-language subtitles, media viewer, audio visualizer, auto-progress tracking, keyboard shortcuts, playlist mode, offline caching, and more — all running locally in your browser with WebGPU acceleration.',
                 // @ts-ignore
-                'description:zh-CN': 'ASMR.one \u7684\u7ec8\u6781\u589e\u5f3a\u5957\u4ef6\u3002\u529f\u80fd\uff1a\u7535\u53f0\u6a21\u5f0f\uff08\u8fde\u7eed\u968f\u673a\u64ad\u653e\u3001\u667a\u80fd\u5bfc\u822a\u3001\u6df7\u6d17\uff09\u548c\u5b66\u4e60\u6a21\u5f0f\uff08\u53cc\u8bed\u5b57\u5e55\u3001\u81ea\u52a8\u7ffb\u8bd1\u3001\u5b66\u4e60/\u6a21\u7cca\u6a21\u5f0f\uff09\u3002',
+                'description:zh-CN': 'asmr.one 全能增强套件。本地Whisper语音转文字、本地神经网络日/中→英翻译、AI语义向量搜索、电台模式、双语字幕学习模式、媒体查看器、音频可视化、自动进度追踪、键盘快捷键、播放列表模式、离线缓存等——全部在浏览器本地运行，支持WebGPU加速。',
+                // @ts-ignore
+                'description:ja': 'asmr.oneの総合拡張スイート。ローカルWhisper音声認識、ローカルニューラル翻訳（日/中→英）、AIセマンティック検索、ラジオモード、デュアル字幕学習モード、メディアビューア、オーディオビジュアライザー、自動進捗追跡、キーボードショートカット、プレイリストモード、オフラインキャッシュなど——すべてブラウザ内でローカル実行、WebGPU対応。',
                 author: 'Henry',
                 match: [
                     'https://asmr.one/*',

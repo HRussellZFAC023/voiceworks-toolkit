@@ -7,7 +7,11 @@ import { EventBus } from '../core/EventBus';
 
 export class PlayerTranslator {
     private trackChangeCleanup?: () => void;
+    private workChangeCleanup?: () => void;
     private _enabled = false;
+    private retryTimers: ReturnType<typeof setTimeout>[] = [];
+    /** Incremented on every track/work change to invalidate stale async callbacks */
+    private _epoch = 0;
 
     public enable(): void {
         if (this._enabled) return;
@@ -17,13 +21,12 @@ export class PlayerTranslator {
 
         // Translate immediately on track change instead of waiting for observer debounce
         this.trackChangeCleanup = EventBus.on('track:change', () => {
-            // Clear stale translation attrs so the old translation doesn't cause
-            // early-return in translateTrackName/translateElement when Vue hasn't
-            // re-rendered the new title yet (rawText still === old translated text).
-            this.resetTranslationState();
-            // Single rAF + 200ms fallback for slow Vue re-renders (was double setTimeout 50+200)
-            requestAnimationFrame(() => this.checkPlayer());
-            setTimeout(() => this.checkPlayer(), 200);
+            this.onTrackOrWorkChange();
+        });
+
+        // Also re-translate when the work itself changes (different RJ code)
+        this.workChangeCleanup = EventBus.on('work:change', () => {
+            this.onTrackOrWorkChange();
         });
     }
 
@@ -32,12 +35,42 @@ export class PlayerTranslator {
         CentralObserver.unregister('PlayerTranslator');
         this.trackChangeCleanup?.();
         this.trackChangeCleanup = undefined;
+        this.workChangeCleanup?.();
+        this.workChangeCleanup = undefined;
+        this.clearRetryTimers();
     }
 
     /**
-     * Clear stale data-asmr-* attributes from player title elements.
-     * Called on track:change so that the early-return checks in
-     * translateTrackName/translateElement don't match stale data.
+     * Handle track or work change: clear stale translation state and
+     * schedule multiple retry attempts to catch Vue re-renders.
+     */
+    private onTrackOrWorkChange(): void {
+        this._epoch++;
+        this.clearRetryTimers();
+        // Clear stale translation attrs so the old translation doesn't cause
+        // early-return in translateTrackName/translateElement when Vue hasn't
+        // re-rendered the new title yet (rawText still === old translated text).
+        // Also restore original text on elements we replaced.
+        this.resetTranslationState();
+        // Multiple attempts: Vue re-renders asynchronously and may take varying time.
+        // rAF catches immediate renders, 200ms/500ms/1000ms catch slower transitions.
+        requestAnimationFrame(() => this.checkPlayer());
+        for (const delay of [200, 500, 1000]) {
+            this.retryTimers.push(setTimeout(() => this.checkPlayer(), delay));
+        }
+    }
+
+    private clearRetryTimers(): void {
+        for (const t of this.retryTimers) clearTimeout(t);
+        this.retryTimers = [];
+    }
+
+    /**
+     * Clear stale data-asmr-* attributes from player title elements and
+     * restore original text where we replaced it with our translation.
+     * Called on track:change and work:change so that the early-return checks in
+     * translateTrackName/translateElement don't match stale data, and so that
+     * the CJK detection check sees the original text (not our English translation).
      */
     private resetTranslationState(): void {
         const playerBar = document.querySelector(PLAYER_BAR_SELECTOR + ', .audio-player');
@@ -45,6 +78,17 @@ export class PlayerTranslator {
 
         const els = playerBar.querySelectorAll<HTMLElement>('[data-asmr-translated]');
         for (const el of els) {
+            // Restore original text so CJK detection works on next checkPlayer().
+            // For track name elements (ellipsis-2-lines), we set textContent to the English
+            // translation, so Vue's re-render is the only way to get the new Japanese text back.
+            // For title/artist elements, we built child spans. Restoring the source text
+            // lets Vue's next re-render overwrite it naturally.
+            const source = el.dataset.asmrSource;
+            if (source) {
+                el.textContent = source;
+                el.title = '';
+            }
+            el.classList.remove('asmr-translation-pair');
             delete el.dataset.asmrTranslated;
             delete el.dataset.asmrSource;
             delete el.dataset.asmrTranslatedText;
@@ -83,15 +127,18 @@ export class PlayerTranslator {
         const text = source && rawText.includes(source) ? source : rawText;
         if (!text) return;
 
+        const epoch = this._epoch;
         const targetLang = I18n.lang === 'zh' ? 'zh-CN' : I18n.lang;
         try {
             const translated = await TranslationService.translate(text, targetLang);
+            if (this._epoch !== epoch) return; // track changed while translating
             if (translated && translated !== text) {
                 this.updateElement(el, text, translated);
             } else {
                 this.markOriginal(el, text);
             }
         } catch {
+            if (this._epoch !== epoch) return;
             this.markOriginal(el, text);
         }
     }
@@ -99,24 +146,23 @@ export class PlayerTranslator {
     /**
      * Translate the track filename shown in the player.
      * Strips number prefix and file extension, translates the core text,
-     * then displays English only with the original as a tooltip.
+     * then displays as "Original (Translated)" using updateElement.
      */
     private async translateTrackName(el: HTMLElement) {
         const rawText = el.textContent?.trim() || '';
         if (!rawText) return;
 
-        // Already translated — skip if showing our translation or source hasn't changed
+        // Already translated — skip if showing our translation pair
         if (el.dataset.asmrTranslated === 'true') {
             const source = el.dataset.asmrSource;
             const translated = el.dataset.asmrTranslatedText;
             // Vue may re-render the original text over our translation — re-apply
             if (source && rawText === source && translated) {
-                el.textContent = translated;
-                el.title = source;
+                this.updateElement(el, source, translated);
                 return;
             }
-            // Still showing our translated text
-            if (translated && rawText === translated) return;
+            // Still showing our translation pair (textContent contains both)
+            if (source && translated && rawText.includes(source) && rawText.includes(translated)) return;
         }
 
         // Detect Japanese content
@@ -128,23 +174,20 @@ export class PlayerTranslator {
             .replace(/\.[a-z0-9]{2,5}$/i, '');  // file extension
         if (!stripped) return;
 
+        const epoch = this._epoch;
         const targetLang = I18n.lang === 'zh' ? 'zh-CN' : I18n.lang;
         try {
             const translated = await TranslationService.translate(stripped, targetLang);
+            if (this._epoch !== epoch) return; // track changed while translating
             if (translated && translated !== stripped) {
-                // Show English only, original as tooltip
-                el.dataset.asmrTranslated = 'true';
-                el.dataset.asmrSource = rawText;
-                el.dataset.asmrTranslatedText = translated;
-                el.textContent = TranslationService.cleanQuotes(translated);
-                el.title = rawText;
+                const cleaned = TranslationService.cleanQuotes(translated);
+                this.updateElement(el, rawText, cleaned);
             } else {
-                el.dataset.asmrTranslated = 'false';
-                el.dataset.asmrSource = rawText;
+                this.markOriginal(el, rawText);
             }
         } catch {
-            el.dataset.asmrTranslated = 'false';
-            el.dataset.asmrSource = rawText;
+            if (this._epoch !== epoch) return;
+            this.markOriginal(el, rawText);
         }
     }
 

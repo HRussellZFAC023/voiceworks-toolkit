@@ -192,6 +192,17 @@
   display: inline-block;
 }
 
+.whisper-crash-persistent {
+  font-weight: 600;
+  opacity: 1;
+  animation: whisper-crash-pulse 3s ease-in-out infinite;
+}
+
+@keyframes whisper-crash-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
+
 /* Transcript download buttons (work tree + flat view) */
 .asmr-transcript-actions {
   display: flex;
@@ -1161,6 +1172,103 @@
 
 .asmr-translation-translated {
   opacity: 1;
+}
+
+/* Card translation subtitle (shown below original title on work cards) */
+.asmr-card-translation {
+  font-size: 11.5px;
+  line-height: 1.3;
+  margin-top: 2px;
+  opacity: 0.72;
+  padding: 0 8px 4px;
+  color: #90caf9;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  word-break: break-word;
+  pointer-events: none; /* Don't block swiper touch/click */
+}
+
+/* Light mode card translation */
+body:not(.body--dark) .asmr-card-translation {
+  color: #1565c0;
+}
+
+/* Allow card body to grow when translation subtitle is present */
+.q-card__section:has(+ .asmr-card-translation),
+.q-card__section:has(.asmr-card-translation) {
+  height: auto !important;
+  min-height: unset !important;
+}
+
+/* Translated chip overflow handling */
+.q-chip.asmr-translated .q-chip__content {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 280px;
+}
+
+@media (max-width: 600px) {
+  .q-chip.asmr-translated .q-chip__content {
+    max-width: 200px;
+  }
+
+  .asmr-card-translation {
+    font-size: 11px;
+    -webkit-line-clamp: 1;
+    padding: 0 6px 2px;
+  }
+}
+
+/* ========================================
+   BUG-004: Mobile Expanded Player Layout
+   On small screens the album art + inline
+   visualizer + subtitles + controls overflow
+   the viewport. Compact everything to fit.
+   ======================================== */
+@media (max-width: 600px) {
+  /* Hide inline visualizer — redundant on small screen */
+  .audio-player .asmr-viz-bar {
+    display: none !important;
+  }
+
+  /* Shrink album art to leave room for subtitles + controls */
+  .audio-player .albumart {
+    max-height: 45vh !important;
+    overflow: hidden;
+  }
+
+  .audio-player .albumart .q-img {
+    max-height: 45vh !important;
+  }
+
+  /* Compact subtitle area */
+  .audio-player .learner-subs-expanded {
+    min-height: 48px !important;
+    padding: 6px 8px !important;
+    margin: 2px 0 4px 0 !important;
+    gap: 2px !important;
+  }
+
+  /* Smaller JP font in expanded player */
+  .audio-player .learner-jp {
+    font-size: 1.15rem !important;
+    min-height: 1.3em !important;
+  }
+
+  /* Smaller EN font in expanded player */
+  .audio-player .learner-en {
+    font-size: 0.75rem !important;
+  }
+
+  /* Remove min-width that forces horizontal scroll */
+  .audio-player {
+    min-width: unset !important;
+    min-width: 100vw !important;
+  }
 }
 
 /* ========================================

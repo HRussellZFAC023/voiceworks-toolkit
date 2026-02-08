@@ -33,6 +33,7 @@ export class SidebarMenu {
     private playlistPrevBtn: HTMLElement | null = null;
     private playlistNextBtn: HTMLElement | null = null;
     private playlistShuffleBtn: HTMLElement | null = null;
+    private playlistLoopBtn: HTMLElement | null = null;
     private playlistProgressEl: HTMLElement | null = null;
 
     constructor(onToggle: () => void) {
@@ -71,6 +72,11 @@ export class SidebarMenu {
         // Listen for shuffle toggle
         EventBus.on('playlist:shuffleToggled', (payload) => {
             this.updateShuffleButton(payload.enabled);
+        });
+
+        // Listen for loop toggle
+        EventBus.on('playlist:loopToggled', (payload) => {
+            this.updateLoopButton(payload.enabled);
         });
 
         Logger.log('[SidebarMenu] Enabled');
@@ -197,14 +203,18 @@ export class SidebarMenu {
             this.playlistProgressEl.textContent = `${current} / ${total}`;
         }
 
+        const loop = Config.get('loopPlaylist');
+        const shuffle = Config.get('shuffle');
+
         // Update button states
+        // When loop or shuffle is on, prev/next are never disabled
         if (this.playlistPrevBtn) {
-            const disabled = current <= 1;
+            const disabled = !loop && !shuffle && current <= 1;
             (this.playlistPrevBtn as HTMLButtonElement).disabled = disabled;
             this.playlistPrevBtn.classList.toggle('disabled', disabled);
         }
         if (this.playlistNextBtn) {
-            const disabled = current >= total;
+            const disabled = !loop && !shuffle && current >= total;
             (this.playlistNextBtn as HTMLButtonElement).disabled = disabled;
             this.playlistNextBtn.classList.toggle('disabled', disabled);
         }
@@ -213,6 +223,12 @@ export class SidebarMenu {
     public updateShuffleButton(isActive: boolean): void {
         if (this.playlistShuffleBtn) {
             this.playlistShuffleBtn.classList.toggle('asmr-playlist-shuffle-active', isActive);
+        }
+    }
+
+    public updateLoopButton(isActive: boolean): void {
+        if (this.playlistLoopBtn) {
+            this.playlistLoopBtn.classList.toggle('asmr-playlist-loop-active', isActive);
         }
     }
 
@@ -250,6 +266,9 @@ export class SidebarMenu {
             <button class="asmr-playlist-player-btn asmr-playlist-shuffle" title="${I18n.t('shuffle') || 'Shuffle'}" aria-label="${I18n.t('shuffle') || 'Shuffle'}">
                 <i class="material-icons" aria-hidden="true">shuffle</i>
             </button>
+            <button class="asmr-playlist-player-btn asmr-playlist-loop" title="${I18n.t('loopPlaylist') || 'Loop'}" aria-label="${I18n.t('loopPlaylist') || 'Loop'}">
+                <i class="material-icons" aria-hidden="true">repeat</i>
+            </button>
         `;
 
         // Insert at the beginning of the player bar so it appears on the left
@@ -259,6 +278,7 @@ export class SidebarMenu {
         this.playlistPrevBtn = controlsContainer.querySelector('.asmr-playlist-prev');
         this.playlistNextBtn = controlsContainer.querySelector('.asmr-playlist-next');
         this.playlistShuffleBtn = controlsContainer.querySelector('.asmr-playlist-shuffle');
+        this.playlistLoopBtn = controlsContainer.querySelector('.asmr-playlist-loop');
         this.playlistProgressEl = controlsContainer.querySelector('.asmr-playlist-player-progress');
 
         // P5: Adjust page container to prevent overlap
@@ -286,8 +306,15 @@ export class SidebarMenu {
             pm.shuffle();
         });
 
-        // Initialize shuffle button active state from config
+        this.playlistLoopBtn?.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const pm = PlaylistMode.getInstance();
+            pm.toggleLoop();
+        });
+
+        // Initialize shuffle and loop button active states from config
         this.updateShuffleButton(Config.get('shuffle'));
+        this.updateLoopButton(Config.get('loopPlaylist'));
 
         // Get current progress
         const pm = PlaylistMode.getInstance();

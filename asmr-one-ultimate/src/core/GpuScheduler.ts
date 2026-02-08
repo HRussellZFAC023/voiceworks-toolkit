@@ -41,6 +41,8 @@ export interface SchedulerTask<T = unknown> {
 export interface SchedulerStats {
     queueDepth: number;
     activeLease: WorkerName | null;
+    activeLoadLease: WorkerName | null;
+    loadQueueDepth: number;
     gpuHealthy: boolean;
     totalProcessed: number;
     totalDropped: number;
@@ -164,6 +166,15 @@ class GpuSchedulerImpl {
         recoveryTimer: null,
     };
 
+    // Model load lease: serializes model loading across workers.
+    // Only one worker can load a model at a time (requestAdapter + requestDevice + ONNX session).
+    // Concurrent loading causes "Failed to create WebGPU Context Provider" or OOM tab crashes.
+    private activeLoadLease: WorkerName | null = null;
+    private loadQueue: Array<{
+        worker: WorkerName;
+        resolve: (release: () => void) => void;
+    }> = [];
+
     // Stats
     private totalProcessed = 0;
     private totalDropped = 0;
@@ -183,6 +194,45 @@ class GpuSchedulerImpl {
         });
 
         Logger.debug('[GpuScheduler] Initialized');
+    }
+
+    /**
+     * Acquire a model-load lease. Only one worker can hold a load lease at a time.
+     * Load leases also block inference leases — inference waits until loading finishes.
+     *
+     * Returns a release function that MUST be called when model loading is complete
+     * (whether it succeeded or failed).
+     *
+     * Usage:
+     *   const release = await GpuScheduler.acquireLoadLease('translation');
+     *   try { await loadModel(); } finally { release(); }
+     */
+    acquireLoadLease(worker: WorkerName): Promise<() => void> {
+        const release = () => {
+            if (this.activeLoadLease === worker) {
+                Logger.debug(`[GpuScheduler] Load lease released: ${worker}`);
+                this.activeLoadLease = null;
+                this._processLoadQueue();
+                // Resume inference queue after load completes
+                queueMicrotask(() => this._processNext());
+            }
+        };
+
+        if (!this.activeLoadLease) {
+            this.activeLoadLease = worker;
+            Logger.debug(`[GpuScheduler] Load lease acquired: ${worker}`);
+            return Promise.resolve(release);
+        }
+
+        Logger.debug(`[GpuScheduler] Load lease queued: ${worker} (waiting for ${this.activeLoadLease})`);
+        return new Promise<() => void>(resolve => {
+            this.loadQueue.push({ worker, resolve });
+        });
+    }
+
+    /** Whether a model is currently being loaded (blocks inference scheduling) */
+    get isLoading(): boolean {
+        return this.activeLoadLease !== null;
     }
 
     /**
@@ -213,6 +263,11 @@ class GpuSchedulerImpl {
     onGpuFailure(worker: WorkerName): void {
         this.health.consecutiveFailures++;
         this.health.lastFailureTime = Date.now();
+
+        // Broadcast device loss to all services so they can skip WebGPU.
+        // A true GPU device loss (GPU process crash) affects ALL workers, not just one.
+        // This is distinct from dtype-specific failures (e.g. fp16 on Intel) which are per-service.
+        EventBus.emit('gpu:device-lost-broadcast', { source: worker });
 
         if (this.health.consecutiveFailures >= CIRCUIT_BREAKER_THRESHOLD) {
             this.health.gpuHealthy = false;
@@ -256,6 +311,8 @@ class GpuSchedulerImpl {
         return {
             queueDepth: this.queue.size,
             activeLease: this.activeLease,
+            activeLoadLease: this.activeLoadLease,
+            loadQueueDepth: this.loadQueue.length,
             gpuHealthy: this.health.gpuHealthy,
             totalProcessed: this.totalProcessed,
             totalDropped: this.totalDropped,
@@ -269,9 +326,31 @@ class GpuSchedulerImpl {
 
     private _processNext(): void {
         if (this.processing || this.activeLease) return;
+        // During model loading, only allow REALTIME tasks (live subtitle translation)
+        // to proceed — batch/background work waits to avoid GPU memory pressure.
+        // Blocking ALL inference was too aggressive and caused live translations to stall.
+        if (this.activeLoadLease) {
+            const peek = this.queue.peek();
+            if (!peek || peek.task.priority !== Priority.REALTIME) return;
+        }
         const entry = this.queue.dequeue();
         if (!entry) return;
         this._executeEntry(entry);
+    }
+
+    private _processLoadQueue(): void {
+        if (this.activeLoadLease || this.loadQueue.length === 0) return;
+        const next = this.loadQueue.shift()!;
+        this.activeLoadLease = next.worker;
+        Logger.debug(`[GpuScheduler] Load lease acquired (from queue): ${next.worker}`);
+        next.resolve(() => {
+            if (this.activeLoadLease === next.worker) {
+                Logger.debug(`[GpuScheduler] Load lease released: ${next.worker}`);
+                this.activeLoadLease = null;
+                this._processLoadQueue();
+                queueMicrotask(() => this._processNext());
+            }
+        });
     }
 
     private async _executeEntry(entry: QueueEntry): Promise<void> {

@@ -197,6 +197,14 @@ export class TranslatedTags {
         delete el.dataset.asmrtagTranslation;
         el.classList.remove('asmr-translated');
         el.classList.remove('asmr-worktree-translation');
+        // Clean up card translation subtitle if present
+        const container = el.closest('.ellipsis-3-lines, .ellipsis-2-lines, .text-h6');
+        if (container) {
+            const sub = container.nextElementSibling;
+            if (sub instanceof HTMLElement && sub.classList.contains('asmr-card-translation')) {
+                sub.remove();
+            }
+        }
     }
 
     private shouldSkipTranslation(el: HTMLElement, currentText: string, scopeKey?: string): boolean {
@@ -255,6 +263,9 @@ export class TranslatedTags {
                 const text = (content.textContent || '').trim();
                 if (!text) continue;
 
+                // Skip if already has a site-provided romanization (e.g. "佐倉江美 (Sakura Emi)")
+                if (this.hasExistingRomanization(text)) continue;
+
                 if (this.processedElements.has(chip) && this.shouldSkipTranslation(chip, text)) continue;
 
                 // Try to match with known tags first (fastest — no async needed)
@@ -275,9 +286,11 @@ export class TranslatedTags {
                     continue;
                 }
 
-                if (this.looksJapanese(text) && !this.shouldSkipAutoTranslate(text, targetLang)) {
+                // Extract base text (strip ruby furigana) for cleaner translation
+                const baseText = this.extractBaseText(content);
+                if (this.looksJapanese(baseText) && !this.shouldSkipAutoTranslate(baseText, targetLang)) {
                     this.markTranslationPending(chip, text);
-                    pending.push({ el: chip, originalText: text, translateKey: text, format: 'pair', apply: (v) => { content.textContent = v; } });
+                    pending.push({ el: chip, originalText: text, translateKey: baseText, format: 'pair', apply: (v) => { content.textContent = v; } });
                 }
             }
 
@@ -319,27 +332,33 @@ export class TranslatedTags {
             const anchors = Array.from(document.querySelectorAll('a[href*="/circles/"], a[href*="/authors/"], a[href*="/actors/"], a[href*="/vas/"], a[href*="/cv/"]')) as HTMLAnchorElement[];
             for (const anchor of anchors) {
                 const text = (anchor.textContent || '').trim();
-                if (!text || !this.looksJapanese(text)) continue;
+                if (!text) continue;
+                if (this.hasExistingRomanization(text)) continue;
+                const baseText = this.extractBaseText(anchor);
+                if (!this.looksJapanese(baseText)) continue;
                 if (this.processedElements.has(anchor) && this.shouldSkipTranslation(anchor, text)) continue;
-                if (this.shouldSkipAutoTranslate(text, targetLang)) continue;
+                if (this.shouldSkipAutoTranslate(baseText, targetLang)) continue;
 
                 this.markTranslationPending(anchor, text);
-                pending.push({ el: anchor, originalText: text, translateKey: text, format: 'pair', apply: (v) => { anchor.textContent = v; } });
+                pending.push({ el: anchor, originalText: text, translateKey: baseText, format: 'pair', apply: (v) => { anchor.textContent = v; } });
             }
 
             // 5. Work Card Circles / Studios
             const cardMetaNames = Array.from(document.querySelectorAll('.text-subtitle1 .text-grey.ellipsis')) as HTMLElement[];
             for (const el of cardMetaNames) {
                 const text = (el.textContent || '').trim();
-                if (!text || !this.looksJapanese(text)) continue;
+                if (!text) continue;
+                if (this.hasExistingRomanization(text)) continue;
+                const baseText = this.extractBaseText(el);
+                if (!this.looksJapanese(baseText)) continue;
                 if (this.processedElements.has(el) && this.shouldSkipTranslation(el, text)) continue;
-                if (this.shouldSkipAutoTranslate(text, targetLang)) continue;
+                if (this.shouldSkipAutoTranslate(baseText, targetLang)) continue;
 
                 this.markTranslationPending(el, text);
-                pending.push({ el, originalText: text, translateKey: text, format: 'pair', apply: (v) => { el.textContent = v; } });
+                pending.push({ el, originalText: text, translateKey: baseText, format: 'pair', apply: (v) => { el.textContent = v; } });
             }
 
-            // 6. Work Titles
+            // 6. Work Titles — keep original, show translated subtitle below
             const workTitles = Array.from(document.querySelectorAll('.ellipsis-3-lines a[href*="/work/"], .ellipsis-2-lines a[href*="/work/"], .q-card .text-h6 a[href*="/work/"], .q-card a[href*="/work/"] .text-weight-medium')) as HTMLElement[];
             for (const el of workTitles) {
                 const text = (el.textContent || '').trim();
@@ -347,7 +366,21 @@ export class TranslatedTags {
                 if (this.processedElements.has(el) && this.shouldSkipTranslation(el, text)) continue;
 
                 this.markTranslationPending(el, text);
-                pending.push({ el, originalText: text, translateKey: text, format: 'raw', apply: (v) => { el.textContent = v; el.title = text; } });
+                pending.push({ el, originalText: text, translateKey: text, format: 'raw', apply: (v) => {
+                    // Keep original text in the anchor, add translated subtitle after the clamped container
+                    const container = el.closest('.ellipsis-3-lines, .ellipsis-2-lines, .text-h6') as HTMLElement;
+                    if (container && container.parentElement) {
+                        let sub = container.nextElementSibling as HTMLElement;
+                        if (!sub || !sub.classList.contains('asmr-card-translation')) {
+                            sub = document.createElement('div');
+                            sub.className = 'asmr-card-translation';
+                            container.after(sub);
+                        }
+                        sub.textContent = v;
+                        sub.title = v;
+                    }
+                    el.title = v;
+                } });
             }
 
         } finally {
@@ -401,7 +434,7 @@ export class TranslatedTags {
                 let formatted: string;
                 switch (item.format) {
                     case 'pair':
-                        formatted = TranslationService.formatPair(item.originalText, translated);
+                        formatted = TranslationService.formatPair(item.translateKey, translated);
                         break;
                     case 'worktree': {
                         const cleaned = TranslationService.cleanQuotes(translated);
@@ -502,6 +535,28 @@ export class TranslatedTags {
 
     private looksJapanese(text: string): boolean {
         return /[\u3040-\u30ff\u4e00-\u9faf]/.test(text);
+    }
+
+    /**
+     * Extract base text from element, removing ruby annotation content (rt/rp).
+     * VA/circle names use <ruby>佐<rt>さ</rt></ruby> — textContent gives
+     * garbled "佐さ倉くら江え美み", this returns clean "佐倉江美".
+     */
+    private extractBaseText(el: HTMLElement): string {
+        if (!el.querySelector('rt')) {
+            return (el.textContent || '').trim();
+        }
+        const clone = el.cloneNode(true) as HTMLElement;
+        for (const rt of clone.querySelectorAll('rt, rp')) rt.remove();
+        return (clone.textContent || '').trim();
+    }
+
+    /**
+     * Check if text already includes a parenthesized Latin romanization.
+     * Site-provided: "佐倉江美 (Sakura Emi)" — skip to avoid double translation.
+     */
+    private hasExistingRomanization(text: string): boolean {
+        return /\([A-Za-z][A-Za-z\s.,!?;:'"…-]*\)\s*$/.test(text);
     }
 
     private getFileTranslationInfo(text: string): { original: string; input: string; ext: string } | null {

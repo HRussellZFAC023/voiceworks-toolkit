@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Features — Voiceworks Toolkit</title>
+  <meta name="description" content="Full feature list for Voiceworks Toolkit: learner mode, live transcription, neural translation, semantic search, radio mode, and 30+ quality-of-life features.">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+  <!-- Navigation -->
+  <nav class="nav">
+    <div class="nav-inner">
+      <a href="index.html" class="nav-brand">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+        Voiceworks Toolkit
+      </a>
+      <button class="nav-toggle" onclick="document.querySelector('.nav-links').classList.toggle('open')" aria-label="Toggle navigation">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12h18M3 6h18M3 18h18"/></svg>
+      </button>
+      <ul class="nav-links">
+        <li><a href="index.html">Home</a></li>
+        <li><a href="features.html" class="active">Features</a></li>
+        <li><a href="installation.html">Installation</a></li>
+        <li><a href="manual.html">Manual</a></li>
+      </ul>
+      <a href="https://github.com/HRussellZFAC023/voiceworks-toolkit" class="nav-github" aria-label="GitHub">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+      </a>
+    </div>
+  </nav>
+
+  <main>
+    <section class="content" style="padding-top: calc(var(--nav-height) + 48px);">
+      <div class="container">
+        <h1>Features</h1>
+        <p class="lead">A comprehensive breakdown of every feature in Voiceworks Toolkit, organized by category.</p>
+
+        <!-- Language Learning -->
+        <div class="feature-section">
+          <h2>&#x1F4DA; Language Learning</h2>
+          <p>Tools designed for immersion-based Japanese study.</p>
+
+          <div class="placeholder-img" style="margin-bottom: 32px;">
+            <span>Screenshot &mdash; Learner Mode with Dual-Language Subtitles</span>
+          </div>
+
+          <div class="feature-list">
+            <div class="feature-item">
+              <h3>Learner Mode &mdash; Dual-Language Subtitles</h3>
+              <p>Real-time synced subtitles purpose-built for immersion-based Japanese study. Japanese text is displayed as the primary line with blurrable English translations underneath &mdash; hover or press <code>B</code> to reveal. Automatically loads LRC lyric files when available and integrates with live Whisper transcriptions for unstudied content. Chinese-language subtitles are auto-translated to Japanese so learners always see kana and kanji as the primary line. Playback speed controls and configurable lead-time let you study at your own pace.</p>
+            </div>
+
+            <div class="feature-item">
+              <h3>Live Transcription &mdash; On-Device Speech-to-Text</h3>
+              <p>Turns any voicework into study material by transcribing audio in real-time directly from the player element &mdash; no file downloads or uploads needed. Powered by Transformers.js running the Whisper model inside a dedicated Web Worker with WebGPU acceleration (automatic WASM fallback for older hardware). Transcripts are cached per-track with a 90-day TTL for instant reloads on revisit. Supports 8 language modes (Japanese, English, Chinese, Korean, etc.) and exports to LRC, VTT, and SRT subtitle formats.</p>
+            </div>
+
+            <div class="feature-item">
+              <h3>Neural Translation &mdash; Local Machine Translation</h3>
+              <p>Neural translation models running entirely in-browser via Web Workers. Uses greedy decoding for fast throughput on short text segments. WebGPU preferred with automatic WASM fallback and preferred-dtype caching. Features batch processing with an 8ms coalescing window, in-flight request deduplication, and a shared translation cache. Translates player titles, content tags, and UI elements in real-time.</p>
+            </div>
+
+            <div class="feature-item">
+              <h3>Interface Translation</h3>
+              <p>Localizes the platform's UI strings to English using a hardcoded translation map for static elements (sort options, buttons, menus) and pattern-based replacements for dynamic text. Combined with the neural tag translator, this makes the entire interface accessible to English-speaking learners.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Search & Discovery -->
+        <div class="feature-section">
+          <h2>&#x1F50D; Search &amp; Discovery</h2>
+          <p>AI-powered tools for finding content by meaning and metadata.</p>
+
+          <div class="placeholder-img" style="margin-bottom: 32px;">
+            <span>Screenshot &mdash; Semantic Search Dialog</span>
+          </div>
+
+          <div class="feature-list">
+            <div class="feature-item">
+              <h3>Semantic Search &mdash; AI-Powered Discovery</h3>
+              <p>Find voiceworks by meaning rather than exact keyword matches. Embeds titles and descriptions using the Jina v3 embeddings API, with vectors stored locally in IndexedDB. Supports multilingual queries with tag-based hints and paginated results. Rate-limited to respect free tier limits. Ideal for finding content by topic or theme when you don't know the exact Japanese title.</p>
+            </div>
+
+            <div class="feature-item">
+              <h3>Advanced Search &mdash; Multi-Filter Query Builder</h3>
+              <p>Structured search with filters for tags, circles (creators), voice actors, date range, rating, and price. Supports AND/OR logic for combining multiple filters. Includes saved search history for quick re-use of frequent queries.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Playback & Immersion -->
+        <div class="feature-section">
+          <h2>&#x1F3B5; Playback &amp; Immersion</h2>
+          <p>Continuous playback modes for extended study sessions.</p>
+
+          <div class="feature-list">
+            <div class="feature-item">
+              <h3>Radio Mode &mdash; Continuous Shuffled Playback</h3>
+              <p>Shuffled continuous playback across your entire library for extended immersion sessions. Automatically selects random voiceworks and plays all tracks sequentially, advancing to the next work on completion. Health-checking and auto-recovery mechanisms keep the stream running through network interruptions. Playback state persists across page refreshes.</p>
+            </div>
+
+            <div class="feature-item">
+              <h3>Playlist Mode &mdash; Sequential Work Playback</h3>
+              <p>Curated playlist playback with forward/back navigation controls injected into the player bar. Auto-advances to the next voicework when the current one finishes. Paired with the Playlist Discovery panel for browsing, searching, and activating community-curated playlists.</p>
+            </div>
+
+            <div class="feature-item">
+              <h3>Audio Cache &mdash; Offline Playback</h3>
+              <p>IndexedDB-backed audio caching with TTL-based expiration. Automatically caches tracks during playback for offline replay and reduced bandwidth on revisits &mdash; useful for reviewing previously studied content without re-downloading.</p>
+            </div>
+
+            <div class="feature-item">
+              <h3>Enhanced Shuffle</h3>
+              <p>Improved playlist shuffling that integrates with native shuffle controls. Applies a hard shuffle maintaining the current track and persists the preference across sessions.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Media & Visualization -->
+        <div class="feature-section">
+          <h2>&#x1F3AC; Media &amp; Visualization</h2>
+          <p>Rich media handling and audio visualization.</p>
+
+          <div class="placeholder-img" style="margin-bottom: 32px;">
+            <span>Screenshot &mdash; Media Viewer Lightbox</span>
+          </div>
+
+          <div class="feature-list">
+            <div class="feature-item">
+              <h3>Media Viewer &mdash; Inline Gallery</h3>
+              <p>Click-to-expand lightbox for images and video files bundled with voiceworks. Supports JPG, PNG, GIF, WebP, MP4, WebM, MOV, AVI, MKV, PDF, TXT, and SRT. Slideshow mode with auto-advance, keyboard navigation (arrow keys, ESC), and swipe support on touch devices.</p>
+            </div>
+
+            <div class="feature-item">
+              <h3>Player Gallery &mdash; Album Art Slideshow</h3>
+              <p>Image gallery integrated into the player's album art area. Displays cover images with slideshow navigation, arrow controls, swipe support, and keyboard shortcuts.</p>
+            </div>
+
+            <div class="feature-item">
+              <h3>Audio Visualizer &mdash; Real-time Spectrum</h3>
+              <p>40-bar frequency spectrum visualization using the Web Audio API. Renders in both a collapsible compact view and an expanded player-integrated view with smooth animations and configurable bar styling.</p>
+            </div>
+
+            <div class="feature-item">
+              <h3>Player Fullscreen</h3>
+              <p>CSS-based fullscreen expansion for the player area. Preserves playback during toggle and syncs with the Player Gallery when active. Keyboard shortcut: <code>F</code>.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Progress & Organization -->
+        <div class="feature-section">
+          <h2>&#x1F4CA; Progress &amp; Organization</h2>
+          <p>Track your listening history and navigate content efficiently.</p>
+
+          <div class="feature-list">
+            <div class="feature-item">
+              <h3>Auto Progress Tracking</h3>
+              <p>Automatically tracks listening progress across your library. Marks voiceworks as "listening" when playback starts and upgrades to "listened" at 80% completion. Progress checkmarks appear on work cards throughout the site.</p>
+            </div>
+
+            <div class="feature-item">
+              <h3>Folder Diver &mdash; Smart Directory Navigation</h3>
+              <p>Intelligently navigates nested voicework directory structures to find audio content. Uses a folder scoring algorithm that weights by audio file count, folder name keywords, and content relevance.</p>
+            </div>
+
+            <div class="feature-item">
+              <h3>Flat View &mdash; Alternative File Browser</h3>
+              <p>Side-drawer panel showing all files from a voicework in a flat list. Supports direct playback, lightbox image viewing, and file path copy with responsive layout.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Quality of Life -->
+        <div class="feature-section">
+          <h2>&#x2699; Quality of Life</h2>
+          <p>Dozens of enhancements for a polished, efficient study experience.</p>
+
+          <div class="feature-list">
+            <div class="feature-item">
+              <h3>Keyboard Shortcuts</h3>
+              <p>Comprehensive keyboard control for hands-free operation during study sessions. Smart input filtering ensures shortcuts are ignored when typing in text fields.</p>
+
+              <div class="table-wrap" style="margin-top: 16px;">
+                <table>
+                  <thead>
+                    <tr><th>Key</th><th>Action</th></tr>
+                  </thead>
+                  <tbody>
+                    <tr><td><code>Space</code> / <code>K</code></td><td>Play / Pause</td></tr>
+                    <tr><td><code>M</code></td><td>Mute / Unmute</td></tr>
+                    <tr><td><code>F</code></td><td>Fullscreen toggle</td></tr>
+                    <tr><td><code>Left</code> / <code>Right</code></td><td>Seek &plusmn;5s (Shift: &plusmn;30s)</td></tr>
+                    <tr><td><code>Up</code> / <code>Down</code></td><td>Volume &plusmn;5%</td></tr>
+                    <tr><td><code>[</code> / <code>]</code></td><td>Playback speed</td></tr>
+                    <tr><td><code>0</code>&ndash;<code>9</code></td><td>Jump to 0%&ndash;90% of track</td></tr>
+                    <tr><td><code>B</code></td><td>Toggle English subtitle blur</td></tr>
+                    <tr><td><code>J</code></td><td>Toggle Japanese subtitles</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div class="feature-item">
+              <h3>Infinite Scroll</h3>
+              <p>Replaces pagination with IntersectionObserver-based infinite scroll on home, category, and search pages for seamless browsing.</p>
+            </div>
+
+            <div class="feature-item">
+              <h3>OS Media Integration</h3>
+              <p>Updates system media controls (notification center, lock screen) with voicework metadata and album art. Control playback from your OS media keys without switching to the browser.</p>
+            </div>
+
+            <div class="feature-item">
+              <h3>Translated Tags</h3>
+              <p>Translates CJK tags throughout the entire UI to English using cached translations stored in IndexedDB. Work cards, search results, and filter panels are all covered.</p>
+            </div>
+
+            <div class="feature-item">
+              <h3>Additional Features</h3>
+              <p>Dynamic favicon showing current cover art, tag-click filtering with persistence, route state sync via URL parameters, SFW mode for public environments, full settings backup/restore, and complete UI localization in English, Chinese, and Japanese.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Architecture Overview -->
+        <div class="feature-section">
+          <h2>&#x1F3D7; Architecture</h2>
+          <p>Technical overview of the system design.</p>
+
+          <div class="feature-list">
+            <div class="feature-item">
+              <h3>Parasitic Userscript Design</h3>
+              <p>Hooks into the host site's Vue 2.6 + Quasar framework via a bridge singleton that exposes the app's Vuex store, Vue Router, and HTTP client. Features mount as isolated modules that register with a central lifecycle controller.</p>
+            </div>
+
+            <div class="feature-item">
+              <h3>On-Device ML Pipeline</h3>
+              <p>Whisper transcription and neural translation models run in dedicated Web Workers using Transformers.js. WebGPU provides GPU acceleration with automatic WASM fallback. Worker coalescing batches requests in 8ms windows for optimal throughput.</p>
+            </div>
+
+            <div class="feature-item">
+              <h3>Efficient DOM Observation</h3>
+              <p>A single MutationObserver on the document body handles all DOM watching. Features register callbacks with the central observer instead of creating individual observers, minimizing overhead.</p>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </section>
+  </main>
+
+  <!-- Footer -->
+  <footer class="footer">
+    <div class="container">
+      <div class="footer-links">
+        <a href="https://github.com/HRussellZFAC023/voiceworks-toolkit">GitHub</a>
+        <a href="features.html">Features</a>
+        <a href="installation.html">Installation</a>
+        <a href="manual.html">Manual</a>
+      </div>
+      <p>Voiceworks Toolkit &mdash; MIT License</p>
+    </div>
+  </footer>
+
+</body>
+</html>

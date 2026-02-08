@@ -679,10 +679,6 @@ function renderPdf(wrapper: HTMLElement, item: MediaFile, url: string): void {
     extractPdfText(url).then((text) => {
         if (!text) { renderPdfFallback(); return; }
 
-        const originalPre = document.createElement('pre');
-        originalPre.className = 'media-viewer-text';
-        originalPre.textContent = text;
-
         if (translateMode.value) {
             const targetLang = I18n.lang === 'zh' ? 'zh-CN' : I18n.lang;
             const { grid, translatedCells } = buildTranslationGrid(text);
@@ -694,23 +690,30 @@ function renderPdf(wrapper: HTMLElement, item: MediaFile, url: string): void {
             translateGridCells(text, translatedCells, targetLang, fastOptions).then((ok) => {
                 if (!ok) {
                     pdfContainer.innerHTML = '';
-                    pdfContainer.appendChild(originalPre);
+                    pdfContainer.appendChild(buildTextLines(text));
                 }
             }).catch(() => renderPdfFallback());
         } else {
             pdfContainer.innerHTML = '';
-            pdfContainer.appendChild(originalPre);
+            pdfContainer.appendChild(buildTextLines(text));
             isLoading.value = false;
         }
     }).catch(() => renderPdfFallback());
 }
 
-function renderText(wrapper: HTMLElement, item: MediaFile, url: string): void {
-    const originalPre = document.createElement('pre');
-    originalPre.className = 'media-viewer-text';
-    originalPre.textContent = '';
-    wrapper.appendChild(originalPre);
+function buildTextLines(text: string): HTMLElement {
+    const container = document.createElement('div');
+    container.className = 'media-viewer-text';
+    for (const line of text.split(/\r?\n/)) {
+        const lineEl = document.createElement('pre');
+        lineEl.className = 'media-viewer-text-line';
+        lineEl.textContent = line || '\u00A0';
+        container.appendChild(lineEl);
+    }
+    return container;
+}
 
+function renderText(wrapper: HTMLElement, item: MediaFile, url: string): void {
     const loadText = async () => {
         try {
             const res = await retryWithBackoff(
@@ -720,7 +723,6 @@ function renderText(wrapper: HTMLElement, item: MediaFile, url: string): void {
             const rawText = String(res.response || '');
             const maxChars = 400000;
             const text = rawText.length > maxChars ? rawText.slice(0, maxChars) : rawText;
-            originalPre.textContent = text;
 
             let note: HTMLDivElement | null = null;
             if (rawText.length > maxChars) {
@@ -740,9 +742,12 @@ function renderText(wrapper: HTMLElement, item: MediaFile, url: string): void {
                 const ok = await translateGridCells(text, translatedCells, targetLang, fastOptions);
                 if (!ok) {
                     wrapper.innerHTML = '';
-                    wrapper.appendChild(originalPre);
+                    wrapper.appendChild(buildTextLines(text));
                     if (note) wrapper.appendChild(note);
                 }
+            } else {
+                wrapper.innerHTML = '';
+                wrapper.appendChild(buildTextLines(text));
             }
 
             if (note && !note.isConnected) wrapper.appendChild(note);
@@ -1404,7 +1409,7 @@ defineExpose({
                         <div
                             ref="mediaWrapperRef"
                             class="media-viewer-media-wrapper"
-                            @wheel.prevent="handleWheel"
+                            @wheel="handleWheel"
                             @mousedown="handleMouseDown"
                             @dragstart.prevent
                         />

@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Manual — Voiceworks Toolkit</title>
+  <meta name="description" content="User manual for Voiceworks Toolkit. Learn how to use Learner Mode, Whisper transcription, translation, radio mode, and all other features.">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+  <!-- Navigation -->
+  <nav class="nav">
+    <div class="nav-inner">
+      <a href="index.html" class="nav-brand">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+        Voiceworks Toolkit
+      </a>
+      <button class="nav-toggle" onclick="document.querySelector('.nav-links').classList.toggle('open')" aria-label="Toggle navigation">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12h18M3 6h18M3 18h18"/></svg>
+      </button>
+      <ul class="nav-links">
+        <li><a href="index.html">Home</a></li>
+        <li><a href="features.html">Features</a></li>
+        <li><a href="installation.html">Installation</a></li>
+        <li><a href="manual.html" class="active">Manual</a></li>
+      </ul>
+      <a href="https://github.com/HRussellZFAC023/voiceworks-toolkit" class="nav-github" aria-label="GitHub">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+      </a>
+    </div>
+  </nav>
+
+  <main>
+    <section class="content" style="padding-top: calc(var(--nav-height) + 48px);">
+      <div class="container">
+        <h1>User Manual</h1>
+        <p class="lead">A comprehensive guide to using Voiceworks Toolkit for Japanese language study.</p>
+
+        <!-- Table of Contents -->
+        <div class="feature-item" style="margin-bottom: 48px;">
+          <h3>Contents</h3>
+          <ol style="padding-left: 20px; color: var(--text-secondary); line-height: 2;">
+            <li><a href="#getting-started">Getting Started</a></li>
+            <li><a href="#settings">Settings &amp; Configuration</a></li>
+            <li><a href="#learner-mode">Learner Mode</a></li>
+            <li><a href="#transcription">Live Transcription (Whisper)</a></li>
+            <li><a href="#translation">Translation System</a></li>
+            <li><a href="#search">Search &amp; Discovery</a></li>
+            <li><a href="#playback">Playback Modes</a></li>
+            <li><a href="#media">Media Viewer</a></li>
+            <li><a href="#shortcuts">Keyboard Shortcuts</a></li>
+            <li><a href="#backup">Backup &amp; Restore</a></li>
+            <li><a href="#faq">FAQ</a></li>
+          </ol>
+        </div>
+
+        <!-- Getting Started -->
+        <h2 id="getting-started">Getting Started</h2>
+
+        <p>After <a href="installation.html">installing</a> the userscript, browse to the platform. The toolkit activates automatically and you'll notice several enhancements right away:</p>
+
+        <ul>
+          <li>A new sidebar menu with Radio Mode and Playlist Mode toggles</li>
+          <li>Keyboard shortcuts for playback control</li>
+          <li>Infinite scroll replacing pagination</li>
+          <li>Translated tags and UI elements (if translation models are downloaded)</li>
+          <li>Progress tracking checkmarks on work cards</li>
+        </ul>
+
+        <p>Most features work out of the box. AI-powered features (transcription, translation, semantic search) require a one-time model download or API key setup in Settings.</p>
+
+        <div class="placeholder-img" style="margin: 24px 0;">
+          <span>Screenshot &mdash; Enhanced Interface Overview</span>
+        </div>
+
+        <!-- Settings -->
+        <h2 id="settings">Settings &amp; Configuration</h2>
+
+        <p>Access the settings panel from the Settings page. The toolkit adds its own configuration sections alongside the native settings.</p>
+
+        <h3>General Settings</h3>
+        <ul>
+          <li><strong>Language:</strong> Switch between English, Chinese, and Japanese UI localization</li>
+          <li><strong>SFW Mode:</strong> Hide all images and thumbnails for use in public environments</li>
+          <li><strong>Infinite Scroll:</strong> Toggle automatic page loading on scroll</li>
+        </ul>
+
+        <h3>AI Settings</h3>
+        <ul>
+          <li><strong>Whisper Model:</strong> Choose the transcription model size (tiny, small, medium) and quantization level. Larger models are more accurate but use more memory</li>
+          <li><strong>Whisper Language:</strong> Set the default transcription language (Japanese, English, Chinese, Korean, etc.)</li>
+          <li><strong>Translation Model:</strong> Download or update the local neural translation model. Status and progress are shown inline</li>
+          <li><strong>Jina API Key:</strong> Enter your free Jina API key to enable semantic vector search</li>
+        </ul>
+
+        <h3>Playback Settings</h3>
+        <ul>
+          <li><strong>Shuffle:</strong> Enable or disable shuffle for Radio and Playlist modes</li>
+          <li><strong>Auto-advance:</strong> Automatically move to the next work when the current one finishes</li>
+        </ul>
+
+        <!-- Learner Mode -->
+        <h2 id="learner-mode">Learner Mode</h2>
+
+        <p>Learner Mode displays dual-language subtitles during playback, designed for immersion-based Japanese study.</p>
+
+        <h3>How It Works</h3>
+        <ol>
+          <li>Navigate to any voicework with available subtitle files (LRC format) or enable Whisper for live transcription</li>
+          <li>The <strong>primary line</strong> shows Japanese text (kana/kanji)</li>
+          <li>The <strong>secondary line</strong> shows English translation, blurred by default</li>
+          <li>Hover over the English line or press <code>B</code> to reveal the translation</li>
+        </ol>
+
+        <h3>Subtitle Sources</h3>
+        <p>Learner Mode uses subtitles from these sources, in priority order:</p>
+        <ol>
+          <li><strong>LRC files:</strong> Pre-existing lyric files bundled with the voicework</li>
+          <li><strong>Whisper transcription:</strong> Live speech-to-text when enabled (overrides static subtitles)</li>
+          <li><strong>Cached transcripts:</strong> Previously transcribed content is loaded instantly</li>
+        </ol>
+
+        <h3>Chinese Content</h3>
+        <p>When Chinese-language subtitles are detected (CJK text without kana), they are automatically translated to Japanese via remote translation so the primary line always shows Japanese text. This ensures learners studying Japanese always see their target language first.</p>
+
+        <div class="callout">
+          <p><strong>Tip:</strong> Use playback speed controls (<code>[</code> and <code>]</code> keys) to slow down audio during study. The lead-time setting in the player lets you read ahead before each line is spoken.</p>
+        </div>
+
+        <div class="placeholder-img" style="margin: 24px 0;">
+          <span>Screenshot &mdash; Learner Mode Subtitles with Blur Toggle</span>
+        </div>
+
+        <!-- Transcription -->
+        <h2 id="transcription">Live Transcription (Whisper)</h2>
+
+        <p>The live transcription feature uses the Whisper speech recognition model to generate subtitles in real-time from any audio being played.</p>
+
+        <h3>Enabling Transcription</h3>
+        <ol>
+          <li>Click the microphone icon in the player controls</li>
+          <li>On first use, the Whisper model will download (~150 MB). This is cached for future use</li>
+          <li>Once loaded, transcription begins automatically as audio plays</li>
+        </ol>
+
+        <h3>Model Selection</h3>
+        <p>Choose the appropriate model size in Settings based on your hardware:</p>
+        <ul>
+          <li><strong>Tiny:</strong> Fastest, lowest memory, good for real-time use on modest hardware</li>
+          <li><strong>Small:</strong> Better accuracy, recommended for systems with WebGPU support</li>
+          <li><strong>Medium:</strong> Best accuracy, requires a capable GPU and sufficient memory</li>
+        </ul>
+
+        <h3>Caching</h3>
+        <p>Transcripts are automatically cached per-track with a 90-day TTL. When you revisit a previously transcribed voicework, subtitles appear instantly without re-running the model.</p>
+
+        <h3>Exporting</h3>
+        <p>Download transcripts in standard subtitle formats:</p>
+        <ul>
+          <li><strong>LRC:</strong> Lyric format, compatible with most music players and study tools</li>
+          <li><strong>VTT:</strong> WebVTT format, standard for web video subtitles</li>
+          <li><strong>SRT:</strong> SubRip format, widely supported by media players and Anki</li>
+        </ul>
+        <p>Download buttons appear in the file tree and flat view after transcription completes.</p>
+
+        <!-- Translation -->
+        <h2 id="translation">Translation System</h2>
+
+        <p>The toolkit includes two translation mechanisms that work together to provide comprehensive English translation across the interface.</p>
+
+        <h3>Neural Translation (Local)</h3>
+        <p>A local machine translation model runs entirely in your browser via a Web Worker. After downloading the model from Settings, it translates:</p>
+        <ul>
+          <li>Player track titles (Japanese/Chinese to English)</li>
+          <li>Content tags across all pages</li>
+          <li>Work card titles in grid and list views</li>
+          <li>Circle and voice actor names</li>
+        </ul>
+        <p>The model uses WebGPU for acceleration when available, falling back to WASM on older hardware. Translations are cached in a shared cache for instant reuse.</p>
+
+        <h3>Interface Translation (Static)</h3>
+        <p>A built-in translation map converts static UI elements (buttons, menus, sort options, labels) to English. This works immediately without any model download and covers the complete interface.</p>
+
+        <h3>Performance</h3>
+        <p>Translation requests are batched in an 8ms coalescing window and deduplicated to prevent redundant work. Single-text requests (like the currently playing track title) are prioritized over batch operations for minimal perceived latency.</p>
+
+        <!-- Search -->
+        <h2 id="search">Search &amp; Discovery</h2>
+
+        <h3>Semantic Search</h3>
+        <p>Semantic search lets you find voiceworks by meaning rather than exact keywords. This is particularly useful for finding content by theme or topic when you don't know the exact Japanese title.</p>
+        <ol>
+          <li>Enter your Jina API key in Settings (free tier available)</li>
+          <li>Click the search icon in the header to open the Semantic Search dialog</li>
+          <li>Type your query in any language</li>
+          <li>Results are ranked by semantic similarity to your query</li>
+        </ol>
+        <p>The vector index builds automatically in the background. You can also trigger manual indexing from the dialog. Embeddings are stored locally in IndexedDB and persist across sessions.</p>
+
+        <h3>Advanced Search</h3>
+        <p>The Advanced Search panel provides structured filtering:</p>
+        <ul>
+          <li><strong>Tags:</strong> Filter by content tags with AND/OR logic</li>
+          <li><strong>Circle:</strong> Search by creator/circle name</li>
+          <li><strong>Voice Actor:</strong> Filter by voice actor</li>
+          <li><strong>Date Range:</strong> Limit results to a time period</li>
+          <li><strong>Rating &amp; Price:</strong> Set minimum rating or price filters</li>
+        </ul>
+        <p>Search history is saved for quick re-use of frequent queries.</p>
+
+        <h3>Tag Filters</h3>
+        <p>Click any tag on a work card or detail page to instantly filter by it. Active filters appear as removable chips and persist across navigation. Multi-tag filtering is supported &mdash; click additional tags to narrow your results.</p>
+
+        <!-- Playback Modes -->
+        <h2 id="playback">Playback Modes</h2>
+
+        <h3>Radio Mode</h3>
+        <p>Radio Mode provides continuous shuffled playback across your library, ideal for extended immersion sessions.</p>
+        <ol>
+          <li>Toggle Radio Mode from the sidebar menu</li>
+          <li>Playback begins automatically with a randomly selected voicework</li>
+          <li>When one work finishes, the next is selected randomly</li>
+          <li>A short history buffer prevents frequent repetition</li>
+          <li>Health-checking and auto-recovery keep the stream running through interruptions</li>
+        </ol>
+        <p>Playback state persists across page refreshes. Radio Mode is mutually exclusive with Playlist Mode.</p>
+
+        <h3>Playlist Mode</h3>
+        <p>Playlist Mode enables sequential playback through curated collections.</p>
+        <ol>
+          <li>Open the Playlist Discovery panel from the sidebar</li>
+          <li>Browse or search community-curated playlists</li>
+          <li>Activate a playlist to begin sequential playback</li>
+          <li>Use the forward/back controls in the player bar to navigate between works</li>
+        </ol>
+        <p>Playlists auto-advance to the next voicework when the current one finishes.</p>
+
+        <!-- Media Viewer -->
+        <h2 id="media">Media Viewer</h2>
+
+        <p>The Media Viewer provides a lightbox gallery for images and video files bundled with voiceworks.</p>
+
+        <h3>Supported Formats</h3>
+        <ul>
+          <li><strong>Images:</strong> JPG, PNG, GIF, WebP</li>
+          <li><strong>Video:</strong> MP4, WebM, MOV, AVI, MKV</li>
+          <li><strong>Documents:</strong> PDF, TXT, SRT</li>
+        </ul>
+
+        <h3>Controls</h3>
+        <ul>
+          <li>Click any media file to open the lightbox</li>
+          <li>Use arrow keys or swipe to navigate between files</li>
+          <li>Press <code>ESC</code> to close</li>
+          <li>Enable slideshow mode for auto-advance</li>
+        </ul>
+
+        <!-- Keyboard Shortcuts -->
+        <h2 id="shortcuts">Keyboard Shortcuts</h2>
+
+        <p>All shortcuts are disabled when focus is in a text input field.</p>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Key</th><th>Action</th><th>Context</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><code>Space</code> / <code>K</code></td><td>Play / Pause</td><td>Player</td></tr>
+              <tr><td><code>M</code></td><td>Mute / Unmute</td><td>Player</td></tr>
+              <tr><td><code>F</code></td><td>Fullscreen toggle</td><td>Player</td></tr>
+              <tr><td><code>Left Arrow</code></td><td>Seek back 5 seconds</td><td>Player</td></tr>
+              <tr><td><code>Right Arrow</code></td><td>Seek forward 5 seconds</td><td>Player</td></tr>
+              <tr><td><code>Shift + Left</code></td><td>Seek back 30 seconds</td><td>Player</td></tr>
+              <tr><td><code>Shift + Right</code></td><td>Seek forward 30 seconds</td><td>Player</td></tr>
+              <tr><td><code>Up Arrow</code></td><td>Volume up 5%</td><td>Player</td></tr>
+              <tr><td><code>Down Arrow</code></td><td>Volume down 5%</td><td>Player</td></tr>
+              <tr><td><code>[</code></td><td>Decrease playback speed</td><td>Player</td></tr>
+              <tr><td><code>]</code></td><td>Increase playback speed</td><td>Player</td></tr>
+              <tr><td><code>0</code>&ndash;<code>9</code></td><td>Jump to 0%&ndash;90% of track</td><td>Player</td></tr>
+              <tr><td><code>B</code></td><td>Toggle English subtitle blur</td><td>Learner Mode</td></tr>
+              <tr><td><code>J</code></td><td>Toggle Japanese subtitles</td><td>Learner Mode</td></tr>
+              <tr><td><code>ESC</code></td><td>Close lightbox / Exit fullscreen</td><td>Media Viewer</td></tr>
+              <tr><td><code>Left</code> / <code>Right</code></td><td>Previous / Next image</td><td>Media Viewer</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Backup & Restore -->
+        <h2 id="backup">Backup &amp; Restore</h2>
+
+        <p>Export all your settings and preferences to a JSON file for safekeeping or transfer to another browser.</p>
+
+        <h3>Export</h3>
+        <ol>
+          <li>Open Settings</li>
+          <li>Click <strong>Export Settings</strong></li>
+          <li>Save the downloaded JSON file</li>
+        </ol>
+
+        <h3>Import</h3>
+        <ol>
+          <li>Open Settings</li>
+          <li>Click <strong>Import Settings</strong></li>
+          <li>Select your previously exported JSON file</li>
+          <li>Settings are applied immediately</li>
+        </ol>
+
+        <div class="callout">
+          <p><strong>Note:</strong> The export includes preferences, feature toggles, and configuration values. It does not include cached data (transcripts, translations, embeddings) as these are regenerated automatically.</p>
+        </div>
+
+        <!-- FAQ -->
+        <h2 id="faq">FAQ</h2>
+
+        <div class="feature-list">
+          <div class="feature-item">
+            <h3>Does the toolkit send my data to external servers?</h3>
+            <p>AI transcription and translation run entirely on your device &mdash; no audio or text is uploaded. The only external calls are: (1) Jina API for semantic search embeddings (if you provide an API key), and (2) Google Translate as a fallback for Chinese-to-Japanese translation when no local model is available. All other functionality is fully local.</p>
+          </div>
+
+          <div class="feature-item">
+            <h3>What browsers are supported?</h3>
+            <p>Any modern Chromium-based browser (Chrome, Edge, Brave) or Firefox with Tampermonkey installed. WebGPU support (Chrome 113+, Edge 113+) is recommended for optimal AI performance but not required &mdash; the toolkit falls back to WASM automatically.</p>
+          </div>
+
+          <div class="feature-item">
+            <h3>How much disk space do the AI models use?</h3>
+            <p>The Whisper transcription model uses ~150 MB and the translation model uses ~80 MB. Both are stored in the browser's cache storage and persist across sessions. You can choose smaller quantized variants in Settings to reduce memory usage.</p>
+          </div>
+
+          <div class="feature-item">
+            <h3>Can I use custom Whisper models?</h3>
+            <p>Yes. The model selection field in Settings accepts arbitrary Hugging Face model IDs. Type a custom model ID (e.g., from the onnx-community namespace) and the worker will attempt to load it. Suggested models are provided in a dropdown for convenience.</p>
+          </div>
+
+          <div class="feature-item">
+            <h3>Why are translations slow on first load?</h3>
+            <p>The neural translation model needs to be downloaded and initialized on first use. Once loaded, translations are cached and subsequent requests are near-instant. The model remains in memory for the duration of your browsing session.</p>
+          </div>
+
+          <div class="feature-item">
+            <h3>How do I report bugs or request features?</h3>
+            <p>Open an issue on the <a href="https://github.com/HRussellZFAC023/voiceworks-toolkit/issues" target="_blank" rel="noopener">GitHub Issues</a> page. Include your browser version, GPU model (if AI-related), and steps to reproduce.</p>
+          </div>
+        </div>
+
+      </div>
+    </section>
+  </main>
+
+  <!-- Footer -->
+  <footer class="footer">
+    <div class="container">
+      <div class="footer-links">
+        <a href="https://github.com/HRussellZFAC023/voiceworks-toolkit">GitHub</a>
+        <a href="features.html">Features</a>
+        <a href="installation.html">Installation</a>
+        <a href="manual.html">Manual</a>
+      </div>
+      <p>Voiceworks Toolkit &mdash; MIT License</p>
+    </div>
+  </footer>
+
+</body>
+</html>

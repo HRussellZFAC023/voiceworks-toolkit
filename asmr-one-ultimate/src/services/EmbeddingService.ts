@@ -47,8 +47,17 @@ let consecutiveGpuErrors = 0;
 let circuitRecoveryAttempted = false;
 let serviceDead = false;
 
-// No cross-service webgpu:failed propagation — each service independently tries WebGPU.
-// Serialized warmup prevents device contention; fp32 dtype fix handles Intel GPUs.
+// No cross-service webgpu:failed propagation for dtype failures — each service independently
+// tries WebGPU. But true GPU device loss (process crash) affects ALL workers.
+EventBus.on('gpu:device-lost-broadcast', ({ source }) => {
+    if (source === 'embedding') return; // Already handled by our own error path
+    if (webgpuFailed) return; // Already on WASM
+    Logger.warn(`[EmbeddingService] GPU device lost in ${source} worker — switching to WASM`);
+    webgpuFailed = true;
+    if (worker) {
+        worker.postMessage({ type: 'skip-webgpu' });
+    }
+});
 
 // Idle unload
 let idleTimer: ReturnType<typeof setTimeout> | null = null;
@@ -199,56 +208,63 @@ function initWorker(): Promise<void> {
     if (workerReady) return Promise.resolve();
     if (initPromise) return initPromise;
 
-    initPromise = new Promise<void>((resolve, reject) => {
-        try {
-            EventBus.emit('embedding:progress', {
-                percent: 0,
-                message: I18n.t('embeddingLoading'),
-                stage: 'model',
-            });
+    // Acquire a load lease from GpuScheduler to prevent concurrent model loading.
+    // Only one worker loads a model at a time (requestAdapter + requestDevice + ONNX compile).
+    initPromise = GpuScheduler.acquireLoadLease('embedding').then(releaseLease => {
+        return new Promise<void>((resolve, reject) => {
+            try {
+                EventBus.emit('embedding:progress', {
+                    percent: 0,
+                    message: I18n.t('embeddingLoading'),
+                    stage: 'model',
+                });
 
-            worker = createEmbeddingWorker();
+                worker = createEmbeddingWorker();
 
-            if (webgpuFailed) {
-                worker.postMessage({ type: 'skip-webgpu' });
-            }
-            // Only send cached dtype hint if it's relevant. WASM-only dtypes (q8/q4)
-            // are useless when GPU is available — worker uses fp32 on WebGPU anyway,
-            // and q8 is the default WASM fallback order.
-            const isWasmOnlyDtype = ['q8', 'q4'].includes(rememberedDtype);
-            if (rememberedDtype && !(isWasmOnlyDtype && DeviceCapabilities.profile.hasGpu && !webgpuFailed)) {
-                worker.postMessage({ type: 'preferred-dtype', dtype: rememberedDtype });
-            }
-
-            const onReady = (e: MessageEvent) => {
-                if (e.data.status === 'ready') {
-                    handleMessage(e);
-                    resolve();
-                } else if (e.data.status === 'error' && !workerReady) {
-                    handleMessage(e);
-                    reject(new Error(e.data.data?.message || 'Worker init failed'));
-                } else {
-                    handleMessage(e);
+                if (webgpuFailed) {
+                    worker.postMessage({ type: 'skip-webgpu' });
                 }
-            };
+                // Only send cached dtype hint if it's relevant. WASM-only dtypes (q8/q4)
+                // are useless when GPU is available — worker uses fp32 on WebGPU anyway,
+                // and q8 is the default WASM fallback order.
+                const isWasmOnlyDtype = ['q8', 'q4'].includes(rememberedDtype);
+                if (rememberedDtype && !(isWasmOnlyDtype && DeviceCapabilities.profile.hasGpu && !webgpuFailed)) {
+                    worker.postMessage({ type: 'preferred-dtype', dtype: rememberedDtype });
+                }
 
-            worker.onmessage = (e: MessageEvent) => {
-                if (!workerReady && (e.data.status === 'ready' || (e.data.status === 'error' && !e.data.id))) {
-                    onReady(e);
-                    // Switch to normal handler after init
-                    if (workerReady && worker) {
-                        worker.onmessage = handleMessage;
+                const onReady = (e: MessageEvent) => {
+                    if (e.data.status === 'ready') {
+                        handleMessage(e);
+                        releaseLease();
+                        resolve();
+                    } else if (e.data.status === 'error' && !workerReady) {
+                        handleMessage(e);
+                        releaseLease();
+                        reject(new Error(e.data.data?.message || 'Worker init failed'));
+                    } else {
+                        handleMessage(e);
                     }
-                } else {
-                    handleMessage(e);
-                }
-            };
+                };
 
-            worker.postMessage({ type: 'init', model: EMBEDDING_MODEL });
-        } catch (err) {
-            terminateWorker();
-            reject(err);
-        }
+                worker.onmessage = (e: MessageEvent) => {
+                    if (!workerReady && (e.data.status === 'ready' || (e.data.status === 'error' && !e.data.id))) {
+                        onReady(e);
+                        // Switch to normal handler after init
+                        if (workerReady && worker) {
+                            worker.onmessage = handleMessage;
+                        }
+                    } else {
+                        handleMessage(e);
+                    }
+                };
+
+                worker.postMessage({ type: 'init', model: EMBEDDING_MODEL });
+            } catch (err) {
+                releaseLease();
+                terminateWorker();
+                reject(err);
+            }
+        });
     });
 
     return initPromise;

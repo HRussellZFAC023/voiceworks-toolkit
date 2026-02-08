@@ -57,6 +57,7 @@ export class VectorSearch {
     private autoBatchTimer: number | null = null;
     private autoIndexExhausted = false;
     private bulkIndexCursor = 1;
+    private batchBackoffMs = 1000; // starts at 1s, doubles on error, resets on success
     // Embeddings cached via SharedCache memory-only (too large for GM_*)
     private embeddingInflight = new Map<string, Promise<number[] | null>>();
     private lastResults: Array<{ entry: VectorEntry; score: number }> = [];
@@ -329,18 +330,20 @@ export class VectorSearch {
                     res = await WorksApi.getWorks({ order: order as any, sort: sort as any, page });
                 } catch (fetchErr) {
                     if (fetchErr instanceof HttpError && fetchErr.status === 429) {
-                        Logger.warn('[VectorSearch] Works API rate limited (429). Rescheduling.');
+                        this.batchBackoffMs = Math.min(this.batchBackoffMs * 2, 120_000);
+                        Logger.warn(`[VectorSearch] Works API rate limited (429). Backing off ${this.batchBackoffMs}ms.`);
                         this.setStatus(I18n.t('magicSearchWorksRateLimited'), false);
-                        this.scheduleNextBatch(120_000);
+                        this.scheduleNextBatch(this.batchBackoffMs);
                         return;
                     }
                     throw fetchErr;
                 }
                 // Validate response structure - GM_xmlhttpRequest injection may return empty objects
                 if (!res || typeof res !== 'object') {
-                    Logger.warn('[VectorSearch] Invalid response from Works API (null or not an object):', res);
+                    this.batchBackoffMs = Math.min(this.batchBackoffMs * 2, 120_000);
+                    Logger.warn(`[VectorSearch] Invalid response from Works API. Backing off ${this.batchBackoffMs}ms.`);
                     this.setStatus(I18n.t('magicSearchBulkIndexFailed'), false);
-                    this.scheduleNextBatch(60_000);
+                    this.scheduleNextBatch(this.batchBackoffMs);
                     return;
                 }
                 const works = res.works || [];
@@ -360,9 +363,10 @@ export class VectorSearch {
                 if (this.embeddingRateLimited) {
                     this.embeddingRateLimited = false;
                     this.autoIndexExhausted = false;
-                    const delay = Math.max(0, this.embeddingCooldownUntil - Date.now());
+                    this.batchBackoffMs = Math.min(this.batchBackoffMs * 2, 120_000);
+                    const delay = Math.max(this.batchBackoffMs, this.embeddingCooldownUntil - Date.now());
                     this.setStatus(I18n.t('magicSearchRateLimitedJinaCooldown'), false);
-                    this.scheduleNextBatch(delay || 60000);
+                    this.scheduleNextBatch(delay);
                     return;
                 }
                 if (indexed >= maxWorks) break;
@@ -379,9 +383,10 @@ export class VectorSearch {
             await this.updateIndexCount();
             const total = await this.countIndex();
             if (!this.autoIndexExhausted) {
-                const batchDelay = 60;
-                this.setStatus(I18n.format('magicSearchIndexingContinue', { indexed, cursor: this.bulkIndexCursor, total, delay: batchDelay }), false);
-                this.scheduleNextBatch(batchDelay * 1000);
+                this.batchBackoffMs = 1000; // reset on success
+                const delaySec = Math.round(this.batchBackoffMs / 1000);
+                this.setStatus(I18n.format('magicSearchIndexingContinue', { indexed, cursor: this.bulkIndexCursor, total, delay: delaySec }), false);
+                this.scheduleNextBatch(this.batchBackoffMs);
             } else {
                 this.setStatus(I18n.format('magicSearchIndexingPaused', { total }), false);
             }
@@ -824,7 +829,7 @@ export class VectorSearch {
         await this.bulkIndex({ maxPages: 6, maxWorks: 250, order: 'release', sort: 'desc' });
     }
 
-    private scheduleNextBatch(delayMs = 60 * 1000): void {
+    private scheduleNextBatch(delayMs = 1000): void {
         if (this.autoBatchTimer) return;
         this.autoBatchTimer = window.setTimeout(async () => {
             this.autoBatchTimer = null;

@@ -51,6 +51,8 @@ const _quoteMap: Record<string, string> = {
     '\u2018': "'", '\u2019': "'", '\u201A': "'", '\u2039': "'", '\u203A': "'", '\u2032': "'",
     '\uFF08': '(', '\uFF09': ')',
     '\u3010': '[', '\u3011': ']',
+    '\u300C': '"', '\u300D': '"',  // 「」 Japanese single quotes
+    '\u300E': '"', '\u300F': '"',  // 『』 Japanese double quotes
     '\uFF01': '!', '\uFF1F': '?',
     '\uFF1A': ':', '\uFF1B': ';', '\uFF0C': ',',
 };
@@ -58,6 +60,33 @@ const _quoteRegex = new RegExp(
     Object.keys(_quoteMap).map(k => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'),
     'g',
 );
+
+/**
+ * Normalize input text before sending to the local opus-mt model.
+ * Only strips characters PROVEN to cause hallucinations or truncation.
+ * Preserves decorative characters (♡♪★ etc.) — they pass through the model harmlessly.
+ * Does NOT apply to remote (Google Translate) which handles these natively.
+ */
+const _modelNormQuoteOpen = /[「『]/g;
+const _modelNormQuoteClose = /[」』]/g;
+const _modelNormBrackets = /【[^】]*】/g;
+const _modelNormWaveDash = /[〜～]/g;
+const _modelNormEllipsis = /…/g;
+const _modelNormMultiply = /[×✕✖・]/g;
+const _modelNormDecorative = /[♡♥♪♫★☆✨💕🌙❤️✿❀⭐🎵🎶💖💗💓💘🔥💜💙💛🤍🖤🩷🩵]/g;
+const _modelNormSpaces = /\s{2,}/g;
+function normalizeForModel(text: string): string {
+    return text
+        .replace(_modelNormQuoteOpen, '"')      // 「『 → " (prevents model stopping at quote boundary)
+        .replace(_modelNormQuoteClose, '"')     // 」』 → "
+        .replace(_modelNormBrackets, ' ')       // 【...】 → strip (metadata confuses model, causes hallucinations)
+        .replace(_modelNormWaveDash, '')        // 〜～ → strip (causes hallucinations like "hospital")
+        .replace(_modelNormEllipsis, '...')     // … → ... (better tokenization)
+        .replace(_modelNormMultiply, ', ')      // × → ", " (DLsite tag separator: 純愛×催眠 → 純愛, 催眠)
+        .replace(_modelNormDecorative, '')      // ♡♪★✨💕 → strip for model input (display still shows originals)
+        .replace(_modelNormSpaces, ' ')
+        .trim();
+}
 
 // Opus-MT models: ja→en (~105MB fp16) and zh→en (~110MB fp16).
 // Both fit comfortably within the 2048 MB WebGPU buffer limit.
@@ -104,6 +133,14 @@ function getModelForText(text: string, targetLang: string): ModelRoute | null {
 // Quality Checks
 // ============================================================================
 
+/**
+ * Hallucination pattern: opus-mt produces stock first-person conversational phrases
+ * ("I'm sorry...", "I don't know...") when it can't decode the input.
+ * DLsite titles/tags are noun phrases — first-person output without first-person input is a red flag.
+ */
+const _hallucinationFirstPerson = /^I['\u2019]?m\s|^I\s(don|can|won|didn|couldn|wouldn|shouldn)['\u2019]t\s|^I\s(have|want|need|think|know|like)\s/i;
+const _firstPersonJa = /私|僕|俺|わたし|ぼく|おれ|あたし/;
+
 function isLikelyGarbage(input: string, output: string): boolean {
     if (!output?.trim()) return true;
     if (output.length > input.length * 5 && output.length > 100) return true;
@@ -116,6 +153,10 @@ function isLikelyGarbage(input: string, output: string): boolean {
         } else {
             repeat = 1;
         }
+    }
+    // Hallucination: first-person English from non-first-person Japanese input
+    if (!_firstPersonJa.test(input) && _hallucinationFirstPerson.test(output.trim())) {
+        return true;
     }
     return false;
 }
@@ -202,27 +243,14 @@ function glossaryPreProcess(text: string, targetLang: string): [string, boolean]
 // ============================================================================
 
 /**
- * Extract leading 【...】 or [...] bracket tags from text so they can be
- * translated separately instead of being dropped by the model.
- * e.g. "【简体中文版】容量MAX！..." → { brackets: ["简体中文版"], rest: "容量MAX！..." }
+ * Split multi-sentence text on 。 boundaries for opus-mt translation.
+ * MarianMT treats 。 as end-of-sequence and drops subsequent sentences.
+ * 【】 brackets are stripped by normalizeForModel() before reaching the model.
+ * Returns null if text has only one sentence (no split needed).
  */
-function extractBracketedPrefixes(text: string): { brackets: string[]; rest: string } | null {
-    const brackets: string[] = [];
-    const trimmed = text.trimStart();
-    const re = /^[【\[](.*?)[】\]]\s*/;
-    let remaining = trimmed;
-
-    let match: RegExpExecArray | null;
-    while ((match = re.exec(remaining)) !== null) {
-        const content = match[1].trim();
-        if (content) brackets.push(content);
-        remaining = remaining.slice(match[0].length);
-    }
-
-    if (brackets.length === 0) return null;
-    const rest = remaining.trim();
-    if (!rest) return null; // entire text was brackets — let model handle it
-    return { brackets, rest };
+function splitForModel(text: string): string[] | null {
+    const sentences = text.split(/。/).filter(s => s.trim());
+    return sentences.length > 1 ? sentences : null;
 }
 
 // ============================================================================
@@ -274,6 +302,18 @@ let rememberedDtype = SharedCache.get<string>(CacheKeys.translationPreferredDtyp
 let whisperActive = false;
 EventBus.on('whisper:transcribing', ({ active }) => {
     whisperActive = active;
+});
+
+// Cross-service device loss: when any worker reports GPU device lost, tell all
+// translation workers to skip WebGPU. A GPU process crash affects ALL workers.
+EventBus.on('gpu:device-lost-broadcast', ({ source }) => {
+    if (source === 'translation') return; // Already handled by our own error path
+    if (webgpuFailed) return; // Already on WASM
+    Logger.warn(`[TranslationService] GPU device lost in ${source} worker — switching to WASM`);
+    webgpuFailed = true;
+    for (const w of workers) {
+        w.worker.postMessage({ type: 'skip-webgpu' });
+    }
 });
 
 // In-flight dedup: prevent duplicate translate() calls for the same text+lang
@@ -477,51 +517,59 @@ function initWorker(model: string, force = false): Promise<void> {
         terminateWorker(model);
     }
 
-    const promise = new Promise<void>((resolve, reject) => {
-        try {
-            EventBus.emit('translation:progress', {
-                percent: 0,
-                message: I18n.t('downloadModelSub'),
-                stage: 'model',
-                model,
-            });
-
-            const entry: WorkerEntry = {
-                worker: createTranslationWorker(),
-                ready: false,
-                pending: new Map(),
-                model,
-            };
-            workers.push(entry);
-
-            if (webgpuFailed) {
-                entry.worker.postMessage({ type: 'skip-webgpu' });
-            }
-            // Only send cached dtype hint if it's relevant. WASM-only dtypes (q8/q4)
-            // are useless when GPU is available — worker uses fp32 on WebGPU anyway,
-            // and q8 is the default WASM fallback order.
-            const isWasmOnlyDtype = ['q8', 'q4'].includes(rememberedDtype);
-            if (rememberedDtype && !(isWasmOnlyDtype && DeviceCapabilities.profile.hasGpu && !webgpuFailed)) {
-                entry.worker.postMessage({ type: 'preferred-dtype', dtype: rememberedDtype });
-            }
-            // Send persisted CDN preference so worker tries known-good CDN first
-            const cdnTransformerIdx = SharedCache.get<number>('asmr-ult:cdn:transformer-idx');
-            const cdnHubIdx = SharedCache.get<number>('asmr-ult:cdn:hub-idx');
-            if (cdnTransformerIdx !== null || cdnHubIdx !== null) {
-                entry.worker.postMessage({
-                    type: 'cdn-preference',
-                    transformerIdx: cdnTransformerIdx ?? 0,
-                    hubIdx: cdnHubIdx ?? 0,
+    // Acquire a load lease from GpuScheduler to prevent concurrent model loading.
+    // Only one worker loads a model at a time (requestAdapter + requestDevice + ONNX compile).
+    const promise = GpuScheduler.acquireLoadLease('translation').then(releaseLease => {
+        return new Promise<void>((resolve, reject) => {
+            try {
+                EventBus.emit('translation:progress', {
+                    percent: 0,
+                    message: I18n.t('downloadModelSub'),
+                    stage: 'model',
+                    model,
                 });
-            }
 
-            entry.worker.onmessage = handleWorkerMessage(entry, model, resolve, reject);
-            entry.worker.postMessage({ type: 'init', model });
-        } catch (err) {
-            workers = workers.filter(w => w.model !== model);
-            initPromises.delete(model);
-            reject(err);
-        }
+                const entry: WorkerEntry = {
+                    worker: createTranslationWorker(),
+                    ready: false,
+                    pending: new Map(),
+                    model,
+                };
+                workers.push(entry);
+
+                if (webgpuFailed) {
+                    entry.worker.postMessage({ type: 'skip-webgpu' });
+                }
+                // Only send cached dtype hint if it's relevant. WASM-only dtypes (q8/q4)
+                // are useless when GPU is available — worker uses fp32 on WebGPU anyway,
+                // and q8 is the default WASM fallback order.
+                const isWasmOnlyDtype = ['q8', 'q4'].includes(rememberedDtype);
+                if (rememberedDtype && !(isWasmOnlyDtype && DeviceCapabilities.profile.hasGpu && !webgpuFailed)) {
+                    entry.worker.postMessage({ type: 'preferred-dtype', dtype: rememberedDtype });
+                }
+                // Send persisted CDN preference so worker tries known-good CDN first
+                const cdnTransformerIdx = SharedCache.get<number>('asmr-ult:cdn:transformer-idx');
+                const cdnHubIdx = SharedCache.get<number>('asmr-ult:cdn:hub-idx');
+                if (cdnTransformerIdx !== null || cdnHubIdx !== null) {
+                    entry.worker.postMessage({
+                        type: 'cdn-preference',
+                        transformerIdx: cdnTransformerIdx ?? 0,
+                        hubIdx: cdnHubIdx ?? 0,
+                    });
+                }
+
+                entry.worker.onmessage = handleWorkerMessage(entry, model,
+                    () => { releaseLease(); resolve(); },
+                    (err) => { releaseLease(); reject(err); },
+                );
+                entry.worker.postMessage({ type: 'init', model });
+            } catch (err) {
+                releaseLease();
+                workers = workers.filter(w => w.model !== model);
+                initPromises.delete(model);
+                reject(err);
+            }
+        });
     });
 
     initPromises.set(model, promise);
@@ -793,16 +841,16 @@ export const TranslationService = {
 
     /** @internal */
     async _translateInner(text: string, targetLang: string): Promise<string> {
-        // 0. Bracket preprocessing — extract leading 【...】 before translation
-        //    Batch all parts in a single translateBatch() instead of N separate translate() calls
-        const bracketSplit = extractBracketedPrefixes(text);
-        if (bracketSplit) {
-            const allParts = [...bracketSplit.brackets, bracketSplit.rest];
-            const results = await this.translateBatch(allParts, targetLang);
-            const bracketStr = results.slice(0, -1).map(b => `[${b}]`).join(' ');
-            const result = `${bracketStr} ${results[results.length - 1]}`;
-            SharedCache.set(cacheKey(text, targetLang, 'local'), result, CACHE_TTL_MS);
-            return result;
+        // 0. Multi-sentence split — opus-mt treats 。as EOS and drops subsequent sentences.
+        //    Split on 。, translate each sentence independently, then join.
+        const sentences = splitForModel(text);
+        if (sentences) {
+            const results = await Promise.all(
+                sentences.map(s => this.translate(s, targetLang)),
+            );
+            const joined = results.join('. ');
+            SharedCache.set(cacheKey(text, targetLang, 'local'), joined, CACHE_TTL_MS);
+            return joined;
         }
 
         // 1. Glossary exact match — bypasses model entirely
@@ -816,9 +864,11 @@ export const TranslationService = {
         const [preprocessed, wasModified] = glossaryPreProcess(text, targetLang);
 
         // 3. Try local translation (with preprocessed text if glossary modified it)
+        //    Normalize input: strip decorative chars (♡♪〜) and convert 「」→"" that confuse opus-mt
         if (Config.get('preferLocalTranslation') !== false) {
             try {
-                const result = await translateLocal(wasModified ? preprocessed : text, targetLang);
+                const localInput = normalizeForModel(wasModified ? preprocessed : text);
+                const result = await translateLocal(localInput, targetLang);
                 if (result) {
                     // Cache under the ORIGINAL text key
                     SharedCache.set(cacheKey(text, targetLang, 'local'), result, CACHE_TTL_MS);
@@ -887,12 +937,13 @@ export const TranslationService = {
 
         if (stillUncached.length === 0) return results;
 
-        // Pre-process remaining texts with glossary substitution for model — store mapping for reuse in remote fallback
+        // Pre-process remaining texts with glossary substitution + model normalization
         const preprocessedMap = new Map<string, string>();
         const preprocessedTexts = stillUncached.map(u => {
             const [preprocessed] = glossaryPreProcess(u.text, targetLang);
-            preprocessedMap.set(u.text, preprocessed);
-            return preprocessed;
+            const normalized = normalizeForModel(preprocessed);
+            preprocessedMap.set(u.text, normalized);
+            return normalized;
         });
         let remaining: { idx: number; text: string }[] = [];
 
@@ -1030,3 +1081,6 @@ export const TranslationService = {
         return s.trim();
     }
 };
+
+// Exported for unit testing — not part of the public API
+export const _testExports = { normalizeForModel, splitForModel, isLikelyGarbage };

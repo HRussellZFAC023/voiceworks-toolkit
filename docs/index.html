@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Voiceworks Toolkit — Japanese Language Learning Tools</title>
+  <meta name="description" content="Browser-based toolkit for Japanese language learning through immersion with native voiceworks. On-device AI transcription, neural translation, and 30+ features.">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+  <!-- Navigation -->
+  <nav class="nav">
+    <div class="nav-inner">
+      <a href="index.html" class="nav-brand">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+        Voiceworks Toolkit
+      </a>
+      <button class="nav-toggle" onclick="document.querySelector('.nav-links').classList.toggle('open')" aria-label="Toggle navigation">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12h18M3 6h18M3 18h18"/></svg>
+      </button>
+      <ul class="nav-links">
+        <li><a href="index.html" class="active">Home</a></li>
+        <li><a href="features.html">Features</a></li>
+        <li><a href="installation.html">Installation</a></li>
+        <li><a href="manual.html">Manual</a></li>
+      </ul>
+      <a href="https://github.com/HRussellZFAC023/voiceworks-toolkit" class="nav-github" aria-label="GitHub">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+      </a>
+    </div>
+  </nav>
+
+  <main>
+    <!-- Hero -->
+    <section class="hero">
+      <div class="container">
+        <h1>Voiceworks Toolkit</h1>
+        <p class="tagline">
+          A browser-based toolkit for Japanese language learning through immersion with native voiceworks.
+          On-device AI transcription, real-time neural translation, and dozens of study features &mdash;
+          all running locally with no external server dependencies.
+        </p>
+        <div class="hero-actions">
+          <a href="installation.html" class="btn btn-primary">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            Get Started
+          </a>
+          <a href="features.html" class="btn btn-secondary">Explore Features</a>
+        </div>
+
+        <div class="tech-badges">
+          <span class="badge">TypeScript</span>
+          <span class="badge">Vue 3</span>
+          <span class="badge">WebGPU</span>
+          <span class="badge">Transformers.js</span>
+          <span class="badge">Vite</span>
+          <span class="badge">Web Workers</span>
+          <span class="badge">IndexedDB</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Screenshot Placeholder -->
+    <section style="padding: 0 0 80px; border: none;">
+      <div class="container">
+        <div class="placeholder-img">
+          <span>Application Screenshot &mdash; Player with Dual-Language Subtitles</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Feature Highlights -->
+    <section>
+      <div class="container">
+        <div class="section-header">
+          <h2>Core Features</h2>
+          <p>Everything you need for immersion-based Japanese study, running entirely in your browser.</p>
+        </div>
+
+        <div class="features-grid">
+          <div class="feature-card">
+            <div class="feature-icon">&#x1F4DA;</div>
+            <h3>Learner Mode</h3>
+            <p>Real-time dual-language subtitles with Japanese as the primary line and blurrable English translations. Adjustable playback speed and lead-time for study at your own pace.</p>
+          </div>
+
+          <div class="feature-card">
+            <div class="feature-icon">&#x1F399;</div>
+            <h3>Live Transcription</h3>
+            <p>On-device Whisper speech-to-text with WebGPU acceleration. Turns any voicework into study material &mdash; no uploads needed. Export to LRC, VTT, or SRT formats.</p>
+          </div>
+
+          <div class="feature-card">
+            <div class="feature-icon">&#x1F310;</div>
+            <h3>Neural Translation</h3>
+            <p>Local machine translation models running in Web Workers. Japanese-to-English translation with batch coalescing and shared caching for real-time performance.</p>
+          </div>
+
+          <div class="feature-card">
+            <div class="feature-icon">&#x1F50D;</div>
+            <h3>Semantic Search</h3>
+            <p>Find voiceworks by meaning using AI vector embeddings stored locally in IndexedDB. Supports multilingual queries with tag-based hints and paginated results.</p>
+          </div>
+
+          <div class="feature-card">
+            <div class="feature-icon">&#x1F4FB;</div>
+            <h3>Radio &amp; Playlist Mode</h3>
+            <p>Continuous shuffled playback for extended immersion sessions with auto-recovery. Curated playlists with forward/back navigation and community collections.</p>
+          </div>
+
+          <div class="feature-card">
+            <div class="feature-icon">&#x2699;</div>
+            <h3>30+ QoL Features</h3>
+            <p>Keyboard shortcuts, infinite scroll, audio visualizer, progress tracking, media viewer, interface translation, and much more for a polished study experience.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- How It Works -->
+    <section>
+      <div class="container">
+        <div class="section-header">
+          <h2>How It Works</h2>
+          <p>A Tampermonkey userscript that enhances your browsing experience with AI-powered study tools.</p>
+        </div>
+
+        <div class="features-grid" style="grid-template-columns: repeat(3, 1fr);">
+          <div class="feature-card" style="text-align: center;">
+            <div class="feature-icon" style="margin: 0 auto 20px;">&#x1F4E5;</div>
+            <h3>Install</h3>
+            <p>Clone the repository, build the userscript, and install it via Tampermonkey. One-time setup takes under 5 minutes.</p>
+          </div>
+          <div class="feature-card" style="text-align: center;">
+            <div class="feature-icon" style="margin: 0 auto 20px;">&#x1F9E0;</div>
+            <h3>AI Runs Locally</h3>
+            <p>Whisper transcription and neural translation models run entirely in your browser using WebGPU. No data leaves your device.</p>
+          </div>
+          <div class="feature-card" style="text-align: center;">
+            <div class="feature-icon" style="margin: 0 auto 20px;">&#x1F3AF;</div>
+            <h3>Study Immersively</h3>
+            <p>Browse your library with live subtitles, translations, and keyboard controls designed for hands-free language study.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Companion Tools -->
+    <section>
+      <div class="container">
+        <div class="section-header">
+          <h2>Companion Tools</h2>
+          <p>Additional utilities for managing and organizing your voicework library.</p>
+        </div>
+
+        <div class="features-grid" style="grid-template-columns: repeat(2, 1fr);">
+          <div class="feature-card">
+            <h3>Voiceworks Renamer</h3>
+            <p>Python desktop application for batch-organizing voicework libraries with metadata enrichment, Whisper transcription (multi-backend: CUDA, ROCm, OpenVINO), audio tagging, and smart playlist generation.</p>
+          </div>
+          <div class="feature-card">
+            <h3>Library Server</h3>
+            <p>Self-hosted media server with Express backend and Vue frontend for streaming your voicework collection. SQLite database, JWT authentication, and filesystem scanning.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Footer -->
+  <footer class="footer">
+    <div class="container">
+      <div class="footer-links">
+        <a href="https://github.com/HRussellZFAC023/voiceworks-toolkit">GitHub</a>
+        <a href="features.html">Features</a>
+        <a href="installation.html">Installation</a>
+        <a href="manual.html">Manual</a>
+      </div>
+      <p>Voiceworks Toolkit &mdash; MIT License</p>
+    </div>
+  </footer>
+
+</body>
+</html>

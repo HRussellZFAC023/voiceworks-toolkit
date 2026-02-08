@@ -129,6 +129,10 @@ export class LearnerMode {
                     this.applyBlurState();
                 } else if (key === 'showJP') {
                     this.updateStyle();
+                } else if (key === 'enablePlayerTranslator') {
+                    for (const el of this.getEnEls()) {
+                        el.style.display = value ? '' : 'none';
+                    }
                 } else if (key === 'enableWhisper' || key === 'enableJoiTool' || key === 'enableVisualizer') {
                     this.syncOverflowItemVisibility(key, !!value);
                 }
@@ -873,6 +877,7 @@ export class LearnerMode {
         div.innerHTML = `<div class="learner-jp" role="status"></div><div class="learner-en"></div>`;
         const en = div.querySelector('.learner-en') as HTMLElement;
         if (this.isBlurEnabled) en.classList.add('blurred');
+        if (!Config.get('enablePlayerTranslator')) en.style.display = 'none';
 
         // Accessibility for blur toggle
         en.setAttribute('role', 'button');
@@ -2365,6 +2370,16 @@ export class LearnerMode {
     private updatePrimaryLine(text: string, splitIdx = -1, hlStart = -1): void {
         const karaokeEnabled = !!Config.get('karaokeMode');
         const segmentEnabled = !!Config.get('segmentMode');
+
+        // Trigger JPDB parsing (async, non-blocking)
+        if (Config.get('enableJpdb') && Config.get('jpdbSubtitleFurigana') && Config.get('jpdbShowFurigana') && text && text !== this.lastJpdbText) {
+            this.lastJpdbText = text;
+            this.parseJpdbFurigana(text);
+        } else if (!text) {
+            this.jpdbTokens = null;
+            this.lastJpdbText = '';
+        }
+
         for (const e of this.getJpEls()) {
             const isCollapsed = !!e.closest('.learner-subs-collapsed');
             if (karaokeEnabled && !isCollapsed && splitIdx >= 0 && hlStart >= 0 && text) {
@@ -2389,6 +2404,22 @@ export class LearnerMode {
             } else {
                 e.textContent = text;
             }
+        }
+    }
+
+    // JPDB furigana state
+    private jpdbTokens: import('../types/jpdb').JPDBToken[] | null = null;
+    private lastJpdbText = '';
+
+    private async parseJpdbFurigana(text: string): Promise<void> {
+        try {
+            const { JpdbService } = await import('../services/JpdbService');
+            const tokens = await JpdbService.parseSingle(text);
+            if (this.lastJpdbText === text) {
+                this.jpdbTokens = tokens;
+            }
+        } catch {
+            // Silently fail
         }
     }
 

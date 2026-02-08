@@ -47,6 +47,24 @@ export type {
     DLsiteMetadata,
 } from './dlsite';
 
+// JPDB types
+export {
+    JPDBCardState,
+} from './jpdb';
+export type {
+    JPDBCard,
+    JPDBToken,
+    JPDBRuby,
+    JPDBMeaning,
+    JPDBGrade,
+    JPDBDeck,
+    JPDBParsedResult,
+    JPDBParseResult,
+    JPDBRawToken,
+    JPDBRawVocabulary,
+    JPDBSpecialDeckName,
+} from './jpdb';
+
 // Store types - application state structures
 export type {
     AudioPlayerState,

@@ -251,11 +251,11 @@ export class FolderDiver {
             }
             const clicked = await this.clickAndConfirm(segment);
             if (!clicked) {
-                Logger.warn(`[FolderDiver] DOM click sequence failed for "${segment}", falling back to Vue path`);
+                Logger.debug(`[FolderDiver] DOM click sequence failed for "${segment}", falling back to Vue path`);
                 this.currentPath = [...fullPath];
                 const applied = await this.applyPathViaVueWithRetry(fullPath);
                 if (!applied) {
-                    Logger.warn('[FolderDiver] Vue path fallback timed out, updating query path instead');
+                    Logger.debug('[FolderDiver] Vue path fallback timed out, updating query path instead');
                     this.applyPathViaVue(fullPath);
                 }
                 return false;
@@ -452,7 +452,7 @@ export class FolderDiver {
         } else {
             this.bridge.updatePath(pathSegments);
             this.scheduleDeferredVueApply(pathSegments);
-            Logger.warn('[FolderDiver] WorkTree component not found, fell back to route query');
+            Logger.debug('[FolderDiver] WorkTree component not found, fell back to route query');
         }
     }
 

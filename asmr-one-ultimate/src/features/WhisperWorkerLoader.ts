@@ -8,12 +8,24 @@
 
 function getWorkerCode(): string {
     return `
+let gpuDeviceLost = false;
+
 self.addEventListener('unhandledrejection', (event) => {
     const reason = event.reason;
     const message = reason && reason.message ? reason.message : String(reason || 'Unknown error');
-    if (/WebGPU Context Provider|context.*provider|device lost|GPUDevice|createComputePipeline|createShaderModule|mapAsync|Instance reference|AbortError/i.test(message)) {
-        console.warn('[Whisper Worker] Suppressed non-fatal WebGPU error:', message);
+    if (/WebGPU Context Provider|context.*provider|device lost|GPUDevice|createComputePipeline|createShaderModule|mapAsync|Instance reference|AbortError|release session|invalid session/i.test(message)) {
         event.preventDefault();
+        // Fatal GPU device loss — notify host so it can show crash UI
+        if (/device lost|Instance reference|release session|invalid session/i.test(message)) {
+            if (!gpuDeviceLost) {
+                gpuDeviceLost = true;
+                skipWebgpu = true;
+                console.error('[Whisper Worker] Fatal GPU device loss:', message);
+                self.postMessage({ status: 'gpu-device-lost', data: { message } });
+            }
+        } else {
+            console.warn('[Whisper Worker] Suppressed WebGPU error:', message);
+        }
         return;
     }
     self.postMessage({ status: 'error', data: { message } });
@@ -68,7 +80,6 @@ let currentBackend = 'wasm';
 let currentVendor = '';
 let currentDtype = '';
 let skipWebgpu = false;
-let preferredDtype = '';
 
 async function detectWebGPU() {
     if (typeof navigator === 'undefined' || !('gpu' in navigator)) return null;
@@ -112,7 +123,12 @@ function getDtypeCandidates(device) {
 
 function resolveModelName(model, multilingual) {
     if (model.startsWith('distil-whisper/')) return model;
-    return multilingual ? model : model + '.en';
+    if (multilingual) return model;
+    // Insert .en before _timestamped suffix if present
+    if (model.endsWith('_timestamped')) {
+        return model.slice(0, -'_timestamped'.length) + '.en_timestamped';
+    }
+    return model + '.en';
 }
 
 async function releaseGpuResources() {
@@ -140,7 +156,7 @@ async function ensurePipeline(settings, progressCb) {
 
     // Dispose previous pipeline if needed
     if (pipelinePromise) {
-        try { (await pipelinePromise).dispose?.(); } catch {}
+        try { await (await pipelinePromise).dispose?.(); } catch {}
         pipelinePromise = null;
     }
 
@@ -150,7 +166,7 @@ async function ensurePipeline(settings, progressCb) {
 
     self.postMessage({ status: 'initiate', backend: currentBackend, vendor: currentVendor });
 
-    const revision = modelName.includes('/whisper-medium') ? 'no_attentions' : 'main';
+    const revision = 'main';
 
     // --- WebGPU path: try dtype candidates ---
     if (currentBackend === 'webgpu') {
@@ -187,13 +203,15 @@ async function ensurePipeline(settings, progressCb) {
 
                         console.warn('[Whisper Worker] WebGPU load error:', JSON.stringify(dtype), msg);
 
+                        if (isContextErr) {
+                            // Context provider / device lost: skip WebGPU entirely
+                            await releaseGpuResources();
+                            skipWebgpu = true;
+                            break;
+                        }
                         if (isGpuErr) {
                             await releaseGpuResources();
                             break; // try next dtype
-                        }
-                        if (isContextErr) {
-                            skipWebgpu = true;
-                            break;
                         }
                         if (!isUnauthorizedError(err)) break;
                         // Unauthorized → try next hub
@@ -254,6 +272,34 @@ async function ensurePipeline(settings, progressCb) {
 // ------------------------------------------------------------
 
 let wordTimestampsSupported = true;
+
+// Hallucination detection for Whisper on ASMR/ambient audio.
+// Transformers.js doesn't expose per-segment no_speech_prob or avg_logprob,
+// and no_speech_threshold may not apply to chunked input (huggingface/transformers#29595).
+// So we use pattern matching as a practical fallback.
+
+// 1. Bracketed non-speech annotations (e.g. [laughter], (music))
+const HALLUCINATION_RE = /^\\s*[\\[\\(](laughter|laughing|crying|music|applause|cheering|singing|sighing|coughing|clapping|crowd noise|background noise|inaudible|silence|blank audio|no speech|\u305F\u3081\u606F|\u7B11\u3044|\u6CE3\u304D|\u62CD\u624B|\u97F3\u697D)[\\]\\)]\\s*$/i;
+
+// 2. Common YouTube/subtitle hallucinations from Whisper's training data
+const SUBTITLE_HALLUCINATION_RE = /^\\s*(thank you(\\s+for\\s+watching)?|thanks for watching|please subscribe|like and subscribe|see you next time|\\u3054\\u8996\\u8074\\u3042\\u308A\\u304C\\u3068\\u3046\\u3054\\u3056\\u3044\\u307E\\u3059|\\u30C1\\u30E3\\u30F3\\u30CD\\u30EB\\u767B\\u9332)\\s*[\\.!]*\\s*$/i;
+
+function cleanHallucinatedChunks(chunks) {
+    if (!chunks) return chunks;
+    return chunks.filter(c => {
+        const text = (c.text || '').trim();
+        if (!text) return false;
+        if (HALLUCINATION_RE.test(text)) {
+            console.log('[Whisper Worker] Filtered hallucinated chunk (non-speech):', text);
+            return false;
+        }
+        if (SUBTITLE_HALLUCINATION_RE.test(text)) {
+            console.log('[Whisper Worker] Filtered hallucinated chunk (subtitle):', text);
+            return false;
+        }
+        return true;
+    });
+}
 
 const SEGMENT_GAP_S = 0.5;
 
@@ -329,18 +375,6 @@ async function transcribe(msg) {
     const pipe = await ensurePipeline(msg, (data) => self.postMessage(data));
     self.postMessage({ status: 'ready', backend: currentBackend, vendor: currentVendor });
 
-    // Only preemptively disable word timestamps for no_attentions revision on WASM
-    // (no cross-attention outputs). Other revisions on WASM can attempt word timestamps;
-    // the retry logic below catches failures gracefully.
-    if (currentBackend === 'wasm' && wordTimestampsSupported) {
-        const modelName = resolveModelName(msg.model, msg.multilingual);
-        const revision = modelName.includes('/whisper-medium') ? 'no_attentions' : 'main';
-        if (revision === 'no_attentions') {
-            console.log('[Whisper Worker] WASM + no_attentions revision — disabling word-level timestamps');
-            wordTimestampsSupported = false;
-        }
-    }
-
     const timeOffset = msg.timeOffset || 0;
     const chunkId = msg.chunkId;
 
@@ -361,17 +395,23 @@ async function transcribe(msg) {
 
     function sendBufferUpdate() {
         if (wordBuffer.length === 0) return;
+        const cleaned = cleanHallucinatedChunks(wordBuffer);
+        if (cleaned.length === 0) return;
         if (detectedWordLevel) {
-            const segments = groupWordsToSegments(wordBuffer, timeOffset);
+            const segments = groupWordsToSegments(cleaned, timeOffset);
             const text = segments.map(s => s.text).join(' ');
             self.postMessage({ status: 'update', data: [text, { chunks: segments }], chunkId });
         } else {
-            const text = wordBuffer.map(c => (c.text || '').trim()).join(' ');
-            const chunks = formatSegmentChunks(wordBuffer, timeOffset);
+            const text = cleaned.map(c => (c.text || '').trim()).join(' ');
+            const chunks = formatSegmentChunks(cleaned, timeOffset);
             self.postMessage({ status: 'update', data: [text, { chunks }], chunkId });
         }
     }
 
+    // Note: no_speech_threshold, logprob_threshold, condition_on_prev_tokens
+    // are NOT supported by Transformers.js — they are silently dropped by
+    // GenerationConfig.pick(). Hallucination suppression relies on our
+    // cleanHallucinatedChunks() post-processing filter instead.
     const pipeOpts = {
         top_k: 0,
         do_sample: false,
@@ -392,13 +432,13 @@ async function transcribe(msg) {
         result = await pipe(msg.audio, pipeOpts);
     } catch (error) {
         const errMsg = error.message || String(error);
-        const isGpuError = /createBuffer|RangeError|out of memory|OOM|allocation|device lost|GPUDevice|createComputePipeline|createShaderModule|mapAsync|Instance reference|AbortError/i.test(errMsg);
+        const isGpuError = /createBuffer|RangeError|out of memory|OOM|allocation|device lost|GPUDevice|createComputePipeline|createShaderModule|mapAsync|Instance reference|AbortError|release session|invalid session/i.test(errMsg);
 
         if (isGpuError && currentBackend !== 'wasm' && msg.allowWasm) {
             console.warn('[Whisper Worker] GPU inference failed, falling back to WASM:', errMsg);
             skipWebgpu = true;
             if (pipelinePromise) {
-                try { (await pipelinePromise).dispose?.(); } catch {}
+                try { await (await pipelinePromise).dispose?.(); } catch {}
             }
             pipelinePromise = null;
             currentModel = null;
@@ -433,11 +473,17 @@ async function transcribe(msg) {
     // Final flush of any throttled updates
     sendBufferUpdate();
 
+    // Filter hallucinated non-speech chunks before processing
+    if (result.chunks) {
+        result.chunks = cleanHallucinatedChunks(result.chunks);
+    }
+
     // Detect word-level output and group into segments with word timestamps
     if (result.chunks && isWordLevelChunks(result.chunks)) {
+        const segments = groupWordsToSegments(result.chunks, timeOffset);
         return {
-            text: result.text,
-            chunks: groupWordsToSegments(result.chunks, timeOffset),
+            text: segments.map(s => s.text).join(' '),
+            chunks: segments,
         };
     }
 
@@ -449,6 +495,11 @@ async function transcribe(msg) {
                 if (c.timestamp[1] != null) c.timestamp[1] += timeOffset;
             }
         }
+    }
+
+    // Update text to match filtered chunks
+    if (result.chunks) {
+        result.text = result.chunks.map(c => (c.text || '').trim()).join(' ');
     }
 
     return result;
@@ -501,12 +552,6 @@ self.addEventListener('message', async (event) => {
         return;
     }
 
-    if (msg.type === 'preferred-dtype') {
-        preferredDtype = msg.dtype || '';
-        console.log('[Whisper Worker] Preferred dtype:', preferredDtype);
-        return;
-    }
-
     if (msg.type === 'flush-queue') {
         const flushed = jobQueue.length;
         jobQueue = [];
@@ -516,7 +561,7 @@ self.addEventListener('message', async (event) => {
 
     if (msg.type === 'reset') {
         if (pipelinePromise) {
-            try { (await pipelinePromise).dispose?.(); } catch {}
+            try { await (await pipelinePromise).dispose?.(); } catch {}
             pipelinePromise = null;
         }
         currentModel = null;
