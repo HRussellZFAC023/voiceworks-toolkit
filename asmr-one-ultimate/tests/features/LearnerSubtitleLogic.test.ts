@@ -545,157 +545,252 @@ describe('Cache continuation', () => {
 });
 
 // ---------------------------------------------------------------------------
-// computeKaraokeHighlightStart
+// computeWordKaraokeIndices / computeTimeFallbackKaraokeIndices
+// (Mirrors LearnerSubtitles.vue & LearnerMode.ts)
 // ---------------------------------------------------------------------------
 
-function computeKaraokeHighlightStart(text: string): number {
-    if (!text) return 0;
-    const chars = Array.from(text);
-    if (chars.length <= 1) return 0;
-    if (/\s/.test(text)) {
-        const lastSpace = text.lastIndexOf(' ');
-        if (lastSpace >= 0) return Array.from(text.slice(0, lastSpace + 1)).length;
+function computeWordKaraokeIndices(
+    fullText: string,
+    words: Array<{ start: number; end: number; text: string }>,
+    now: number,
+): { splitIdx: number; hlStart: number } {
+    const hasSpaces = /\s/.test(fullText);
+    let charOffset = 0;
+    let hlStart = 0;
+    let splitIdx = 0;
+    let foundAny = false;
+    for (let i = 0; i < words.length; i++) {
+        const wText = (words[i].text || '').trim();
+        const wChars = Array.from(wText).length;
+        if (words[i].start <= now + 0.01) {
+            hlStart = charOffset;
+            splitIdx = charOffset + wChars;
+            foundAny = true;
+        }
+        charOffset += wChars;
+        if (hasSpaces && i < words.length - 1) charOffset += 1;
     }
-    return chars.length - 1;
+    return foundAny ? { splitIdx, hlStart } : { splitIdx: 0, hlStart: 0 };
 }
 
-describe('computeKaraokeHighlightStart', () => {
-    it('CJK: highlights last char', () => {
-        expect(computeKaraokeHighlightStart('こんにちは')).toBe(4);
+function computeTimeFallbackKaraokeIndices(
+    fullText: string,
+    line: { time: number; endTime?: number },
+    now: number,
+): { splitIdx: number; hlStart: number } {
+    if (!line.endTime) return { splitIdx: -1, hlStart: -1 };
+    const duration = Math.max(0.05, line.endTime - line.time);
+    const progress = Math.max(0, Math.min(1, (now - line.time) / duration));
+    if (/\s/.test(fullText)) {
+        const ws = fullText.split(/\s+/).filter(Boolean);
+        const count = Math.max(1, Math.min(ws.length, Math.ceil(progress * ws.length)));
+        const spoken = ws.slice(0, count).join(' ');
+        const spokenChars = Array.from(spoken).length;
+        const prevWords = ws.slice(0, count - 1);
+        const prevLen = prevWords.length > 0 ? Array.from(prevWords.join(' ')).length + 1 : 0;
+        return { splitIdx: spokenChars, hlStart: prevLen };
+    }
+    const chars = Array.from(fullText);
+    const count = Math.max(1, Math.min(chars.length, Math.ceil(progress * chars.length)));
+    return { splitIdx: count, hlStart: Math.max(0, count - 1) };
+}
+
+describe('computeWordKaraokeIndices', () => {
+    it('tracks current word for CJK without spaces', () => {
+        const fullText = 'おはよう';
+        const words = [
+            { start: 0, end: 1, text: 'お' },
+            { start: 1, end: 2, text: 'は' },
+            { start: 2, end: 3, text: 'よ' },
+            { start: 3, end: 4, text: 'う' },
+        ];
+        // At time 1.5: first two words spoken, last spoken is 'は'
+        const result = computeWordKaraokeIndices(fullText, words, 1.5);
+        expect(result.hlStart).toBe(1); // 'は' starts at char 1
+        expect(result.splitIdx).toBe(2); // 'は' ends at char 2
     });
 
-    it('spaced text: highlights last word', () => {
-        expect(computeKaraokeHighlightStart('hello world')).toBe(6); // "hello " = 6 chars
+    it('tracks current word for spaced text', () => {
+        const fullText = 'hello beautiful world';
+        const words = [
+            { start: 0, end: 1, text: 'hello' },
+            { start: 1, end: 2, text: 'beautiful' },
+            { start: 2, end: 3, text: 'world' },
+        ];
+        // At time 1.5: 'hello' and 'beautiful' spoken
+        const result = computeWordKaraokeIndices(fullText, words, 1.5);
+        expect(result.hlStart).toBe(6); // 'beautiful' starts at char 6 (after "hello ")
+        expect(result.splitIdx).toBe(15); // 'beautiful' ends at char 15
     });
 
-    it('single char returns 0', () => {
-        expect(computeKaraokeHighlightStart('あ')).toBe(0);
+    it('returns 0,0 before any word starts', () => {
+        const fullText = 'test';
+        const words = [{ start: 5, end: 10, text: 'test' }];
+        const result = computeWordKaraokeIndices(fullText, words, 0);
+        expect(result.hlStart).toBe(0);
+        expect(result.splitIdx).toBe(0);
     });
 
-    it('single word (no spaces) returns length - 1', () => {
-        expect(computeKaraokeHighlightStart('hello')).toBe(4);
-    });
-
-    it('empty string returns 0', () => {
-        expect(computeKaraokeHighlightStart('')).toBe(0);
-    });
-
-    it('multi-space text: highlights after last space', () => {
-        expect(computeKaraokeHighlightStart('a b c')).toBe(4); // "a b " = 4 chars
-    });
-
-    it('trailing space: last word is empty, highlights from after last space', () => {
-        // "hello " → lastSpace=5, slice(0,6).length = 6
-        expect(computeKaraokeHighlightStart('hello ')).toBe(6);
+    it('returns last word when all spoken', () => {
+        const fullText = 'a b c';
+        const words = [
+            { start: 0, end: 1, text: 'a' },
+            { start: 1, end: 2, text: 'b' },
+            { start: 2, end: 3, text: 'c' },
+        ];
+        const result = computeWordKaraokeIndices(fullText, words, 3);
+        expect(result.hlStart).toBe(4); // 'c' starts at char 4 (after "a b ")
+        expect(result.splitIdx).toBe(5); // 'c' ends at char 5
     });
 });
 
-describe('Karaoke mode variants', () => {
-    it('karaoke + segment: full text with 3-way word highlighting', () => {
-        const fullText = 'こんにちは世界';
-        const progressiveText = 'こんにち';
-        const karaokeMode = true;
-        const segmentMode = true;
+describe('computeTimeFallbackKaraokeIndices', () => {
+    it('returns word-level indices for spaced text', () => {
+        const fullText = 'hello world test';
+        const line = { time: 0, endTime: 3 };
+        // At time 1 (33% progress): ceil(0.33*3)=1 word revealed
+        const result = computeTimeFallbackKaraokeIndices(fullText, line, 1);
+        expect(result.splitIdx).toBe(5); // "hello" = 5 chars
+        expect(result.hlStart).toBe(0); // first word, no previous words
+    });
 
-        let primary: string;
-        let splitIdx = -1;
-        let hlStart = -1;
+    it('returns char-level indices for CJK', () => {
+        const fullText = 'こんにちは';
+        const line = { time: 0, endTime: 5 };
+        // At time 2 (40% progress): ceil(0.4*5)=2 chars
+        const result = computeTimeFallbackKaraokeIndices(fullText, line, 2);
+        expect(result.splitIdx).toBe(2); // 2 chars
+        expect(result.hlStart).toBe(1); // previous char
+    });
 
-        if (karaokeMode && segmentMode) {
-            // Karaoke+segment: 3-way — past (primary) | current word (accent) | upcoming (dim)
-            primary = fullText;
-            splitIdx = Array.from(progressiveText).length;
-            hlStart = computeKaraokeHighlightStart(progressiveText);
-        } else if (karaokeMode) {
-            primary = progressiveText;
-            hlStart = computeKaraokeHighlightStart(progressiveText);
-        } else {
-            primary = progressiveText;
-        }
+    it('returns -1,-1 when no endTime', () => {
+        const result = computeTimeFallbackKaraokeIndices('test', { time: 0 }, 1);
+        expect(result.splitIdx).toBe(-1);
+        expect(result.hlStart).toBe(-1);
+    });
+});
 
-        expect(primary).toBe('こんにちは世界'); // Full text shown
-        expect(splitIdx).toBe(4); // Spoken boundary at progressive end
-        expect(hlStart).toBe(3); // Current word starts at last char of progressive
+describe('Karaoke mode variants (new behavior)', () => {
+    const fullText = 'おはよう世界';
+    const words = [
+        { start: 0, end: 1, text: 'お' },
+        { start: 1, end: 2, text: 'は' },
+        { start: 2, end: 3, text: 'よ' },
+        { start: 3, end: 4, text: 'う' },
+        { start: 4, end: 5, text: '世' },
+        { start: 5, end: 6, text: '界' },
+    ];
 
-        // 3-way render test: past | current word | upcoming
-        const chars = Array.from(primary);
+    it('segment ON + karaoke ON (fill-up): accent fills from start, all spoken in accent', () => {
+        const now = 2.5; // 'お', 'は', 'よ' spoken
+        const indices = computeWordKaraokeIndices(fullText, words, now);
+        // Segment ON: hlStart forced to 0 (fill-up)
+        const hlStart = 0;
+        const splitIdx = indices.splitIdx;
+
+        expect(splitIdx).toBe(3); // 3 chars spoken
+        const chars = Array.from(fullText);
         const past = chars.slice(0, hlStart).join('');
         const current = chars.slice(hlStart, splitIdx).join('');
         const upcoming = chars.slice(splitIdx).join('');
-        expect(past).toBe('こんに');
-        expect(current).toBe('ち');
-        expect(upcoming).toBe('は世界');
+        expect(past).toBe(''); // Empty past (fill-up from 0)
+        expect(current).toBe('おはよ'); // All spoken text in accent
+        expect(upcoming).toBe('う世界'); // Remaining text dimmed
     });
 
-    it('karaoke only (no segment): progressive reveal with 2-way highlight', () => {
-        const fullText = 'こんにちは世界';
-        const progressiveText = 'こんにち';
-        const karaokeMode = true;
-        const segmentMode = false;
+    it('segment OFF + karaoke ON (spotlight): only current word in accent, upcoming hidden', () => {
+        const now = 2.5; // 'お', 'は', 'よ' spoken
+        const indices = computeWordKaraokeIndices(fullText, words, now);
+        // Segment OFF: use actual hlStart from computation
+        const hlStart = indices.hlStart;
+        const splitIdx = indices.splitIdx;
 
-        let primary: string;
-        let splitIdx = -1;
-        let hlStart = -1;
-
-        if (karaokeMode && segmentMode) {
-            primary = fullText;
-            splitIdx = Array.from(progressiveText).length;
-            hlStart = computeKaraokeHighlightStart(progressiveText);
-        } else if (karaokeMode) {
-            primary = progressiveText;
-            hlStart = computeKaraokeHighlightStart(progressiveText);
-        } else {
-            primary = progressiveText;
-        }
-
-        expect(primary).toBe('こんにち'); // Progressive text (not full)
-        expect(splitIdx).toBe(-1); // Not in segment mode
-        expect(hlStart).toBe(3); // Last char of progressive text
-
-        // 2-way render test: past | current word (no upcoming)
-        const chars = Array.from(primary);
+        expect(hlStart).toBe(2); // 'よ' starts at char 2
+        expect(splitIdx).toBe(3); // 'よ' ends at char 3
+        const chars = Array.from(fullText);
         const past = chars.slice(0, hlStart).join('');
-        const current = splitIdx >= 0
-            ? chars.slice(hlStart, splitIdx).join('')
-            : chars.slice(hlStart).join('');
-        expect(past).toBe('こんに');
-        expect(current).toBe('ち');
+        const current = chars.slice(hlStart, splitIdx).join('');
+        const upcoming = chars.slice(splitIdx).join('');
+        expect(past).toBe('おは'); // Past words in normal color
+        expect(current).toBe('よ'); // Only current word in accent
+        expect(upcoming).toBe('う世界'); // Hidden (visibility: hidden)
     });
 
-    it('karaoke only with spaced text: highlights last word', () => {
-        const progressiveText = 'hello beautiful';
+    it('both modes always show full text as primary', () => {
+        // In the new implementation, karaoke ON → primary = fullText always
         const karaokeMode = true;
-        const segmentMode = false;
+        const primary = karaokeMode ? fullText : 'progressive';
+        expect(primary).toBe(fullText);
+    });
 
-        const hlStart = computeKaraokeHighlightStart(progressiveText);
-        const past = Array.from(progressiveText).slice(0, hlStart).join('');
-        const current = Array.from(progressiveText).slice(hlStart).join('');
+    it('no karaoke: plain progressive text', () => {
+        const progressiveText = 'おはよ';
+        const karaokeMode = false;
+        const primary = karaokeMode ? fullText : progressiveText;
+        expect(primary).toBe('おはよ');
+    });
 
+    it('segment OFF + karaoke ON: first word spoken, accent on first word only', () => {
+        const now = 0.5; // Only 'お' spoken
+        const indices = computeWordKaraokeIndices(fullText, words, now);
+        const hlStart = indices.hlStart; // segment OFF uses actual hlStart
+        const splitIdx = indices.splitIdx;
+
+        expect(hlStart).toBe(0);
+        expect(splitIdx).toBe(1);
+        const chars = Array.from(fullText);
+        expect(chars.slice(0, hlStart).join('')).toBe(''); // No past yet
+        expect(chars.slice(hlStart, splitIdx).join('')).toBe('お'); // Current word accented
+        expect(chars.slice(splitIdx).join('')).toBe('はよう世界'); // Hidden
+    });
+
+    it('segment ON + karaoke ON: last word spoken, everything accented', () => {
+        const now = 5.5; // All words spoken
+        const indices = computeWordKaraokeIndices(fullText, words, now);
+        const hlStart = 0; // segment ON forces 0
+        const splitIdx = indices.splitIdx;
+
+        expect(splitIdx).toBe(6); // All 6 chars spoken
+        const chars = Array.from(fullText);
+        expect(chars.slice(0, hlStart).join('')).toBe('');
+        expect(chars.slice(hlStart, splitIdx).join('')).toBe('おはよう世界'); // Full text in accent
+        expect(chars.slice(splitIdx).join('')).toBe(''); // Nothing upcoming
+    });
+});
+
+describe('Karaoke with spaced text', () => {
+    const fullText = 'hello beautiful world';
+    const words = [
+        { start: 0, end: 1, text: 'hello' },
+        { start: 1, end: 2, text: 'beautiful' },
+        { start: 2, end: 3, text: 'world' },
+    ];
+
+    it('spotlight mode: accents only "beautiful" (the current word)', () => {
+        const now = 1.5; // 'hello' and 'beautiful' spoken
+        const indices = computeWordKaraokeIndices(fullText, words, now);
+
+        expect(indices.hlStart).toBe(6); // "beautiful" starts after "hello "
+        expect(indices.splitIdx).toBe(15); // "beautiful" ends at char 15
+
+        const chars = Array.from(fullText);
+        const past = chars.slice(0, indices.hlStart).join('');
+        const current = chars.slice(indices.hlStart, indices.splitIdx).join('');
+        const upcoming = chars.slice(indices.splitIdx).join('');
         expect(past).toBe('hello ');
         expect(current).toBe('beautiful');
+        expect(upcoming).toBe(' world');
     });
 
-    it('no karaoke, no segment: plain progressive text', () => {
-        const progressiveText = 'こんにち';
-        const karaokeMode = false;
-        const segmentMode = false;
+    it('fill-up mode: accents "hello beautiful" (all spoken)', () => {
+        const now = 1.5;
+        const indices = computeWordKaraokeIndices(fullText, words, now);
+        const hlStart = 0; // segment ON forces 0
 
-        let primary: string;
-        let splitIdx = -1;
-        let hlStart = -1;
-
-        if (karaokeMode && segmentMode) {
-            primary = 'full';
-            splitIdx = 4;
-        } else if (karaokeMode) {
-            primary = progressiveText;
-            hlStart = computeKaraokeHighlightStart(progressiveText);
-        } else {
-            primary = progressiveText;
-        }
-
-        expect(primary).toBe('こんにち');
-        expect(splitIdx).toBe(-1);
-        expect(hlStart).toBe(-1);
+        const chars = Array.from(fullText);
+        const current = chars.slice(hlStart, indices.splitIdx).join('');
+        const upcoming = chars.slice(indices.splitIdx).join('');
+        expect(current).toBe('hello beautiful');
+        expect(upcoming).toBe(' world');
     });
 });

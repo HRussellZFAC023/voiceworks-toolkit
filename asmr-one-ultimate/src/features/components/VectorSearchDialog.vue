@@ -9,6 +9,7 @@ import { buildCoverUrl } from '../../types/api';
 import { Config, Logger, I18n } from '../../core/Utils';
 import { HttpError } from '../../infrastructure/HttpClient';
 import { EmbeddingService } from '../../services/EmbeddingService';
+import { GpuScheduler, Priority } from '../../core/GpuScheduler';
 import type { TagEntry } from '../../types/api';
 
 // ============================================================================
@@ -66,7 +67,7 @@ const EMBEDDING_TASK_DOC = 'passage';
 const MAX_DESCRIPTION_CHARS = 1500;
 const MAX_PAYLOAD_CHARS = 5000;
 const MIN_SCORE_THRESHOLD = 0.25;
-const SEARCH_TIMEOUT_MS = 15_000;
+const SEARCH_TIMEOUT_MS = 25_000;
 const TRANSLATION_TIMEOUT_MS = 5_000;
 
 // ============================================================================
@@ -269,7 +270,13 @@ async function ensureTagIndex(): Promise<void> {
 async function getEmbedding(text: string, task: string): Promise<number[] | null> {
     try {
         const embTask = task === EMBEDDING_TASK_QUERY ? 'query' : 'passage';
-        return await EmbeddingService.embed(text, embTask);
+        const isSearch = task === EMBEDDING_TASK_QUERY;
+        return await EmbeddingService.embed(text, embTask, {
+            // Search queries: HIGH priority to jump ahead of background indexing
+            // Indexing: LOW priority + cancellable so search can clear them from the queue
+            priority: isSearch ? Priority.HIGH : Priority.LOW,
+            cancellable: !isSearch,
+        });
     } catch (err) {
         Logger.warn('[VectorSearch] getEmbedding failed:', err);
         return null;
@@ -379,9 +386,12 @@ async function prepareWorkEntry(work: any): Promise<{ entry: VectorEntry; payloa
 
 async function indexWork(work: any): Promise<boolean> {
     if (!work?.id) return false;
-    // Yield to search when search is active
+    // Fully pause indexing while search is active to keep the GPU scheduler queue clear
     if (searchPriority) {
-        await new Promise(resolve => setTimeout(resolve, 200));
+        const pauseStart = Date.now();
+        while (searchPriority && Date.now() - pauseStart < 30_000) {
+            await new Promise(resolve => setTimeout(resolve, 500));
+        }
     }
     const id = String(work.id);
     await ensureIndexReady();
@@ -555,13 +565,15 @@ async function bulkIndex(opts?: { maxPages?: number; maxWorks?: number; order?: 
         }
         Config.set('vectorIndexCursor', bulkIndexCursor);
         if (firstWorkId) Config.set('vectorIndexLatestWorkId', firstWorkId);
+        await refreshIndexCount();
+        const total = indexCount.value;
         if (!autoIndexExhausted) {
-            setStatus(t('magicSearchIndexingContinue'), false);
-            scheduleNextBatch();
+            const batchDelay = 60;
+            setStatus(format('magicSearchIndexingContinue', { indexed, cursor: bulkIndexCursor, total, delay: batchDelay }), false);
+            scheduleNextBatch(batchDelay * 1000);
         } else {
-            setStatus(t('magicSearchIndexingPaused'), false);
+            setStatus(format('magicSearchIndexingPaused', { total }), false);
         }
-        refreshIndexCount();
     } catch (e) {
         Logger.error('[VectorSearch] Bulk index failed', e);
         setStatus(t('magicSearchBulkIndexFailed'), false);
@@ -793,6 +805,8 @@ async function doSearch(): Promise<void> {
     Logger.debug('[VectorSearch] Search query:', val);
     searching.value = true;
     searchPriority = true;
+    // Drop pending background indexing embeddings so the search embedding runs immediately
+    GpuScheduler.clearCancellable('embedding');
     setStatus(t('magicSearchPreparing'), true);
     allResults.value = [];
     currentPage.value = 1;
@@ -872,6 +886,9 @@ async function doSearch(): Promise<void> {
         } else {
             Logger.warn('[VectorSearch] Search failed:', err);
             setStatus(t('magicSearchTimeout'), false);
+            // Abort the zombie searchBody so it stops at the next abort check
+            // and doesn't leave stale embedding tasks in the GPU scheduler queue
+            abort.abort();
         }
     } finally {
         searching.value = false;

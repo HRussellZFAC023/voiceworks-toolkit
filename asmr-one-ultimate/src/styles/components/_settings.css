@@ -118,10 +118,19 @@
     transition: filter 0.2s, box-shadow 0.2s;
 }
 
-.asmr-clear-cache-btn:hover:not(.disabled) {
-    filter: brightness(1.1);
-    box-shadow: 0 2px 8px rgba(193, 0, 21, 0.3);
-    /* Keep red shadow for negative action */
+@media (hover: hover) {
+    .asmr-clear-cache-btn:hover:not(.disabled) {
+        filter: brightness(1.1);
+        box-shadow: 0 2px 8px rgba(193, 0, 21, 0.3);
+        /* Keep red shadow for negative action */
+    }
+}
+
+@media (hover: none) {
+    .asmr-clear-cache-btn:active:not(.disabled) {
+        filter: brightness(1.1);
+        box-shadow: 0 2px 8px rgba(193, 0, 21, 0.3);
+    }
 }
 
 .asmr-clear-cache-btn.disabled {
@@ -197,8 +206,16 @@
     color: white;
 }
 
-.asmr-nuke-btn:hover:not(.disabled) {
-    filter: brightness(1.15);
+@media (hover: hover) {
+    .asmr-nuke-btn:hover:not(.disabled) {
+        filter: brightness(1.15);
+    }
+}
+
+@media (hover: none) {
+    .asmr-nuke-btn:active:not(.disabled) {
+        filter: brightness(1.15);
+    }
 }
 
 /* ============================================
@@ -239,8 +256,16 @@
     opacity: 0.5;
 }
 
-.asmr-setup-guide summary:hover {
-    background: rgba(128, 128, 128, 0.1);
+@media (hover: hover) {
+    .asmr-setup-guide summary:hover {
+        background: rgba(128, 128, 128, 0.1);
+    }
+}
+
+@media (hover: none) {
+    .asmr-setup-guide summary:active {
+        background: rgba(128, 128, 128, 0.1);
+    }
 }
 
 .asmr-setup-guide[open] summary {
@@ -328,8 +353,10 @@
     color: var(--asmr-accent, #1976d2);
 }
 
-.asmr-combobox-arrow:hover {
-    opacity: 0.9;
+@media (hover: hover) {
+    .asmr-combobox-arrow:hover {
+        opacity: 0.9;
+    }
 }
 
 .asmr-combobox-arrow:active {
@@ -365,8 +392,16 @@
     transition: background 0.1s;
 }
 
-.asmr-combobox-option:hover {
-    background: var(--asmr-bg-hover, rgba(255, 255, 255, 0.08));
+@media (hover: hover) {
+    .asmr-combobox-option:hover {
+        background: var(--asmr-bg-hover, rgba(255, 255, 255, 0.08));
+    }
+}
+
+@media (hover: none) {
+    .asmr-combobox-option:active {
+        background: var(--asmr-bg-hover, rgba(255, 255, 255, 0.08));
+    }
 }
 
 .asmr-combobox-option--active {

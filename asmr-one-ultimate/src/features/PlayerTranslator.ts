@@ -7,44 +7,65 @@ import { EventBus } from '../core/EventBus';
 
 export class PlayerTranslator {
     private trackChangeCleanup?: () => void;
+    private _enabled = false;
 
     public enable(): void {
-        if (!AppStore.getConfig('translateMode')) {
-            return;
-        }
+        if (this._enabled) return;
+        this._enabled = true;
         // Register with central observer instead of own MutationObserver
         CentralObserver.register('PlayerTranslator', () => this.checkPlayer(), 500);
 
         // Translate immediately on track change instead of waiting for observer debounce
         this.trackChangeCleanup = EventBus.on('track:change', () => {
-            setTimeout(() => this.checkPlayer(), 50);
+            // Clear stale translation attrs so the old translation doesn't cause
+            // early-return in translateTrackName/translateElement when Vue hasn't
+            // re-rendered the new title yet (rawText still === old translated text).
+            this.resetTranslationState();
+            // Single rAF + 200ms fallback for slow Vue re-renders (was double setTimeout 50+200)
+            requestAnimationFrame(() => this.checkPlayer());
+            setTimeout(() => this.checkPlayer(), 200);
         });
     }
 
-    private async checkPlayer() {
-        // Mini player usually at the bottom or top depending on layout
+    public disable(): void {
+        this._enabled = false;
+        CentralObserver.unregister('PlayerTranslator');
+        this.trackChangeCleanup?.();
+        this.trackChangeCleanup = undefined;
+    }
+
+    /**
+     * Clear stale data-asmr-* attributes from player title elements.
+     * Called on track:change so that the early-return checks in
+     * translateTrackName/translateElement don't match stale data.
+     */
+    private resetTranslationState(): void {
         const playerBar = document.querySelector(PLAYER_BAR_SELECTOR + ', .audio-player');
         if (!playerBar) return;
 
-        // Selectors based on the screenshots and common structure
-        // The title is usually in a text-h6 or similar, artist in text-subtitle2 or caption
+        const els = playerBar.querySelectorAll<HTMLElement>('[data-asmr-translated]');
+        for (const el of els) {
+            delete el.dataset.asmrTranslated;
+            delete el.dataset.asmrSource;
+            delete el.dataset.asmrTranslatedText;
+        }
+    }
+
+    private async checkPlayer() {
+        if (!AppStore.getConfig('translateMode')) return;
+        const playerBar = document.querySelector(PLAYER_BAR_SELECTOR + ', .audio-player');
+        if (!playerBar) return;
+
         const titleEl = playerBar.querySelector('.q-toolbar__title, .text-h6, .text-weight-bold.text-body1') as HTMLElement;
         const artistEl = playerBar.querySelector('.text-subtitle2, .text-caption, .text-grey-5') as HTMLElement;
-
-        // Track filename: "1,残業で爆睡…ダウナー系な職場の後輩が迫る….mp3"
         const trackNameEl = playerBar.querySelector('.ellipsis-2-lines') as HTMLElement;
 
-        if (titleEl) {
-            await this.translateElement(titleEl, 'title');
-        }
-
-        if (artistEl) {
-            await this.translateElement(artistEl, 'artist');
-        }
-
-        if (trackNameEl) {
-            await this.translateTrackName(trackNameEl);
-        }
+        // Run all translations concurrently instead of sequentially
+        const tasks: Promise<void>[] = [];
+        if (titleEl) tasks.push(this.translateElement(titleEl, 'title'));
+        if (artistEl) tasks.push(this.translateElement(artistEl, 'artist'));
+        if (trackNameEl) tasks.push(this.translateTrackName(trackNameEl));
+        await Promise.all(tasks);
     }
 
     private async translateElement(el: HTMLElement, _type: 'title' | 'artist') {
@@ -137,25 +158,26 @@ export class PlayerTranslator {
         el.dataset.asmrTranslated = 'true';
         el.dataset.asmrSource = original;
         el.dataset.asmrTranslatedText = translated;
-
         el.classList.add('asmr-translation-pair');
-        el.textContent = '';
 
+        // Build all children in a DocumentFragment (single DOM mutation instead of 5)
+        const frag = document.createDocumentFragment();
         const originalSpan = document.createElement('span');
         originalSpan.className = 'asmr-translation-original';
         originalSpan.textContent = original;
-
-        const separator = document.createElement('span');
-        separator.className = 'asmr-translation-sep';
-        separator.textContent = ' · ';
-
+        const openParen = document.createElement('span');
+        openParen.className = 'asmr-translation-sep';
+        openParen.textContent = ' (';
         const translatedSpan = document.createElement('span');
         translatedSpan.className = 'asmr-translation-translated';
         translatedSpan.textContent = translated;
+        const closeParen = document.createElement('span');
+        closeParen.className = 'asmr-translation-sep';
+        closeParen.textContent = ')';
+        frag.append(originalSpan, openParen, translatedSpan, closeParen);
 
-        el.appendChild(originalSpan);
-        el.appendChild(separator);
-        el.appendChild(translatedSpan);
+        el.textContent = '';
+        el.appendChild(frag); // single reflow
         el.title = original;
 
         // Recalculate marquee animation after text change

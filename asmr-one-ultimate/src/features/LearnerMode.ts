@@ -42,7 +42,7 @@ export class LearnerMode {
     // Ticker translation throttle: prevents spamming translate() every 80ms for the same text
     private lastTickerTranslationText = '';
     private lastTickerTranslationAt = 0;
-    private readonly TICKER_TRANSLATION_COOLDOWN_MS = 500;
+    private readonly TICKER_TRANSLATION_COOLDOWN_MS = 250;
 
     // Playback Speed
     private playbackRate = 1.0;
@@ -119,8 +119,7 @@ export class LearnerMode {
             // Playback rate sync from keyboard
             this.eventCleanups.push(EventBus.on('player:rate-change', (payload) => {
                 this.playbackRate = payload.rate;
-                // Sync UI (swatches, sliders)
-                this.updateStyle();
+                this.syncSpeedUI();
             }));
 
             // Sync blur from config changes (e.g. from KeyboardManager)
@@ -130,6 +129,8 @@ export class LearnerMode {
                     this.applyBlurState();
                 } else if (key === 'showJP') {
                     this.updateStyle();
+                } else if (key === 'enableWhisper' || key === 'enableJoiTool' || key === 'enableVisualizer') {
+                    this.syncOverflowItemVisibility(key, !!value);
                 }
             }));
 
@@ -589,6 +590,7 @@ export class LearnerMode {
         const whisperBtn = createItem('record_voice_over', I18n.t('aiTranscribe'), () => {
             EventBus.emit('whisper:toggle', undefined);
         }, 'asmr-whisper-btn');
+        if (!Config.get('enableWhisper')) whisperBtn.style.display = 'none';
         this.overflowMenu.appendChild(whisperBtn);
 
         // 2. Host "Open Work" Proxy
@@ -620,21 +622,32 @@ export class LearnerMode {
         });
         this.overflowMenu.appendChild(downloadBtn);
 
-        // 6. JOI Tool Toggle (only if feature enabled)
-        if (Config.get('enableJoiTool')) {
-            const joiBtn = createItem('casino', I18n.t('joiToggle'), () => {
-                EventBus.emit('joi:toggle', undefined);
-            }, 'asmr-joi-btn');
-            this.overflowMenu.appendChild(joiBtn);
-        }
+        // 6. JOI Tool Toggle
+        const joiBtn = createItem('casino', I18n.t('joiToggle'), () => {
+            EventBus.emit('joi:toggle', undefined);
+        }, 'asmr-joi-btn');
+        if (!Config.get('enableJoiTool')) joiBtn.style.display = 'none';
+        this.overflowMenu.appendChild(joiBtn);
 
-        // 7. Visualizer Toggle (only if feature enabled)
-        if (Config.get('enableVisualizer')) {
-            const vizBtn = createItem('graphic_eq', I18n.t('vizToggle'), () => {
-                EventBus.emit('viz:toggle', undefined);
-            }, 'asmr-viz-btn');
-            this.overflowMenu.appendChild(vizBtn);
-        }
+        // 7. Visualizer Toggle
+        const vizBtn = createItem('graphic_eq', I18n.t('vizToggle'), () => {
+            EventBus.emit('viz:toggle', undefined);
+        }, 'asmr-viz-btn');
+        if (!Config.get('enableVisualizer')) vizBtn.style.display = 'none';
+        this.overflowMenu.appendChild(vizBtn);
+    }
+
+    private static readonly OVERFLOW_CONFIG_MAP: Record<string, string> = {
+        enableWhisper: '.asmr-whisper-btn',
+        enableJoiTool: '.asmr-joi-btn',
+        enableVisualizer: '.asmr-viz-btn',
+    };
+
+    private syncOverflowItemVisibility(configKey: string, enabled: boolean): void {
+        const selector = LearnerMode.OVERFLOW_CONFIG_MAP[configKey];
+        if (!selector || !this.overflowMenu) return;
+        const btn = this.overflowMenu.querySelector(selector) as HTMLElement | null;
+        if (btn) btn.style.display = enabled ? '' : 'none';
     }
 
     private downloadCurrentTrack() {
@@ -661,6 +674,19 @@ export class LearnerMode {
         this.setPlaybackRate(rates[nextIdx], btn);
     }
 
+    private syncSpeedUI(): void {
+        document.querySelectorAll('.asmr-speed-swatch').forEach(el => {
+            el.textContent = `${this.playbackRate}x`;
+            el.classList.toggle('modified', this.playbackRate !== 1.0);
+        });
+        document.querySelectorAll<HTMLInputElement>('.asmr-speed-slider').forEach(slider => {
+            slider.value = String(this.playbackRate);
+        });
+        document.querySelectorAll('.asmr-speed-slider-label').forEach(el => {
+            el.textContent = `${this.playbackRate}x`;
+        });
+    }
+
     private setPlaybackRate(rate: number, triggerBtn?: HTMLElement) {
         this.playbackRate = rate;
         Config.set('playbackRate', this.playbackRate);
@@ -674,22 +700,9 @@ export class LearnerMode {
         // Update speed button title and swatch
         if (triggerBtn) {
             triggerBtn.title = I18n.format('speedTitle', { rate: this.playbackRate });
-            const swatch = triggerBtn.querySelector('.asmr-speed-swatch');
-            if (swatch) swatch.textContent = `${this.playbackRate}x`;
         }
 
-        // Sync all speed swatches and sliders across DOM
-        document.querySelectorAll('.asmr-speed-swatch').forEach(el => {
-            el.textContent = `${this.playbackRate}x`;
-            el.classList.toggle('modified', this.playbackRate !== 1.0);
-        });
-        document.querySelectorAll<HTMLInputElement>('.asmr-speed-slider').forEach(slider => {
-            slider.value = String(this.playbackRate);
-        });
-        document.querySelectorAll('.asmr-speed-slider-label').forEach(el => {
-            el.textContent = `${this.playbackRate}x`;
-        });
-
+        this.syncSpeedUI();
         Logger.debug(`[LearnerMode] Playback speed set to ${this.playbackRate}x`);
     }
 
@@ -1046,38 +1059,35 @@ export class LearnerMode {
                             }).catch(() => {});
                         }
                     } else if (wKaraoke && fullText) {
-                        wHlStart = 0; // accent all spoken text from the beginning
-                        if (wSegment) {
-                            // Karaoke + Segment: spoken (accent) | upcoming (dim)
-                            primaryForDisplay = fullText;
-                            const words = display.activeLine?.words;
-                            if (Array.isArray(words) && words.length > 0 && display.now != null) {
-                                wSplitIdx = this.computeWordKaraokeIndices(fullText, words, display.now).splitIdx;
-                            } else if (display.activeLine && display.now != null) {
-                                wSplitIdx = this.computeTimeFallbackKaraokeIndices(fullText, display.activeLine, display.now).splitIdx;
-                            }
-                        } else {
-                            // Karaoke only: all revealed text in accent
-                            primaryForDisplay = display.displayText;
+                        // Karaoke ON: always show full text, control visibility via CSS
+                        primaryForDisplay = fullText;
+                        const words = display.activeLine?.words;
+                        let indices = { splitIdx: 0, hlStart: 0 };
+                        if (Array.isArray(words) && words.length > 0 && display.now != null) {
+                            indices = this.computeWordKaraokeIndices(fullText, words, display.now);
+                        } else if (display.activeLine && display.now != null) {
+                            indices = this.computeTimeFallbackKaraokeIndices(fullText, display.activeLine, display.now);
                         }
+                        wSplitIdx = indices.splitIdx;
+                        // Segment ON (fill-up): hlStart=0, all spoken text in accent
+                        // Segment OFF (spotlight): hlStart=word start, only current word in accent
+                        wHlStart = wSegment ? 0 : indices.hlStart;
                     }
                     this.updatePrimaryLine(primaryForDisplay, wSplitIdx, wHlStart);
                     this.lastWhisperDisplayText = primaryForDisplay;
                 } else if (display.displayText && !!Config.get('karaokeMode')) {
                     // Karaoke: text unchanged but indices may have advanced
-                    if (!!Config.get('segmentMode')) {
-                        const ft = display.fullText || display.displayText;
-                        const words = display.activeLine?.words;
-                        let newSplitIdx = -1;
-                        if (Array.isArray(words) && words.length > 0 && display.now != null) {
-                            newSplitIdx = this.computeWordKaraokeIndices(ft, words, display.now).splitIdx;
-                        } else if (display.activeLine && display.now != null) {
-                            newSplitIdx = this.computeTimeFallbackKaraokeIndices(ft, display.activeLine, display.now).splitIdx;
-                        }
-                        this.updatePrimaryLine(this.lastWhisperDisplayText, newSplitIdx, 0);
-                    } else {
-                        this.updatePrimaryLine(display.displayText, -1, 0);
+                    const ft = display.fullText || display.displayText;
+                    const words = display.activeLine?.words;
+                    let indices = { splitIdx: 0, hlStart: 0 };
+                    if (Array.isArray(words) && words.length > 0 && display.now != null) {
+                        indices = this.computeWordKaraokeIndices(ft, words, display.now);
+                    } else if (display.activeLine && display.now != null) {
+                        indices = this.computeTimeFallbackKaraokeIndices(ft, display.activeLine, display.now);
                     }
+                    const newSplitIdx = indices.splitIdx;
+                    const newHlStart = !!Config.get('segmentMode') ? 0 : indices.hlStart;
+                    this.updatePrimaryLine(this.lastWhisperDisplayText, newSplitIdx, newHlStart);
                 } else if (!display.displayText) {
                     // Between segments (gap/silence) — clear stale text.
                     // Whisper segments have precise endTimes, so gaps are intentional.
@@ -1216,20 +1226,19 @@ export class LearnerMode {
             const jaTranslation = TranslationService.peekCached(fullText, 'ja');
             primaryText = jaTranslation || fullText || '';
         } else if (karaokeEnabled) {
-            hlStart = 0; // accent all spoken text from the beginning
-            if (segmentEnabled) {
-                // Karaoke + Segment: spoken (accent) | upcoming (dim)
-                primaryText = fullText;
-                const words = display.activeLine?.words;
-                if (Array.isArray(words) && words.length > 0 && display.now != null) {
-                    splitIdx = this.computeWordKaraokeIndices(fullText, words, display.now).splitIdx;
-                } else if (display.activeLine && display.now != null) {
-                    splitIdx = this.computeTimeFallbackKaraokeIndices(fullText, display.activeLine, display.now).splitIdx;
-                }
-            } else {
-                // Karaoke only: all revealed text in accent
-                primaryText = progressiveText;
+            // Karaoke ON: always show full text, control visibility via CSS
+            primaryText = fullText;
+            const words = display.activeLine?.words;
+            let indices = { splitIdx: 0, hlStart: 0 };
+            if (Array.isArray(words) && words.length > 0 && display.now != null) {
+                indices = this.computeWordKaraokeIndices(fullText, words, display.now);
+            } else if (display.activeLine && display.now != null) {
+                indices = this.computeTimeFallbackKaraokeIndices(fullText, display.activeLine, display.now);
             }
+            splitIdx = indices.splitIdx;
+            // Segment ON (fill-up): hlStart=0, all spoken text in accent
+            // Segment OFF (spotlight): hlStart=word start, only current word in accent
+            hlStart = segmentEnabled ? 0 : indices.hlStart;
         } else {
             primaryText = progressiveText;
         }
@@ -1909,7 +1918,7 @@ export class LearnerMode {
         if (backgroundBatch.length > 0) {
             setTimeout(() => {
                 processBatch(backgroundBatch, 'background');
-            }, 2000); // Small delay to let initial batch/UI settle
+            }, 200); // Brief delay to let initial batch start on worker
         }
     }
 
@@ -2274,10 +2283,15 @@ export class LearnerMode {
         return combined;
     }
 
+    /** Adjust lead time for playback rate: at 2x, we need 2x audio-seconds of lead for the same real-world reaction time */
+    private effectiveLead(baseLead: number): number {
+        return baseLead * this.playbackRate;
+    }
+
     private getTextFromTimeline(): string {
         return this.getTextFromTimelineFor(
             this.currentLyrics,
-            this.subtitleLeadSec,
+            this.effectiveLead(this.subtitleLeadSec),
             false,
             this.subtitleAppendWindowSec,
             this.subtitleAppendMaxChars
@@ -2285,13 +2299,13 @@ export class LearnerMode {
     }
 
     private getWhisperTextFromTimeline(): string {
-        return this.getTextFromTimelineFor(this.whisperLines, this.whisperLeadSec, true);
+        return this.getTextFromTimelineFor(this.whisperLines, this.effectiveLead(this.whisperLeadSec), true);
     }
 
     private getWhisperDisplay(): { displayText: string; fullText: string; activeLine?: any; now?: number } {
         const audio = getAudioElement();
         if (!audio || this.whisperLines.length === 0) return { displayText: '', fullText: '' };
-        const now = audio.currentTime + Math.max(0, this.whisperLeadSec);
+        const now = audio.currentTime + Math.max(0, this.effectiveLead(this.whisperLeadSec));
         const activeLine = this.findActiveLine(this.whisperLines, now);
         if (!activeLine || !activeLine.text) return { displayText: '', fullText: '' };
         const fullText = activeLine.text.trim();
@@ -2306,7 +2320,7 @@ export class LearnerMode {
     private getSubtitleDisplay(): { displayText: string; fullText: string; activeLine?: any; now?: number } {
         const audio = getAudioElement();
         if (!audio || this.currentLyrics.length === 0) return { displayText: '', fullText: '' };
-        const now = audio.currentTime + this.subtitleLeadSec;
+        const now = audio.currentTime + this.effectiveLead(this.subtitleLeadSec);
         const activeLine = this.findActiveLine(this.currentLyrics, now);
         if (!activeLine || !activeLine.text) return { displayText: '', fullText: '' };
         const fullText = activeLine.text.trim();
@@ -2344,16 +2358,17 @@ export class LearnerMode {
 
     /**
      * Update the primary (JP) line with optional karaoke highlighting.
-     * Both splitIdx >= 0 AND hlStart >= 0: karaoke+segment 3-way — past | current word (accent) | upcoming (dim)
-     * splitIdx >= 0 only: 2-way — spoken (accent) | upcoming (dim)
-     * hlStart >= 0 only:  karaoke-only — past (primary) | current word (accent)
+     * When both splitIdx >= 0 AND hlStart >= 0:
+     *   Segment ON (fill-up):  past="" | spoken 0..splitIdx (accent) | upcoming splitIdx..end (dim)
+     *   Segment OFF (spotlight): past 0..hlStart (normal) | current hlStart..splitIdx (accent) | upcoming splitIdx..end (hidden)
      */
     private updatePrimaryLine(text: string, splitIdx = -1, hlStart = -1): void {
         const karaokeEnabled = !!Config.get('karaokeMode');
+        const segmentEnabled = !!Config.get('segmentMode');
         for (const e of this.getJpEls()) {
             const isCollapsed = !!e.closest('.learner-subs-collapsed');
             if (karaokeEnabled && !isCollapsed && splitIdx >= 0 && hlStart >= 0 && text) {
-                // 3-way: past (primary) | current word (accent) | upcoming (dim)
+                // 3-way: past (primary) | current word (accent) | upcoming (dim or hidden)
                 const chars = Array.from(text);
                 const past = chars.slice(0, hlStart).join('');
                 const current = chars.slice(hlStart, splitIdx).join('');
@@ -2366,39 +2381,11 @@ export class LearnerMode {
                 currentSpan.className = 'karaoke-spoken';
                 currentSpan.textContent = current;
                 const upcomingSpan = document.createElement('span');
-                upcomingSpan.className = 'karaoke-upcoming';
+                upcomingSpan.className = segmentEnabled ? 'karaoke-upcoming' : 'karaoke-upcoming karaoke-hidden';
                 upcomingSpan.textContent = upcoming;
                 e.appendChild(pastSpan);
                 e.appendChild(currentSpan);
                 e.appendChild(upcomingSpan);
-            } else if (karaokeEnabled && !isCollapsed && splitIdx >= 0 && text) {
-                // 2-way: spoken (accent) | upcoming (dim)
-                const chars = Array.from(text);
-                const spoken = chars.slice(0, splitIdx).join('');
-                const upcoming = chars.slice(splitIdx).join('');
-                e.textContent = '';
-                const spokenSpan = document.createElement('span');
-                spokenSpan.className = 'karaoke-spoken';
-                spokenSpan.textContent = spoken;
-                const upcomingSpan = document.createElement('span');
-                upcomingSpan.className = 'karaoke-upcoming';
-                upcomingSpan.textContent = upcoming;
-                e.appendChild(spokenSpan);
-                e.appendChild(upcomingSpan);
-            } else if (karaokeEnabled && !isCollapsed && hlStart >= 0 && text) {
-                // 2-way: past (primary) | current word (accent)
-                const chars = Array.from(text);
-                const past = chars.slice(0, hlStart).join('');
-                const current = chars.slice(hlStart).join('');
-                e.textContent = '';
-                const pastSpan = document.createElement('span');
-                pastSpan.className = 'karaoke-past';
-                pastSpan.textContent = past;
-                const currentSpan = document.createElement('span');
-                currentSpan.className = 'karaoke-spoken';
-                currentSpan.textContent = current;
-                e.appendChild(pastSpan);
-                e.appendChild(currentSpan);
             } else {
                 e.textContent = text;
             }

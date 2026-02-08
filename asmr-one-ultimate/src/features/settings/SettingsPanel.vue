@@ -431,6 +431,8 @@ const credits = [
             <hr class="q-separator q-separator--horizontal q-separator--dark">
             <SettingsToggle config-key="enableLearnerMode" :label="t('enableLearnerMode')" :sublabel="t('enableLearnerModeSub')" icon="school" />
             <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <SettingsToggle config-key="learnerBlur" :label="t('learnerBlurLabel')" :sublabel="t('learnerBlurSub')" icon="blur_on" />
+            <hr class="q-separator q-separator--horizontal q-separator--dark">
             <SettingsToggle config-key="karaokeMode" :label="t('karaokeMode')" :sublabel="t('karaokeModeSub')" icon="music_note" />
             <hr class="q-separator q-separator--horizontal q-separator--dark">
             <SettingsToggle config-key="segmentMode" :label="t('segmentMode')" :sublabel="t('segmentModeSub')" icon="segment" />
@@ -684,8 +686,6 @@ const credits = [
                 <SettingsToggle config-key="autoProgressPostponed" :label="t('autoProgressPostponed')" :sublabel="t('autoProgressPostponedDesc')" icon="schedule" />
                 <hr class="q-separator q-separator--horizontal q-separator--dark">
                 <SettingsInput config-key="autoProgressReplayThreshold" :label="t('autoProgressReplayThreshold')" :sublabel="t('autoProgressReplayThresholdDesc')" placeholder="2" icon="repeat_one" />
-                <hr class="q-separator q-separator--horizontal q-separator--dark">
-                <SettingsToggle config-key="autoProgressRadioGuard" :label="t('autoProgressRadioGuard')" :sublabel="t('autoProgressRadioGuardDesc')" icon="radio" />
                 <hr class="q-separator q-separator--horizontal q-separator--dark">
                 <SettingsInput config-key="autoProgressRadioSkipThreshold" :label="t('autoProgressRadioSkipThreshold')" :sublabel="t('autoProgressRadioSkipThresholdDesc')" placeholder="3" icon="visibility_off" />
             </div>

@@ -2,7 +2,9 @@ import { SharedCache, CacheKeys } from '../core/Cache';
 import { I18n } from '../core/Config';
 import { Logger } from '../core/Utils';
 import { EventBus } from '../core/EventBus';
+import { GpuScheduler, Priority, type WorkerName } from '../core/GpuScheduler';
 import { createEmbeddingWorker } from '../features/EmbeddingWorkerLoader';
+import { DeviceCapabilities } from '../core/DeviceCapabilities';
 
 // ============================================================================
 // Constants
@@ -45,6 +47,9 @@ let consecutiveGpuErrors = 0;
 let circuitRecoveryAttempted = false;
 let serviceDead = false;
 
+// No cross-service webgpu:failed propagation — each service independently tries WebGPU.
+// Serialized warmup prevents device contention; fp32 dtype fix handles Intel GPUs.
+
 // Idle unload
 let idleTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -61,7 +66,9 @@ function resetIdleTimer(): void {
 function terminateWorker(): void {
     if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
     if (worker) {
-        try { worker.terminate(); } catch { /* ignore */ }
+        const dyingWorker = worker;
+        dyingWorker.postMessage({ type: 'cleanup' });
+        setTimeout(() => dyingWorker.terminate(), 300);
         for (const [, req] of pending) {
             clearTimeout(req.timer);
             req.reject(new Error('Worker terminated'));
@@ -104,6 +111,7 @@ function handleCircuitBreaker(errorMsg: string): void {
         // Circuit breaker tripped — kill worker and recreate on WASM
         Logger.warn('[EmbeddingService] Circuit breaker tripped — killing worker, will recreate on WASM');
         webgpuFailed = true;
+        EventBus.emit('webgpu:failed', { source: 'embedding' });
         SharedCache.set(CacheKeys.embeddingPreferredDtype(), '', CACHE_TTL_MS); // Clear GPU dtype preference
         circuitRecoveryAttempted = true;
         consecutiveGpuErrors = 0;
@@ -129,8 +137,9 @@ function handleMessage(e: MessageEvent): void {
             rememberedDtype = msg.dtype;
             SharedCache.set(CacheKeys.embeddingPreferredDtype(), msg.dtype, CACHE_TTL_MS);
         }
-        if (msg.backend === 'wasm') {
+        if (msg.backend === 'wasm' && !webgpuFailed) {
             webgpuFailed = true;
+            EventBus.emit('webgpu:failed', { source: 'embedding' });
         }
         Logger.log(`[EmbeddingService] Model ready on ${msg.backend} [${msg.dtype}]`);
         EventBus.emit('embedding:progress', {
@@ -147,6 +156,14 @@ function handleMessage(e: MessageEvent): void {
             message: msg.file ? I18n.format('embeddingLoadingFile', { file: msg.file }) : I18n.t('embeddingLoading'),
             stage: 'model',
         });
+        return;
+    }
+
+    if (msg.status === 'gpu-device-lost') {
+        // Transient GPU device loss — worker will recover with fresh device on next call.
+        // Don't count toward circuit breaker, but notify scheduler.
+        Logger.warn('[EmbeddingService] GPU device lost (transient):', msg.data?.message);
+        EventBus.emit('gpu:device-lost', { worker: 'embedding' as const });
         return;
     }
 
@@ -174,6 +191,7 @@ function handleMessage(e: MessageEvent): void {
         }
         // Success — reset GPU error counter
         consecutiveGpuErrors = 0;
+        GpuScheduler.onGpuSuccess();
     }
 }
 
@@ -194,7 +212,11 @@ function initWorker(): Promise<void> {
             if (webgpuFailed) {
                 worker.postMessage({ type: 'skip-webgpu' });
             }
-            if (rememberedDtype) {
+            // Only send cached dtype hint if it's relevant. WASM-only dtypes (q8/q4)
+            // are useless when GPU is available — worker uses fp32 on WebGPU anyway,
+            // and q8 is the default WASM fallback order.
+            const isWasmOnlyDtype = ['q8', 'q4'].includes(rememberedDtype);
+            if (rememberedDtype && !(isWasmOnlyDtype && DeviceCapabilities.profile.hasGpu && !webgpuFailed)) {
                 worker.postMessage({ type: 'preferred-dtype', dtype: rememberedDtype });
             }
 
@@ -265,6 +287,9 @@ export const EmbeddingService = {
     model: EMBEDDING_MODEL,
 
     async ensureReady(): Promise<void> {
+        if (!DeviceCapabilities.budget.embeddingEnabled) {
+            throw new Error('Embedding disabled on constrained device');
+        }
         await initWorker();
         resetIdleTimer();
     },
@@ -273,10 +298,11 @@ export const EmbeddingService = {
      * Embed a single text. Prepends E5 task prefix automatically.
      * @param text - Raw text to embed
      * @param task - 'query' or 'passage'
+     * @param options - priority (default LOW), cancellable (default false)
      * @returns Normalized 384-dim float32 vector
      */
-    async embed(text: string, task: 'query' | 'passage' = 'query'): Promise<number[]> {
-        if (serviceDead) throw new Error('Embedding service unavailable');
+    async embed(text: string, task: 'query' | 'passage' = 'query', options?: { priority?: Priority; cancellable?: boolean }): Promise<number[]> {
+        if (serviceDead || !DeviceCapabilities.budget.embeddingEnabled) throw new Error('Embedding service unavailable');
         resetIdleTimer();
         const prefixed = task === 'query' ? `query: ${text}` : `passage: ${text}`;
 
@@ -287,7 +313,12 @@ export const EmbeddingService = {
 
         const promise = (async () => {
             await initWorker();
-            return sendToWorker('embed', prefixed, SINGLE_TIMEOUT_MS);
+            return GpuScheduler.enqueue({
+                priority: options?.priority ?? Priority.LOW,
+                worker: 'embedding',
+                execute: () => sendToWorker('embed', prefixed, SINGLE_TIMEOUT_MS),
+                cancellable: options?.cancellable,
+            });
         })();
 
         embedInFlight.set(flightKey, promise);
@@ -305,7 +336,7 @@ export const EmbeddingService = {
      * @returns Array of normalized 384-dim float32 vectors
      */
     async embedBatch(texts: string[], task: 'query' | 'passage' = 'passage'): Promise<number[][]> {
-        if (serviceDead) throw new Error('Embedding service unavailable');
+        if (serviceDead || !DeviceCapabilities.budget.embeddingEnabled) throw new Error('Embedding service unavailable');
         if (texts.length === 0) return [];
         resetIdleTimer();
 
@@ -315,7 +346,13 @@ export const EmbeddingService = {
 
         await initWorker();
         const timeoutMs = BATCH_TIMEOUT_BASE_MS + texts.length * BATCH_TIMEOUT_PER_ITEM_MS;
-        return sendToWorker('embed-batch', prefixed, timeoutMs);
+        // Batch embedding is LOW priority and cancellable
+        return GpuScheduler.enqueue({
+            priority: Priority.LOW,
+            worker: 'embedding',
+            execute: () => sendToWorker('embed-batch', prefixed, timeoutMs),
+            cancellable: true,
+        });
     },
 
     isReady(): boolean {

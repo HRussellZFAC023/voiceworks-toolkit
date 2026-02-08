@@ -5,7 +5,7 @@ type CacheEnvelope<T> = {
     value: T;
 };
 
-const hashString = (input: string): string => {
+export const hashString = (input: string): string => {
     if (!input) return '0';
     let hash = 2166136261;
     for (let i = 0; i < input.length; i++) {
@@ -34,7 +34,7 @@ export const CacheKeys = {
     embeddingPreferredDtype: () => 'asmr-ult:embed:preferred-dtype',
 };
 
-const MAX_SIZE = 1000;
+const MAX_SIZE = 5000;
 
 export class CacheStore {
     private memory = new Map<string, CacheEnvelope<any>>();

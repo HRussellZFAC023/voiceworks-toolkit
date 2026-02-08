@@ -148,9 +148,18 @@ body.asmr-fullscreen-active .player-bar-container {
     opacity: 1;
 }
 
-.audio-player.asmr-player-fullscreen .albumart .asmr-gallery-nav:hover {
-    background: rgba(0, 0, 0, 0.5) !important;
-    transform: translateY(-50%) scale(1.1) !important;
+@media (hover: hover) {
+    .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-nav:hover {
+        background: rgba(0, 0, 0, 0.5) !important;
+        transform: translateY(-50%) scale(1.1) !important;
+    }
+}
+
+@media (hover: none) {
+    .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-nav:active {
+        background: rgba(0, 0, 0, 0.5) !important;
+        transform: translateY(-50%) scale(1.1) !important;
+    }
 }
 
 .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-prev {
@@ -170,10 +179,20 @@ body.asmr-fullscreen-active .player-bar-container {
     transform: none !important;
 }
 
-.audio-player.asmr-player-fullscreen .albumart .asmr-gallery-slideshow-toggle:hover {
-    background: rgba(255, 255, 255, 0.15) !important;
-    opacity: 1 !important;
-    transform: scale(1.05) !important;
+@media (hover: hover) {
+    .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-slideshow-toggle:hover {
+        background: rgba(255, 255, 255, 0.15) !important;
+        opacity: 1 !important;
+        transform: scale(1.05) !important;
+    }
+}
+
+@media (hover: none) {
+    .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-slideshow-toggle:active {
+        background: rgba(255, 255, 255, 0.15) !important;
+        opacity: 1 !important;
+        transform: scale(1.05) !important;
+    }
 }
 
 .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-slideshow-toggle .material-icons {
@@ -189,10 +208,20 @@ body.asmr-fullscreen-active .player-bar-container {
     transform: none !important;
 }
 
-.audio-player.asmr-player-fullscreen .albumart .asmr-gallery-exclude:hover {
-    background: rgba(255, 255, 255, 0.15) !important;
-    opacity: 1 !important;
-    transform: scale(1.05) !important;
+@media (hover: hover) {
+    .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-exclude:hover {
+        background: rgba(255, 255, 255, 0.15) !important;
+        opacity: 1 !important;
+        transform: scale(1.05) !important;
+    }
+}
+
+@media (hover: none) {
+    .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-exclude:active {
+        background: rgba(255, 255, 255, 0.15) !important;
+        opacity: 1 !important;
+        transform: scale(1.05) !important;
+    }
 }
 
 .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-exclude .material-icons {
@@ -299,10 +328,20 @@ body.asmr-fullscreen-active .player-bar-container {
     transition: all 0.3s ease !important;
 }
 
-.audio-player .asmr-fullscreen-btn:hover {
-    background: rgba(255, 255, 255, 0.15) !important;
-    opacity: 1 !important;
-    transform: scale(1.05) !important;
+@media (hover: hover) {
+    .audio-player .asmr-fullscreen-btn:hover {
+        background: rgba(255, 255, 255, 0.15) !important;
+        opacity: 1 !important;
+        transform: scale(1.05) !important;
+    }
+}
+
+@media (hover: none) {
+    .audio-player .asmr-fullscreen-btn:active {
+        background: rgba(255, 255, 255, 0.15) !important;
+        opacity: 1 !important;
+        transform: scale(1.05) !important;
+    }
 }
 
 .audio-player .asmr-fullscreen-btn .material-icons {

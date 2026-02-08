@@ -80,6 +80,15 @@ export class WorkTreeManager {
         }
     }
 
+    disable(): void {
+        if (!this.enabled) return;
+        this.enabled = false;
+        this.flatView.disable();
+        this.treeObserver?.disconnect();
+        this.treeObserver = null;
+        this.diveToken++;
+    }
+
     // =========================================================================
     // Route Handling
     // =========================================================================

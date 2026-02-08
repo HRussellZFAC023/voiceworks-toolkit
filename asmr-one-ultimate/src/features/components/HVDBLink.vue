@@ -33,14 +33,14 @@ const chobitUrl = computed(() => rjCode.value ? `https://chobit.cc/s/?f_category
                class="q-icon notranslate material-icons"
                style="font-size: 18px">launch</i>
             <a rel="noreferrer noopener" target="_blank" class="text-blue"
-               :href="hvdbUrl" style="margin-left: 4px">HVDB</a>
+               :href="hvdbUrl">HVDB</a>
         </div>
         <div class="col-auto q-pl-sm asmr-chobit-link">
             <i aria-hidden="true" role="presentation"
                class="q-icon notranslate material-icons"
                style="font-size: 18px">search</i>
             <a rel="noreferrer noopener" target="_blank" class="text-blue"
-               :href="chobitUrl" style="margin-left: 4px">Chobit</a>
+               :href="chobitUrl">Chobit</a>
         </div>
     </template>
 </template>

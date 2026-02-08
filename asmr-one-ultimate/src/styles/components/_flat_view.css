@@ -75,9 +75,18 @@
     transition: background 0.2s ease, color 0.2s ease;
 }
 
-.asmr-flat-panel__close:hover {
-    background: var(--asmr-hover-bg);
-    color: var(--asmr-text-primary);
+@media (hover: hover) {
+    .asmr-flat-panel__close:hover {
+        background: var(--asmr-hover-bg);
+        color: var(--asmr-text-primary);
+    }
+}
+
+@media (hover: none) {
+    .asmr-flat-panel__close:active {
+        background: var(--asmr-hover-bg);
+        color: var(--asmr-text-primary);
+    }
 }
 
 .asmr-flat-panel__close:focus-visible {
@@ -113,8 +122,16 @@
     transition: background-color 0.15s ease;
 }
 
-.asmr-flat-panel .q-item:hover {
-    background: var(--asmr-hover-bg);
+@media (hover: hover) {
+    .asmr-flat-panel .q-item:hover {
+        background: var(--asmr-hover-bg);
+    }
+}
+
+@media (hover: none) {
+    .asmr-flat-panel .q-item:active {
+        background: var(--asmr-hover-bg);
+    }
 }
 
 .asmr-flat-panel .q-item__label--caption {

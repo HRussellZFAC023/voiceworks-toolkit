@@ -1,6 +1,6 @@
 import { openDB, DBSchema } from 'idb';
 import { Logger } from '../core/Utils';
-import { findIconButton, getAudioElement } from '../core/DomUtils';
+import { getAudioElement } from '../core/DomUtils';
 import { KikoeruBridge } from './KikoeruBridge';
 import { EventBus } from '../core/EventBus';
 
@@ -262,7 +262,6 @@ export class AudioCache {
             return;
         }
         Logger.debug('[AudioCache] Starting background download:', url);
-        const cleanup = this.showSpinner();
 
         const promise = (async () => {
             try {
@@ -273,51 +272,17 @@ export class AudioCache {
                 const blob = res.response as Blob;
                 if (blob?.size > 0) await this.cacheAudio(url, blob);
             } catch {
-                // Fallback to fetch
-                try {
-                    const res = await fetch(url);
-                    const blob = await res.blob();
-                    if (blob.size > 0) await this.cacheAudio(url, blob);
-                } catch (err) {
-                    Logger.warn('[AudioCache] Download failed:', err);
-                }
+                // gmRequest unavailable or failed — try native fetch
+                const res = await fetch(url).catch(() => null);
+                const blob = await res?.blob().catch(() => null);
+                if (blob && blob.size > 0) await this.cacheAudio(url, blob);
             }
         })();
 
         this.inFlight.set(url, promise);
         promise.finally(() => {
             this.inFlight.delete(url);
-            cleanup();
         });
-    }
-
-    private showSpinner(): () => void {
-        const btn = this.findPlayButton();
-        if (!btn) return () => { };
-
-        let spinner = btn.querySelector('.asmr-cache-spinner') as HTMLElement | null;
-        if (!spinner) {
-            spinner = document.createElement('span');
-            spinner.className = 'asmr-cache-spinner';
-            spinner.style.display = 'inline-block';
-            spinner.style.width = '12px';
-            spinner.style.height = '12px';
-            spinner.style.marginLeft = '6px';
-            spinner.style.border = '2px solid rgba(255, 255, 255, 0.4)';
-            spinner.style.borderTopColor = 'rgba(255, 255, 255, 0.9)';
-            spinner.style.borderRadius = '50%';
-            spinner.style.animation = 'asmr-spin 1s linear infinite';
-            btn.appendChild(spinner);
-        }
-
-        return () => {
-            spinner?.remove();
-        };
-    }
-
-    private findPlayButton(): HTMLElement | null {
-        return findIconButton('play_arrow', '.audio-player')
-            || findIconButton('play_arrow', '.player-bar');
     }
 
     private static trackObjectUrl(sourceUrl: string, objectUrl: string): void {

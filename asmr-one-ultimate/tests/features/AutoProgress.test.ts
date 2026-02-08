@@ -109,7 +109,6 @@ vi.mock('../../src/core/Utils', async () => {
                     autoProgressReplay: true,
                     autoProgressPostponed: true,
                     autoProgressReplayThreshold: 2,
-                    autoProgressRadioGuard: true,
                     autoProgressRadioSkipThreshold: 3,
                 };
                 return defaults[key] ?? true;
@@ -138,7 +137,6 @@ function setConfig(overrides: Record<string, any>): void {
         autoProgressReplay: true,
         autoProgressPostponed: true,
         autoProgressReplayThreshold: 2,
-        autoProgressRadioGuard: true,
         autoProgressRadioSkipThreshold: 3,
     };
     const merged = { ...defaults, ...overrides };
@@ -394,7 +392,7 @@ describe('AutoProgress', () => {
     // =========================================================================
 
     describe('radio mode guard', () => {
-        it('should block "listened" when radio is active and guard is on', () => {
+        it('should block "listened" when radio is active', () => {
             (RadioMode as any).isActive = true;
             bridge.store.state.User.marks['12345'] = 2;
             (ap as any).checkAndMark(90);
@@ -402,16 +400,6 @@ describe('AutoProgress', () => {
                 (c: any) => c[0]?.progress === 'listened'
             );
             expect(listenedCalls.length).toBe(0);
-        });
-
-        it('should allow "listened" when radio is active but guard is off', () => {
-            setConfig({ autoProgressRadioGuard: false });
-            (RadioMode as any).isActive = true;
-            bridge.store.state.User.marks['12345'] = 2;
-            (ap as any).checkAndMark(90);
-            expect(mockUpdateReview).toHaveBeenCalledWith(
-                expect.objectContaining({ progress: 'listened' })
-            );
         });
 
         it('should still allow "listening" when radio is active', () => {

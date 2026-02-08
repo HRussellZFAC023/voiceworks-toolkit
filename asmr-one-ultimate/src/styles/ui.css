@@ -15,9 +15,9 @@
 /* Dialog Overlay */
 .asmr-filter-overlay {
   position: fixed;
-  left: 12px;
-  right: 12px;
-  bottom: 12px;
+  left: calc(12px + var(--asmr-safe-left, 0px));
+  right: calc(12px + var(--asmr-safe-right, 0px));
+  bottom: calc(12px + var(--asmr-safe-bottom, 0px));
   z-index: var(--q-z-top, 6000);
   padding: 8px 12px;
   border-radius: 8px;
@@ -57,8 +57,10 @@
   justify-content: center;
 }
 
-.asmr-vector-dialog .asmr-close-btn:hover {
-  background: var(--asmr-hover-bg);
+@media (hover: hover) {
+  .asmr-vector-dialog .asmr-close-btn:hover {
+    background: var(--asmr-hover-bg);
+  }
 }
 
 .asmr-vector-dialog .asmr-close-btn i {
@@ -165,10 +167,12 @@
   transition: box-shadow 0.2s, background 0.2s, border-color 0.2s;
 }
 
-.asmr-vector-result:hover {
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-  background: var(--asmr-bg-primary);
-  border-color: var(--asmr-accent);
+@media (hover: hover) {
+  .asmr-vector-result:hover {
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    background: var(--asmr-bg-primary);
+    border-color: var(--asmr-accent);
+  }
 }
 
 .asmr-vector-result:focus-within {
@@ -292,8 +296,10 @@
   justify-content: center;
 }
 
-.asmr-vector-cancel:hover {
-  opacity: 0.8;
+@media (hover: hover) {
+  .asmr-vector-cancel:hover {
+    opacity: 0.8;
+  }
 }
 
 .asmr-vector-input:disabled {
@@ -373,16 +379,27 @@
 }
 
 /* Misc - dialog hover */
-:is(.body--dark, .q-dark) .asmr-vector-dialog .q-item--clickable:hover {
-  background: var(--asmr-bg-tertiary);
+@media (hover: hover) {
+  :is(.body--dark, .q-dark) .asmr-vector-dialog .q-item--clickable:hover {
+    background: var(--asmr-bg-tertiary);
+  }
 }
 
 /* Metadata panel styles are in _metadata.css */
 
-/* HVDB/Chobit link wrapper - make transparent to parent flex row */
+/* HVDB/Chobit link wrapper - display:contents makes it invisible to flexbox,
+   but CSS selectors (q-gutter-xs > *) still use DOM tree, so children miss
+   the gutter margins. Apply them manually. */
 #asmr-hvdb-link-root {
   display: contents;
 }
+
+.asmr-hvdb-link,
+.asmr-chobit-link {
+  margin-top: 4px;
+  margin-left: 4px;
+}
+
 
 #asmr-radio-icon.asmr-accent {
   color: var(--asmr-accent) !important;

@@ -200,7 +200,6 @@ export interface PluginConfig {
     autoProgressReplay: boolean;
     autoProgressPostponed: boolean;
     autoProgressReplayThreshold: number;
-    autoProgressRadioGuard: boolean;
     autoProgressRadioSkipThreshold: number;
 
     // Radio Runtime (persisted for refresh survival)
@@ -341,7 +340,7 @@ export interface AppEvents {
     'whisper:start': { trackSrc: string };
     'whisper:toggle': void;
     'whisper:progress': { percent: number; message: string; stage: string };
-    'whisper:update': { text: string; segments: Array<{ start: number; end: number; text: string }>; final: boolean; chunkIndex?: number };
+    'whisper:update': { text: string; segments: Array<{ start: number; end: number; text: string; words?: Array<{ start: number; end: number; text: string }> }>; final: boolean; chunkIndex?: number };
     'whisper:complete': { text: string };
     'whisper:error': { message: string; isHlsWarning?: boolean };
     'whisper:hls-warning': { message: string };
@@ -385,6 +384,11 @@ export interface AppEvents {
     'gallery:exclude': {};
     // Playlist supplementary
     'playlist:shuffleToggled': { enabled: boolean };
+    // GPU coordination
+    'webgpu:failed': { source: string };
+    'whisper:transcribing': { active: boolean };
+    'embedding:dead': {};
+    'embedding:gpu-failed': {};
 }
 
 export type AppEventName = keyof AppEvents;

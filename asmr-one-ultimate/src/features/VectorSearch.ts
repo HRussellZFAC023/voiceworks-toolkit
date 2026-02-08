@@ -376,13 +376,15 @@ export class VectorSearch {
             }
             Config.set('vectorIndexCursor', this.bulkIndexCursor);
             if (firstWorkId) Config.set('vectorIndexLatestWorkId', firstWorkId);
+            await this.updateIndexCount();
+            const total = await this.countIndex();
             if (!this.autoIndexExhausted) {
-                this.setStatus(I18n.t('magicSearchIndexingContinue'), false);
-                this.scheduleNextBatch();
+                const batchDelay = 60;
+                this.setStatus(I18n.format('magicSearchIndexingContinue', { indexed, cursor: this.bulkIndexCursor, total, delay: batchDelay }), false);
+                this.scheduleNextBatch(batchDelay * 1000);
             } else {
-                this.setStatus(I18n.t('magicSearchIndexingPaused'), false);
+                this.setStatus(I18n.format('magicSearchIndexingPaused', { total }), false);
             }
-            this.updateIndexCount();
         } catch (e) {
             Logger.error('[VectorSearch] Bulk index failed', e);
             this.setStatus(I18n.t('magicSearchBulkIndexFailed'), false);

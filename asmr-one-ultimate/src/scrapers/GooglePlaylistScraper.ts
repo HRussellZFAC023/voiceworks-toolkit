@@ -132,15 +132,11 @@ export class GooglePlaylistScraper {
      * Check if we're currently rate limited by Google
      */
     static isRateLimited(): boolean {
-        try {
-            const limitedAt = this.safeGetValue(RATE_LIMIT_KEY, 0) as number;
-            if (limitedAt && Date.now() - limitedAt < RATE_LIMIT_COOLDOWN_MS) {
-                const remainingMin = Math.ceil((RATE_LIMIT_COOLDOWN_MS - (Date.now() - limitedAt)) / 60000);
-                Logger.debug(`[GooglePlaylistScraper] Still rate limited, ${remainingMin} minutes remaining`);
-                return true;
-            }
-        } catch (e) {
-            // ignore
+        const limitedAt = this.safeGetValue(RATE_LIMIT_KEY, 0) as number;
+        if (limitedAt && Date.now() - limitedAt < RATE_LIMIT_COOLDOWN_MS) {
+            const remainingMin = Math.ceil((RATE_LIMIT_COOLDOWN_MS - (Date.now() - limitedAt)) / 60000);
+            Logger.debug(`[GooglePlaylistScraper] Still rate limited, ${remainingMin} minutes remaining`);
+            return true;
         }
         return false;
     }

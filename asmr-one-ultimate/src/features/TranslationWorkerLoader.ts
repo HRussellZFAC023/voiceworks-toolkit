@@ -79,34 +79,6 @@ async function clearModelCache(modelName) {
     }
 }
 
-// ---- WebGPU adapter/device patches (dual-GPU + shader-f16 fixes) ----
-// Fixes: (1) Chrome using wrong GPU on dual-GPU laptops (AMD iGPU + Intel Arc dGPU)
-//        (2) ONNX Runtime requesting shader-f16 which fails on some D3D12 backends
-(function patchWebGPU() {
-    if (typeof navigator === 'undefined' || !navigator.gpu) return;
-    const origRA = navigator.gpu.requestAdapter.bind(navigator.gpu);
-    navigator.gpu.requestAdapter = async function(options) {
-        const adapter = await origRA({ ...options, powerPreference: 'high-performance' });
-        if (!adapter) return adapter;
-        const origRD = adapter.requestDevice.bind(adapter);
-        adapter.requestDevice = async function(desc) {
-            try {
-                return await origRD(desc);
-            } catch (err) {
-                const feats = [...(desc?.requiredFeatures || [])];
-                if (feats.includes('shader-f16')) {
-                    console.warn('[Translation Worker] requestDevice failed with shader-f16, retrying without:', err?.message);
-                    const fresh = await origRA({ ...options, powerPreference: 'high-performance' });
-                    if (!fresh) throw err;
-                    return fresh.requestDevice({ ...desc, requiredFeatures: feats.filter(f => f !== 'shader-f16') });
-                }
-                throw err;
-            }
-        };
-        return adapter;
-    };
-})();
-
 const isFirefox = typeof navigator !== 'undefined' && /firefox/i.test(navigator.userAgent);
 if (isFirefox) console.log('[Translation Worker] Firefox detected');
 
@@ -131,16 +103,12 @@ let preferredDtype = '';
 async function detectWebGPU() {
     if (typeof navigator === 'undefined' || !('gpu' in navigator)) return null;
     try {
-        // Prefer discrete GPU; fall back to integrated if unavailable
-        let adapter = await withTimeout(
-            navigator.gpu.requestAdapter({ powerPreference: 'high-performance' }),
-            10000, 'requestAdapter'
-        );
+        // Direct requestAdapter — no timeout wrapper.
+        // withTimeout creates dangling promises that interfere with subsequent
+        // requestAdapter calls from ONNX Runtime internally.
+        let adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
         if (!adapter) {
-            adapter = await withTimeout(
-                navigator.gpu.requestAdapter({ powerPreference: 'low-power' }),
-                10000, 'requestAdapter(low-power)'
-            );
+            adapter = await navigator.gpu.requestAdapter({ powerPreference: 'low-power' });
         }
         if (!adapter) return null;
         const info = adapter.info || {};
@@ -149,14 +117,6 @@ async function detectWebGPU() {
         console.log('[Translation Worker] WebGPU adapter:', vendor, '| maxBufferSize:', maxBuf, '(' + Math.round(maxBuf / 1048576) + ' MB)');
         if (maxBuf > 0 && maxBuf < 134217728) {
             console.warn('[Translation Worker] maxBufferSize too small for translation models');
-            return null;
-        }
-        // Verify device creation actually works (adapter detection alone fails on dual-GPU systems)
-        try {
-            const testDevice = await withTimeout(adapter.requestDevice(), 10000, 'requestDevice');
-            testDevice.destroy();
-        } catch (deviceErr) {
-            console.warn('[Translation Worker] WebGPU device creation failed:', deviceErr?.message);
             return null;
         }
         return { device: 'webgpu', vendor, maxBuf };
@@ -181,8 +141,11 @@ function getDtypeCandidates(device, vendor, maxBuf) {
             console.log('[Translation Worker] Firefox: using fp32 only (fp16 hangs)');
             return ['fp32'];
         }
-        // opus-mt models are small (~52MB fp16) — fp16 works on virtually any GPU
-        const candidates = ['fp16', 'fp32'];
+        const isIntel = /intel|xe|arc/i.test(vendor);
+        const isQualcomm = /qualcomm|adreno/i.test(vendor);
+        // Intel Xe-2 HPG / Qualcomm Adreno: fp32 first (fp16 may produce garbage)
+        // Others (Apple, NVIDIA, AMD): fp16 first (uses less memory, faster)
+        const candidates = (isIntel || isQualcomm) ? ['fp32', 'fp16'] : ['fp16', 'fp32'];
         if (preferredDtype && candidates.includes(preferredDtype)) {
             return [preferredDtype, ...candidates.filter(d => d !== preferredDtype)];
         }
@@ -199,18 +162,11 @@ function getDtypeCandidates(device, vendor, maxBuf) {
 
 /**
  * Release GPU memory after failed pipeline creation.
- * When pipeline() throws partway through, ONNX sessions (encoder/decoder) may
- * have allocated GPU buffers we can't reach. Yield to GC + release ONNX EP.
+ * Yield to event loop so browser GC can reclaim orphaned GPU buffers.
+ * Note: ort.env.webgpu.device manipulation is intentionally omitted —
+ * ONNX Runtime ignores pre-set device references (issue #26107).
  */
 async function releaseGpuResources() {
-    // 1. Try to release ONNX Runtime's execution provider resources
-    try {
-        if (typeof globalThis.ort !== 'undefined' && globalThis.ort.env?.webgpu?.device) {
-            // Force ONNX RT to drop its device reference
-            globalThis.ort.env.webgpu.device = undefined;
-        }
-    } catch {}
-    // 2. Yield to event loop so browser GC can reclaim orphaned GPU buffers
     await new Promise(r => setTimeout(r, 100));
 }
 

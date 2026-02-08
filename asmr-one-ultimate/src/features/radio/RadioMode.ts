@@ -126,6 +126,9 @@ export class RadioMode {
         this.eventCleanups.push(
             EventBus.on('track:end', () => this.handleTrackEnd()),
             EventBus.on('work:change', (event: any) => this.onWorkChange(event)),
+            EventBus.on('config:change', ({ key, value }: { key: string; value: unknown }) => {
+                if (key === 'playAllInFolder') this.playAllInFolder = !!value;
+            }),
         );
 
         Logger.log('[RadioMode] Initialized');

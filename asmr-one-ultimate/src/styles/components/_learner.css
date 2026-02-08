@@ -27,7 +27,7 @@
 
 .learner-subs-collapsed {
     position: fixed;
-    bottom: 60px;
+    bottom: calc(60px + var(--asmr-safe-bottom, 0px));
     /* Stacks on top of the player bar */
     left: var(--asmr-drawer-width, 0px);
     right: 0;
@@ -120,9 +120,14 @@
 }
 .karaoke-upcoming {
     color: var(--asmr-text-tertiary, rgba(255, 255, 255, 0.38));
+    transition: color 0.15s ease;
+}
+.karaoke-upcoming.karaoke-hidden {
+    visibility: hidden;
 }
 .karaoke-past {
     color: var(--asmr-text-primary);
+    transition: color 0.15s ease;
 }
 
 /* ============================================
@@ -219,10 +224,20 @@
     justify-content: center;
 }
 
-.learner-btn-normal:hover {
-    opacity: 1;
-    background: var(--asmr-hover-bg);
-    color: var(--asmr-accent) !important;
+@media (hover: hover) {
+    .learner-btn-normal:hover {
+        opacity: 1;
+        background: var(--asmr-hover-bg);
+        color: var(--asmr-accent) !important;
+    }
+}
+
+@media (hover: none) {
+    .learner-btn-normal:active {
+        opacity: 1;
+        background: var(--asmr-hover-bg);
+        color: var(--asmr-accent) !important;
+    }
 }
 
 .learner-btn-active {

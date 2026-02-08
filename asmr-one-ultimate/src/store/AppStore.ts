@@ -97,7 +97,6 @@ const CONFIG_DEFAULTS: PluginConfig = {
     autoProgressReplay: false,
     autoProgressPostponed: false,
     autoProgressReplayThreshold: 2,
-    autoProgressRadioGuard: false,
     autoProgressRadioSkipThreshold: 3,
 
     // Radio Runtime (persisted for refresh survival)

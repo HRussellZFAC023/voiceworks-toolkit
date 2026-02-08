@@ -2,6 +2,12 @@
     /* Core Brand */
     --asmr-accent: var(--q-primary, #7c4dff);
 
+    /* Safe Area Insets (notch, home indicator, rounded corners) */
+    --asmr-safe-top: env(safe-area-inset-top, 0px);
+    --asmr-safe-bottom: env(safe-area-inset-bottom, 0px);
+    --asmr-safe-left: env(safe-area-inset-left, 0px);
+    --asmr-safe-right: env(safe-area-inset-right, 0px);
+
     /* Semantic Backgrounds — Light Mode */
     --asmr-bg-primary: #ffffff;
     --asmr-bg-secondary: #f5f5f5;

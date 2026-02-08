@@ -1,10 +1,12 @@
 import { GM_listValues, GM_deleteValue } from '$';
-import { CacheKeys, SharedCache } from '../core/Cache';
+import { CacheKeys, SharedCache, hashString } from '../core/Cache';
+import { GpuScheduler, Priority } from '../core/GpuScheduler';
 import { gmRequest, retryWithBackoff, HttpError } from '../infrastructure/HttpClient';
 import { I18n, Config } from '../core/Config';
 import { Logger } from '../core/Utils';
 import { EventBus } from '../core/EventBus';
 import { createTranslationWorker } from '../features/TranslationWorkerLoader';
+import { DeviceCapabilities } from '../core/DeviceCapabilities';
 import {
     glossaryMap,
     alwaysRegex, alwaysReplacerMap,
@@ -29,14 +31,33 @@ const BATCH_TIMEOUT_BASE_WASM_MS = 30_000;
 const BATCH_TIMEOUT_PER_ITEM_MS = 50;
 const BATCH_TIMEOUT_PER_ITEM_WASM_MS = 150;
 
-// Smaller chunks = more chances for single-text (current line) requests to interleave
-// between batch chunks in the worker queue. GPU processes each chunk atomically.
-const BATCH_CHUNK_SIZE = 16;
+// Larger chunks = fewer round-trips, better GPU utilization.
+// WASM stays small to keep per-chunk inference short so live singles can interleave.
+const BATCH_CHUNK_SIZE_GPU = 64;
+const BATCH_CHUNK_SIZE_WASM = 16;
+// When Whisper is actively transcribing, reduce GPU batch size to avoid GPU contention
+const BATCH_CHUNK_SIZE_GPU_THROTTLED = 8;
 
 // Remote (Google Translate) settings
 const REMOTE_CONCURRENCY = 12;
 const REMOTE_MIN_INTERVAL_MS = 50;
 const REMOTE_RATE_LIMIT_PAUSE_MS = 60_000;
+
+// Single-pass quote/fullwidth normalization — compiled once at module scope
+const _quoteMap: Record<string, string> = {
+    '``': '"', "''": '"',
+    '\u00AB': '"', '\u00BB': '"', '\u201E': '"', '\u201C': '"', '\u201D': '"',
+    '\u301D': '"', '\u301E': '"', '\u301F': '"', '\u2033': '"',
+    '\u2018': "'", '\u2019': "'", '\u201A': "'", '\u2039': "'", '\u203A': "'", '\u2032': "'",
+    '\uFF08': '(', '\uFF09': ')',
+    '\u3010': '[', '\u3011': ']',
+    '\uFF01': '!', '\uFF1F': '?',
+    '\uFF1A': ':', '\uFF1B': ';', '\uFF0C': ',',
+};
+const _quoteRegex = new RegExp(
+    Object.keys(_quoteMap).map(k => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'),
+    'g',
+);
 
 // Opus-MT models: ja→en (~105MB fp16) and zh→en (~110MB fp16).
 // Both fit comfortably within the 2048 MB WebGPU buffer limit.
@@ -208,12 +229,14 @@ function extractBracketedPrefixes(text: string): { brackets: string[]; rest: str
 // Cache
 // ============================================================================
 
+// lang parameter must already be normalized via normalizeTargetLang()
 const cacheKey = (text: string, lang: string, source: TranslationSource): string =>
-    CacheKeys.translation(text, normalizeTargetLang(lang), source);
+    CacheKeys.translation(text, lang, source);
 
 function getCached(text: string, lang: string): string | null {
-    return SharedCache.get<string>(cacheKey(text, lang, 'local'))
-        || SharedCache.get<string>(cacheKey(text, lang, 'remote'))
+    const h = hashString(text);
+    return SharedCache.get<string>(`asmr-ult:trans:local:${lang}:${h}`)
+        || SharedCache.get<string>(`asmr-ult:trans:remote:${lang}:${h}`)
         || null;
 }
 
@@ -242,28 +265,56 @@ let webgpuFailed = false;
 // dtype that worked last time — sent to new workers to skip failed candidates (persisted across sessions)
 let rememberedDtype = SharedCache.get<string>(CacheKeys.translationPreferredDtype()) || '';
 
+// No cross-service webgpu:failed propagation — each service independently tries WebGPU
+// with its own dtype cascade (fp32 on Intel, etc.). Serialized warmup in main.ts prevents
+// device contention. Cross-service propagation was too aggressive: one service's fp16
+// failure would permanently lock all services into WASM for the entire session.
+
+// GPU contention: throttle translation batches while Whisper is actively transcribing
+let whisperActive = false;
+EventBus.on('whisper:transcribing', ({ active }) => {
+    whisperActive = active;
+});
+
 // In-flight dedup: prevent duplicate translate() calls for the same text+lang
 const translateInFlight = new Map<string, Promise<string>>();
 
-// Idle unload: terminate workers after 15 minutes of no translation requests
-const IDLE_UNLOAD_MS = 15 * 60 * 1000;
+// Adaptive batch chunk size: converges based on observed throughput (0 = use static defaults)
+let adaptiveChunkSize = 0;
+
+// Graduated idle unload: soft = unload less-used model early, hard = unload all
+// Tier-aware: constrained devices unload sooner to free memory
+const tierIdleMs = DeviceCapabilities.budget.translationIdleMs;
+const IDLE_SOFT_UNLOAD_MS = Math.min(5 * 60 * 1000, tierIdleMs);
+const IDLE_HARD_UNLOAD_MS = tierIdleMs;
 let idleUnloadTimer: ReturnType<typeof setTimeout> | null = null;
+let idleSoftTimer: ReturnType<typeof setTimeout> | null = null;
 
 function resetIdleUnloadTimer(): void {
     if (idleUnloadTimer) clearTimeout(idleUnloadTimer);
+    if (idleSoftTimer) clearTimeout(idleSoftTimer);
+
+    // Soft unload: free the less-used zh-en model after 5 min idle
+    idleSoftTimer = setTimeout(() => {
+        const zhWorker = workers.find(w => w.model === OPUS_ZH_EN && w.pending.size === 0);
+        if (zhWorker) {
+            Logger.log('[TranslationService] Soft idle: unloading zh-en to free VRAM');
+            terminateWorker(OPUS_ZH_EN);
+        }
+    }, IDLE_SOFT_UNLOAD_MS);
+
+    // Hard unload: free all after 15 min idle
     idleUnloadTimer = setTimeout(() => {
         if (workers.length > 0 && workers.every(w => w.pending.size === 0)) {
-            Logger.log('[TranslationService] Idle timeout reached, unloading workers to free memory');
+            Logger.log('[TranslationService] Hard idle timeout, unloading all workers');
             terminateWorker();
         }
-    }, IDLE_UNLOAD_MS);
+    }, IDLE_HARD_UNLOAD_MS);
 }
 
 function clearIdleUnloadTimer(): void {
-    if (idleUnloadTimer) {
-        clearTimeout(idleUnloadTimer);
-        idleUnloadTimer = null;
-    }
+    if (idleUnloadTimer) { clearTimeout(idleUnloadTimer); idleUnloadTimer = null; }
+    if (idleSoftTimer) { clearTimeout(idleSoftTimer); idleSoftTimer = null; }
 }
 
 function getSingleTimeout(): number {
@@ -279,7 +330,8 @@ function getBatchTimeout(itemCount: number): number {
 function terminateWorker(model?: string): void {
     const toKill = model ? workers.filter(w => w.model === model) : workers;
     for (const w of toKill) {
-        try { w.worker.terminate(); } catch { /* ignore */ }
+        w.worker.postMessage({ type: 'cleanup' });
+        setTimeout(() => w.worker.terminate(), 300);
         for (const [, req] of w.pending) {
             clearTimeout(req.timer);
             req.reject(new Error('Worker terminated'));
@@ -316,6 +368,7 @@ function handleWorkerMessage(entry: WorkerEntry, model: string, onReady: () => v
         if (msg.status === 'ready') {
             if (msg.backend === 'wasm' && entry.backend && entry.backend !== 'wasm') {
                 webgpuFailed = true;
+                EventBus.emit('webgpu:failed', { source: 'translation' });
                 for (const w of workers) {
                     if (w !== entry) w.worker.postMessage({ type: 'skip-webgpu' });
                 }
@@ -350,6 +403,7 @@ function handleWorkerMessage(entry: WorkerEntry, model: string, onReady: () => v
 
                 if (isGpuError && !webgpuFailed) {
                     webgpuFailed = true;
+                    EventBus.emit('webgpu:failed', { source: 'translation' });
                     Logger.warn('[TranslationService] WebGPU inference failed, restarting on WASM');
                     const models = [...new Set(workers.map(w => w.model))];
                     terminateWorker();
@@ -358,6 +412,7 @@ function handleWorkerMessage(entry: WorkerEntry, model: string, onReady: () => v
             } else if (!resolved) {
                 if (isGpuError && !webgpuFailed) {
                     webgpuFailed = true;
+                    EventBus.emit('webgpu:failed', { source: 'translation' });
                     Logger.warn('[TranslationService] WebGPU init failed, retrying on WASM');
                     resolved = true;
                     onError(new Error(err));
@@ -380,7 +435,21 @@ function handleWorkerMessage(entry: WorkerEntry, model: string, onReady: () => v
                 clearTimeout(req.timer);
                 req.resolve(msg.data);
                 entry.pending.delete(msg.id);
+                GpuScheduler.onGpuSuccess();
             }
+        } else if (msg.status === 'cdn-success') {
+            // Persist successful CDN indices so future workers try the known-good CDN first
+            if (typeof msg.transformerIdx === 'number') {
+                SharedCache.set('asmr-ult:cdn:transformer-idx', msg.transformerIdx, CACHE_TTL_MS);
+            }
+            if (typeof msg.hubIdx === 'number') {
+                SharedCache.set('asmr-ult:cdn:hub-idx', msg.hubIdx, CACHE_TTL_MS);
+            }
+        } else if (msg.status === 'gpu-device-lost') {
+            // Transient GPU device loss — worker will recover with fresh device on next call.
+            // Don't set webgpuFailed or restart workers, but notify scheduler.
+            Logger.warn('[TranslationService] GPU device lost (transient):', msg.data?.message);
+            EventBus.emit('gpu:device-lost', { worker: 'translation' as const });
         } else if (msg.status === 'progress') {
             if (!entry.ready) {
                 EventBus.emit('translation:progress', {
@@ -428,8 +497,22 @@ function initWorker(model: string, force = false): Promise<void> {
             if (webgpuFailed) {
                 entry.worker.postMessage({ type: 'skip-webgpu' });
             }
-            if (rememberedDtype) {
+            // Only send cached dtype hint if it's relevant. WASM-only dtypes (q8/q4)
+            // are useless when GPU is available — worker uses fp32 on WebGPU anyway,
+            // and q8 is the default WASM fallback order.
+            const isWasmOnlyDtype = ['q8', 'q4'].includes(rememberedDtype);
+            if (rememberedDtype && !(isWasmOnlyDtype && DeviceCapabilities.profile.hasGpu && !webgpuFailed)) {
                 entry.worker.postMessage({ type: 'preferred-dtype', dtype: rememberedDtype });
+            }
+            // Send persisted CDN preference so worker tries known-good CDN first
+            const cdnTransformerIdx = SharedCache.get<number>('asmr-ult:cdn:transformer-idx');
+            const cdnHubIdx = SharedCache.get<number>('asmr-ult:cdn:hub-idx');
+            if (cdnTransformerIdx !== null || cdnHubIdx !== null) {
+                entry.worker.postMessage({
+                    type: 'cdn-preference',
+                    transformerIdx: cdnTransformerIdx ?? 0,
+                    hubIdx: cdnHubIdx ?? 0,
+                });
             }
 
             entry.worker.onmessage = handleWorkerMessage(entry, model, resolve, reject);
@@ -476,7 +559,7 @@ async function translateLocal(text: string, targetLang: string): Promise<string 
         const pending = initPromises.get(route.model);
         if (pending) {
             try {
-                await Promise.race([pending, new Promise((_, rej) => setTimeout(() => rej(new Error('init-wait')), 5000))]);
+                await Promise.race([pending, new Promise((_, rej) => setTimeout(() => rej(new Error('init-wait')), 2000))]);
                 entry = getWorker(route.model);
             } catch { /* timed out or failed, fall through */ }
         } else {
@@ -485,7 +568,12 @@ async function translateLocal(text: string, targetLang: string): Promise<string 
         if (!entry) return null;
     }
 
-    const raw = await sendToWorker(entry, text, route.model, getSingleTimeout());
+    // Single translations get REALTIME priority — they're the current subtitle/title
+    const raw = await GpuScheduler.enqueue({
+        priority: Priority.REALTIME,
+        worker: 'translation',
+        execute: () => sendToWorker(entry, text, route.model, getSingleTimeout()),
+    });
     if (!raw) return null;
 
     const cleaned = TranslationService.cleanQuotes(raw);
@@ -514,7 +602,7 @@ async function translateLocalBatch(texts: string[], targetLang: string): Promise
             const pending = initPromises.get(group.route.model);
             if (pending) {
                 try {
-                    await Promise.race([pending, new Promise((_, rej) => setTimeout(() => rej(new Error('init-wait')), 5000))]);
+                    await Promise.race([pending, new Promise((_, rej) => setTimeout(() => rej(new Error('init-wait')), 2000))]);
                     entry = getWorker(group.route.model);
                 } catch { /* timed out */ }
             } else {
@@ -523,14 +611,41 @@ async function translateLocalBatch(texts: string[], targetLang: string): Promise
             if (!entry) return;
         }
 
-        // Split into chunks for throughput
-        for (let i = 0; i < group.texts.length; i += BATCH_CHUNK_SIZE) {
-            const chunkTexts = group.texts.slice(i, i + BATCH_CHUNK_SIZE);
-            const chunkIndices = group.indices.slice(i, i + BATCH_CHUNK_SIZE);
+        // Sequential chunks: each chunk awaits completion before the next is sent.
+        // This naturally staggers timeouts and creates interleave points where
+        // single-text requests (live whisper) can jump the worker queue.
+        // Adaptive: converge chunk size based on observed ms-per-item throughput.
+        let chunkSize = webgpuFailed
+            ? BATCH_CHUNK_SIZE_WASM
+            : whisperActive ? BATCH_CHUNK_SIZE_GPU_THROTTLED : BATCH_CHUNK_SIZE_GPU;
+        if (adaptiveChunkSize > 0) chunkSize = whisperActive ? Math.max(4, adaptiveChunkSize >> 1) : adaptiveChunkSize;
+
+        for (let i = 0; i < group.texts.length; i += chunkSize) {
+            const chunkTexts = group.texts.slice(i, i + chunkSize);
+            const chunkIndices = group.indices.slice(i, i + chunkSize);
             const timeoutMs = getBatchTimeout(chunkTexts.length);
 
             try {
-                const translated = await sendToWorker(entry, chunkTexts, group.route.model, timeoutMs);
+                const t0 = performance.now();
+                // Batch chunks get NORMAL priority — background pre-translation
+                const translated = await GpuScheduler.enqueue({
+                    priority: Priority.NORMAL,
+                    worker: 'translation',
+                    execute: () => sendToWorker(entry, chunkTexts, group.route.model, timeoutMs),
+                    cancellable: true,
+                });
+                const elapsedMs = performance.now() - t0;
+
+                // Adapt chunk size: target 2-5s per chunk (GPU=3s, WASM=5s)
+                if (chunkTexts.length >= 4 && elapsedMs > 100) {
+                    const targetMs = webgpuFailed ? 5000 : 3000;
+                    const msPerItem = elapsedMs / chunkTexts.length;
+                    const ideal = Math.round(targetMs / msPerItem);
+                    adaptiveChunkSize = Math.max(4, Math.min(128, ideal));
+                    // Update chunkSize for remaining chunks in this batch
+                    chunkSize = whisperActive ? Math.max(4, adaptiveChunkSize >> 1) : adaptiveChunkSize;
+                }
+
                 if (Array.isArray(translated)) {
                     for (let j = 0; j < chunkIndices.length; j++) {
                         const raw = translated[j];
@@ -556,11 +671,29 @@ async function translateLocalBatch(texts: string[], targetLang: string): Promise
 let remoteActive = 0;
 let remoteLastTime = 0;
 let remotePausedUntil = 0;
+// Promise-based semaphore: waiters are resolved FIFO when a slot frees up (replaces polling loop)
+const remoteWaiters: Array<() => void> = [];
+
+function acquireRemoteSlot(): Promise<void> {
+    if (remoteActive < REMOTE_CONCURRENCY) {
+        remoteActive++;
+        return Promise.resolve();
+    }
+    return new Promise<void>(resolve => {
+        remoteWaiters.push(() => { remoteActive++; resolve(); });
+    });
+}
+
+function releaseRemoteSlot(): void {
+    remoteActive--;
+    const next = remoteWaiters.shift();
+    if (next) next();
+}
 
 async function translateRemoteSingle(text: string, targetLang: string): Promise<string> {
     // Rate limiting
-    while (Date.now() < remotePausedUntil) {
-        await new Promise(r => setTimeout(r, remotePausedUntil - Date.now()));
+    if (Date.now() < remotePausedUntil) {
+        await new Promise(r => setTimeout(r, Math.max(0, remotePausedUntil - Date.now())));
     }
 
     // Minimum interval between requests
@@ -569,11 +702,7 @@ async function translateRemoteSingle(text: string, targetLang: string): Promise<
         await new Promise(r => setTimeout(r, REMOTE_MIN_INTERVAL_MS - elapsed));
     }
 
-    while (remoteActive >= REMOTE_CONCURRENCY) {
-        await new Promise(r => setTimeout(r, 50));
-    }
-
-    remoteActive++;
+    await acquireRemoteSlot();
     remoteLastTime = Date.now();
 
     try {
@@ -593,7 +722,7 @@ async function translateRemoteSingle(text: string, targetLang: string): Promise<
         }
         throw e;
     } finally {
-        remoteActive--;
+        releaseRemoteSlot();
     }
 }
 
@@ -609,20 +738,18 @@ export const TranslationService = {
      */
     async ensureLocalModelReady(): Promise<void> {
         if (Config.get('preferLocalTranslation') === false) return;
-        await Promise.all([
-            initWorker(OPUS_JA_EN, false),
-            initWorker(OPUS_ZH_EN, false),
-        ]);
+        // Sequential loading: avoid creating 2 GPU devices simultaneously
+        await initWorker(OPUS_JA_EN, false);
+        await initWorker(OPUS_ZH_EN, false);
     },
 
     /**
      * Force-reload translation models.
      */
     async warmupLocalModel(): Promise<void> {
-        await Promise.all([
-            initWorker(OPUS_JA_EN, true),
-            initWorker(OPUS_ZH_EN, true),
-        ]);
+        // Sequential loading: avoid creating 2 GPU devices simultaneously
+        await initWorker(OPUS_JA_EN, true);
+        await initWorker(OPUS_ZH_EN, true);
         resetIdleUnloadTimer();
     },
 
@@ -644,6 +771,7 @@ export const TranslationService = {
      */
     async translate(text: string, targetLang = 'en'): Promise<string> {
         if (!text) return '';
+        targetLang = normalizeTargetLang(targetLang);
         resetIdleUnloadTimer();
 
         const cached = getCached(text, targetLang);
@@ -666,14 +794,13 @@ export const TranslationService = {
     /** @internal */
     async _translateInner(text: string, targetLang: string): Promise<string> {
         // 0. Bracket preprocessing — extract leading 【...】 before translation
+        //    Batch all parts in a single translateBatch() instead of N separate translate() calls
         const bracketSplit = extractBracketedPrefixes(text);
         if (bracketSplit) {
-            const [bracketResults, restResult] = await Promise.all([
-                Promise.all(bracketSplit.brackets.map(b => this.translate(b, targetLang))),
-                this.translate(bracketSplit.rest, targetLang),
-            ]);
-            const bracketStr = bracketResults.map(b => `[${b}]`).join(' ');
-            const result = `${bracketStr} ${restResult}`;
+            const allParts = [...bracketSplit.brackets, bracketSplit.rest];
+            const results = await this.translateBatch(allParts, targetLang);
+            const bracketStr = results.slice(0, -1).map(b => `[${b}]`).join(' ');
+            const result = `${bracketStr} ${results[results.length - 1]}`;
             SharedCache.set(cacheKey(text, targetLang, 'local'), result, CACHE_TTL_MS);
             return result;
         }
@@ -721,6 +848,7 @@ export const TranslationService = {
      */
     async translateBatch(texts: string[], targetLang = 'en'): Promise<string[]> {
         if (texts.length === 0) return [];
+        targetLang = normalizeTargetLang(targetLang);
 
         const results = new Array(texts.length).fill('');
         const uncached: { idx: number; text: string }[] = [];
@@ -759,9 +887,11 @@ export const TranslationService = {
 
         if (stillUncached.length === 0) return results;
 
-        // Pre-process remaining texts with glossary substitution for model
+        // Pre-process remaining texts with glossary substitution for model — store mapping for reuse in remote fallback
+        const preprocessedMap = new Map<string, string>();
         const preprocessedTexts = stillUncached.map(u => {
             const [preprocessed] = glossaryPreProcess(u.text, targetLang);
+            preprocessedMap.set(u.text, preprocessed);
             return preprocessed;
         });
         let remaining: { idx: number; text: string }[] = [];
@@ -795,7 +925,7 @@ export const TranslationService = {
 
             const remoteResults = await Promise.allSettled(
                 remaining.map(({ text }) => {
-                    const [preprocessed] = glossaryPreProcess(text, targetLang);
+                    const preprocessed = preprocessedMap.get(text) || text;
                     return translateRemoteSingle(preprocessed, targetLang).catch(() => text);
                 })
             );
@@ -847,7 +977,7 @@ export const TranslationService = {
 
     peekCached(text: string, targetLang = 'en'): string | null {
         if (!text) return null;
-        return getCached(text, targetLang);
+        return getCached(text, normalizeTargetLang(targetLang));
     },
 
     async autoTranslate(text: string, targetLang = 'en'): Promise<string> {
@@ -894,19 +1024,7 @@ export const TranslationService = {
 
     cleanQuotes(text: string): string {
         if (!text) return '';
-        let s = text;
-        s = s.replace(/``/g, '"').replace(/''/g, '"');
-        const replacements: [RegExp, string][] = [
-            [/«|»|„|"|"|〝|〞|〟|″|〝/g, '"'],
-            [/'|'|‚|‹|›|′/g, "'"],
-            [/（/g, '('], [/）/g, ')'],
-            [/【/g, '['], [/】/g, ']'],
-            [/！/g, '!'], [/？/g, '?'],
-            [/：/g, ':'], [/；/g, ';'], [/，/g, ','],
-        ];
-        for (const [pattern, replacement] of replacements) {
-            s = s.replace(pattern, replacement);
-        }
+        let s = text.replace(_quoteRegex, m => _quoteMap[m] || m);
         s = s.replace(/"\s+([^"]+)\s+"/g, '"$1"');
         s = s.replace(/'\s+([^']+)\s+'/g, "'$1'");
         return s.trim();

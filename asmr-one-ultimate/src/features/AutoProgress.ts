@@ -344,7 +344,7 @@ export class AutoProgress {
      */
     private markAsListened(workId: string): void {
         // Radio mode guard: don't mark listened/replay when radio is active
-        if (Config.get('autoProgressRadioGuard') && RadioMode.isActive) {
+        if (RadioMode.isActive) {
             Logger.debug(`[AutoProgress] Radio guard: skipping "listened" for ${workId}`);
             return;
         }
@@ -355,11 +355,6 @@ export class AutoProgress {
         // Check replay threshold
         const threshold = Config.get('autoProgressReplayThreshold') || 2;
         if (Config.get('autoProgressReplay') && count >= threshold) {
-            // Radio mode guard also applies to replay
-            if (Config.get('autoProgressRadioGuard') && RadioMode.isActive) {
-                Logger.debug(`[AutoProgress] Radio guard: skipping "replay" for ${workId}`);
-                return;
-            }
             this.setProgress(workId, 'replay');
         } else {
             this.setProgress(workId, 'listened');

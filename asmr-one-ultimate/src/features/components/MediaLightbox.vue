@@ -690,7 +690,7 @@ function renderPdf(wrapper: HTMLElement, item: MediaFile, url: string): void {
             pdfContainer.appendChild(grid);
             isLoading.value = false;
 
-            const fastOptions = text.length > 20000 ? { fastDeadlineMs: 900, maxLines: 80 } : undefined;
+            const fastOptions = text.length > 20000 ? { fastDeadlineMs: 30000, maxLines: 80 } : undefined;
             translateGridCells(text, translatedCells, targetLang, fastOptions).then((ok) => {
                 if (!ok) {
                     pdfContainer.innerHTML = '';
@@ -736,7 +736,7 @@ function renderText(wrapper: HTMLElement, item: MediaFile, url: string): void {
                 wrapper.appendChild(grid);
                 if (note) wrapper.appendChild(note);
 
-                const fastOptions = text.length > 20000 ? { fastDeadlineMs: 900, maxLines: 80 } : undefined;
+                const fastOptions = text.length > 20000 ? { fastDeadlineMs: 30000, maxLines: 80 } : undefined;
                 const ok = await translateGridCells(text, translatedCells, targetLang, fastOptions);
                 if (!ok) {
                     wrapper.innerHTML = '';
@@ -1064,10 +1064,40 @@ async function extractPdfText(url: string): Promise<string | null> {
         for (let i = 1; i <= maxPages; i++) {
             const page = await doc.getPage(i);
             const content = await page.getTextContent();
-            const strings = (content.items || [])
-                .map((item: { str: string }) => item.str)
-                .filter((s: string) => s && s.trim().length > 0);
-            if (strings.length) pages.push(strings.join(' '));
+            const lines: string[] = [];
+            let currentLine = '';
+
+            for (const item of (content.items || []) as Array<{ str?: string; hasEOL?: boolean }>) {
+                if (item.str) currentLine += item.str;
+                if (item.hasEOL) {
+                    if (currentLine.trim()) lines.push(currentLine.trim());
+                    currentLine = '';
+                }
+            }
+            if (currentLine.trim()) lines.push(currentLine.trim());
+
+            // Split any remaining long lines at sentence boundaries (CJK: 。！？)
+            // so each grid cell stays within translation model limits
+            const splitLines: string[] = [];
+            for (const line of lines) {
+                if (line.length <= 300) {
+                    splitLines.push(line);
+                } else {
+                    const parts = line.split(/(?<=[。！？\.\!\?])\s*/);
+                    let buf = '';
+                    for (const part of parts) {
+                        if (buf && buf.length + part.length > 300) {
+                            splitLines.push(buf);
+                            buf = part;
+                        } else {
+                            buf += part;
+                        }
+                    }
+                    if (buf) splitLines.push(buf);
+                }
+            }
+
+            if (splitLines.length) pages.push(splitLines.join('\n'));
         }
 
         return pages.join('\n\n');

@@ -1,0 +1,703 @@
+{
+  "config": {
+    "configFile": "C:\\Users\\admin\\Desktop\\dlsite-doujin-renamer-0.2.9\\asmr-one-ultimate\\playwright.bench.config.ts",
+    "rootDir": "C:/Users/admin/Desktop/dlsite-doujin-renamer-0.2.9/asmr-one-ultimate/tests/e2e/benchmarks",
+    "forbidOnly": false,
+    "fullyParallel": false,
+    "globalSetup": null,
+    "globalTeardown": null,
+    "globalTimeout": 0,
+    "grep": {},
+    "grepInvert": null,
+    "maxFailures": 0,
+    "metadata": {},
+    "preserveOutput": "always",
+    "projects": [
+      {
+        "outputDir": "C:/Users/admin/Desktop/dlsite-doujin-renamer-0.2.9/asmr-one-ultimate/test-results",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {},
+        "id": "benchmarks",
+        "name": "benchmarks",
+        "testDir": "C:/Users/admin/Desktop/dlsite-doujin-renamer-0.2.9/asmr-one-ultimate/tests/e2e/benchmarks",
+        "testIgnore": [],
+        "testMatch": [
+          "**/*.bench.ts"
+        ],
+        "timeout": 180000
+      }
+    ],
+    "quiet": false,
+    "reporter": [
+      [
+        "json",
+        {
+          "outputFile": "benchmark-results.json"
+        }
+      ],
+      [
+        "list",
+        null
+      ]
+    ],
+    "reportSlowTests": {
+      "max": 5,
+      "threshold": 300000
+    },
+    "runAgents": "none",
+    "shard": null,
+    "tags": [],
+    "updateSnapshots": "missing",
+    "updateSourceMethod": "patch",
+    "version": "1.58.0",
+    "workers": 1,
+    "webServer": {
+      "command": "npm run dev",
+      "url": "http://localhost:5173",
+      "reuseExistingServer": true,
+      "timeout": 30000
+    }
+  },
+  "suites": [
+    {
+      "title": "device-capabilities.bench.ts",
+      "file": "device-capabilities.bench.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [],
+      "suites": [
+        {
+          "title": "DeviceCapabilities",
+          "file": "device-capabilities.bench.ts",
+          "line": 10,
+          "column": 6,
+          "specs": [
+            {
+              "title": "detects device tier on startup",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 180000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "benchmarks",
+                  "projectName": "benchmarks",
+                  "results": [],
+                  "status": "skipped"
+                }
+              ],
+              "id": "85fd0f72cc853c23191c-7c65bf79c3640d40e92c",
+              "file": "device-capabilities.bench.ts",
+              "line": 11,
+              "column": 5
+            },
+            {
+              "title": "tier is exposed for debugging",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 180000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "benchmarks",
+                  "projectName": "benchmarks",
+                  "results": [],
+                  "status": "skipped"
+                }
+              ],
+              "id": "85fd0f72cc853c23191c-f605f426bb24b9d9e0d2",
+              "file": "device-capabilities.bench.ts",
+              "line": 31,
+              "column": 5
+            },
+            {
+              "title": "Chromium headless detects as full tier with GPU",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 180000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "benchmarks",
+                  "projectName": "benchmarks",
+                  "results": [],
+                  "status": "skipped"
+                }
+              ],
+              "id": "85fd0f72cc853c23191c-79712b08abaa23865efc",
+              "file": "device-capabilities.bench.ts",
+              "line": 43,
+              "column": 5
+            }
+          ]
+        },
+        {
+          "title": "Mobile Simulation",
+          "file": "device-capabilities.bench.ts",
+          "line": 58,
+          "column": 6,
+          "specs": [
+            {
+              "title": "touch device with small screen is constrained or limited",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 180000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "benchmarks",
+                  "projectName": "benchmarks",
+                  "results": [],
+                  "status": "skipped"
+                }
+              ],
+              "id": "85fd0f72cc853c23191c-b126ca806179c88d0bd5",
+              "file": "device-capabilities.bench.ts",
+              "line": 59,
+              "column": 5
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "title": "gpu-scheduler.bench.ts",
+      "file": "gpu-scheduler.bench.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [],
+      "suites": [
+        {
+          "title": "GpuScheduler",
+          "file": "gpu-scheduler.bench.ts",
+          "line": 10,
+          "column": 6,
+          "specs": [
+            {
+              "title": "scheduler is initialized on startup",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 180000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "benchmarks",
+                  "projectName": "benchmarks",
+                  "results": [],
+                  "status": "skipped"
+                }
+              ],
+              "id": "17ce3fc3726f02e5598b-46866f66a0216a07da8e",
+              "file": "gpu-scheduler.bench.ts",
+              "line": 11,
+              "column": 5
+            },
+            {
+              "title": "priority ordering: REALTIME tasks execute before NORMAL",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 180000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "benchmarks",
+                  "projectName": "benchmarks",
+                  "results": [],
+                  "status": "skipped"
+                }
+              ],
+              "id": "17ce3fc3726f02e5598b-511944d5368fe4969d6e",
+              "file": "gpu-scheduler.bench.ts",
+              "line": 32,
+              "column": 5
+            },
+            {
+              "title": "lease timing: GPU tasks are serialized",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 180000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "benchmarks",
+                  "projectName": "benchmarks",
+                  "results": [],
+                  "status": "skipped"
+                }
+              ],
+              "id": "17ce3fc3726f02e5598b-89c90c3530cd94866c85",
+              "file": "gpu-scheduler.bench.ts",
+              "line": 62,
+              "column": 5
+            },
+            {
+              "title": "device failure triggers circuit breaker",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 180000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "benchmarks",
+                  "projectName": "benchmarks",
+                  "results": [],
+                  "status": "skipped"
+                }
+              ],
+              "id": "17ce3fc3726f02e5598b-3883ba7d636aca671e83",
+              "file": "gpu-scheduler.bench.ts",
+              "line": 107,
+              "column": 5
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "title": "memory-growth.bench.ts",
+      "file": "memory-growth.bench.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [],
+      "suites": [
+        {
+          "title": "Memory Growth",
+          "file": "memory-growth.bench.ts",
+          "line": 15,
+          "column": 6,
+          "specs": [
+            {
+              "title": "idle heap stays stable for 60 seconds",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 180000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "benchmarks",
+                  "projectName": "benchmarks",
+                  "results": [],
+                  "status": "skipped"
+                }
+              ],
+              "id": "49e6945a361f6f548b4f-df5a1ecbd2ea5b05104c",
+              "file": "memory-growth.bench.ts",
+              "line": 16,
+              "column": 5
+            },
+            {
+              "title": "DOM node count stays stable during idle",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 180000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "benchmarks",
+                  "projectName": "benchmarks",
+                  "results": [],
+                  "status": "skipped"
+                }
+              ],
+              "id": "49e6945a361f6f548b4f-4a7de5eba67583c9aae0",
+              "file": "memory-growth.bench.ts",
+              "line": 39,
+              "column": 5
+            },
+            {
+              "title": "no detached DOM nodes accumulate",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 180000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "benchmarks",
+                  "projectName": "benchmarks",
+                  "results": [],
+                  "status": "skipped"
+                }
+              ],
+              "id": "49e6945a361f6f548b4f-99328085a9f598df4e17",
+              "file": "memory-growth.bench.ts",
+              "line": 59,
+              "column": 5
+            },
+            {
+              "title": "no console errors during 20s idle period",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 180000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "benchmarks",
+                  "projectName": "benchmarks",
+                  "results": [],
+                  "status": "skipped"
+                }
+              ],
+              "id": "49e6945a361f6f548b4f-26acd5ebd72f88fd4fde",
+              "file": "memory-growth.bench.ts",
+              "line": 84,
+              "column": 5
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "title": "startup-timing.bench.ts",
+      "file": "startup-timing.bench.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [],
+      "suites": [
+        {
+          "title": "Startup Timing",
+          "file": "startup-timing.bench.ts",
+          "line": 15,
+          "column": 6,
+          "specs": [
+            {
+              "title": "bridge initializes within 15 seconds",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 180000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "benchmarks",
+                  "projectName": "benchmarks",
+                  "results": [],
+                  "status": "skipped"
+                }
+              ],
+              "id": "1a075f3731e243b355eb-fc4ae2fc84ad0171d444",
+              "file": "startup-timing.bench.ts",
+              "line": 16,
+              "column": 5
+            },
+            {
+              "title": "script loads within 5 seconds of page load",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 180000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "benchmarks",
+                  "projectName": "benchmarks",
+                  "results": [],
+                  "status": "skipped"
+                }
+              ],
+              "id": "1a075f3731e243b355eb-d35bb296307468b254da",
+              "file": "startup-timing.bench.ts",
+              "line": 27,
+              "column": 5
+            },
+            {
+              "title": "device detection is synchronous and fast",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 180000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "benchmarks",
+                  "projectName": "benchmarks",
+                  "results": [],
+                  "status": "skipped"
+                }
+              ],
+              "id": "1a075f3731e243b355eb-cc4c4a996ea48c185747",
+              "file": "startup-timing.bench.ts",
+              "line": 39,
+              "column": 5
+            },
+            {
+              "title": "no page errors during startup sequence",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 180000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "benchmarks",
+                  "projectName": "benchmarks",
+                  "results": [],
+                  "status": "skipped"
+                }
+              ],
+              "id": "1a075f3731e243b355eb-bcd6085bb10ddcc89cfd",
+              "file": "startup-timing.bench.ts",
+              "line": 61,
+              "column": 5
+            },
+            {
+              "title": "GpuScheduler initializes before workers",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 180000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "benchmarks",
+                  "projectName": "benchmarks",
+                  "results": [],
+                  "status": "skipped"
+                }
+              ],
+              "id": "1a075f3731e243b355eb-ea0d1c411822fa01aad3",
+              "file": "startup-timing.bench.ts",
+              "line": 90,
+              "column": 5
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "title": "stress.bench.ts",
+      "file": "stress.bench.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [],
+      "suites": [
+        {
+          "title": "Stress Tests",
+          "file": "stress.bench.ts",
+          "line": 11,
+          "column": 6,
+          "specs": [
+            {
+              "title": "rapid navigation does not crash",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 180000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "benchmarks",
+                  "projectName": "benchmarks",
+                  "results": [],
+                  "status": "skipped"
+                }
+              ],
+              "id": "f2df7173c3973704bf1e-d8dc8205604f5d31ddac",
+              "file": "stress.bench.ts",
+              "line": 12,
+              "column": 5
+            },
+            {
+              "title": "SharedCache handles 1000 concurrent writes without error",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 180000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "benchmarks",
+                  "projectName": "benchmarks",
+                  "results": [],
+                  "status": "skipped"
+                }
+              ],
+              "id": "f2df7173c3973704bf1e-67fb67cf1c03db67642d",
+              "file": "stress.bench.ts",
+              "line": 41,
+              "column": 5
+            },
+            {
+              "title": "EventBus handles burst of 100 events without dropping",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 180000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "benchmarks",
+                  "projectName": "benchmarks",
+                  "results": [],
+                  "status": "skipped"
+                }
+              ],
+              "id": "f2df7173c3973704bf1e-2bcc668392c8bb6cd197",
+              "file": "stress.bench.ts",
+              "line": 81,
+              "column": 5
+            },
+            {
+              "title": "DOM mutation handling does not degrade with many mutations",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 180000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "benchmarks",
+                  "projectName": "benchmarks",
+                  "results": [],
+                  "status": "skipped"
+                }
+              ],
+              "id": "f2df7173c3973704bf1e-cb12349f60d1063772b6",
+              "file": "stress.bench.ts",
+              "line": 109,
+              "column": 5
+            },
+            {
+              "title": "page does not leak after work page visit",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 180000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "benchmarks",
+                  "projectName": "benchmarks",
+                  "results": [],
+                  "status": "skipped"
+                }
+              ],
+              "id": "f2df7173c3973704bf1e-57301ffbd6788bf5b755",
+              "file": "stress.bench.ts",
+              "line": 148,
+              "column": 5
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "title": "translation-cache.bench.ts",
+      "file": "translation-cache.bench.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [],
+      "suites": [
+        {
+          "title": "Translation Cache",
+          "file": "translation-cache.bench.ts",
+          "line": 14,
+          "column": 6,
+          "specs": [
+            {
+              "title": "cache hit latency < 5ms",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 180000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "benchmarks",
+                  "projectName": "benchmarks",
+                  "results": [],
+                  "status": "skipped"
+                }
+              ],
+              "id": "44d4ba4daabb4e20750b-c41d675cd554760ac2a6",
+              "file": "translation-cache.bench.ts",
+              "line": 15,
+              "column": 5
+            },
+            {
+              "title": "hash function is consistent across calls",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 180000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "benchmarks",
+                  "projectName": "benchmarks",
+                  "results": [],
+                  "status": "skipped"
+                }
+              ],
+              "id": "44d4ba4daabb4e20750b-ef3129f56b98022069c1",
+              "file": "translation-cache.bench.ts",
+              "line": 51,
+              "column": 5
+            },
+            {
+              "title": "glossary bypass is faster than translation",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 180000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "benchmarks",
+                  "projectName": "benchmarks",
+                  "results": [],
+                  "status": "skipped"
+                }
+              ],
+              "id": "44d4ba4daabb4e20750b-055cd997357c8ac92820",
+              "file": "translation-cache.bench.ts",
+              "line": 91,
+              "column": 5
+            },
+            {
+              "title": "cleanQuotes single-pass is faster than multi-pass",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 180000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "benchmarks",
+                  "projectName": "benchmarks",
+                  "results": [],
+                  "status": "skipped"
+                }
+              ],
+              "id": "44d4ba4daabb4e20750b-6bbf7e72fca5eaf8f7dd",
+              "file": "translation-cache.bench.ts",
+              "line": 134,
+              "column": 5
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "errors": [],
+  "stats": {
+    "startTime": "2026-02-08T14:31:44.152Z",
+    "duration": 210.19900000000007,
+    "expected": 0,
+    "skipped": 26,
+    "unexpected": 0,
+    "flaky": 0
+  }
+}

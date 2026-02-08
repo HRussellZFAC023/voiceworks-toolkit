@@ -31,9 +31,13 @@ import { TagDatabase } from './infrastructure/TagDatabase';
 import { AppStore } from './store/AppStore';
 import { initReactiveConfig } from './store/ReactiveConfig';
 import { DialogStyles, Logger, I18n, Config } from './core/Utils';
+import { DeviceCapabilities } from './core/DeviceCapabilities';
+import { GpuScheduler } from './core/GpuScheduler';
 import { TranslationService } from './services/TranslationService';
 import { EmbeddingService } from './services/EmbeddingService';
 import { CentralObserver } from './core/CentralObserver';
+import { EventBus } from './core/EventBus';
+import type { ConfigKey } from './types';
 
 // Features
 import { RadioMode } from './features/radio';
@@ -213,18 +217,56 @@ async function initialize(): Promise<void> {
         // Quality of life features
         initializeQOLFeatures();
 
-        // Eagerly warm up translation models so first work page load is instant
-        if (Config.get('preferLocalTranslation') !== false &&
-            (Config.get('enablePlayerTranslator') || Config.get('enableLearnerMode'))) {
-            TranslationService.ensureLocalModelReady(); // fire-and-forget
+        // Listen for config changes to reactively enable/disable features
+        setupFeatureToggleListener();
+
+        // Detect device capabilities and decide whether to eagerly warm up ML models.
+        // Desktop with GPU ("full" tier) behaves exactly as before.
+        // Mobile / no-GPU devices skip eager warmup — models load on first use.
+        const device = DeviceCapabilities.detect();
+        Logger.log(`[Device] ${device.reason}`);
+
+        // Initialize GPU scheduler before any worker creation
+        GpuScheduler.initialize();
+
+        // Eagerly warm up ML models — staggered to avoid GPU device exhaustion.
+        // Translation workers load first (sequential ja-en → zh-en inside),
+        // then embedding worker starts only after translation is done.
+        const budget = DeviceCapabilities.budget;
+        const warmTranslation = Config.get('preferLocalTranslation') !== false &&
+            (Config.get('enablePlayerTranslator') || Config.get('enableLearnerMode'));
+        const warmEmbedding = Config.get('enableVectorSearch') && budget.embeddingEnabled;
+
+        if (!budget.embeddingEnabled && Config.get('enableVectorSearch')) {
+            Logger.log('[Device] Embedding disabled on constrained device — vector search unavailable');
         }
 
-        // Eagerly warm up embedding model so first search is instant
-        if (Config.get('enableVectorSearch')) {
-            EmbeddingService.ensureReady().catch(() => { /* non-critical */ });
+        if (DeviceCapabilities.shouldWarmup && (warmTranslation || warmEmbedding)) {
+            // Serialized warmup: Translation → Embedding → Whisper
+            // Each worker gets exclusive GPU access to prevent "Failed to create WebGPU Context Provider"
+            Logger.log('[Warmup] Starting serialized ML warmup (Translation → Embedding → Whisper)');
+            if (warmTranslation) {
+                Logger.log('[Warmup] Loading translation models...');
+                await TranslationService.ensureLocalModelReady().catch((e) => {
+                    Logger.warn('[Warmup] Translation warmup failed (non-critical):', e?.message || e);
+                });
+                Logger.log('[Warmup] Translation warmup complete');
+            }
+            if (warmEmbedding) {
+                Logger.log('[Warmup] Loading embedding model...');
+                await EmbeddingService.ensureReady().catch((e) => {
+                    Logger.warn('[Warmup] Embedding warmup failed (non-critical):', e?.message || e);
+                });
+                Logger.log('[Warmup] Embedding warmup complete');
+            }
+        } else if (!DeviceCapabilities.shouldWarmup && (warmTranslation || warmEmbedding)) {
+            Logger.log('[Device] Skipping eager ML warmup — models load on first use');
+        } else {
+            Logger.log('[Warmup] No ML features enabled for warmup');
         }
 
-        // AI features
+        // AI features (Whisper, VectorSearch) — starts AFTER warmup to avoid GPU contention
+        Logger.log('[Warmup] Initializing AI features (Whisper loads on first use)...');
         await initializeAIFeatures();
 
         // Infrastructure
@@ -279,22 +321,84 @@ function setupPlaylistModeTracking(bridge: KikoeruBridge): void {
     updatePlaylistStatus(bridge.route);
 }
 
+// ============================================================================
+// Feature Registry — enables reactive enable/disable when settings change
+// ============================================================================
+
+interface ToggleableFeature {
+    enable(): void | Promise<void>;
+    disable(): void;
+}
+
+const featureRegistry = new Map<string, ToggleableFeature>();
+
+/** Lazily-imported feature modules (loaded on first enable) */
+const lazyFeatures = new Map<string, {
+    loader: () => Promise<ToggleableFeature>;
+    instance: ToggleableFeature | null;
+}>();
+
+function registerFeature(configKey: ConfigKey, feature: ToggleableFeature): void {
+    featureRegistry.set(configKey, feature);
+    if (Config.get(configKey)) {
+        feature.enable();
+        Logger.debug(`[Init] ${configKey} enabled`);
+    }
+}
+
+function registerLazyFeature(
+    configKey: ConfigKey,
+    loader: () => Promise<ToggleableFeature>,
+): void {
+    lazyFeatures.set(configKey, { loader, instance: null });
+    if (Config.get(configKey)) {
+        loader().then((instance) => {
+            lazyFeatures.get(configKey)!.instance = instance;
+            instance.enable();
+            Logger.debug(`[Init] ${configKey} enabled (lazy)`);
+        });
+    }
+}
+
+function setupFeatureToggleListener(): void {
+    EventBus.on('config:change', ({ key, value }: { key: string; value: unknown }) => {
+        // Eagerly-loaded features
+        const feature = featureRegistry.get(key);
+        if (feature) {
+            if (value) {
+                feature.enable();
+                Logger.debug(`[Toggle] ${key} enabled`);
+            } else {
+                feature.disable();
+                Logger.debug(`[Toggle] ${key} disabled`);
+            }
+            return;
+        }
+        // Lazily-loaded features
+        const lazy = lazyFeatures.get(key);
+        if (lazy) {
+            if (value) {
+                if (lazy.instance) {
+                    lazy.instance.enable();
+                } else {
+                    lazy.loader().then((instance) => {
+                        lazy.instance = instance;
+                        instance.enable();
+                    });
+                }
+                Logger.debug(`[Toggle] ${key} enabled (lazy)`);
+            } else if (lazy.instance) {
+                lazy.instance.disable();
+                Logger.debug(`[Toggle] ${key} disabled (lazy)`);
+            }
+        }
+    });
+}
+
 function initializeQOLFeatures(): void {
     Logger.debug('[Init] Initializing QOL features...');
-    // All features now use CentralObserver instead of individual observers
 
-    if (Config.get('enableSupportButton')) {
-        const supportButton = new SupportButton();
-        supportButton.enable();
-        Logger.debug('[Init] SupportButton enabled');
-    }
-
-    if (Config.get('enableTagFilters')) {
-        const tagFilters = new TagFilters();
-        tagFilters.enable();
-        Logger.debug('[Init] TagFilters enabled');
-    }
-
+    // Always-on features (no toggle)
     const shuffleFeature = new ShuffleFeature();
     shuffleFeature.enable();
     Logger.debug('[Init] ShuffleFeature enabled');
@@ -303,169 +407,73 @@ function initializeQOLFeatures(): void {
     autoProgress.enable();
     Logger.debug('[Init] AutoProgress enabled');
 
-    if (Config.get('enableWorkTreeManager')) {
-        // Work Tree Manager (coordinates Flat View + Folder Diving)
-        const treeManager = WorkTreeManager.getInstance();
-        treeManager.enable();
-        Logger.debug('[Init] WorkTreeManager enabled');
-    }
-
-    if (Config.get('enableAdvancedSearch')) {
-        const advancedSearch = new AdvancedSearchController();
-        advancedSearch.enable();
-        Logger.debug('[Init] AdvancedSearch enabled');
-    }
-
-    if (Config.get('enableWorkTreeCopy')) {
-        const workTreeCopy = new WorkTreeCopy();
-        workTreeCopy.enable();
-        Logger.debug('[Init] WorkTreeCopy enabled');
-    }
-
-    if (Config.get('enableWorkMetadata')) {
-        const workMetadata = new WorkMetadataController();
-        workMetadata.enable();
-        Logger.debug('[Init] WorkMetadata enabled');
-    }
-
-    if (Config.get('enableCommentSection')) {
-        const commentSection = new CommentSectionController();
-        commentSection.enable();
-        Logger.debug('[Init] CommentSection enabled');
-    }
-
-    if (Config.get('enablePlayerTranslator')) {
-        const playerTranslator = new PlayerTranslator();
-        playerTranslator.enable();
-        Logger.debug('[Init] PlayerTranslator enabled');
-    }
-
-    // TranslatedTags - now uses CentralObserver
     const translatedTags = TranslatedTags.getInstance();
     translatedTags.enable();
     Logger.debug('[Init] TranslatedTags enabled');
 
-    if (Config.get('enableMediaViewer')) {
-        // MediaViewer - inline preview for images and videos
-        const mediaViewer = MediaViewerController.getInstance();
-        mediaViewer.enable();
-        Logger.debug('[Init] MediaViewer enabled');
-    }
-
-    if (Config.get('enablePlayerFullscreen')) {
-        const playerFullscreen = PlayerFullscreenController.getInstance();
-        playerFullscreen.enable();
-        Logger.debug('[Init] PlayerFullscreen enabled');
-    }
-
-    if (Config.get('enablePlayerGallery')) {
-        const playerGallery = new PlayerGalleryController();
-        playerGallery.enable();
-        Logger.debug('[Init] PlayerGallery enabled');
-    }
-
-    if (Config.get('enableJoiTool')) {
-        const joiTool = JoiTool.getInstance();
-        joiTool.enable();
-        Logger.debug('[Init] JoiTool enabled');
-    }
-
-    if (Config.get('enableVisualizer')) {
-        const visualizer = new VisualizerController();
-        visualizer.enable();
-        Logger.debug('[Init] Visualizer enabled');
-    }
-
-    if (Config.get('enableVisitCounter')) {
-        const visitCounter = new VisitCounter();
-        visitCounter.enable();
-        Logger.debug('[Init] VisitCounter enabled');
-    }
-
-    if (Config.get('enableContinueListening')) {
-        const continueListening = new ContinueListeningController();
-        continueListening.enable();
-        Logger.debug('[Init] ContinueListening enabled');
-    }
-
-    if (Config.get('enableHVDBLink')) {
-        // HVDBLink - link to HVDB next to DLsite link
-        const hvdbLink = new HVDBLinkController();
-        hvdbLink.enable();
-        Logger.debug('[Init] HVDBLink enabled');
-    }
-
-    if (Config.get('enableInterfaceTranslator')) {
-        // InterfaceTranslator - localizes interface elements
-        const interfaceTranslator = InterfaceTranslator.getInstance();
-        interfaceTranslator.enable();
-        Logger.debug('[Init] InterfaceTranslator enabled');
-    }
-
-    if (Config.get('enablePageTitleManager')) {
-        // PageTitleManager - fixes "undefined" in tab bar
-        const titleManager = new PageTitleManager();
-        titleManager.enable();
-        Logger.debug('[Init] PageTitleManager enabled');
-    }
-
-    if (Config.get('enableRouteStateSync')) {
-        // RouteStateSync - syncs store state with URL
-        const routeStateSync = new RouteStateSync();
-        routeStateSync.enable();
-        Logger.debug('[Init] RouteStateSync enabled');
-    }
-
-    if (Config.get('enableKeyboardManager')) {
-        // KeyboardManager - global shortcuts
-        const keyboardManager = KeyboardManager.getInstance();
-        keyboardManager.enable();
-        Logger.debug('[Init] KeyboardManager enabled');
-    }
+    // Toggleable features — all instances created upfront, enabled by config
+    registerFeature('enableSupportButton', new SupportButton());
+    registerFeature('enableTagFilters', new TagFilters());
+    registerFeature('enableWorkTreeManager', WorkTreeManager.getInstance());
+    registerFeature('enableAdvancedSearch', new AdvancedSearchController());
+    registerFeature('enableWorkTreeCopy', new WorkTreeCopy());
+    registerFeature('enableWorkMetadata', new WorkMetadataController());
+    registerFeature('enableCommentSection', new CommentSectionController());
+    registerFeature('enablePlayerTranslator', new PlayerTranslator());
+    registerFeature('enableMediaViewer', MediaViewerController.getInstance());
+    registerFeature('enablePlayerFullscreen', PlayerFullscreenController.getInstance());
+    registerFeature('enablePlayerGallery', new PlayerGalleryController());
+    registerFeature('enableJoiTool', JoiTool.getInstance());
+    registerFeature('enableVisualizer', new VisualizerController());
+    registerFeature('enableVisitCounter', new VisitCounter());
+    registerFeature('enableContinueListening', new ContinueListeningController());
+    registerFeature('enableHVDBLink', new HVDBLinkController());
+    registerFeature('enableInterfaceTranslator', InterfaceTranslator.getInstance());
+    registerFeature('enablePageTitleManager', new PageTitleManager());
+    registerFeature('enableRouteStateSync', new RouteStateSync());
+    registerFeature('enableKeyboardManager', KeyboardManager.getInstance());
 
     Logger.debug('[Init] All QOL features initialized');
 }
 
 async function initializeAIFeatures(): Promise<void> {
     Logger.debug('[Init] Initializing AI features...');
-    // All features now use CentralObserver instead of individual observers
 
-    if (Config.get('enableVectorSearch')) {
-        const vectorSearch = new VectorSearchController();
-        vectorSearch.enable();
-        Logger.debug('[Init] VectorSearch enabled');
-    }
+    registerFeature('enableVectorSearch', new VectorSearchController());
 
-    if (Config.get('enableWhisper')) {
-        const whisper = Whisper.getInstance();
-        whisper.enable();
-        Logger.debug('[Init] Whisper enabled');
+    // Whisper + TranscriptFileInjector are paired — wrap as a single toggleable unit
+    const whisperInstance = Whisper.getInstance();
+    const transcriptInstance = new TranscriptFileInjector();
+    registerFeature('enableWhisper', {
+        enable() {
+            whisperInstance.enable();
+            transcriptInstance.enable();
+        },
+        disable() {
+            transcriptInstance.disable();
+            // Whisper is heavyweight; just disable transcript injector.
+            // Full Whisper teardown would kill the worker — acceptable for toggle-off.
+        },
+    });
 
-        const transcriptFiles = new TranscriptFileInjector();
-        transcriptFiles.enable();
-        Logger.debug('[Init] TranscriptFileInjector enabled');
-    }
-
-    // Parallel dynamic imports — each is independent
-    await Promise.all([
-        Config.get('enableFavicon') && import('./features/FaviconNowPlaying').then(({ FaviconNowPlaying }) => {
-            const faviconManager = new FaviconNowPlaying();
-            faviconManager.enable();
-            Logger.debug('[Init] FaviconNowPlaying enabled');
-            if (globalWindow.ASMRUlt) {
-                globalWindow.ASMRUlt.testFavicon = (color?: string) => faviconManager.testWithColor(color);
-                globalWindow.ASMRUlt.forceFavicon = () => faviconManager.forceUpdate();
-            }
-        }),
-        Config.get('enableMediaSession') && import('./features/MediaSessionManager').then(({ MediaSessionManager }) => {
-            new MediaSessionManager().enable();
-            Logger.debug('[Init] MediaSessionManager enabled');
-        }),
-        Config.get('enableMenuIconFixer') && import('./features/MenuIconFixer').then(({ MenuIconFixer }) => {
-            new MenuIconFixer().enable();
-            Logger.debug('[Init] MenuIconFixer enabled');
-        }),
-    ].filter(Boolean));
+    // Lazy-loaded features (dynamic imports)
+    registerLazyFeature('enableFavicon', async () => {
+        const { FaviconNowPlaying } = await import('./features/FaviconNowPlaying');
+        const faviconManager = new FaviconNowPlaying();
+        if (globalWindow.ASMRUlt) {
+            globalWindow.ASMRUlt.testFavicon = (color?: string) => faviconManager.testWithColor(color);
+            globalWindow.ASMRUlt.forceFavicon = () => faviconManager.forceUpdate();
+        }
+        return faviconManager;
+    });
+    registerLazyFeature('enableMediaSession', async () => {
+        const { MediaSessionManager } = await import('./features/MediaSessionManager');
+        return new MediaSessionManager();
+    });
+    registerLazyFeature('enableMenuIconFixer', async () => {
+        const { MenuIconFixer } = await import('./features/MenuIconFixer');
+        return new MenuIconFixer();
+    });
 
     Logger.debug('[Init] All AI features initialized');
 }
@@ -478,11 +486,7 @@ function initializeInfrastructure(bridge: KikoeruBridge): void {
     storageManager.enable();
     Logger.debug('[Init] StorageManager enabled');
 
-    if (Config.get('enableStoreBackup')) {
-        const storeBackup = new StoreBackup();
-        storeBackup.enable();
-        Logger.debug('[Init] StoreBackup enabled');
-    }
+    registerFeature('enableStoreBackup', new StoreBackup());
 
     // Enable audio caching (sets up Vuex watcher for track changes)
     audioCache.enable();

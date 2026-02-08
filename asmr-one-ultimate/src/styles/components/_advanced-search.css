@@ -45,8 +45,16 @@
     justify-content: center;
 }
 
-.asmr-advanced-search-dialog .asmr-close-btn:hover {
-    background: var(--asmr-hover-bg);
+@media (hover: hover) {
+    .asmr-advanced-search-dialog .asmr-close-btn:hover {
+        background: var(--asmr-hover-bg);
+    }
+}
+
+@media (hover: none) {
+    .asmr-advanced-search-dialog .asmr-close-btn:active {
+        background: var(--asmr-hover-bg);
+    }
 }
 
 .asmr-advanced-search-dialog .asmr-close-btn:focus-visible {
@@ -227,8 +235,16 @@
     padding: 0;
 }
 
-.asmr-advanced-search-dialog .asmr-filter-chip .chip-remove:hover {
-    background: rgba(255, 0, 0, 0.3);
+@media (hover: hover) {
+    .asmr-advanced-search-dialog .asmr-filter-chip .chip-remove:hover {
+        background: rgba(255, 0, 0, 0.3);
+    }
+}
+
+@media (hover: none) {
+    .asmr-advanced-search-dialog .asmr-filter-chip .chip-remove:active {
+        background: rgba(255, 0, 0, 0.3);
+    }
 }
 
 .asmr-advanced-search-dialog .asmr-filter-chip .chip-remove i {
@@ -252,8 +268,16 @@
     background: rgba(255, 255, 255, 0.2);
 }
 
-.asmr-advanced-search-dialog .asmr-selected-chip .chip-remove:hover {
-    background: rgba(255, 255, 255, 0.4);
+@media (hover: hover) {
+    .asmr-advanced-search-dialog .asmr-selected-chip .chip-remove:hover {
+        background: rgba(255, 255, 255, 0.4);
+    }
+}
+
+@media (hover: none) {
+    .asmr-advanced-search-dialog .asmr-selected-chip .chip-remove:active {
+        background: rgba(255, 255, 255, 0.4);
+    }
 }
 
 .asmr-advanced-search-dialog .asmr-selected-chip .chip-remove i {
@@ -275,10 +299,20 @@
     transition: all 0.2s;
 }
 
-.asmr-advanced-search-dialog .asmr-preset-btn:hover {
-    background: var(--asmr-hover-bg);
-    border-color: var(--asmr-accent);
-    color: var(--asmr-text-primary);
+@media (hover: hover) {
+    .asmr-advanced-search-dialog .asmr-preset-btn:hover {
+        background: var(--asmr-hover-bg);
+        border-color: var(--asmr-accent);
+        color: var(--asmr-text-primary);
+    }
+}
+
+@media (hover: none) {
+    .asmr-advanced-search-dialog .asmr-preset-btn:active {
+        background: var(--asmr-hover-bg);
+        border-color: var(--asmr-accent);
+        color: var(--asmr-text-primary);
+    }
 }
 
 .asmr-advanced-search-dialog .asmr-preset-btn.active {
@@ -384,9 +418,18 @@
     color: white;
 }
 
-.asmr-advanced-search-dialog .asmr-btn-primary:hover {
-    filter: brightness(0.9);
-    box-shadow: 0 4px 12px color-mix(in srgb, var(--asmr-accent) 30%, transparent);
+@media (hover: hover) {
+    .asmr-advanced-search-dialog .asmr-btn-primary:hover {
+        filter: brightness(0.9);
+        box-shadow: 0 4px 12px color-mix(in srgb, var(--asmr-accent) 30%, transparent);
+    }
+}
+
+@media (hover: none) {
+    .asmr-advanced-search-dialog .asmr-btn-primary:active {
+        filter: brightness(0.9);
+        box-shadow: 0 4px 12px color-mix(in srgb, var(--asmr-accent) 30%, transparent);
+    }
 }
 
 .asmr-advanced-search-dialog .asmr-btn-primary:disabled {
@@ -401,8 +444,16 @@
     color: var(--asmr-accent);
 }
 
-.asmr-advanced-search-dialog .asmr-btn-secondary:hover {
-    background: color-mix(in srgb, var(--asmr-accent) 10%, transparent);
+@media (hover: hover) {
+    .asmr-advanced-search-dialog .asmr-btn-secondary:hover {
+        background: color-mix(in srgb, var(--asmr-accent) 10%, transparent);
+    }
+}
+
+@media (hover: none) {
+    .asmr-advanced-search-dialog .asmr-btn-secondary:active {
+        background: color-mix(in srgb, var(--asmr-accent) 10%, transparent);
+    }
 }
 
 .asmr-advanced-search-dialog .asmr-btn-secondary:disabled {
@@ -527,9 +578,18 @@
     transition: all 0.2s;
 }
 
-.asmr-playlist-controls .asmr-playlist-nav-btn:hover {
-    background: var(--asmr-hover-bg);
-    color: var(--asmr-text-primary);
+@media (hover: hover) {
+    .asmr-playlist-controls .asmr-playlist-nav-btn:hover {
+        background: var(--asmr-hover-bg);
+        color: var(--asmr-text-primary);
+    }
+}
+
+@media (hover: none) {
+    .asmr-playlist-controls .asmr-playlist-nav-btn:active {
+        background: var(--asmr-hover-bg);
+        color: var(--asmr-text-primary);
+    }
 }
 
 .asmr-playlist-controls .asmr-playlist-nav-btn:disabled {

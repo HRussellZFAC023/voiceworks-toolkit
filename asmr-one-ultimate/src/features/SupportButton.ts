@@ -8,6 +8,8 @@ export class SupportButton {
     private readonly link = 'https://paypal.me/HenryRussell163';
 
     public async enable(): Promise<void> {
+        if (this.button?.isConnected) return; // Already enabled
+
         // Initial wait
         await SafeUtils.waitFor(() => !!HeaderActions.ensure(), 30000);
         this.inject();
@@ -19,6 +21,14 @@ export class SupportButton {
                 this.inject();
             }
         }, 500);
+    }
+
+    public disable(): void {
+        CentralObserver.unregister('support-button');
+        if (this.button) {
+            this.button.remove();
+            this.button = null;
+        }
     }
 
     private inject(): void {

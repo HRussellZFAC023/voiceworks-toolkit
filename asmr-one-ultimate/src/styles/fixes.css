@@ -7,11 +7,13 @@
    respective _component.css files.
    ======================================== */
 
-/* BUG-001: Blurred text should reveal on hover */
-:root {
-  .learner-en.blurred:hover {
-    filter: none !important;
-    opacity: 1 !important;
+/* BUG-001: Blurred text should reveal on hover (pointer devices only) */
+@media (hover: hover) {
+  :root {
+    .learner-en.blurred:hover {
+      filter: none !important;
+      opacity: 1 !important;
+    }
   }
 }
 
@@ -52,14 +54,24 @@
   border-radius: 4px;
 }
 
-/* Whisper button hover - accent background */
-.asmr-whisper-btn:hover {
-  background: color-mix(in srgb, var(--asmr-accent) 10%, transparent) !important;
-  color: var(--asmr-accent) !important;
+/* Whisper button hover - accent background (pointer devices only) */
+@media (hover: hover) {
+  .asmr-whisper-btn:hover {
+    background: color-mix(in srgb, var(--asmr-accent) 10%, transparent) !important;
+    color: var(--asmr-accent) !important;
+  }
+
+  .asmr-whisper-btn:hover .q-icon {
+    color: var(--asmr-accent) !important;
+  }
 }
 
-.asmr-whisper-btn:hover .q-icon {
-  color: var(--asmr-accent) !important;
+/* Touch fallback */
+@media (hover: none) {
+  .asmr-whisper-btn:active {
+    background: color-mix(in srgb, var(--asmr-accent) 10%, transparent) !important;
+    color: var(--asmr-accent) !important;
+  }
 }
 
 /* Whisper active state - accent color, no flashing */
@@ -243,6 +255,7 @@
   min-width: 360px !important;
 }
 
+
 .learner-en {
   white-space: normal !important;
   overflow-wrap: anywhere !important;
@@ -263,17 +276,19 @@
   --asmr-header-icon-color: var(--asmr-accent);
 }
 
-.asmr-header-actions .q-btn:hover {
-  background: var(--asmr-hover-bg) !important;
-}
+@media (hover: hover) {
+  .asmr-header-actions .q-btn:hover {
+    background: var(--asmr-hover-bg) !important;
+  }
 
-.asmr-header-actions .q-btn:hover .q-icon {
-  color: var(--asmr-text-inverted) !important;
-}
+  .asmr-header-actions .q-btn:hover .q-icon {
+    color: var(--asmr-text-inverted) !important;
+  }
 
-.body--dark .asmr-header-actions .q-btn:hover .q-icon,
-.q-dark .asmr-header-actions .q-btn:hover .q-icon {
-  color: var(--asmr-accent) !important;
+  .body--dark .asmr-header-actions .q-btn:hover .q-icon,
+  .q-dark .asmr-header-actions .q-btn:hover .q-icon {
+    color: var(--asmr-accent) !important;
+  }
 }
 
 /* Header Buttons Consistency - mobile-first */
@@ -355,9 +370,18 @@
   min-height: 28px !important;
 }
 
-.asmr-radio-mini-btn:hover {
-  background: var(--asmr-hover-bg) !important;
-  color: var(--asmr-accent) !important;
+@media (hover: hover) {
+  .asmr-radio-mini-btn:hover {
+    background: var(--asmr-hover-bg) !important;
+    color: var(--asmr-accent) !important;
+  }
+}
+
+@media (hover: none) {
+  .asmr-radio-mini-btn:active {
+    background: var(--asmr-hover-bg) !important;
+    color: var(--asmr-accent) !important;
+  }
 }
 
 .asmr-radio-mini-btn .q-icon {
@@ -448,9 +472,11 @@
   color: var(--asmr-text-inverted) !important;
 }
 
-.asmr-vector-btn:hover,
-.asmr-playlist-btn:hover {
-  background: rgba(255, 255, 255, 0.15) !important;
+@media (hover: hover) {
+  .asmr-vector-btn:hover,
+  .asmr-playlist-btn:hover {
+    background: rgba(255, 255, 255, 0.15) !important;
+  }
 }
 
 /* Dark mode: Use accent */
@@ -459,14 +485,16 @@
   color: var(--asmr-accent) !important;
 }
 
-:is(.body--dark, .q-dark) .asmr-vector-btn:hover,
-:is(.body--dark, .q-dark) .asmr-playlist-btn:hover {
-  background: color-mix(in srgb, var(--asmr-accent) 15%, transparent) !important;
-}
+@media (hover: hover) {
+  :is(.body--dark, .q-dark) .asmr-vector-btn:hover,
+  :is(.body--dark, .q-dark) .asmr-playlist-btn:hover {
+    background: color-mix(in srgb, var(--asmr-accent) 15%, transparent) !important;
+  }
 
-/* Playlist button hover */
-.asmr-playlist-btn:hover .q-icon {
-  color: var(--asmr-accent) !important;
+  /* Playlist button hover */
+  .asmr-playlist-btn:hover .q-icon {
+    color: var(--asmr-accent) !important;
+  }
 }
 
 /* ========================================
@@ -593,44 +621,55 @@
 
 
 /* ========================================
-   Consistent Hover States
+   Consistent Hover States (pointer devices only)
    ======================================== */
 
-/* Learner control buttons hover */
-.learner-controls button:hover,
-.learner-collapsed-controls button:hover {
-  background: var(--asmr-hover-bg) !important;
-  border-radius: 4px;
+@media (hover: hover) {
+  /* Learner control buttons hover */
+  .learner-controls button:hover,
+  .learner-collapsed-controls button:hover {
+    background: var(--asmr-hover-bg) !important;
+    border-radius: 4px;
+  }
+
+  /* Sidebar menu item hover */
+  .q-drawer .q-item:hover #asmr-radio-icon,
+  .q-drawer .q-item:hover #asmr-playlist-icon {
+    color: var(--asmr-accent) !important;
+  }
+
+  /* Clear cache button hover */
+  .asmr-clear-cache-btn:hover {
+    background: rgba(255, 82, 82, 0.1) !important;
+  }
+
+  .asmr-clear-cache-btn:hover .q-icon {
+    color: var(--q-negative, #ff5252) !important;
+  }
+
+  /* Generate button hover (Playlist dialog) */
+  .asmr-generate:hover {
+    filter: brightness(1.1);
+    box-shadow: 0 4px 12px color-mix(in srgb, var(--asmr-accent) 30%, transparent) !important;
+  }
+
+  /* Duration preset buttons hover */
+  .asmr-preset-short:hover,
+  .asmr-preset-medium:hover,
+  .asmr-preset-long:hover {
+    background: var(--asmr-hover-bg) !important;
+    border-color: var(--asmr-accent) !important;
+    color: var(--asmr-accent) !important;
+  }
 }
 
-/* Sidebar menu item hover */
-.q-drawer .q-item:hover #asmr-radio-icon,
-.q-drawer .q-item:hover #asmr-playlist-icon {
-  color: var(--asmr-accent) !important;
-}
-
-/* Clear cache button hover */
-.asmr-clear-cache-btn:hover {
-  background: rgba(255, 82, 82, 0.1) !important;
-}
-
-.asmr-clear-cache-btn:hover .q-icon {
-  color: var(--q-negative, #ff5252) !important;
-}
-
-/* Generate button hover (Playlist dialog) */
-.asmr-generate:hover {
-  filter: brightness(1.1);
-  box-shadow: 0 4px 12px color-mix(in srgb, var(--asmr-accent) 30%, transparent) !important;
-}
-
-/* Duration preset buttons hover */
-.asmr-preset-short:hover,
-.asmr-preset-medium:hover,
-.asmr-preset-long:hover {
-  background: var(--asmr-hover-bg) !important;
-  border-color: var(--asmr-accent) !important;
-  color: var(--asmr-accent) !important;
+/* Touch fallback for primary interaction buttons */
+@media (hover: none) {
+  .learner-controls button:active,
+  .learner-collapsed-controls button:active {
+    background: var(--asmr-hover-bg) !important;
+    border-radius: 4px;
+  }
 }
 
 /* ========================================
@@ -737,6 +776,7 @@
 .learner-subs-collapsed .learner-en {
   display: flex;
   align-items: center;
+  justify-content: center;
 }
 
 /* ========================================
@@ -993,8 +1033,10 @@
   transition: background 0.3s ease, box-shadow 0.3s ease !important;
 }
 
-.q-field__control:hover {
-  background: var(--asmr-hover-bg) !important;
+@media (hover: hover) {
+  .q-field__control:hover {
+    background: var(--asmr-hover-bg) !important;
+  }
 }
 
 /* Focus state: Accent border ring */

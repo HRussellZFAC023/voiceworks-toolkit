@@ -15,11 +15,24 @@ export class TagFilters {
         this.boundHandler = (e: MouseEvent) => this.handleClick(e);
     }
 
+    private routeUnwatch: (() => void) | null = null;
+
     public enable(): void {
+        if (this.overlay) return; // Already enabled
         document.body.addEventListener('click', this.boundHandler as unknown as EventListener, true);
         this.injectFilterBar();
         this.restoreFilters();
         this.observeRoute();
+    }
+
+    public disable(): void {
+        document.body.removeEventListener('click', this.boundHandler as unknown as EventListener, true);
+        if (this.overlay) {
+            this.overlay.remove();
+            this.overlay = null;
+        }
+        this.routeUnwatch?.();
+        this.routeUnwatch = null;
     }
 
     private handleClick(e: MouseEvent): void {
@@ -188,7 +201,7 @@ export class TagFilters {
     private observeRoute(): void {
         const app = this.bridge.app as any;
         if (!app?.$watch) return;
-        app.$watch('$route', (to: any) => this.syncFromRoute(to));
+        this.routeUnwatch = app.$watch('$route', (to: any) => this.syncFromRoute(to));
         this.syncFromRoute(app.$route);
     }
 

@@ -18,6 +18,7 @@ import { AppStore } from '../store/AppStore';
 import { TranslationService } from '../services/TranslationService';
 import { AudioCache } from '../infrastructure/AudioCache';
 import { gmRequest } from '../infrastructure/HttpClient';
+import { GpuScheduler } from '../core/GpuScheduler';
 
 // ============================================================================
 // Constants
@@ -47,15 +48,23 @@ type WorkerProgressMessage = {
     message?: string;
 };
 
+type ChunkWordEntry = { text: string; start: number | null; end: number | null };
+
+type ChunkEntry = {
+    text: string;
+    timestamp?: [number | null, number | null];
+    words?: ChunkWordEntry[];
+};
+
 type WorkerUpdateMessage = {
     status: 'update';
-    data: [string, { chunks?: Array<{ text: string; timestamp?: [number | null, number | null] }> }];
+    data: [string, { chunks?: ChunkEntry[] }];
     chunkId?: number;
 };
 
 type WorkerCompleteMessage = {
     status: 'complete';
-    data: { text?: string; chunks?: Array<{ text: string; timestamp?: [number | null, number | null] }> };
+    data: { text?: string; chunks?: ChunkEntry[] };
     chunkId?: number;
 };
 
@@ -64,6 +73,8 @@ type WorkerReadyMessage = { status: 'ready'; backend?: string; vendor?: string }
 type WorkerInitMessage = { status: 'initiate'; backend?: string; vendor?: string };
 
 type WorkerErrorMessage = { status: 'error'; data?: { message?: string } };
+
+type WorkerDeviceLostMessage = { status: 'gpu-device-lost'; data?: { message?: string } };
 
 type WorkerFallbackMessage = { status: 'fallback'; originalModel: string; fallbackModel: string; reason?: string };
 
@@ -74,6 +85,7 @@ type WorkerMessage =
     | WorkerReadyMessage
     | WorkerInitMessage
     | WorkerErrorMessage
+    | WorkerDeviceLostMessage
     | WorkerFallbackMessage;
 
 // ============================================================================
@@ -166,6 +178,7 @@ export class Whisper {
     private transcriptionGeneration = 0;
     private static gpuRecoveryAttempts = 0;
     private static readonly MAX_GPU_RECOVERY = 3;
+    private static webgpuFailed = false;
     private gpuRecoveryTimer: number | null = null;
     private idleUnloadTimer: number | null = null;
     private static readonly IDLE_UNLOAD_MS = 10 * 60 * 1000; // 10 minutes
@@ -281,6 +294,9 @@ export class Whisper {
                 this.handleTrackChange(newSrc);
             }
         });
+
+        // No cross-service webgpu:failed propagation — Whisper independently tries WebGPU.
+        // Serialized warmup (Translation → Embedding → Whisper) prevents device contention.
     }
 
     private handleTrackChange(newSrc: string): void {
@@ -361,6 +377,7 @@ export class Whisper {
         }
 
         this.transcribing = true;
+        EventBus.emit('whisper:transcribing', { active: true });
         this.setButtonsActive(true);
         this.dispatchProgress(I18n.t('whisperInit'), 0, 'loading');
 
@@ -471,6 +488,7 @@ export class Whisper {
 
         const shouldFinalize = this.finalizeOnIdle;
         this.transcribing = false;
+        EventBus.emit('whisper:transcribing', { active: false });
         this.finalizeOnIdle = false;
         this.clearModelLoadTimer();
         if (this.gpuRecoveryTimer) {
@@ -793,7 +811,10 @@ export class Whisper {
             chunk = padded;
         }
 
-        this.sendChunk(chunk, this.transcribedUpTo, settings);
+        // Chunks near the playhead get high priority for responsive scrubbing
+        const distFromPlayhead = Math.abs(this.transcribedUpTo - playhead);
+        const priority = distFromPlayhead <= 30 ? 1 : 0;
+        this.sendChunk(chunk, this.transcribedUpTo, settings, priority);
         this.transcribedUpTo += settings.chunkLengthS - overlapSec;
     }
 
@@ -810,12 +831,15 @@ export class Whisper {
             const seekTime = this.audio!.currentTime;
             Logger.debug('[Whisper] Seek detected:', seekTime.toFixed(2));
 
+            // Flush stale jobs from the worker queue so new playhead chunks process immediately
+            if (this.worker) this.worker.postMessage({ type: 'flush-queue' });
+
             // Rewind processing window on backward scrubs, jump on forward scrubs.
             if (seekTime < this.transcribedUpTo - 0.25) {
                 this.transcribedUpTo = Math.max(0, seekTime - SEEK_BACKFILL_SEC);
                 this.pendingChunks = 0;
                 this.chunkSendTimes.clear();
-        this.chunkGenerations.clear();
+                this.chunkGenerations.clear();
                 this.lastSegmentEnd = Math.min(this.lastSegmentEnd, seekTime);
                 // Remove stale future segments that may be re-transcribed differently
                 this.segments = this.segments.filter(s => s.start <= seekTime + 1);
@@ -824,7 +848,7 @@ export class Whisper {
                 this.transcribedUpTo = seekTime;
                 this.pendingChunks = 0;
                 this.chunkSendTimes.clear();
-        this.chunkGenerations.clear();
+                this.chunkGenerations.clear();
             }
 
             // Keep learner mode alive while scrubbing; update with current segment snapshot.
@@ -881,6 +905,12 @@ export class Whisper {
         if (this.worker) return;
         this.worker = createWhisperWorker();
         this.worker.onmessage = (e: MessageEvent<WorkerMessage>) => this.handleWorkerMessage(e);
+
+        // Only skip WebGPU if it failed THIS session — don't inherit from translation's
+        // cached dtype, as the issue may have been transient (driver/Chrome update).
+        if (Whisper.webgpuFailed) {
+            this.worker.postMessage({ type: 'skip-webgpu' });
+        }
         this.worker.onerror = (e: ErrorEvent) => {
             const errObj = (e as ErrorEvent & { error?: unknown }).error;
             const errorMsg = e.message || (errObj instanceof Error ? errObj.message : '') || 'Unknown worker error';
@@ -893,8 +923,10 @@ export class Whisper {
                 error: errObj ? String(errObj) : undefined,
             };
             Logger.error('[Whisper] Worker error:', details);
-            if (isGpuError) {
-                Logger.warn('[Whisper] GPU worker error — will retry with fresh context:', errorMsg);
+            if (isGpuError && !Whisper.webgpuFailed) {
+                Whisper.webgpuFailed = true;
+                EventBus.emit('webgpu:failed', { source: 'whisper' });
+                Logger.warn('[Whisper] GPU worker error — next worker will use WASM:', errorMsg);
             }
             this.clearModelLoadTimer();
             this.resetWorker('error');
@@ -902,7 +934,7 @@ export class Whisper {
             if (wasTranscribing) {
                 this.stopTranscription('worker-error');
             }
-            // Auto-recover from GPU errors: create a fresh worker with a new GPU device
+            // Auto-recover from GPU errors: create a fresh worker on WASM
             if (isGpuError && wasTranscribing) {
                 Whisper.gpuRecoveryAttempts++;
                 if (Whisper.gpuRecoveryAttempts > Whisper.MAX_GPU_RECOVERY) {
@@ -916,9 +948,9 @@ export class Whisper {
                     this.gpuRecoveryTimer = null;
                     const audio = getAudioElement();
                     if (audio && !audio.paused) {
-                        Logger.warn('[Whisper] Auto-recovery: restarting transcription with fresh GPU context');
+                        Logger.warn('[Whisper] Auto-recovery: restarting transcription on WASM backend');
                         this.showStatus(`<span class="whisper-status-text">${I18n.t('whisperRecovering')}</span>`);
-                        this.startTranscription().catch(err => Logger.error('[Whisper] GPU recovery start failed:', err));
+                        this.startTranscription().catch(err => Logger.error('[Whisper] Recovery start failed:', err));
                     }
                 }, 2000);
             } else {
@@ -930,13 +962,15 @@ export class Whisper {
 
     private resetWorker(reason: string): void {
         if (this.worker) {
-            try {
-                this.worker.terminate();
-            } catch (err) {
-                Logger.warn('[Whisper] Failed to terminate worker:', err);
-            }
+            // Send reset so worker can dispose GPU pipeline before we kill it
+            try { this.worker.postMessage({ type: 'reset' }); } catch { /* ignore */ }
+            const dyingWorker = this.worker;
+            setTimeout(() => { try { dyingWorker.terminate(); } catch { /* ignore */ } }, 300);
             this.worker = null;
         }
+        // Clear timers that reference the dead worker
+        if (this.gpuRecoveryTimer) { clearTimeout(this.gpuRecoveryTimer); this.gpuRecoveryTimer = null; }
+        if (this.errorDismissTimer) { clearTimeout(this.errorDismissTimer); this.errorDismissTimer = null; }
         this.modelLoadingKey = '';
         this.modelReady = false;
         this.pendingChunks = 0;
@@ -970,13 +1004,13 @@ export class Whisper {
         }
     }
 
-    private sendChunk(audio: Float32Array, timeOffset: number, settings: WhisperSettings): void {
+    private sendChunk(audio: Float32Array, timeOffset: number, settings: WhisperSettings, priority = 0): void {
         if (!this.worker) return;
         const chunkId = this.nextChunkId++;
         this.pendingChunks++;
         this.chunkSendTimes.set(chunkId, performance.now());
         this.chunkGenerations.set(chunkId, this.transcriptionGeneration);
-        Logger.debug(`[Whisper] Sending chunk ${chunkId}, offset=${timeOffset.toFixed(2)}s, samples=${audio.length}`);
+        Logger.debug(`[Whisper] Sending chunk ${chunkId}, offset=${timeOffset.toFixed(2)}s, priority=${priority}, samples=${audio.length}`);
         this.worker!.postMessage({
             type: 'transcribe',
             audio,
@@ -988,7 +1022,9 @@ export class Whisper {
             timeOffset,
             chunkLengthS: settings.chunkLengthS,
             strideLengthS: settings.strideLengthS,
+            allowWasm: Config.get('whisperAllowWasmFallback'),
             chunkId,
+            priority,
         });
     }
 
@@ -1060,6 +1096,7 @@ export class Whisper {
             case 'update': {
                 if (!this.transcribing) return;
                 Whisper.gpuRecoveryAttempts = 0; // GPU is working — reset recovery counter
+                GpuScheduler.onGpuSuccess();
                 const update = message as WorkerUpdateMessage;
                 if (typeof update.chunkId === 'number') {
                     if (!this.chunkSendTimes.has(update.chunkId)) return;
@@ -1115,12 +1152,21 @@ export class Whisper {
                 break;
             }
 
+            case 'gpu-device-lost':
+                // Transient GPU device loss — worker disposed its pipeline and will
+                // re-create with a fresh GPU device on next transcribe() call.
+                Logger.warn('[Whisper] GPU device lost (transient):', message.data?.message);
+                EventBus.emit('gpu:device-lost', { worker: 'whisper' as const });
+                break;
+
             case 'error': {
                 const errMsg = message.data?.message || I18n.t('whisperUnknownError');
                 const isGpuError = /createBuffer|RangeError|out of memory|OOM|allocation|device lost|GPUDevice|createComputePipeline|createShaderModule|mapAsync|Instance reference|AbortError/i.test(errMsg);
 
-                if (isGpuError) {
-                    Logger.warn('[Whisper] GPU inference error — will retry with fresh context:', errMsg);
+                if (isGpuError && !Whisper.webgpuFailed) {
+                    Whisper.webgpuFailed = true;
+                    EventBus.emit('webgpu:failed', { source: 'whisper' });
+                    Logger.warn('[Whisper] GPU inference error — next worker will use WASM:', errMsg);
                 }
 
                 Logger.error('[Whisper] Worker error:', errMsg);
@@ -1133,7 +1179,7 @@ export class Whisper {
                     this.stopTranscription('worker-error');
                 }
 
-                // Auto-recover from GPU errors: create a fresh worker with a new GPU device.
+                // Auto-recover from GPU errors: create a fresh worker on WASM.
                 // Cached segments are preserved by stopTranscription, and startTranscription
                 // will resume from where we left off via cache continuation logic.
                 if (isGpuError && wasTranscribing) {
@@ -1148,9 +1194,9 @@ export class Whisper {
                         this.gpuRecoveryTimer = null;
                         const audio = getAudioElement();
                         if (audio && !audio.paused) {
-                            Logger.warn('[Whisper] Auto-recovery: restarting transcription with fresh GPU context');
+                            Logger.warn('[Whisper] Auto-recovery: restarting transcription on WASM backend');
                             this.showStatus(`<span class="whisper-status-text">${I18n.t('whisperRecovering')}</span>`);
-                            this.startTranscription().catch(err => Logger.error('[Whisper] GPU recovery start failed:', err));
+                            this.startTranscription().catch(err => Logger.error('[Whisper] Recovery start failed:', err));
                         } else {
                             Logger.debug('[Whisper] Auto-recovery skipped: audio paused or unavailable');
                         }
@@ -1301,7 +1347,7 @@ export class Whisper {
         }
     }
 
-    private parseSegments(raw: Array<{ text: string; timestamp?: [number | null, number | null] }> | undefined): WhisperSegment[] {
+    private parseSegments(raw: ChunkEntry[] | undefined): WhisperSegment[] {
         if (!raw) return [];
         const segments: WhisperSegment[] = [];
         for (const item of raw) {
@@ -1319,8 +1365,26 @@ export class Whisper {
             if (safeEnd === safeStart) {
                 safeEnd = safeStart + text.length * 0.15;
             }
-            const words = this.buildWordTimings(text, safeStart, safeEnd);
-            segments.push({ start: safeStart, end: safeEnd, text, words: words.length ? words : undefined });
+
+            // Prefer real word timestamps from the worker (cross-attention aligned)
+            let words: WhisperWord[] | undefined;
+            if (item.words && item.words.length > 0) {
+                words = item.words
+                    .filter(w => w.text && w.start != null)
+                    .map(w => ({
+                        text: w.text.trim(),
+                        start: Number(w.start),
+                        end: Number(w.end ?? w.start),
+                    }));
+                if (words.length === 0) words = undefined;
+            }
+            // Fallback: linear interpolation when no real word timestamps
+            if (!words) {
+                const fallback = this.buildWordTimings(text, safeStart, safeEnd);
+                words = fallback.length ? fallback : undefined;
+            }
+
+            segments.push({ start: safeStart, end: safeEnd, text, words });
         }
         return segments;
     }

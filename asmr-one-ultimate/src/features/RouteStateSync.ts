@@ -47,6 +47,8 @@ export class RouteStateSync {
     private bridge: KikoeruBridge;
     private lastSyncKey: string = '';
     private interceptorInstalled = false;
+    private _enabled = false;
+    private routeUnwatch: (() => void) | null = null;
 
     /**
      * Cache of the last consumed pending sort values.
@@ -68,17 +70,25 @@ export class RouteStateSync {
     }
 
     public enable(): void {
+        if (this._enabled) return;
+        this._enabled = true;
         Logger.info('[RouteStateSync] System enabled');
 
         this.installAxiosInterceptor();
 
-        this.bridge.$watch(
+        this.routeUnwatch = this.bridge.$watch(
             () => this.bridge.route.fullPath,
             () => this.syncFromRoute()
-        );
+        ) || null;
 
         // Initial sync
         this.syncFromRoute();
+    }
+
+    public disable(): void {
+        this._enabled = false;
+        this.routeUnwatch?.();
+        this.routeUnwatch = null;
     }
 
     // =========================================================================
@@ -112,6 +122,7 @@ export class RouteStateSync {
             }
 
             axios.interceptors.request.use((config: any) => {
+                if (!this._enabled) return config;
                 let order = AppStore.state.search.pendingOrder as WorkOrder | undefined;
                 let sort = AppStore.state.search.pendingSort as SortOrder | undefined;
 

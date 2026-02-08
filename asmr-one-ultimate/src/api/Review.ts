@@ -20,21 +20,15 @@ export interface ReviewData {
 export const ReviewApi = {
     async updateReview(params: ReviewUpdateParams): Promise<void> {
         const { work_id, ...rest } = params;
+        const body = { work_id, ...rest };
         try {
-            // Try POST first (newer API)
-            await getAxios().post('/api/review', {
-                work_id,
-                ...rest
-            });
-        } catch (error: any) {
-            // Fallback to PUT if POST fails
-            if (error?.response?.status === 405 || error?.response?.status === 404) {
-                await getAxios().put('/api/review', {
-                    work_id,
-                    ...rest
-                });
+            await getAxios().post('/api/review', body);
+        } catch (err: any) {
+            const status = err?.response?.status;
+            if (status === 404 || status === 405) {
+                await getAxios().put('/api/review', body);
             } else {
-                throw error;
+                throw err;
             }
         }
     },

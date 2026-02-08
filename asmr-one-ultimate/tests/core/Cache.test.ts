@@ -229,13 +229,13 @@ describe('CacheStore', () => {
             expect(cache.get('valid')).toBe('new');
         });
 
-        it('should evict oldest entries when over MAX_SIZE (1000)', () => {
+        it('should evict oldest entries when over MAX_SIZE (5000)', () => {
             vi.useFakeTimers();
             vi.setSystemTime(new Date('2020-01-01T00:00:00Z'));
             const cache = new CacheStore();
 
             // Fill cache past MAX_SIZE
-            for (let i = 0; i < 1005; i++) {
+            for (let i = 0; i < 5005; i++) {
                 cache.set(`key-${i}`, `value-${i}`, 60000);
             }
 
@@ -243,10 +243,10 @@ describe('CacheStore', () => {
             // (exact eviction count depends on implementation, but the
             //  important thing is it doesn't grow unbounded)
             let validCount = 0;
-            for (let i = 0; i < 1005; i++) {
+            for (let i = 0; i < 5005; i++) {
                 if (cache.get(`key-${i}`) !== null) validCount++;
             }
-            expect(validCount).toBeLessThanOrEqual(1000);
+            expect(validCount).toBeLessThanOrEqual(5000);
         });
     });
 

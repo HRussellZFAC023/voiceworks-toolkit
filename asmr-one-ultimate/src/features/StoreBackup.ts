@@ -41,6 +41,7 @@ export class StoreBackup {
      * Enable the backup system
      */
     public async enable(): Promise<void> {
+        if (this.timerId !== null) return; // Already enabled
         Logger.info('[StoreBackup] System enabled');
 
         // Wait for bridge to be ready before starting backup/restore
@@ -51,6 +52,13 @@ export class StoreBackup {
 
         // Start periodic backup
         this.startTimer();
+    }
+
+    public disable(): void {
+        if (this.timerId !== null) {
+            clearInterval(this.timerId);
+            this.timerId = null;
+        }
     }
 
     /**

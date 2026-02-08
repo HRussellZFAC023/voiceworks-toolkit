@@ -84,6 +84,11 @@ const subtitleLeadSec = 1.2;
 const subtitleAppendWindowSec = 1.5;
 const subtitleAppendMaxChars = 140;
 
+/** Adjust lead time for playback rate: at 2x, need 2x audio-seconds of lead for same real-world reaction time */
+function effectiveLead(baseLead: number): number {
+    return baseLead * playbackRate.value;
+}
+
 // Audio binding
 let boundAudio: HTMLAudioElement | null = null;
 let boundTimeHandler: (() => void) | null = null;
@@ -103,6 +108,13 @@ const TICKER_TRANSLATION_COOLDOWN_MS = 500;
 
 // Drawer width tracking
 let drawerResizeObserver: ResizeObserver | null = null;
+
+// Cover height adjustment — reduce album art q-img max-height to
+// accommodate injected subtitle/visualizer areas that the host app
+// doesn't know about.
+let coverImgObserver: MutationObserver | null = null;
+let subsResizeObserver: ResizeObserver | null = null;
+let lastSetCoverMaxH = '';  // Track our last-set value to distinguish from host updates
 
 // Host more button (for overflow proxy)
 let hostMoreBtn: HTMLElement | null = null;
@@ -135,10 +147,6 @@ function scheduleUpdateLyrics() {
 
 const showExpanded = computed(() => !isPlayerMinimized.value && hasContent.value);
 const showCollapsed = computed(() => isPlayerMinimized.value && hasContent.value);
-const karaokeSpoken = computed(() => {
-    if (karaokeSplitIndex.value < 0 || !primaryText.value) return '';
-    return Array.from(primaryText.value).slice(0, karaokeSplitIndex.value).join('');
-});
 const karaokeUpcoming = computed(() => {
     if (karaokeSplitIndex.value < 0 || !primaryText.value) return '';
     return Array.from(primaryText.value).slice(karaokeSplitIndex.value).join('');
@@ -263,6 +271,8 @@ on('config:change', ({ key, value }) => {
         isBlurred.value = !!value;
     } else if (key === 'showJP') {
         // showJP ref auto-syncs via useConfig
+    } else if (key === 'enableWhisper' || key === 'enableJoiTool' || key === 'enableVisualizer') {
+        syncOverflowItemVisibility(key, !!value);
     }
 });
 
@@ -447,7 +457,7 @@ interface SubtitleDisplayResult {
 function getWhisperDisplay(): SubtitleDisplayResult {
     const audio = getAudioElement();
     if (!audio || whisperLines.length === 0) return { displayText: '', fullText: '' };
-    const now = audio.currentTime + Math.max(0, whisperLeadSec);
+    const now = audio.currentTime + Math.max(0, effectiveLead(whisperLeadSec));
     const activeLine = findActiveLine(whisperLines, now);
     if (!activeLine || !activeLine.text) return { displayText: '', fullText: '' };
     return { displayText: getProgressiveText(activeLine, now), fullText: activeLine.text.trim(), activeLine, now };
@@ -456,7 +466,7 @@ function getWhisperDisplay(): SubtitleDisplayResult {
 function getSubtitleDisplay(): SubtitleDisplayResult {
     const audio = getAudioElement();
     if (!audio || currentLyrics.length === 0) return { displayText: '', fullText: '' };
-    const now = audio.currentTime + subtitleLeadSec;
+    const now = audio.currentTime + effectiveLead(subtitleLeadSec);
     const activeLine = findActiveLine(currentLyrics, now);
     if (!activeLine || !activeLine.text) return { displayText: '', fullText: '' };
     return { displayText: getProgressiveText(activeLine, now), fullText: activeLine.text.trim(), activeLine, now };
@@ -841,20 +851,19 @@ function updateLyrics() {
         const ja = TranslationService.peekCached(fullText, 'ja');
         primary = ja || fullText;
     } else if (karaokeMode.value) {
-        hlStart = 0; // accent all spoken text from the beginning
-        if (segmentMode.value) {
-            // Karaoke + Segment: spoken (accent) | upcoming (dim)
-            primary = fullText;
-            const words = display.activeLine?.words;
-            if (Array.isArray(words) && words.length > 0 && display.now != null) {
-                splitIdx = computeWordKaraokeIndices(fullText, words, display.now).splitIdx;
-            } else if (display.activeLine && display.now != null) {
-                splitIdx = computeTimeFallbackKaraokeIndices(fullText, display.activeLine, display.now).splitIdx;
-            }
-        } else {
-            // Karaoke only: all revealed text in accent
-            primary = progressiveText;
+        // Karaoke ON: always show full text, control visibility via CSS
+        primary = fullText;
+        const words = display.activeLine?.words;
+        let indices = { splitIdx: 0, hlStart: 0 };
+        if (Array.isArray(words) && words.length > 0 && display.now != null) {
+            indices = computeWordKaraokeIndices(fullText, words, display.now);
+        } else if (display.activeLine && display.now != null) {
+            indices = computeTimeFallbackKaraokeIndices(fullText, display.activeLine, display.now);
         }
+        splitIdx = indices.splitIdx;
+        // Segment ON (fill-up): hlStart=0, all spoken text in accent
+        // Segment OFF (spotlight): hlStart=word start, only current word in accent
+        hlStart = segmentMode.value ? 0 : indices.hlStart;
     } else {
         primary = progressiveText;
     }
@@ -951,39 +960,36 @@ function _updateWhisperDisplay() {
                     }).catch(() => {});
                 }
             } else if (karaokeMode.value && fullText) {
-                hlStart = 0; // accent all spoken text from the beginning
-                if (segmentMode.value) {
-                    // Karaoke + Segment: spoken (accent) | upcoming (dim)
-                    prim = fullText;
-                    const words = display.activeLine?.words;
-                    if (Array.isArray(words) && words.length > 0 && display.now != null) {
-                        splitIdx = computeWordKaraokeIndices(fullText, words, display.now).splitIdx;
-                    } else if (display.activeLine && display.now != null) {
-                        splitIdx = computeTimeFallbackKaraokeIndices(fullText, display.activeLine, display.now).splitIdx;
-                    }
-                } else {
-                    // Karaoke only: all revealed text in accent
-                    prim = display.displayText;
+                // Karaoke ON: always show full text, control visibility via CSS
+                prim = fullText;
+                const words = display.activeLine?.words;
+                let indices = { splitIdx: 0, hlStart: 0 };
+                if (Array.isArray(words) && words.length > 0 && display.now != null) {
+                    indices = computeWordKaraokeIndices(fullText, words, display.now);
+                } else if (display.activeLine && display.now != null) {
+                    indices = computeTimeFallbackKaraokeIndices(fullText, display.activeLine, display.now);
                 }
+                splitIdx = indices.splitIdx;
+                // Segment ON (fill-up): hlStart=0, all spoken text in accent
+                // Segment OFF (spotlight): hlStart=word start, only current word in accent
+                hlStart = segmentMode.value ? 0 : indices.hlStart;
             }
             updatePrimaryLine(prim, splitIdx, hlStart);
             lastWhisperDisplayText = prim;
         } else if (display.displayText && karaokeMode.value) {
             // Karaoke: text unchanged but indices may have advanced
-            if (segmentMode.value) {
-                const ft = display.fullText || display.displayText;
-                const words = display.activeLine?.words;
-                let newSplitIdx = karaokeSplitIndex.value;
-                if (Array.isArray(words) && words.length > 0 && display.now != null) {
-                    newSplitIdx = computeWordKaraokeIndices(ft, words, display.now).splitIdx;
-                } else if (display.activeLine && display.now != null) {
-                    newSplitIdx = computeTimeFallbackKaraokeIndices(ft, display.activeLine, display.now).splitIdx;
-                }
-                if (newSplitIdx !== karaokeSplitIndex.value) karaokeSplitIndex.value = newSplitIdx;
-                if (karaokeHighlightStart.value !== 0) karaokeHighlightStart.value = 0;
-            } else {
-                if (karaokeHighlightStart.value !== 0) karaokeHighlightStart.value = 0;
+            const ft = display.fullText || display.displayText;
+            const words = display.activeLine?.words;
+            let indices = { splitIdx: karaokeSplitIndex.value, hlStart: karaokeHighlightStart.value };
+            if (Array.isArray(words) && words.length > 0 && display.now != null) {
+                indices = computeWordKaraokeIndices(ft, words, display.now);
+            } else if (display.activeLine && display.now != null) {
+                indices = computeTimeFallbackKaraokeIndices(ft, display.activeLine, display.now);
             }
+            const newSplitIdx = indices.splitIdx;
+            const newHlStart = segmentMode.value ? 0 : indices.hlStart;
+            if (newSplitIdx !== karaokeSplitIndex.value) karaokeSplitIndex.value = newSplitIdx;
+            if (newHlStart !== karaokeHighlightStart.value) karaokeHighlightStart.value = newHlStart;
         } else if (!display.displayText) {
             // Between segments (gap/silence) — clear stale text.
             // Whisper segments have precise endTimes, so gaps are intentional.
@@ -1176,18 +1182,21 @@ function seek(offset: number) {
     }
 }
 
-function setPlaybackRate(rate: number) {
-    playbackRate.value = rate;
-    Config.set('playbackRate', rate);
-    const audio = boundAudio || getAudioElement();
-    if (audio) audio.playbackRate = rate;
-    // Sync all speed swatches/sliders across DOM (including imperative controls)
+function syncSpeedUI(rate: number) {
     document.querySelectorAll('.asmr-speed-swatch').forEach(el => {
         el.textContent = `${rate}x`;
         el.classList.toggle('modified', rate !== 1.0);
     });
     document.querySelectorAll<HTMLInputElement>('.asmr-speed-slider').forEach(s => { s.value = String(rate); });
     document.querySelectorAll('.asmr-speed-slider-label').forEach(el => { el.textContent = `${rate}x`; });
+}
+
+function setPlaybackRate(rate: number) {
+    playbackRate.value = rate;
+    Config.set('playbackRate', rate);
+    const audio = boundAudio || getAudioElement();
+    if (audio) audio.playbackRate = rate;
+    syncSpeedUI(rate);
 }
 
 function cyclePlaybackRate() {
@@ -1205,6 +1214,83 @@ function syncDrawerWidth() {
     const drawer = document.querySelector('.q-drawer--left') as HTMLElement | null;
     const width = drawer ? `${drawer.getBoundingClientRect().width}px` : '0px';
     document.documentElement.style.setProperty('--asmr-drawer-width', width);
+}
+
+// ---------------------------------------------------------------------------
+// Cover height adjustment
+// ---------------------------------------------------------------------------
+// The host app sets the album art q-img max-height to
+//   calc(playerH - 395px - safeArea)
+// but doesn't account for injected elements (subtitles, visualizer).
+// We wrap the host's calc() expression and subtract the injected height.
+
+function adjustCoverForSubtitles() {
+    const player = document.querySelector('.audio-player:not(.asmr-player-fullscreen)') as HTMLElement;
+    if (!player) return;
+
+    const qImg = player.querySelector('.albumart .q-img') as HTMLElement;
+    if (!qImg) return;
+
+    const subsRoot = player.querySelector('#asmr-learner-subs-root') as HTMLElement;
+    const vizRoot = player.querySelector('#asmr-visualizer-root') as HTMLElement;
+    const injectedH = (subsRoot?.offsetHeight || 0) + (vizRoot?.offsetHeight || 0);
+
+    const current = qImg.style.maxHeight;
+
+    // If the current value differs from what we last set, the host updated it
+    if (current && current !== lastSetCoverMaxH) {
+        qImg.dataset.asmrOrigMaxH = current;
+    }
+
+    const base = qImg.dataset.asmrOrigMaxH || current;
+    if (!base) return;
+
+    let newVal: string;
+    if (injectedH <= 0) {
+        newVal = base;
+    } else {
+        newVal = `calc(${base} - ${injectedH}px)`;
+    }
+
+    if (newVal === current) return; // No change needed — prevents infinite loop
+    qImg.style.maxHeight = newVal;
+    lastSetCoverMaxH = newVal;
+}
+
+function setupCoverAdjustment() {
+    const player = document.querySelector('.audio-player') as HTMLElement;
+    if (!player) return;
+
+    // Observe the q-img style for host recalculations (e.g. on resize)
+    const qImg = player.querySelector('.albumart .q-img') as HTMLElement;
+    if (qImg && !coverImgObserver) {
+        coverImgObserver = new MutationObserver(() => adjustCoverForSubtitles());
+        coverImgObserver.observe(qImg, { attributes: true, attributeFilter: ['style'] });
+    }
+
+    // Observe our subtitle container for size changes
+    const subsRoot = player.querySelector('#asmr-learner-subs-root') as HTMLElement;
+    if (subsRoot && !subsResizeObserver && typeof ResizeObserver !== 'undefined') {
+        subsResizeObserver = new ResizeObserver(() => adjustCoverForSubtitles());
+        subsResizeObserver.observe(subsRoot);
+    }
+
+    adjustCoverForSubtitles();
+}
+
+function teardownCoverAdjustment() {
+    coverImgObserver?.disconnect();
+    coverImgObserver = null;
+    subsResizeObserver?.disconnect();
+    subsResizeObserver = null;
+    lastSetCoverMaxH = '';
+
+    // Restore the host's original max-height
+    const qImg = document.querySelector('.audio-player .albumart .q-img') as HTMLElement;
+    if (qImg?.dataset.asmrOrigMaxH) {
+        qImg.style.maxHeight = qImg.dataset.asmrOrigMaxH;
+        delete qImg.dataset.asmrOrigMaxH;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1465,7 +1551,9 @@ function addPermanentOverflowItems() {
         return b;
     };
 
-    overflowMenuEl.appendChild(createItem('record_voice_over', t('aiTranscribe'), () => emit('whisper:toggle', undefined as never), 'asmr-whisper-btn'));
+    const whisperBtn = createItem('record_voice_over', t('aiTranscribe'), () => emit('whisper:toggle', undefined as never), 'asmr-whisper-btn');
+    if (!Config.get('enableWhisper')) whisperBtn.style.display = 'none';
+    overflowMenuEl.appendChild(whisperBtn);
     overflowMenuEl.appendChild(createItem('link', t('openWorkDetail'), () => triggerHostMenuAction('link')));
     overflowMenuEl.appendChild(createItem('folder', t('loadSubtitle'), () => triggerHostMenuAction('subtitles')));
 
@@ -1477,12 +1565,26 @@ function addPermanentOverflowItems() {
     overflowMenuEl.appendChild(speedBtn);
 
     overflowMenuEl.appendChild(createItem('download', t('downloadTrack'), () => downloadCurrentTrack()));
-    if (Config.get('enableJoiTool')) {
-        overflowMenuEl.appendChild(createItem('casino', t('joiToggle'), () => emit('joi:toggle', undefined as never), 'asmr-joi-btn'));
-    }
-    if (Config.get('enableVisualizer')) {
-        overflowMenuEl.appendChild(createItem('equalizer', t('vizToggle'), () => emit('viz:toggle', undefined as never), 'asmr-viz-btn'));
-    }
+    const joiBtn = createItem('casino', t('joiToggle'), () => emit('joi:toggle', undefined as never), 'asmr-joi-btn');
+    if (!Config.get('enableJoiTool')) joiBtn.style.display = 'none';
+    overflowMenuEl.appendChild(joiBtn);
+
+    const vizBtn = createItem('equalizer', t('vizToggle'), () => emit('viz:toggle', undefined as never), 'asmr-viz-btn');
+    if (!Config.get('enableVisualizer')) vizBtn.style.display = 'none';
+    overflowMenuEl.appendChild(vizBtn);
+}
+
+const OVERFLOW_CONFIG_MAP: Record<string, string> = {
+    enableWhisper: '.asmr-whisper-btn',
+    enableJoiTool: '.asmr-joi-btn',
+    enableVisualizer: '.asmr-viz-btn',
+};
+
+function syncOverflowItemVisibility(configKey: string, enabled: boolean) {
+    const selector = OVERFLOW_CONFIG_MAP[configKey];
+    if (!selector || !overflowMenuEl) return;
+    const btn = overflowMenuEl.querySelector(selector) as HTMLElement | null;
+    if (btn) btn.style.display = enabled ? '' : 'none';
 }
 
 function restoreControls() {
@@ -1577,6 +1679,7 @@ onMounted(() => {
     });
     on('player:rate-change', (payload) => {
         playbackRate.value = payload.rate;
+        syncSpeedUI(payload.rate);
         syncPsychologyBtn();
     });
     on('translation:progress', (payload) => {
@@ -1632,6 +1735,9 @@ onMounted(() => {
     }
     syncDrawerWidth();
 
+    // Cover height adjustment — reduce album art to fit injected subtitles/visualizer
+    setTimeout(() => setupCoverAdjustment(), 200);
+
     // Bind audio
     bindAudioTimeUpdate();
 
@@ -1656,6 +1762,7 @@ onUnmounted(() => {
     playerObserver = null;
     drawerResizeObserver?.disconnect();
     drawerResizeObserver = null;
+    teardownCoverAdjustment();
     restoreControls();
     storeWatcherCleanups.forEach(fn => fn());
     storeWatcherCleanups.length = 0;
@@ -1680,13 +1787,7 @@ watch(showJP, () => syncPsychologyBtn());
     >
         <div class="learner-jp" lang="ja" role="status">
             <template v-if="karaokeHighlightStart >= 0 && karaokeSplitIndex >= 0">
-                <span class="karaoke-past">{{ karaokePast }}</span><span class="karaoke-spoken">{{ karaokeCurrent }}</span><span class="karaoke-upcoming">{{ karaokeUpcoming }}</span>
-            </template>
-            <template v-else-if="karaokeHighlightStart >= 0">
-                <span class="karaoke-past">{{ karaokePast }}</span><span class="karaoke-spoken">{{ karaokeCurrent }}</span>
-            </template>
-            <template v-else-if="karaokeSplitIndex >= 0">
-                <span class="karaoke-spoken">{{ karaokeSpoken }}</span><span class="karaoke-upcoming">{{ karaokeUpcoming }}</span>
+                <span class="karaoke-past">{{ karaokePast }}</span><span class="karaoke-spoken">{{ karaokeCurrent }}</span><span class="karaoke-upcoming" :class="{ 'karaoke-hidden': !segmentMode }">{{ karaokeUpcoming }}</span>
             </template>
             <template v-else>{{ primaryText }}</template>
         </div>
@@ -1708,13 +1809,7 @@ watch(showJP, () => syncPsychologyBtn());
         >
             <div class="learner-jp" lang="ja" role="status">
                 <template v-if="karaokeHighlightStart >= 0 && karaokeSplitIndex >= 0">
-                    <span class="karaoke-past">{{ karaokePast }}</span><span class="karaoke-spoken">{{ karaokeCurrent }}</span><span class="karaoke-upcoming">{{ karaokeUpcoming }}</span>
-                </template>
-                <template v-else-if="karaokeHighlightStart >= 0">
-                    <span class="karaoke-past">{{ karaokePast }}</span><span class="karaoke-spoken">{{ karaokeCurrent }}</span>
-                </template>
-                <template v-else-if="karaokeSplitIndex >= 0">
-                    <span class="karaoke-spoken">{{ karaokeSpoken }}</span><span class="karaoke-upcoming">{{ karaokeUpcoming }}</span>
+                    <span class="karaoke-past">{{ karaokePast }}</span><span class="karaoke-spoken">{{ karaokeCurrent }}</span><span class="karaoke-upcoming" :class="{ 'karaoke-hidden': !segmentMode }">{{ karaokeUpcoming }}</span>
                 </template>
                 <template v-else>{{ primaryText }}</template>
             </div>

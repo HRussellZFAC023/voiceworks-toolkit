@@ -240,8 +240,11 @@ export class TranscriptFileInjector {
     private buildVttFromSegments(segments: WhisperSegment[]): string {
         if (!segments?.length) return '';
         const lines = ['WEBVTT', ''];
-        for (const seg of segments) {
-            lines.push(`${this.formatVttTimestamp(seg.start)} --> ${this.formatVttTimestamp(seg.end)}`);
+        for (let i = 0; i < segments.length; i++) {
+            const seg = segments[i];
+            const safeEnd = Math.max(seg.start + 0.01, seg.end); // Prevent zero-duration cues
+            lines.push(`${i + 1}`); // Cue index for spec compliance
+            lines.push(`${this.formatVttTimestamp(seg.start)} --> ${this.formatVttTimestamp(safeEnd)}`);
             // Karaoke-style: embed word-level timestamps for progressive display
             if (seg.words?.length) {
                 const parts = seg.words.map(w => `<${this.formatVttTimestamp(w.start)}>${w.text}`);

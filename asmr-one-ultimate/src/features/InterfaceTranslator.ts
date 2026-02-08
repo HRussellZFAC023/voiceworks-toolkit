@@ -70,27 +70,42 @@ export class InterfaceTranslator {
         return InterfaceTranslator.instance;
     }
 
+    private _enabled = false;
+
     public enable(): void {
-        if (!AppStore.getConfig('translateMode')) {
-            Logger.debug('[InterfaceTranslator] Translation disabled by config, skipping');
-            return;
-        }
+        if (this._enabled) return;
+        this._enabled = true;
         CentralObserver.register('InterfaceTranslator', () => this.translate(), 500);
         this.translate();
         Logger.debug('[InterfaceTranslator] Enabled');
     }
 
+    public disable(): void {
+        this._enabled = false;
+        CentralObserver.unregister('InterfaceTranslator');
+    }
+
     private translate(): void {
-        // Targeted selectors for efficiency
-        const candidates = document.querySelectorAll('.q-btn__content span, .q-notification__message, .q-card__actions .block, .q-tooltip, .q-tooltip *, h2, .text-h5');
+        if (!AppStore.getConfig('translateMode')) return;
+        // Narrowed selectors: removed `.q-tooltip *` (unbounded descendant match).
+        // `:not([data-asmritran])` skips already-processed elements at browser engine level.
+        const candidates = document.querySelectorAll(
+            '.q-btn__content span:not([data-asmritran]), ' +
+            '.q-notification__message:not([data-asmritran]), ' +
+            '.q-card__actions .block:not([data-asmritran]), ' +
+            '.q-tooltip:not([data-asmritran]), ' +
+            'h2:not([data-asmritran]), ' +
+            '.text-h5:not([data-asmritran])',
+        );
 
         candidates.forEach(el => {
             const htmlEl = el as HTMLElement;
+
+            // WeakSet check before textContent read — avoids DOM property access on re-processed elements
+            if (this.processedElements.has(htmlEl)) return;
+
             const text = htmlEl.textContent?.trim();
             if (!text) return;
-
-            // Content-aware check: skip if we already processed this exact text on this element
-            if (this.processedElements.has(htmlEl) && htmlEl.dataset.asmritran === text) return;
 
             // Direct mapping
             if (this.translationMap[text]) {
@@ -101,19 +116,17 @@ export class InterfaceTranslator {
                 return;
             }
 
-            // Pattern matching - apply ALL matching patterns
+            // Pattern matching — early-exit since patterns are mutually exclusive
             let newText = text;
             let matched = false;
 
             for (const pattern of this.patterns) {
-                // Reset lastIndex — /g regexes are stateful and test() advances it,
-                // causing alternating match/miss on subsequent calls.
                 pattern.regex.lastIndex = 0;
-
-                if (pattern.regex.test(newText)) {
-                    pattern.regex.lastIndex = 0;
-                    newText = newText.replace(pattern.regex, pattern.replace);
+                const replaced = newText.replace(pattern.regex, pattern.replace);
+                if (replaced !== newText) {
+                    newText = replaced;
                     matched = true;
+                    break; // Patterns are mutually exclusive
                 }
             }
 

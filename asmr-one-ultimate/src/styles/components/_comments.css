@@ -22,8 +22,16 @@
     transition: background 0.15s;
 }
 
-.asmr-comments-header:hover {
-    background: var(--asmr-hover-bg);
+@media (hover: hover) {
+    .asmr-comments-header:hover {
+        background: var(--asmr-hover-bg);
+    }
+}
+
+@media (hover: none) {
+    .asmr-comments-header:active {
+        background: var(--asmr-hover-bg);
+    }
 }
 
 .asmr-comments-header-icon {
@@ -119,8 +127,16 @@
     color: var(--asmr-text-disabled);
 }
 
-.asmr-comments-star:hover {
-    transform: scale(1.15);
+@media (hover: hover) {
+    .asmr-comments-star:hover {
+        transform: scale(1.15);
+    }
+}
+
+@media (hover: none) {
+    .asmr-comments-star:active {
+        transform: scale(1.15);
+    }
 }
 
 .asmr-comments-star--active {
@@ -194,9 +210,18 @@
     transition: color 0.2s, border-color 0.2s;
 }
 
-.asmr-comments-delete-btn:hover {
-    color: var(--q-negative, #f44336);
-    border-color: var(--q-negative, #f44336);
+@media (hover: hover) {
+    .asmr-comments-delete-btn:hover {
+        color: var(--q-negative, #f44336);
+        border-color: var(--q-negative, #f44336);
+    }
+}
+
+@media (hover: none) {
+    .asmr-comments-delete-btn:active {
+        color: var(--q-negative, #f44336);
+        border-color: var(--q-negative, #f44336);
+    }
 }
 
 .asmr-comments-delete-btn:active {
@@ -326,8 +351,10 @@
     cursor: pointer;
 }
 
-.asmr-comments-review-cell a:hover {
-    opacity: 0.8;
+@media (hover: hover) {
+    .asmr-comments-review-cell a:hover {
+        opacity: 0.8;
+    }
 }
 
 .asmr-comments-review-cell img {
@@ -350,8 +377,16 @@
     transition: opacity 0.15s;
 }
 
-.asmr-comments-translate-btn:hover {
-    opacity: 0.8;
+@media (hover: hover) {
+    .asmr-comments-translate-btn:hover {
+        opacity: 0.8;
+    }
+}
+
+@media (hover: none) {
+    .asmr-comments-translate-btn:active {
+        opacity: 0.8;
+    }
 }
 
 .asmr-comments-translate-btn .material-icons {
@@ -422,20 +457,34 @@
     transition: background 0.2s, border-color 0.2s, color 0.2s;
 }
 
-.asmr-comments-fetch-error:hover {
-    background: var(--asmr-hover-bg);
-    border-color: var(--q-primary, var(--asmr-accent, #7c4dff));
-    color: var(--asmr-text-secondary);
+@media (hover: hover) {
+    .asmr-comments-fetch-error:hover {
+        background: var(--asmr-hover-bg);
+        border-color: var(--q-primary, var(--asmr-accent, #7c4dff));
+        color: var(--asmr-text-secondary);
+    }
+
+    .asmr-comments-fetch-error:hover .material-icons {
+        color: var(--q-primary, var(--asmr-accent, #7c4dff));
+    }
+}
+
+@media (hover: none) {
+    .asmr-comments-fetch-error:active {
+        background: var(--asmr-hover-bg);
+        border-color: var(--q-primary, var(--asmr-accent, #7c4dff));
+        color: var(--asmr-text-secondary);
+    }
+
+    .asmr-comments-fetch-error:active .material-icons {
+        color: var(--q-primary, var(--asmr-accent, #7c4dff));
+    }
 }
 
 .asmr-comments-fetch-error .material-icons {
     font-size: 32px;
     color: var(--asmr-text-disabled);
     transition: color 0.2s;
-}
-
-.asmr-comments-fetch-error:hover .material-icons {
-    color: var(--q-primary, var(--asmr-accent, #7c4dff));
 }
 
 /* === Dark Mode === */

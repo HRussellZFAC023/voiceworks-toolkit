@@ -249,13 +249,26 @@
     opacity: 0;
 }
 
-.asmr-joi-bar:hover .asmr-joi-close {
-    opacity: 1;
+@media (hover: hover) {
+    .asmr-joi-bar:hover .asmr-joi-close {
+        opacity: 1;
+    }
+
+    .asmr-joi-close:hover {
+        background: var(--asmr-hover-bg);
+        color: var(--asmr-text-primary);
+    }
 }
 
-.asmr-joi-close:hover {
-    background: var(--asmr-hover-bg);
-    color: var(--asmr-text-primary);
+@media (hover: none) {
+    .asmr-joi-close {
+        opacity: 1;
+    }
+
+    .asmr-joi-close:active {
+        background: var(--asmr-hover-bg);
+        color: var(--asmr-text-primary);
+    }
 }
 
 .asmr-joi-close:focus-visible {

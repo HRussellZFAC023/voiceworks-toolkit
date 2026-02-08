@@ -70,13 +70,26 @@
     z-index: 2;
 }
 
-.asmr-viz-bar:hover .asmr-viz-close {
-    opacity: 1;
+@media (hover: hover) {
+    .asmr-viz-bar:hover .asmr-viz-close {
+        opacity: 1;
+    }
+
+    .asmr-viz-close:hover {
+        background: var(--asmr-hover-bg);
+        color: var(--asmr-text-primary);
+    }
 }
 
-.asmr-viz-close:hover {
-    background: var(--asmr-hover-bg);
-    color: var(--asmr-text-primary);
+@media (hover: none) {
+    .asmr-viz-close {
+        opacity: 1;
+    }
+
+    .asmr-viz-close:active {
+        background: var(--asmr-hover-bg);
+        color: var(--asmr-text-primary);
+    }
 }
 
 .asmr-viz-close:focus-visible {

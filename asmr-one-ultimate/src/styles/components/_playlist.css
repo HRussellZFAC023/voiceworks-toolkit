@@ -66,8 +66,16 @@
     color: var(--asmr-text-primary);
 }
 
-.asmr-playlist-controls .asmr-playlist-action:hover {
-    background: var(--asmr-bg-tertiary);
+@media (hover: hover) {
+    .asmr-playlist-controls .asmr-playlist-action:hover {
+        background: var(--asmr-bg-tertiary);
+    }
+}
+
+@media (hover: none) {
+    .asmr-playlist-controls .asmr-playlist-action:active {
+        background: var(--asmr-bg-tertiary);
+    }
 }
 
 .asmr-playlist-controls .q-btn__content {
@@ -103,18 +111,36 @@
     justify-content: space-between;
 }
 
-.asmr-tag-suggestion-item:hover {
-    background: var(--asmr-accent);
-    color: #fff;
+@media (hover: hover) {
+    .asmr-tag-suggestion-item:hover {
+        background: var(--asmr-accent);
+        color: #fff;
+    }
+}
+
+@media (hover: none) {
+    .asmr-tag-suggestion-item:active {
+        background: var(--asmr-accent);
+        color: #fff;
+    }
 }
 
 .asmr-tag-suggestion-item .text-caption {
     opacity: 0.7;
 }
 
-.asmr-playlist-card .q-btn:hover {
-    background: var(--asmr-bg-tertiary);
-    color: var(--asmr-text-primary);
+@media (hover: hover) {
+    .asmr-playlist-card .q-btn:hover {
+        background: var(--asmr-bg-tertiary);
+        color: var(--asmr-text-primary);
+    }
+}
+
+@media (hover: none) {
+    .asmr-playlist-card .q-btn:active {
+        background: var(--asmr-bg-tertiary);
+        color: var(--asmr-text-primary);
+    }
 }
 
 /* Chips in Playlist Builder */
@@ -131,8 +157,10 @@
     cursor: default;
 }
 
-.asmr-tag-chip:hover {
-    background: var(--asmr-hover-bg);
+@media (hover: hover) {
+    .asmr-tag-chip:hover {
+        background: var(--asmr-hover-bg);
+    }
 }
 
 /* ============================================================
@@ -172,8 +200,16 @@
     padding: 0;
 }
 
-.asmr-playlist-player-btn:hover:not(.disabled) {
-    background: rgba(255, 255, 255, 0.1);
+@media (hover: hover) {
+    .asmr-playlist-player-btn:hover:not(.disabled) {
+        background: rgba(255, 255, 255, 0.1);
+    }
+}
+
+@media (hover: none) {
+    .asmr-playlist-player-btn:active:not(.disabled) {
+        background: rgba(255, 255, 255, 0.1);
+    }
 }
 
 .asmr-playlist-player-btn:active:not(.disabled) {
