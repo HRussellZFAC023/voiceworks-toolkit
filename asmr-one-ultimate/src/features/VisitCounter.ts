@@ -67,7 +67,7 @@ export class VisitCounter {
     }
 
     private recordVisit(path: string): void {
-        const workId = this.extractWorkIdFromPath(path);
+        const workId = this.extractWorkId(path);
         if (!workId) return;
 
         this.counts[workId] = (this.counts[workId] || 0) + 1;
@@ -75,15 +75,8 @@ export class VisitCounter {
         Logger.debug(`[VisitCounter] Recorded visit #${this.counts[workId]} for ${workId}`);
     }
 
-    private extractWorkIdFromPath(path: string): string | null {
-        // /work/RJ123456 or /work/123456
-        const match = path.match(/\/work\/(?:RJ)?(\d+)/i);
-        return match?.[1] || null;
-    }
-
-    private extractWorkIdFromHref(href: string): string | null {
-        // href="/work/RJ123456" or href="#/work/RJ123456"
-        const match = href.match(/\/work\/(?:RJ)?(\d+)/i);
+    private extractWorkId(str: string): string | null {
+        const match = str.match(/\/work\/(?:RJ)?(\d+)/i);
         return match?.[1] || null;
     }
 
@@ -102,7 +95,7 @@ export class VisitCounter {
                 if (!anchor) continue;
 
                 const href = anchor.getAttribute('href') || '';
-                const workId = this.extractWorkIdFromHref(href);
+                const workId = this.extractWorkId(href);
                 if (!workId) continue;
 
                 const count = this.counts[workId];

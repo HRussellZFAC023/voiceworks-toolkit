@@ -416,7 +416,8 @@ export class KikoeruBridge {
      */
     public getPathSegments(): string[] {
         try {
-            return JSON.parse(this.route.query.path || '[]');
+            const result = JSON.parse(this.route.query.path || '[]');
+            return Array.isArray(result) ? result : [];
         } catch {
             return [];
         }

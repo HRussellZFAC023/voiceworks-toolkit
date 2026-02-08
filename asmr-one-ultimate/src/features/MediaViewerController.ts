@@ -504,7 +504,7 @@ export class MediaViewerController {
         const requestId = ++this.activeRequestId;
         const mediaList = await this.populateMediaList(item, type, requestId, workTreeContext);
 
-        if (requestId !== this.activeRequestId) return;
+        if (requestId !== this.activeRequestId || !this.lightboxRef) return;
 
         if (mediaList && mediaList.length > 0) {
             const matchedItem = this.findMatchingMediaItem(item, mediaList);

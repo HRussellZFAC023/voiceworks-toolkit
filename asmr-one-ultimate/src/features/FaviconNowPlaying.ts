@@ -34,6 +34,7 @@ export class FaviconNowPlaying {
     private currentFaviconUrl: string | null = null;
     // MutationObserver to defend against site overwriting our favicon
     private faviconObserver: MutationObserver | null = null;
+    private watcherInitialized = false;
 
     constructor() {
         this.bridge = KikoeruBridge.getInstance();
@@ -67,9 +68,8 @@ export class FaviconNowPlaying {
     }
 
     private watchToggle(): void {
-        // Prevent multiple watchers
-        if ((this as any).__WATCHER_INIT__) return;
-        (this as any).__WATCHER_INIT__ = true;
+        if (this.watcherInitialized) return;
+        this.watcherInitialized = true;
 
         watchConfig('dynamicFavicon', (enabled) => {
             if (enabled) {

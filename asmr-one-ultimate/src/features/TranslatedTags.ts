@@ -617,7 +617,3 @@ export class TranslatedTags {
         document.head.appendChild(style);
     }
 }
-
-// Backward-compatible aliases
-export const EnglishTags = TranslatedTags;
-export const EnglishTagFeature = TranslatedTags;

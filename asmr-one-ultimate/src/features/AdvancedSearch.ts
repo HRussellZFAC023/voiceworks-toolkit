@@ -55,6 +55,7 @@ export class AdvancedSearch {
     private cancelRequested = false;
     private statusEl: HTMLElement | null = null;
     private langCleanup: (() => void) | null = null;
+    private boundKeyHandler: ((e: KeyboardEvent) => void) | null = null;
 
     constructor() {
         this.bridge = KikoeruBridge.getInstance();
@@ -105,10 +106,18 @@ export class AdvancedSearch {
         }
     }
 
+    private removeKeyHandler(): void {
+        if (this.boundKeyHandler) {
+            document.removeEventListener('keydown', this.boundKeyHandler);
+            this.boundKeyHandler = null;
+        }
+    }
+
     private handleLangChange(): void {
         if (!this.dialog) return;
         const isOpen = this.dialog.style.display !== 'none';
         const snapshot = this.captureDialogState();
+        this.removeKeyHandler();
         this.dialog.remove();
         this.dialog = null;
         this.buildDialogSync();
@@ -412,7 +421,8 @@ export class AdvancedSearch {
         });
 
         // Enter key to search, Escape to close
-        const handleKeys = (e: KeyboardEvent) => {
+        this.removeKeyHandler();
+        this.boundKeyHandler = (e: KeyboardEvent) => {
             if (this.dialog?.style.display === 'none') return;
 
             if (e.key === 'Escape') {
@@ -430,7 +440,7 @@ export class AdvancedSearch {
                 }
             }
         };
-        document.addEventListener('keydown', handleKeys);
+        document.addEventListener('keydown', this.boundKeyHandler);
 
         // Tag selects
         this.bindTagSelects(card);

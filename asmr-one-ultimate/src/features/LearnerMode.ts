@@ -33,6 +33,7 @@ export class LearnerMode {
     private boundAudio: HTMLAudioElement | null = null;
     private boundTimeHandler: (() => void) | null = null;
     private eventCleanups: (() => void)[] = [];
+    private storeWatcherCleanups: (() => void)[] = [];
     private originalParents: Map<HTMLElement, { parent: HTMLElement, nextSibling: Node | null }> = new Map();
     private overflowMenu: HTMLElement | null = null;
     private hostMoreBtn: HTMLElement | null = null;
@@ -186,6 +187,36 @@ export class LearnerMode {
         }, 500);
     }
 
+    public disable(): void {
+        Logger.log('[LearnerMode] Disabling...');
+
+        // Unsubscribe EventBus listeners
+        for (const cleanup of this.eventCleanups) {
+            try { cleanup(); } catch { /* ignore */ }
+        }
+        this.eventCleanups = [];
+
+        // Unsubscribe Vuex store watchers
+        for (const unsub of this.storeWatcherCleanups) {
+            try { unsub(); } catch { /* ignore */ }
+        }
+        this.storeWatcherCleanups = [];
+
+        // Clear whisper state
+        this.clearWhisperTicker();
+        this.whisperLines = [];
+        this.whisperText = '';
+        this.whisperActive = false;
+
+        // Clear originalParents (controls reparenting map)
+        this.originalParents.clear();
+        this.overflowMenu?.remove();
+        this.overflowMenu = null;
+
+        // Clean up injected DOM, audio listeners, observers
+        this.cleanupInjected();
+    }
+
     private setupPlayerObserver(): void {
         this.playerObserver?.disconnect();
         this.playerObserver = new MutationObserver(() => {
@@ -219,48 +250,55 @@ export class LearnerMode {
             return;
         }
 
+        // Guard against double registration
+        if (this.storeWatcherCleanups.length > 0) return;
+
+        const save = (unsub: (() => void) | undefined) => {
+            if (unsub) this.storeWatcherCleanups.push(unsub);
+        };
+
         // Watch for lyrics/lrcLines changes
-        store.watch(
+        save(store.watch(
             (state) => state.AudioPlayer?.lrcLines,
             () => this.updateLyrics(),
             { immediate: true }
-        );
-        store.watch(
+        ));
+        save(store.watch(
             (state) => (state.AudioPlayer as any)?.lyrics,
             () => this.updateLyrics(),
             { immediate: true }
-        );
-        store.watch(
+        ));
+        save(store.watch(
             (state) => (state.AudioPlayer as any)?.lyricLines,
             () => this.updateLyrics(),
             { immediate: true }
-        );
-        store.watch(
+        ));
+        save(store.watch(
             (state) => (state.AudioPlayer as any)?.subtitleLines,
             () => this.updateLyrics(),
             { immediate: true }
-        );
-        store.watch(
+        ));
+        save(store.watch(
             (state) => (state.AudioPlayer as any)?.subtitles,
             () => this.updateLyrics(),
             { immediate: true }
-        );
-        store.watch(
+        ));
+        save(store.watch(
             (state) => (state.AudioPlayer as any)?.subtitle?.lines,
             () => this.updateLyrics(),
             { immediate: true }
-        );
+        ));
 
         // Watch for current lyric text changes
-        store.watch(
+        save(store.watch(
             (state) => state.AudioPlayer?.currentLyric,
             (lyric) => {
                 if (lyric) this.updateLyrics();
             }
-        );
+        ));
 
         // Watch for track changes via queue[queueIndex] - the correct source
-        store.watch(
+        save(store.watch(
             (state) => {
                 const ap = state.AudioPlayer;
                 if (!ap?.queue || typeof ap.queueIndex !== 'number') return null;
@@ -281,10 +319,10 @@ export class LearnerMode {
                 }, 100);
             },
             { immediate: true }
-        );
+        ));
 
         // Also watch the audio source directly (most reliable way to detect track changes)
-        store.watch(
+        save(store.watch(
             (state) => state.AudioPlayer?.source,
             (src) => {
                 if (src) {
@@ -296,10 +334,10 @@ export class LearnerMode {
                 }
             },
             { immediate: true }
-        );
+        ));
 
         // Watch for playing state changes (backup trigger)
-        store.watch(
+        save(store.watch(
             (state) => state.AudioPlayer?.playing,
             (playing) => {
                 if (playing && this.currentLyrics.length === 0) {
@@ -309,13 +347,13 @@ export class LearnerMode {
                 }
             },
             { immediate: true }
-        );
+        ));
 
         // Watch for player minimize/expand state
-        store.watch(
+        save(store.watch(
             (state) => state.AudioPlayer?.hide,
             () => this.updateVisibility()
-        );
+        ));
     }
 
     /**
@@ -2279,7 +2317,7 @@ export class LearnerMode {
 
     private getProgressiveText(line: { time: number; endTime?: number; text: string }, now: number): string {
         const text = line.text?.trim() || '';
-        if (!text || line.endTime == null || line.endTime === undefined) return text;
+        if (!text || line.endTime == null) return text;
         // Segment mode: show full text immediately, no progressive reveal
         if (Config.get('segmentMode')) return text;
         const words = (line as { words?: Array<{ start: number; end: number; text: string }> }).words;

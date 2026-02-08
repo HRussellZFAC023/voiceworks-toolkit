@@ -445,8 +445,6 @@ export class CommentSection {
             this.syncRatingToQRating();
 
             // Re-render section
-            const wasExpanded = this.isExpanded;
-            this.isExpanded = wasExpanded;
             this.renderSection();
             this.injectInDom();
 

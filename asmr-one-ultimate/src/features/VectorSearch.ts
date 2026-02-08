@@ -66,6 +66,7 @@ export class VectorSearch {
     private embeddingRateLimited = false;
     private embeddingNextAt = 0;
     private langCleanup: (() => void) | null = null;
+    private boundKeyHandler: ((e: KeyboardEvent) => void) | null = null;
 
     constructor() {
         this.bridge = KikoeruBridge.getInstance();
@@ -160,10 +161,18 @@ export class VectorSearch {
         if (this.overlay) this.overlay.style.display = 'none';
     }
 
+    private removeKeyHandler(): void {
+        if (this.boundKeyHandler) {
+            document.removeEventListener('keydown', this.boundKeyHandler);
+            this.boundKeyHandler = null;
+        }
+    }
+
     private handleLangChange(): void {
         if (!this.overlay) return;
         const isOpen = this.overlay.style.display !== 'none';
         const state = this.captureDialogState();
+        this.removeKeyHandler();
         this.overlay.remove();
         this.overlay = null;
         this.buildDialog();
@@ -264,14 +273,15 @@ export class VectorSearch {
         input.addEventListener('keydown', (e) => {
             if (e.key === 'Enter') doSearch();
         });
-        const handleKeys = (e: KeyboardEvent) => {
+        this.removeKeyHandler();
+        this.boundKeyHandler = (e: KeyboardEvent) => {
             if (this.overlay?.style.display === 'none') return;
             if (e.key === 'Escape') {
                 e.preventDefault();
                 this.closeDialog();
             }
         };
-        document.addEventListener('keydown', handleKeys);
+        document.addEventListener('keydown', this.boundKeyHandler);
 
         const prevBtn = card.querySelector('.asmr-vector-prev') as HTMLButtonElement | null;
         const nextBtn = card.querySelector('.asmr-vector-next') as HTMLButtonElement | null;
@@ -457,6 +467,8 @@ export class VectorSearch {
                 entry,
                 score: this.scoreEntry(entry, queryVector, searchMeta)
             })).sort((a, b) => b.score - a.score);
+            // Free vector arrays after scoring — no longer needed, saves ~25-50MB
+            for (const r of scored) (r.entry as any).vector = null;
             this.renderResults(scored);
             return;
         }
@@ -465,6 +477,8 @@ export class VectorSearch {
             entry,
             score: this.scoreEntry(entry, queryVector, searchMeta)
         })).sort((a, b) => b.score - a.score);
+        // Free vector arrays after scoring — no longer needed, saves ~25-50MB
+        for (const r of scored) (r.entry as any).vector = null;
 
         Logger.log(`[VectorSearch] Search completed: ${scored.length} results from ${entries.length} indexed entries`, {
             topResults: scored.slice(0, 5).map(r => ({ id: r.entry.id, title: r.entry.title, score: r.score.toFixed(3) })),

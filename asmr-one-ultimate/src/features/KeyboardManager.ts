@@ -39,6 +39,8 @@ export class KeyboardManager {
     private static instance: KeyboardManager;
     private galleryActive = false;
     private boundHandler: ((e: KeyboardEvent) => void) | null = null;
+    private enterCleanup: (() => void) | null = null;
+    private exitCleanup: (() => void) | null = null;
     private lastTrackSkipTime = 0;
     private static readonly TRACK_SKIP_THROTTLE = 300; // ms — prevent rapid next/prev flooding
 
@@ -57,8 +59,8 @@ export class KeyboardManager {
         if (this.boundHandler) return; // Already enabled
         this.boundHandler = (e: KeyboardEvent) => this.handleKeydown(e);
         document.addEventListener('keydown', this.boundHandler, true);
-        EventBus.on('fullscreen:enter', () => { this.galleryActive = true; });
-        EventBus.on('fullscreen:exit', () => { this.galleryActive = false; });
+        this.enterCleanup = EventBus.on('fullscreen:enter', () => { this.galleryActive = true; });
+        this.exitCleanup = EventBus.on('fullscreen:exit', () => { this.galleryActive = false; });
         Logger.log('[KeyboardManager] Keyboard shortcuts enabled');
     }
 
@@ -67,6 +69,10 @@ export class KeyboardManager {
             document.removeEventListener('keydown', this.boundHandler, true);
             this.boundHandler = null;
         }
+        this.enterCleanup?.();
+        this.enterCleanup = null;
+        this.exitCleanup?.();
+        this.exitCleanup = null;
         this.galleryActive = false;
     }
 

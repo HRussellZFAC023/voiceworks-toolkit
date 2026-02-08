@@ -146,6 +146,7 @@ export class Whisper {
     private currentTrackSrc: string | null = null;
     private currentCacheKey: string | null = null;
     private chunkSendTimes = new Map<number, number>();
+    private chunkGenerations = new Map<number, number>();
 
     private statusEl: HTMLElement | null = null;
     private errorDismissTimer: number | null = null;
@@ -162,11 +163,13 @@ export class Whisper {
     private translateAheadUpTo = 0; // seconds: segments up to this time already sent for translation
     private lastTranscribeProgressAt = 0;
     private lastPersistAt = 0;
+    private transcriptionGeneration = 0;
     private static gpuRecoveryAttempts = 0;
     private static readonly MAX_GPU_RECOVERY = 3;
     private gpuRecoveryTimer: number | null = null;
     private idleUnloadTimer: number | null = null;
     private static readonly IDLE_UNLOAD_MS = 10 * 60 * 1000; // 10 minutes
+    private storeWatcherBound = false;
     private _audioCache: AudioCache | null = null;
 
     private getAudioCache(): AudioCache | null {
@@ -196,19 +199,26 @@ export class Whisper {
             this.initWorker(settings);
         }
 
-        // If alwaysTranscribe is on, try to auto-start for the current track.
-        // If audio isn't playing yet, the track:change handler in setupEventListeners
-        // will catch it when the user starts playback.
+        // Use Vuex store.watch to reactively detect playback start.
+        // This fires whenever AudioPlayer.playing transitions to true —
+        // covers initial load, user pressing play, and track advances.
+        // Guard against double registration (enable() called multiple times).
+        if (!this.storeWatcherBound) {
+            this.storeWatcherBound = true;
+            this.bridge.store.watch?.(
+                (state: any) => state.AudioPlayer?.playing,
+                (playing: boolean) => {
+                    if (playing && Config.get('alwaysTranscribe') && !this.transcribing) {
+                        this.tryAutoStartForCurrentTrack();
+                    }
+                }
+            );
+        }
+
+        // Also try immediately in case audio is already playing at enable() time
         if (Config.get('alwaysTranscribe')) {
             this.tryAutoStartForCurrentTrack();
         }
-
-        // When alwaysTranscribe is toggled on mid-session, try to auto-start immediately
-        EventBus.on('config:change', (payload) => {
-            if (payload.key === 'alwaysTranscribe' && payload.value === true) {
-                this.tryAutoStartForCurrentTrack();
-            }
-        });
     }
 
     /**
@@ -220,14 +230,12 @@ export class Whisper {
         const track = this.bridge.currentTrack;
         const src = track?.hash || track?.mediaStreamUrl || track?.src;
         if (!src) return false;
-        const audio = getAudioElement();
-        if (!audio || audio.paused) return false;
 
         Logger.debug('[Whisper] Always-transcribe: auto-starting for current track');
         this.currentTrackSrc = src;
         this.autoTranscribeWorkId = this.bridge.currentWorkId || null;
         setTimeout(() => {
-            void this.startTranscription();
+            this.startTranscription().catch(err => Logger.error('[Whisper] Auto-start failed:', err));
         }, 500);
         return true;
     }
@@ -301,7 +309,7 @@ export class Whisper {
             // Small delay to let audio element settle
             setTimeout(() => {
                 if (this.autoTranscribeWorkId === currentWorkId) {
-                    void this.startTranscription();
+                    this.startTranscription().catch(err => Logger.error('[Whisper] Auto-restart failed:', err));
                 }
             }, 500);
         } else if (Config.get('alwaysTranscribe')) {
@@ -309,7 +317,7 @@ export class Whisper {
             Logger.debug('[Whisper] Always-transcribe enabled, auto-starting for new track');
             this.autoTranscribeWorkId = currentWorkId;
             setTimeout(() => {
-                void this.startTranscription();
+                this.startTranscription().catch(err => Logger.error('[Whisper] Always-transcribe start failed:', err));
             }, 500);
         } else if (wasAutoTranscribing && currentWorkId !== this.autoTranscribeWorkId) {
             // Work changed - clear auto-transcribe state
@@ -329,7 +337,7 @@ export class Whisper {
             this.autoTranscribeWorkId = null;
             this.stopTranscription('toggle');
         } else {
-            void this.startTranscription();
+            this.startTranscription().catch(err => Logger.error('[Whisper] Toggle start failed:', err));
         }
     }
 
@@ -366,6 +374,7 @@ export class Whisper {
         this.nextChunkId = 0;
         this.pendingChunks = 0;
         this.chunkSendTimes.clear();
+        this.chunkGenerations.clear();
         this.finalizeOnIdle = false;
         this.lastTranslatedSegmentCount = 0;
         this.translateAheadUpTo = 0;
@@ -476,6 +485,7 @@ export class Whisper {
         this.clearStatus();
         this.pendingChunks = 0;
         this.chunkSendTimes.clear();
+        this.chunkGenerations.clear();
         AppStore.setWhisperState({ isTranscribing: false, isLoadingModel: false, progress: 0, progressMessage: '', currentTrackSrc: this.currentTrackSrc });
 
         if (this.audio) {
@@ -519,12 +529,14 @@ export class Whisper {
 
     private resetState(reason: string): void {
         Logger.debug('[Whisper] Reset state:', reason);
+        this.transcriptionGeneration++;
         this.pendingChunks = 0;
         this.nextChunkId = 0;
         this.lastSegmentEnd = 0;
         this.segments = [];
         this.currentCacheKey = null;
         this.chunkSendTimes.clear();
+        this.chunkGenerations.clear();
         this.finalizeOnIdle = false;
         this.modelLoadingKey = '';
         this.lastTranslatedSegmentCount = 0;
@@ -629,12 +641,16 @@ export class Whisper {
                 // Inactivity-based timeout: abort only if no data received for 60s
                 // (a fixed timeout fails for large files that are actively downloading)
                 const INACTIVITY_MS = 60_000;
+                const abortController = new AbortController();
                 let inactivityReject: (err: Error) => void;
                 let activityTimer: ReturnType<typeof setTimeout>;
                 const resetTimer = () => {
                     clearTimeout(activityTimer);
                     activityTimer = setTimeout(
-                        () => inactivityReject(new Error(`Download stalled (no data for ${INACTIVITY_MS / 1000}s)`)),
+                        () => {
+                            abortController.abort();
+                            inactivityReject(new Error(`Download stalled (no data for ${INACTIVITY_MS / 1000}s)`));
+                        },
                         INACTIVITY_MS,
                     );
                 };
@@ -645,6 +661,7 @@ export class Whisper {
                 const download = this.bridge.axios.get<ArrayBuffer>(originalUrl, {
                     responseType: 'arraybuffer',
                     timeout: 0, // disabled — we use inactivity guard instead
+                    signal: abortController.signal,
                     onDownloadProgress: (e: { loaded?: number; total?: number }) => {
                         resetTimer();
                         reportProgress(e.loaded || 0, e.total || null);
@@ -798,6 +815,7 @@ export class Whisper {
                 this.transcribedUpTo = Math.max(0, seekTime - SEEK_BACKFILL_SEC);
                 this.pendingChunks = 0;
                 this.chunkSendTimes.clear();
+        this.chunkGenerations.clear();
                 this.lastSegmentEnd = Math.min(this.lastSegmentEnd, seekTime);
                 // Remove stale future segments that may be re-transcribed differently
                 this.segments = this.segments.filter(s => s.start <= seekTime + 1);
@@ -806,6 +824,7 @@ export class Whisper {
                 this.transcribedUpTo = seekTime;
                 this.pendingChunks = 0;
                 this.chunkSendTimes.clear();
+        this.chunkGenerations.clear();
             }
 
             // Keep learner mode alive while scrubbing; update with current segment snapshot.
@@ -899,7 +918,7 @@ export class Whisper {
                     if (audio && !audio.paused) {
                         Logger.warn('[Whisper] Auto-recovery: restarting transcription with fresh GPU context');
                         this.showStatus(`<span class="whisper-status-text">${I18n.t('whisperRecovering')}</span>`);
-                        void this.startTranscription();
+                        this.startTranscription().catch(err => Logger.error('[Whisper] GPU recovery start failed:', err));
                     }
                 }, 2000);
             } else {
@@ -921,6 +940,8 @@ export class Whisper {
         this.modelLoadingKey = '';
         this.modelReady = false;
         this.pendingChunks = 0;
+        this.chunkSendTimes.clear();
+        this.chunkGenerations.clear();
         Logger.warn('[Whisper] Worker reset:', reason);
     }
 
@@ -954,6 +975,7 @@ export class Whisper {
         const chunkId = this.nextChunkId++;
         this.pendingChunks++;
         this.chunkSendTimes.set(chunkId, performance.now());
+        this.chunkGenerations.set(chunkId, this.transcriptionGeneration);
         Logger.debug(`[Whisper] Sending chunk ${chunkId}, offset=${timeOffset.toFixed(2)}s, samples=${audio.length}`);
         this.worker!.postMessage({
             type: 'transcribe',
@@ -1039,8 +1061,9 @@ export class Whisper {
                 if (!this.transcribing) return;
                 Whisper.gpuRecoveryAttempts = 0; // GPU is working — reset recovery counter
                 const update = message as WorkerUpdateMessage;
-                if (typeof update.chunkId === 'number' && !this.chunkSendTimes.has(update.chunkId)) {
-                    return;
+                if (typeof update.chunkId === 'number') {
+                    if (!this.chunkSendTimes.has(update.chunkId)) return;
+                    if (this.chunkGenerations.get(update.chunkId) !== this.transcriptionGeneration) return;
                 }
                 const segments = this.parseSegments(update.data?.[1]?.chunks);
                 this.mergeSegments(segments, { preferNew: false });
@@ -1060,11 +1083,15 @@ export class Whisper {
             case 'complete': {
                 if (!this.transcribing) return;
                 const complete = message as WorkerCompleteMessage;
-                if (typeof complete.chunkId === 'number' && !this.chunkSendTimes.has(complete.chunkId)) {
-                    return;
+                if (typeof complete.chunkId === 'number') {
+                    if (!this.chunkSendTimes.has(complete.chunkId)) return;
+                    if (this.chunkGenerations.get(complete.chunkId) !== this.transcriptionGeneration) return;
                 }
                 this.pendingChunks = Math.max(0, this.pendingChunks - 1);
-                if (complete.chunkId !== undefined) this.chunkSendTimes.delete(complete.chunkId);
+                if (complete.chunkId !== undefined) {
+                    this.chunkSendTimes.delete(complete.chunkId);
+                    this.chunkGenerations.delete(complete.chunkId);
+                }
                 const segments = this.parseSegments(complete.data?.chunks);
                 Logger.debug(`[Whisper] Complete chunk ${complete.chunkId}: ${segments.length} segments, text="${complete.data?.text?.slice(0, 50)}"`);
                 this.mergeSegments(segments, { preferNew: true });
@@ -1123,7 +1150,7 @@ export class Whisper {
                         if (audio && !audio.paused) {
                             Logger.warn('[Whisper] Auto-recovery: restarting transcription with fresh GPU context');
                             this.showStatus(`<span class="whisper-status-text">${I18n.t('whisperRecovering')}</span>`);
-                            void this.startTranscription();
+                            this.startTranscription().catch(err => Logger.error('[Whisper] GPU recovery start failed:', err));
                         } else {
                             Logger.debug('[Whisper] Auto-recovery skipped: audio paused or unavailable');
                         }

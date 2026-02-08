@@ -316,6 +316,10 @@ export class PlaylistMode {
         this.isNavigating = false;
         this.hasAdvanced = false;
 
+        // Clear route watcher
+        this._routeWatcher?.();
+        this._routeWatcher = null;
+
         // Clear timers
         this.stopQueueMonitor();
         if (this.navigationTimer !== null) {

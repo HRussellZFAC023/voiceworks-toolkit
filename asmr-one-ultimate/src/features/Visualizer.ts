@@ -222,7 +222,7 @@ export class Visualizer {
         const data = new Uint8Array(this.analyser.frequencyBinCount);
         this.analyser.getByteFrequencyData(data);
 
-        for (const bar of this.getConnectedBars()) {
+        for (const bar of this.getBars()) {
             const canvas = bar.querySelector('canvas') as HTMLCanvasElement | null;
             if (!canvas) continue;
 
@@ -498,12 +498,6 @@ export class Visualizer {
         for (const bar of this.getBars()) {
             bar.classList.add('hidden');
         }
-    }
-
-    /** Yields connected bars without allocating an array (used in 60Hz render path) */
-    private *getConnectedBars(): Generator<HTMLElement> {
-        if (this.barEl?.isConnected) yield this.barEl;
-        if (this.expandedBarEl?.isConnected) yield this.expandedBarEl;
     }
 
     private getBars(): HTMLElement[] {

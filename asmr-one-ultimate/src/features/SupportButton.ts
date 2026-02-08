@@ -14,7 +14,7 @@ export class SupportButton {
 
         // Re-inject when Vue re-renders the header (detected by CentralObserver)
         CentralObserver.register('support-button', () => {
-            if (this.button && !document.contains(this.button)) {
+            if (this.button && !this.button.isConnected) {
                 this.button = null;
                 this.inject();
             }
@@ -26,7 +26,7 @@ export class SupportButton {
         if (!container) return;
 
         // Check if button exists and is still attached
-        if (this.button && document.contains(this.button)) return;
+        if (this.button && this.button.isConnected) return;
 
         // Create the button
         const btn = document.createElement('a');

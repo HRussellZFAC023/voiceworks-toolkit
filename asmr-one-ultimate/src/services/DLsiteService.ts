@@ -742,7 +742,7 @@ export class DLsiteServiceImpl {
     private isValidReview(review: DLsiteUserReview): boolean {
         if (!review.text || review.text.length < 3) return false;
 
-        if (INVALID_CONTENT_MARKERS.some(m => review.text.includes(m) || review.username.includes(m))) {
+        if (INVALID_CONTENT_MARKERS.some(m => review.text.includes(m) || review.username?.includes(m))) {
             return false;
         }
 

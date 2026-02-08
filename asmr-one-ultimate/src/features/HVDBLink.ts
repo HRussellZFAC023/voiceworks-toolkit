@@ -17,33 +17,23 @@ export class HVDBLink {
             (state) => state.AudioPlayer?.work?.id,
             (newId) => {
                 if (newId) {
-                    Logger.log('[HVDBLink] Work changed, scheduling injection');
-                    this.scheduleInjection();
+                    Logger.log('[HVDBLink] Work changed, injecting');
+                    this.inject();
                 }
             }
         );
 
         // Also watch for route changes (important for SPA navigation)
         this.bridge.$watch('$route', () => {
-            Logger.log('[HVDBLink] Route changed, scheduling injection');
-            this.scheduleInjection();
+            Logger.log('[HVDBLink] Route changed, injecting');
+            this.inject();
         });
 
         // Register with CentralObserver for active polling/fixing
         CentralObserver.register('HVDBLink', () => this.inject(), 1000);
 
         // Immediate first check
-        this.scheduleInjection();
-    }
-
-    private scheduleInjection() {
-        // Since Vue might render with a delay, we try a few times
-        let attempts = 0;
-        const interval = setInterval(() => {
-            this.inject();
-            attempts++;
-            if (attempts > 5) clearInterval(interval);
-        }, 500);
+        this.inject();
     }
 
     private inject(): void {

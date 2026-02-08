@@ -209,6 +209,7 @@ export class AudioCache {
     }
 
     public async interceptPlay(track: any): Promise<void> {
+        if (!track) return;
         Logger.debug('[AudioCache] interceptPlay called with track:', track);
         // P13 FIX: Support multiple URL naming conventions
         const downloadUrl = track.mediaDownloadUrl || track.media_download_url || track.file_url;

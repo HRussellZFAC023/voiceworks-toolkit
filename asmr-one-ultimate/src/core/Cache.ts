@@ -31,6 +31,7 @@ export const CacheKeys = {
     whisperTranscript: (identity: string) => `asmr-ult:whisper:${hashString(identity)}`,
     whisperIndex: () => 'asmr-ult:whisper-index',
     whisperModelReady: (model: string) => `asmr-ult:whisper:model:${hashString(model)}`,
+    embeddingPreferredDtype: () => 'asmr-ult:embed:preferred-dtype',
 };
 
 const MAX_SIZE = 1000;

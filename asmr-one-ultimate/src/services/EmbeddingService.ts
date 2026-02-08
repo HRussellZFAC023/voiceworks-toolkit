@@ -1,4 +1,4 @@
-import { SharedCache } from '../core/Cache';
+import { SharedCache, CacheKeys } from '../core/Cache';
 import { I18n } from '../core/Config';
 import { Logger } from '../core/Utils';
 import { EventBus } from '../core/EventBus';
@@ -33,7 +33,7 @@ let worker: Worker | null = null;
 let workerReady = false;
 let initPromise: Promise<void> | null = null;
 let webgpuFailed = false;
-let rememberedDtype = SharedCache.get<string>('asmr-ult:embed:preferred-dtype') || '';
+let rememberedDtype = SharedCache.get<string>(CacheKeys.embeddingPreferredDtype()) || '';
 const pending = new Map<number, PendingRequest>();
 let nextId = 0;
 
@@ -104,7 +104,7 @@ function handleCircuitBreaker(errorMsg: string): void {
         // Circuit breaker tripped — kill worker and recreate on WASM
         Logger.warn('[EmbeddingService] Circuit breaker tripped — killing worker, will recreate on WASM');
         webgpuFailed = true;
-        SharedCache.set('asmr-ult:embed:preferred-dtype', '', CACHE_TTL_MS); // Clear GPU dtype preference
+        SharedCache.set(CacheKeys.embeddingPreferredDtype(), '', CACHE_TTL_MS); // Clear GPU dtype preference
         circuitRecoveryAttempted = true;
         consecutiveGpuErrors = 0;
 
@@ -127,7 +127,7 @@ function handleMessage(e: MessageEvent): void {
         workerReady = true;
         if (msg.dtype) {
             rememberedDtype = msg.dtype;
-            SharedCache.set('asmr-ult:embed:preferred-dtype', msg.dtype, CACHE_TTL_MS);
+            SharedCache.set(CacheKeys.embeddingPreferredDtype(), msg.dtype, CACHE_TTL_MS);
         }
         if (msg.backend === 'wasm') {
             webgpuFailed = true;

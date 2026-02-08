@@ -581,7 +581,7 @@ async function translateRemoteSingle(text: string, targetLang: string): Promise<
             () => gmRequest({
                 url: `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${targetLang}&dt=t&q=${encodeURIComponent(text)}`,
             }),
-            { attempts: 2, backoffMs: 500, shouldRetry: (e) => !(e instanceof HttpError && e.status === 429) },
+            { attempts: 2, backoffMs: 500, shouldRetry: (e) => !(e instanceof HttpError) || e.status >= 500 },
         );
         const parsed = JSON.parse(res.responseText);
         return parsed?.[0]?.map((x: any) => x?.[0] || '').join('') || text;
