@@ -231,6 +231,16 @@ function glossaryPreProcess(text: string, targetLang: string): [string, boolean]
     return [modified, anyReplaced];
 }
 
+/**
+ * Split multi-sentence text on 。 boundaries for opus-mt translation.
+ * MarianMT can treat 。 as end-of-sequence and drop subsequent sentences.
+ * Returns null if text has only one sentence (no split needed).
+ */
+function splitForModel(text: string): string[] | null {
+    const sentences = text.split(/。/).filter(s => s.trim());
+    return sentences.length > 1 ? sentences : null;
+}
+
 // ============================================================================
 // Cache
 // ============================================================================
@@ -818,6 +828,17 @@ export const TranslationService = {
 
     /** @internal */
     async _translateInner(text: string, targetLang: string): Promise<string> {
+        // 0. Multi-sentence split: translate each sentence independently, then join.
+        const sentences = splitForModel(text);
+        if (sentences) {
+            const results = await Promise.all(
+                sentences.map(s => this.translate(s, targetLang)),
+            );
+            const joined = results.join('. ');
+            SharedCache.set(cacheKey(text, targetLang, 'local'), joined, CACHE_TTL_MS);
+            return joined;
+        }
+
         // 1. Glossary exact match — bypasses model entirely
         const glossaryResult = applyGlossary(text, targetLang);
         if (glossaryResult) {
@@ -1052,4 +1073,4 @@ export const TranslationService = {
 };
 
 // Exported for unit testing — not part of the public API
-export const _testExports = { normalizeForModel, isLikelyGarbage };
+export const _testExports = { normalizeForModel, splitForModel, isLikelyGarbage };

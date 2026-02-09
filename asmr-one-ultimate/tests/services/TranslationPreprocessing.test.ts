@@ -24,7 +24,7 @@ vi.mock('../../src/core/GpuScheduler', () => ({
 }));
 
 import { _testExports } from '../../src/services/TranslationService';
-const { normalizeForModel, isLikelyGarbage } = _testExports;
+const { normalizeForModel, splitForModel, isLikelyGarbage } = _testExports;
 
 // ============================================================================
 // normalizeForModel
@@ -113,6 +113,31 @@ describe('normalizeForModel', () => {
 
     it('preserves 。 period', () => {
         expect(normalizeForModel('文A。文B')).toBe('文A。文B');
+    });
+});
+
+// ============================================================================
+// splitForModel
+// ============================================================================
+describe('splitForModel', () => {
+    it('returns null for single sentence', () => {
+        expect(splitForModel('耳舐め')).toBeNull();
+    });
+
+    it('returns null for trailing 。 with no following sentence', () => {
+        expect(splitForModel('音声作品。')).toBeNull();
+    });
+
+    it('splits on 。 between two sentences', () => {
+        expect(splitForModel('音声作品。収録:KU100')).toEqual(['音声作品', '収録:KU100']);
+    });
+
+    it('splits multiple sentence boundaries and drops empties', () => {
+        expect(splitForModel('文A。文B。文C。')).toEqual(['文A', '文B', '文C']);
+    });
+
+    it('preserves bracketed segments within each split sentence', () => {
+        expect(splitForModel('【催眠】エッチ。【添い寝】癒し')).toEqual(['【催眠】エッチ', '【添い寝】癒し']);
     });
 });
 
