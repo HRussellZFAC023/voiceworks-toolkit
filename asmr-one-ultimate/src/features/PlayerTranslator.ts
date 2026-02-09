@@ -20,13 +20,13 @@ export class PlayerTranslator {
         CentralObserver.register('PlayerTranslator', () => this.checkPlayer(), 500);
 
         // Translate immediately on track change instead of waiting for observer debounce
-        this.trackChangeCleanup = EventBus.on('track:change', () => {
-            this.onTrackOrWorkChange();
+        this.trackChangeCleanup = EventBus.on('track:change', ({ track }) => {
+            this.onTrackOrWorkChange(track?.title || '');
         });
 
         // Also re-translate when the work itself changes (different RJ code)
         this.workChangeCleanup = EventBus.on('work:change', () => {
-            this.onTrackOrWorkChange();
+            this.onTrackOrWorkChange(this.getCurrentTrackTitle());
         });
     }
 
@@ -44,7 +44,7 @@ export class PlayerTranslator {
      * Handle track or work change: clear stale translation state and
      * schedule multiple retry attempts to catch Vue re-renders.
      */
-    private onTrackOrWorkChange(): void {
+    private onTrackOrWorkChange(nextTrackTitle = ''): void {
         this._epoch++;
         this.clearRetryTimers();
         // Clear stale translation attrs so the old translation doesn't cause
@@ -52,6 +52,12 @@ export class PlayerTranslator {
         // re-rendered the new title yet (rawText still === old translated text).
         // Also restore original text on elements we replaced.
         this.resetTranslationState();
+        // Some host renders don't replace our injected spans reliably.
+        // Seed the active title node with the fresh track title so translation
+        // always runs against current content after a track change.
+        if (nextTrackTitle) {
+            this.seedTrackTitle(nextTrackTitle);
+        }
         // Multiple attempts: Vue re-renders asynchronously and may take varying time.
         // rAF catches immediate renders, 200ms/500ms/1000ms catch slower transitions.
         requestAnimationFrame(() => this.checkPlayer());
@@ -78,16 +84,16 @@ export class PlayerTranslator {
 
         const els = playerBar.querySelectorAll<HTMLElement>('[data-asmr-translated]');
         for (const el of els) {
-            // Restore original text so CJK detection works on next checkPlayer().
-            // For track name elements (ellipsis-2-lines), we set textContent to the English
-            // translation, so Vue's re-render is the only way to get the new Japanese text back.
-            // For title/artist elements, we built child spans. Restoring the source text
-            // lets Vue's next re-render overwrite it naturally.
             const source = el.dataset.asmrSource;
-            if (source) {
+            // Only restore source text if our translation spans are still in the DOM,
+            // meaning Vue hasn't re-rendered the element yet. Vue's component render
+            // watcher (lower ID) flushes before our store.watch watcher (higher ID),
+            // so by the time this runs Vue has usually already set textContent to the
+            // new track name. Overwriting it with the old source caused the stale-title bug.
+            if (source && el.querySelector('.asmr-translation-original')) {
                 el.textContent = source;
-                el.title = '';
             }
+            el.title = '';
             el.classList.remove('asmr-translation-pair');
             delete el.dataset.asmrTranslated;
             delete el.dataset.asmrSource;
@@ -105,7 +111,7 @@ export class PlayerTranslator {
         const cnOnlyMode = !translateMode && cnToJp;
         const titleEl = playerBar.querySelector('.q-toolbar__title, .text-h6, .text-weight-bold.text-body1') as HTMLElement;
         const artistEl = playerBar.querySelector('.text-subtitle2, .text-caption, .text-grey-5') as HTMLElement;
-        const trackNameEl = playerBar.querySelector('.ellipsis-2-lines') as HTMLElement;
+        const trackNameEl = this.findTrackNameElement(playerBar);
 
         // Run all translations concurrently instead of sequentially
         const tasks: Promise<void>[] = [];
@@ -113,6 +119,80 @@ export class PlayerTranslator {
         if (artistEl) tasks.push(this.translateElement(artistEl, 'artist', cnOnlyMode));
         if (trackNameEl) tasks.push(this.translateTrackName(trackNameEl, cnOnlyMode));
         await Promise.all(tasks);
+    }
+
+    /**
+     * Resolve the active track title element inside the player.
+     *
+     * The player can contain many .ellipsis-2-lines nodes (queue rows, cards, etc).
+     * Picking the first match causes stale translations on track change when that
+     * element is not the now-playing title. Use a score-based pick instead.
+     */
+    private findTrackNameElement(playerBar: Element): HTMLElement | null {
+        const candidates = Array.from(playerBar.querySelectorAll<HTMLElement>('.ellipsis-2-lines'));
+        if (candidates.length === 0) return null;
+
+        const currentTrackTitle = this.getCurrentTrackTitle();
+        let bestEl: HTMLElement | null = null;
+        let bestScore = Number.NEGATIVE_INFINITY;
+
+        for (const el of candidates) {
+            let score = 0;
+            const rawText = el.textContent?.trim() || '';
+            const source = el.dataset.asmrSource?.trim() || '';
+            const translated = el.dataset.asmrTranslatedText?.trim() || '';
+
+            // Prefer the dedicated now-playing title block in the player card.
+            if (el.classList.contains('text-bold')) score += 50;
+            if (el.classList.contains('q-pb-xs')) score += 40;
+            if (!el.closest('.q-item')) score += 20;
+
+            // Prefer exact match against current track title from host state.
+            if (currentTrackTitle) {
+                if (rawText === currentTrackTitle || source === currentTrackTitle) {
+                    score += 120;
+                } else if (
+                    rawText.includes(currentTrackTitle) ||
+                    source.includes(currentTrackTitle) ||
+                    (source && currentTrackTitle.includes(source))
+                ) {
+                    score += 70;
+                }
+            }
+
+            // If this node currently contains a translation pair, keep it sticky
+            // unless another candidate clearly scores higher for the new track.
+            if (el.dataset.asmrTranslated === 'true' && source && translated) score += 10;
+
+            if (score > bestScore) {
+                bestScore = score;
+                bestEl = el;
+            }
+        }
+
+        return bestEl;
+    }
+
+    private getCurrentTrackTitle(): string {
+        try {
+            return (AppStore.currentTrack?.title || '').trim();
+        } catch {
+            return '';
+        }
+    }
+
+    private seedTrackTitle(nextTrackTitle: string): void {
+        const playerBar = document.querySelector(PLAYER_BAR_SELECTOR + ', .audio-player');
+        if (!playerBar) return;
+
+        const el = this.findTrackNameElement(playerBar);
+        if (!el) return;
+
+        const rawText = el.textContent?.trim() || '';
+        if (!rawText || rawText === nextTrackTitle) return;
+
+        el.textContent = nextTrackTitle;
+        el.title = '';
     }
 
     private async translateElement(el: HTMLElement, _type: 'title' | 'artist', cnOnlyMode = false) {

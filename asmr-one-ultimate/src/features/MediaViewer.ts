@@ -1280,6 +1280,7 @@ export class MediaViewer {
             img.alt = item.title;
             img.className = 'media-viewer-image';
             img.draggable = false;
+            img.referrerPolicy = 'no-referrer';
             img.style.cursor = 'default';
             // Reset any inline styles from previous zoom
             img.style.width = '';
@@ -1442,6 +1443,7 @@ export class MediaViewer {
 
             if (this.currentMediaType === 'image') {
                 const img = document.createElement('img');
+                img.referrerPolicy = 'no-referrer';
                 img.src = this.getMediaUrl(item.hash, item);
                 img.alt = item.title;
                 img.loading = 'lazy';
@@ -1504,6 +1506,7 @@ export class MediaViewer {
             const item = this.currentMediaList[index];
             if (!this.preloadedImages.has(item.hash)) {
                 const img = new Image();
+                img.referrerPolicy = 'no-referrer';
                 img.src = this.getMediaUrl(item.hash, item);
                 this.preloadedImages.set(item.hash, img);
             }
@@ -1515,6 +1518,7 @@ export class MediaViewer {
                 this.currentMediaList.forEach((item) => {
                     if (!this.preloadedImages.has(item.hash)) {
                         const img = new Image();
+                        img.referrerPolicy = 'no-referrer';
                         img.src = this.getMediaUrl(item.hash, item);
                         this.preloadedImages.set(item.hash, img);
                     }
@@ -1711,6 +1715,7 @@ export class MediaViewer {
             Logger.debug(`[MediaViewer] Auto-recovery attempt for ${item.title}`);
 
             const img = new Image();
+            img.referrerPolicy = 'no-referrer';
             img.src = `${url}${url.includes('?') ? '&' : '?'}_recover=${Date.now()}`;
 
             img.onload = () => {

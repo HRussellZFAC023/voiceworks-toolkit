@@ -24,7 +24,7 @@ vi.mock('../../src/core/GpuScheduler', () => ({
 }));
 
 import { _testExports } from '../../src/services/TranslationService';
-const { normalizeForModel, splitForModel, isLikelyGarbage } = _testExports;
+const { normalizeForModel, isLikelyGarbage } = _testExports;
 
 // ============================================================================
 // normalizeForModel
@@ -111,64 +111,8 @@ describe('normalizeForModel', () => {
         expect(normalizeForModel(input)).toBe('【お下品オナ鳴き】オナサポ【ロリオナ育成ASMR】');
     });
 
-    it('preserves 。 period (splitting handled separately)', () => {
+    it('preserves 。 period', () => {
         expect(normalizeForModel('文A。文B')).toBe('文A。文B');
-    });
-});
-
-// ============================================================================
-// splitForModel
-// ============================================================================
-describe('splitForModel', () => {
-    it('returns null for single sentence (no split needed)', () => {
-        expect(splitForModel('耳舐め')).toBeNull();
-    });
-
-    it('returns null for text with no 。', () => {
-        expect(splitForModel('【催眠】甘々エッチ～ダウナーJK')).toBeNull();
-    });
-
-    it('returns null for trailing 。 with no subsequent content', () => {
-        expect(splitForModel('音声作品。')).toBeNull();
-    });
-
-    it('splits on 。 between two sentences', () => {
-        const result = splitForModel('音声作品。収録:KU100');
-        expect(result).toEqual(['音声作品', '収録:KU100']);
-    });
-
-    it('splits on multiple 。', () => {
-        const result = splitForModel('文A。文B。文C');
-        expect(result).toEqual(['文A', '文B', '文C']);
-    });
-
-    it('filters empty segments from trailing 。', () => {
-        const result = splitForModel('文A。文B。');
-        expect(result).toEqual(['文A', '文B']);
-    });
-
-    it('handles real description with metadata', () => {
-        const input = '正義の味方のあなたが怪人化したお姉ちゃんにおっぱい攻めで甘々に洗脳されてしまう音声作品。収録:KU100収録、声優:涼花みなせ様';
-        const result = splitForModel(input);
-        expect(result).toEqual([
-            '正義の味方のあなたが怪人化したお姉ちゃんにおっぱい攻めで甘々に洗脳されてしまう音声作品',
-            '収録:KU100収録、声優:涼花みなせ様',
-        ]);
-    });
-
-    it('preserves brackets within sentences (not split)', () => {
-        const input = '【催眠】エッチ。【添い寝】癒し';
-        const result = splitForModel(input);
-        expect(result).toEqual(['【催眠】エッチ', '【添い寝】癒し']);
-    });
-
-    it('handles title with brackets + sentence boundary', () => {
-        const input = '【両耳赴特化/KU100/耳舐め】耳舐め。～甘くとろける高低差～【総再生時間2時間越え！】';
-        const result = splitForModel(input);
-        expect(result).toEqual([
-            '【両耳赴特化/KU100/耳舐め】耳舐め',
-            '～甘くとろける高低差～【総再生時間2時間越え！】',
-        ]);
     });
 });
 

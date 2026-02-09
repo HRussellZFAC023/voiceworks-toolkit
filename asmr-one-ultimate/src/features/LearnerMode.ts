@@ -524,7 +524,7 @@ export class LearnerMode {
         const excludedIcons = new Set([
             'skip_previous', 'skip_next', 'play_arrow', 'pause',
             'replay_5', 'forward_30', 'volume_up', 'volume_down',
-            'chevron_left', 'chevron_right', 'psychology', 'record_voice_over' // Our own icons
+            'chevron_left', 'chevron_right', 'translate', 'record_voice_over' // Our own icons
         ]);
 
         const candidates = allButtons.filter(btn => {
@@ -949,7 +949,7 @@ export class LearnerMode {
         div.append(
             createBtn('chevron_left', I18n.t('prevLine'), () => this.seek(-1)),
             createBtn('chevron_right', I18n.t('nextLine'), () => this.seek(1)),
-            createBtn('psychology', I18n.t('toggleJP'), () => {
+            createBtn('translate', I18n.t('toggleJP'), () => {
                 Config.set('showJP', !Config.get('showJP'));
                 this.updateStyle();
             }, !!Config.get('showJP')),
@@ -2126,12 +2126,12 @@ export class LearnerMode {
 
     private updateStyle() {
         const showJP = !!Config.get('showJP');
-        this.expanded?.classList.toggle('hide-jp', !showJP);
-        this.collapsed?.classList.toggle('hide-jp', !showJP);
-        // Fix: target only the button element that contains the psychology icon
+        if (this.expanded) this.expanded.classList.toggle('hide-jp', !showJP);
+        if (this.collapsed) this.collapsed.classList.toggle('hide-jp', !showJP);
+        // Fix: target only the button element that contains the translate icon
         document.querySelectorAll('.learner-controls button, .learner-collapsed-controls button').forEach(btn => {
             const icon = btn.querySelector('i');
-            if (icon && icon.textContent?.trim() === 'psychology') {
+            if (icon && icon.textContent?.trim() === 'translate') {
                 btn.classList.toggle('learner-btn-active', showJP);
             }
         });

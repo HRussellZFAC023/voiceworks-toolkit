@@ -85,7 +85,7 @@ export abstract class FeatureController {
 
         const anchor = this.findInjectionPoint();
         if (!anchor) {
-            Logger.info(`[FeatureController] No injection point for: ${this.containerId}`);
+            Logger.debug(`[FeatureController] No injection point for: ${this.containerId}`);
             return;
         }
 

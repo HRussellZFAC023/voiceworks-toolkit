@@ -21,6 +21,12 @@ vi.mock('../../src/features/radio', () => ({
     },
 }));
 
+vi.mock('../../src/features/playlist', () => ({
+    PlaylistMode: {
+        isActive: false,
+    },
+}));
+
 vi.mock('../../src/core/DomUtils', () => ({
     getAudioElement: () => ({
         duration: 100,
@@ -131,6 +137,7 @@ function createAutoProgress(): AutoProgress {
 function setConfig(overrides: Record<string, any>): void {
     const defaults: Record<string, any> = {
         autoProgress: true,
+        playlistAutoProgress: true,
         autoProgressMarked: true,
         autoProgressListening: true,
         autoProgressListened: true,
@@ -180,13 +187,13 @@ describe('AutoProgress', () => {
 
     describe('master toggle', () => {
         it('should not update if autoProgress is false', () => {
-            setConfig({ autoProgress: false });
+            setConfig({ autoProgress: false, playlistAutoProgress: false });
             (ap as any).checkAndMark(50);
             expect(mockUpdateReview).not.toHaveBeenCalled();
         });
 
         it('should not mark on route change if autoProgress is false', () => {
-            setConfig({ autoProgress: false });
+            setConfig({ autoProgress: false, playlistAutoProgress: false });
             (ap as any).handleRouteChange({ path: '/work/RJ99999' });
             expect(mockUpdateReview).not.toHaveBeenCalled();
         });

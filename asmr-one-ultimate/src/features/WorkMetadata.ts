@@ -23,6 +23,7 @@ export class WorkMetadata {
     private currentWorkId: string | null = null;
     private panel: HTMLElement | null = null;
     private processedWorkIds = new Set<string>();
+    private titleTranslationEpoch = 0;
 
     constructor() {
         this.bridge = KikoeruBridge.getInstance();
@@ -52,10 +53,14 @@ export class WorkMetadata {
             if (route && (route.name === 'work' || route.path?.startsWith('/work/'))) {
                 const id = route.params?.id;
                 if (id && id !== this.currentWorkId) {
+                    this.titleTranslationEpoch++;
+                    this.resetInjectedTitleElements();
                     this.currentWorkId = id;
                     this.loadMetadata(id);
                 }
             } else {
+                this.titleTranslationEpoch++;
+                this.resetInjectedTitleElements();
                 this.currentWorkId = null;
                 this.removePanel();
             }
@@ -133,7 +138,7 @@ export class WorkMetadata {
 
         // Start title translation early (in parallel with DLsite scrape) — fire-and-forget
         const titleToTranslate = work.title || fallback?.title || '';
-        if (titleToTranslate) this.translateTitle(titleToTranslate);
+        if (titleToTranslate) this.translateTitle(titleToTranslate, workId);
 
         // Phase 0: Render fallback immediately for fast first paint
         if (fallback) {
@@ -150,7 +155,7 @@ export class WorkMetadata {
                 partial.rjcode = rjCode;
                 const merged = this.mergeMeta(partial, fallback);
                 if (merged.title && merged.title !== titleToTranslate) {
-                    this.translateTitle(merged.title);
+                    this.translateTitle(merged.title, workId);
                 }
                 this.renderPanel(merged, scrapeCode);
             };
@@ -163,7 +168,7 @@ export class WorkMetadata {
             const merged = this.mergeMeta(meta, fallback);
 
             if (merged.title && merged.title !== titleToTranslate) {
-                this.translateTitle(merged.title);
+                this.translateTitle(merged.title, workId);
             }
 
             this.renderPanel(merged, scrapeCode);
@@ -184,62 +189,81 @@ export class WorkMetadata {
         return !!AppStore.getConfig('translateCnToJp');
     }
 
-    private async translateTitle(originalTitle: string) {
+    private async translateTitle(originalTitle: string, expectedWorkId: string) {
         const cnOnlyMode = !this.shouldTranslate && this.cnToJpEnabled;
-        if (!originalTitle || (!this.shouldTranslate && !this.cnToJpEnabled)) return;
-        // In CN-only mode, skip non-Chinese titles
-        if (cnOnlyMode && !isChinese(originalTitle)) return;
-        // Skip translation if title is already in user's language (only when doing normal translations)
-        if (!cnOnlyMode && TranslationService.isUserLang(originalTitle)) return;
+        if (!originalTitle) return;
+
+        const epoch = ++this.titleTranslationEpoch;
+        const shouldSkipTranslation =
+            (!this.shouldTranslate && !this.cnToJpEnabled) ||
+            (cnOnlyMode && !isChinese(originalTitle)) ||
+            (!cnOnlyMode && TranslationService.isUserLang(originalTitle));
+        if (shouldSkipTranslation) {
+            if (this.currentWorkId === expectedWorkId && epoch === this.titleTranslationEpoch) {
+                this.resetInjectedTitleElements();
+                EventBus.emit('title:update', { title: originalTitle });
+            }
+            return;
+        }
+
         try {
             const translated = cnOnlyMode
                 ? await TranslationService.translate(originalTitle, 'ja')
                 : await TranslationService.translate(originalTitle);
-            if (translated && translated !== originalTitle) {
-                // Find title element and update
-                const h1 = await SafeUtils.waitForElement('h1.text-h6');
-                if (h1) {
-                    if (cnOnlyMode) {
-                        // CN→JP: silently replace the title with Japanese
-                        let transEl = h1.parentElement?.querySelector('.asmr-translated-title') as HTMLElement;
-                        if (!transEl) {
-                            transEl = document.createElement('div');
-                            transEl.className = 'text-h6 asmr-translated-title';
-                            h1.parentElement?.insertBefore(transEl, h1.nextSibling);
-                            (h1 as HTMLElement).style.display = 'none';
-                        }
-                        transEl.textContent = translated;
-                        EventBus.emit('title:update', { title: translated });
-                    } else {
-                        const originalSpan = document.createElement('div');
-                        originalSpan.className = 'text-caption text-grey-5 q-mb-xs asmr-original-title';
-                        originalSpan.textContent = originalTitle;
 
-                        if (!h1.parentElement?.querySelector('.asmr-original-title')) {
-                            h1.parentElement?.insertBefore(originalSpan, h1);
-                        }
+            if (this.currentWorkId !== expectedWorkId || epoch !== this.titleTranslationEpoch) return;
 
-                        // For the translated title, we create a separate element
-                        // instead of overwriting h1.textContent which is managed by Vue
-                        let transEl = h1.parentElement?.querySelector('.asmr-translated-title') as HTMLElement;
-                        if (!transEl) {
-                            transEl = document.createElement('div');
-                            transEl.className = 'text-h6 asmr-translated-title';
-                            h1.parentElement?.insertBefore(transEl, h1.nextSibling);
-                            (h1 as HTMLElement).style.display = 'none'; // Hide the original Vue-managed H1
-                        }
-                        transEl.textContent = translated;
-
-                        // Update tab bar title via PageTitleManager
-                        EventBus.emit('title:update', { title: translated });
-                    }
-                }
+            if (!translated || translated === originalTitle) {
+                this.resetInjectedTitleElements();
+                EventBus.emit('title:update', { title: originalTitle });
+                return;
             }
+
+            const h1 = await SafeUtils.waitForElement('h1.text-h6');
+            if (!h1 || this.currentWorkId !== expectedWorkId || epoch !== this.titleTranslationEpoch) return;
+
+            if (cnOnlyMode) {
+                h1.parentElement?.querySelector('.asmr-original-title')?.remove();
+                let transEl = h1.parentElement?.querySelector('.asmr-translated-title') as HTMLElement;
+                if (!transEl) {
+                    transEl = document.createElement('div');
+                    transEl.className = 'text-h6 asmr-translated-title';
+                    h1.parentElement?.insertBefore(transEl, h1.nextSibling);
+                }
+                transEl.textContent = translated;
+                h1.style.display = 'none';
+                EventBus.emit('title:update', { title: translated });
+                return;
+            }
+
+            let originalSpan = h1.parentElement?.querySelector('.asmr-original-title') as HTMLElement;
+            if (!originalSpan) {
+                originalSpan = document.createElement('div');
+                originalSpan.className = 'text-caption text-grey-5 q-mb-xs asmr-original-title';
+                h1.parentElement?.insertBefore(originalSpan, h1);
+            }
+            originalSpan.textContent = originalTitle;
+
+            let transEl = h1.parentElement?.querySelector('.asmr-translated-title') as HTMLElement;
+            if (!transEl) {
+                transEl = document.createElement('div');
+                transEl.className = 'text-h6 asmr-translated-title';
+                h1.parentElement?.insertBefore(transEl, h1.nextSibling);
+            }
+            transEl.textContent = translated;
+            h1.style.display = 'none';
+            EventBus.emit('title:update', { title: translated });
         } catch (e) {
             Logger.warn('[WorkMetadata] Title translation failed', e);
         }
     }
 
+    private resetInjectedTitleElements(): void {
+        document.querySelector('.asmr-original-title')?.remove();
+        document.querySelector('.asmr-translated-title')?.remove();
+        const h1 = document.querySelector('h1.text-h6') as HTMLElement | null;
+        if (h1) h1.style.display = '';
+    }
     private async getPageWorkDetails(id: string): Promise<any> {
         // Check Vuex store first (AudioPlayer work, then Works state)
         const storeWork = this.bridge.store?.state?.AudioPlayer?.work;
@@ -379,10 +403,8 @@ export class WorkMetadata {
 
             this.processedWorkIds.delete(this.currentWorkId);
             this.removePanel();
-            document.querySelector('.asmr-original-title')?.remove();
-            document.querySelector('.asmr-translated-title')?.remove();
-            const h1 = document.querySelector('h1.text-h6') as HTMLElement;
-            if (h1) h1.style.display = '';
+            this.titleTranslationEpoch++;
+            this.resetInjectedTitleElements();
             this.loadMetadata(this.currentWorkId);
         });
         statsRow.appendChild(refreshBtn);
@@ -540,6 +562,7 @@ export class WorkMetadata {
                 img.src = url;
                 img.loading = 'lazy';
                 img.alt = 'Sample';
+                img.referrerPolicy = 'no-referrer';
 
                 let retryCount = 0;
                 const maxRetries = 3;

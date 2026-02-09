@@ -5,6 +5,7 @@ import { CentralObserver } from '../core/CentralObserver';
 import { Logger, Config } from '../core/Utils';
 import { THRESHOLDS } from '../core/Constants';
 import { RadioMode } from './radio';
+import { PlaylistMode } from './playlist';
 import { getAudioElement, getVueItem } from '../core/DomUtils';
 import { GM_getValue, GM_setValue } from '$';
 
@@ -215,6 +216,12 @@ export class AutoProgress {
     // Route-based: Mark on Visit
     // =========================================================================
 
+    private isAutoProgressEnabled(): boolean {
+        if (RadioMode.isActive) return Config.get('autoProgress');
+        if (PlaylistMode.isActive) return Config.get('playlistAutoProgress');
+        return Config.get('autoProgress') || Config.get('playlistAutoProgress');
+    }
+
     private handleRouteChange(route: any): void {
         const path: string = route?.path || '';
         const workIdMatch = path.match(/\/work\/(?:RJ)?(\d+)/i);
@@ -230,7 +237,7 @@ export class AutoProgress {
         this.currentVisitPlayed = false;
 
         // Mark on visit (existing logic)
-        if (!Config.get('autoProgress') || !Config.get('autoProgressMarked')) return;
+        if (!this.isAutoProgressEnabled() || !Config.get('autoProgressMarked')) return;
         if (newWorkId) {
             const currentStatus = this.getCurrentStatus(newWorkId);
             if (currentStatus === null || currentStatus === 0) {
@@ -247,7 +254,7 @@ export class AutoProgress {
     private lastDiagTime = 0;
 
     private checkAndMark(currentTime: number): void {
-        if (!Config.get('autoProgress')) return;
+        if (!this.isAutoProgressEnabled()) return;
 
         const now = Date.now();
         const shouldDiag = now - this.lastDiagTime > 10_000; // every 10s at most
@@ -380,7 +387,7 @@ export class AutoProgress {
     }
 
     private checkPartialListen(): void {
-        if (!Config.get('autoProgress') || !Config.get('autoProgressPostponed')) return;
+        if (!this.isAutoProgressEnabled() || !Config.get('autoProgressPostponed')) return;
         if (!this.currentListeningWorkId) return;
         // Must have actually started a track (>5s playback) to count as partial
         if (!this.currentTrackStarted) return;
@@ -419,7 +426,7 @@ export class AutoProgress {
      * Persistent across sessions via GM storage.
      */
     private recordVisitWithoutPlay(workId: string): void {
-        if (!Config.get('autoProgress') || !Config.get('autoProgressPostponed')) return;
+        if (!this.isAutoProgressEnabled() || !Config.get('autoProgressPostponed')) return;
 
         this.visitsNoPlay[workId] = (this.visitsNoPlay[workId] || 0) + 1;
         this.saveVisitsNoPlay();
@@ -464,7 +471,7 @@ export class AutoProgress {
      * @param bypassRank - If true, skip the no-downgrade check (used for postponed)
      */
     private setProgress(workId: string, progress: ProgressStatus, bypassRank = false): void {
-        if (!Config.get('autoProgress')) return;
+        if (!this.isAutoProgressEnabled()) return;
 
         const currentStatusNum = this.getCurrentStatus(workId) || 0;
         const currentStatusStr = NUMBER_TO_STATUS[currentStatusNum] || null;
@@ -683,7 +690,7 @@ export class AutoProgress {
     }
 
     private injectCheckmarks(): void {
-        if (!Config.get('autoProgress')) return;
+        if (!this.isAutoProgressEnabled()) return;
 
         const items = document.querySelectorAll('.q-item, .file-list-item');
         items.forEach(item => {

@@ -153,12 +153,12 @@ export class PlaybackController {
     /**
      * Click a play button in the UI as a fallback
      */
-    clickPlayButton(): boolean {
+    clickPlayButton(shuffleEnabled = AppStore.getConfig('shuffle')): boolean {
         const container = document.querySelector('.q-page-container');
         if (!container) return false;
 
         // Try Play All button first (non-shuffle)
-        if (!AppStore.getConfig('shuffle')) {
+        if (!shuffleEnabled) {
             const playAll = findButtonByText(['Play All', '全部播放'], container);
             if (playAll) {
                 playAll.click();
@@ -172,7 +172,7 @@ export class PlaybackController {
         if (playButtons.length > 0) {
             let btn = playButtons[0];
 
-            if (AppStore.getConfig('shuffle')) {
+            if (shuffleEnabled) {
                 // Pick random audio button
                 const audioItems = findAudioItems(container);
                 const audioButtons = playButtons.filter((b) => {
@@ -195,7 +195,7 @@ export class PlaybackController {
         // Fallback: click audio items directly
         const audioItems = findAudioItems(container);
         if (audioItems.length > 0) {
-            const item = AppStore.getConfig('shuffle')
+            const item = shuffleEnabled
                 ? audioItems[Math.floor(Math.random() * audioItems.length)]
                 : audioItems[0];
             item.click();

@@ -145,6 +145,13 @@ export interface PluginConfig {
     loopPlaylist: boolean;
     autoFilterFolders: boolean;
     radioUseFlatTracks: boolean;
+    // Playlist Mode (separate from Radio settings)
+    playlistPlayAllInFolder: boolean;
+    playlistShuffle: boolean;
+    playlistLoopPlaylist: boolean;
+    playlistAutoFilterFolders: boolean;
+    playlistUseFlatTracks: boolean;
+    playlistAutoProgress: boolean;
 
     // Learner Mode
     showJP: boolean;
@@ -162,7 +169,6 @@ export interface PluginConfig {
     whisperLiveOverlapSec: number;
     whisperCacheTranscripts: boolean;
     whisperAutoWarmup: boolean;
-    whisperAllowWasmFallback: boolean;
     alwaysTranscribe: boolean;
     vectorSearchApiKey: string;
     vectorIndexCursor: number;

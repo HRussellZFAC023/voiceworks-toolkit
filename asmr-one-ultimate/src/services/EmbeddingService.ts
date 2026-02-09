@@ -379,6 +379,10 @@ export const EmbeddingService = {
         return serviceDead;
     },
 
+    isSuspended(): boolean {
+        return false;
+    },
+
     terminate(): void {
         terminateWorker();
     },

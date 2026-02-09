@@ -354,9 +354,9 @@ export class PlaylistMode {
     async next(): Promise<void> {
         if (!this._isActive) return;
 
-        const loop = Config.get('loopPlaylist');
+        const loop = Config.get('playlistLoopPlaylist');
 
-        if (Config.get('shuffle') && this.workIds.length > 1) {
+        if (Config.get('playlistShuffle') && this.workIds.length > 1) {
             // Mark current as visited
             this.visitedIndices.add(this.currentWorkIndex);
 
@@ -470,8 +470,8 @@ export class PlaylistMode {
      * Resets the visited-indices tracker when toggled.
      */
     shuffle(): void {
-        const newValue = !Config.get('shuffle');
-        Config.set('shuffle', newValue);
+        const newValue = !Config.get('playlistShuffle');
+        Config.set('playlistShuffle', newValue);
         this.visitedIndices.clear();
         Logger.debug('[PlaylistMode] Shuffle toggled:', newValue);
 
@@ -482,8 +482,8 @@ export class PlaylistMode {
      * Toggle loop mode on/off
      */
     toggleLoop(): void {
-        const newValue = !Config.get('loopPlaylist');
-        Config.set('loopPlaylist', newValue);
+        const newValue = !Config.get('playlistLoopPlaylist');
+        Config.set('playlistLoopPlaylist', newValue);
         Logger.debug('[PlaylistMode] Loop toggled:', newValue);
 
         EventBus.emit('playlist:loopToggled', { enabled: newValue });
@@ -681,12 +681,12 @@ export class PlaylistMode {
             } else {
                 // Fallback: try clicking the play button
                 Logger.warn('[PlaylistMode] No tracks extracted, trying play button fallback');
-                this.playbackController.clickPlayButton();
+                this.playbackController.clickPlayButton(Config.get('playlistShuffle'));
             }
         } catch (error) {
             Logger.error('[PlaylistMode] Error loading work for playback:', error);
             // Fallback: try clicking the play button
-            this.playbackController.clickPlayButton();
+            this.playbackController.clickPlayButton(Config.get('playlistShuffle'));
         }
     }
 

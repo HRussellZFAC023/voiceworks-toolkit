@@ -41,6 +41,13 @@ const CONFIG_DEFAULTS: PluginConfig = {
     loopPlaylist: false,
     autoFilterFolders: true,
     radioUseFlatTracks: false,
+    // Playlist Mode (split from Radio settings)
+    playlistPlayAllInFolder: false,
+    playlistShuffle: false,
+    playlistLoopPlaylist: false,
+    playlistAutoFilterFolders: true,
+    playlistUseFlatTracks: false,
+    playlistAutoProgress: false,
 
     // Learner Mode
     showJP: true,
@@ -58,7 +65,6 @@ const CONFIG_DEFAULTS: PluginConfig = {
     whisperLiveOverlapSec: 0,
     whisperCacheTranscripts: true,
     whisperAutoWarmup: true,
-    whisperAllowWasmFallback: false,
     alwaysTranscribe: false,
     vectorSearchApiKey: '',
     vectorIndexCursor: 1,
@@ -240,6 +246,10 @@ class AppStoreImpl {
     private _hostStore: KikoeruStore | null = null;
     private _stateListeners: Set<(state: AppState) => void> = new Set();
 
+    constructor() {
+        this.migrateSplitModeSettings();
+    }
+
     // =========================================================================
     // Configuration Management
     // =========================================================================
@@ -276,6 +286,42 @@ class AppStoreImpl {
      */
     getConfigDefault<K extends ConfigKey>(key: K): PluginConfig[K] {
         return CONFIG_DEFAULTS[key];
+    }
+
+    /**
+     * One-time migration: initialize new playlist-specific settings from legacy shared keys.
+     */
+    private migrateSplitModeSettings(): void {
+        if (typeof GM_getValue !== 'function' || typeof GM_setValue !== 'function') return;
+        if (typeof (globalThis as any).GM_getValue !== 'function' || typeof (globalThis as any).GM_setValue !== 'function') return;
+
+        const MIGRATION_KEY = '__asmr_mode_settings_split_v1__';
+        let alreadyMigrated = false;
+        try {
+            alreadyMigrated = GM_getValue(MIGRATION_KEY, false) as boolean;
+        } catch {
+            return;
+        }
+        if (alreadyMigrated) return;
+
+        const mirrorPairs: Array<{ next: keyof PluginConfig; legacy: keyof PluginConfig }> = [
+            { next: 'playlistPlayAllInFolder', legacy: 'playAllInFolder' },
+            { next: 'playlistShuffle', legacy: 'shuffle' },
+            { next: 'playlistLoopPlaylist', legacy: 'loopPlaylist' },
+            { next: 'playlistAutoFilterFolders', legacy: 'autoFilterFolders' },
+            { next: 'playlistUseFlatTracks', legacy: 'radioUseFlatTracks' },
+            { next: 'playlistAutoProgress', legacy: 'autoProgress' },
+        ];
+
+        for (const { next, legacy } of mirrorPairs) {
+            const existing = GM_getValue(next, undefined as unknown as PluginConfig[typeof next]);
+            if (typeof existing === 'undefined') {
+                const fallback = GM_getValue(legacy, CONFIG_DEFAULTS[legacy]) as PluginConfig[typeof next];
+                GM_setValue(next, fallback);
+            }
+        }
+
+        GM_setValue(MIGRATION_KEY, true);
     }
 
     // =========================================================================

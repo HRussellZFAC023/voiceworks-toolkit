@@ -133,9 +133,6 @@ window.unsafeWindow = window;
 if (!localStorage.getItem('GM_enableLogging')) {
     localStorage.setItem('GM_enableLogging', 'true');
 }
-if (!localStorage.getItem('GM_whisperAllowWasmFallback')) {
-    localStorage.setItem('GM_whisperAllowWasmFallback', 'true');
-}
 `;
 
 type AuthConfig = { username: string; password: string };
@@ -549,7 +546,7 @@ test.describe('Feature: Whisper AI Transcription End-to-End', () => {
          *
          * Covers: US-1, US-2, US-3, US-4, US-5, US-6, NF-1, NF-2, NF-3, NF-4
          *
-         * NOTE: Requires WebGPU/WASM model download — skipped in headless CI.
+         * NOTE: Requires WebGPU model download — skipped in headless CI.
          * Run with `npm run test:e2e:headed` to execute this test.
          */
         test.skip(!!process.env.CI || !process.env.WHISPER_E2E, 'Requires WebGPU model download — set WHISPER_E2E=1 to run');

@@ -793,7 +793,7 @@ export class RadioMode {
             this.ensurePlaying();
         } else {
             Logger.warn('[RadioMode] No tracks found, trying play button fallback');
-            const clicked = this.playbackController.clickPlayButton();
+            const clicked = this.playbackController.clickPlayButton(shuffle);
             if (clicked) {
                 this.recordActivity();
                 Logger.debug('[RadioMode] Play button fallback succeeded');

@@ -5,7 +5,6 @@ import { useConfig } from '../../composables/useConfig';
 import { useEventBus } from '../../composables/useEventBus';
 import { RadioMode } from '../../features/radio';
 import { PlaylistMode } from '../../features/playlist';
-import { PLAYER_BAR_SELECTOR } from '../../core/DomUtils';
 import { Config, Logger } from '../../core/Utils';
 
 // ============================================================================
@@ -29,8 +28,8 @@ const { on } = useEventBus();
 
 const sfwMode = useConfig('sfwMode');
 const translateMode = useConfig('translateMode');
-const shuffleEnabled = useConfig('shuffle');
-const loopEnabled = useConfig('loopPlaylist');
+const shuffleEnabled = useConfig('playlistShuffle');
+const loopEnabled = useConfig('playlistLoopPlaylist');
 
 // ============================================================================
 // Local reactive state
@@ -100,16 +99,10 @@ function ensurePlaylistControls() {
         return;
     }
 
-    // Remove stale instances
-    const existing = document.getElementById('asmr-playlist-player-controls');
-    if (existing) existing.remove();
-
-    const playerBar = document.querySelector(PLAYER_BAR_SELECTOR);
-    if (!playerBar) {
-        Logger.warn('[SidebarMenu] Player bar not found, retrying in 1s');
-        setTimeout(() => ensurePlaylistControls(), 1000);
-        return;
-    }
+    // Remove ALL stale instances (current ID, legacy ID, and any by class name)
+    document.getElementById('asmr-playlist-player-controls')?.remove();
+    document.getElementById('asmr-playlist-controls')?.remove();
+    document.querySelectorAll('.asmr-playlist-player-controls').forEach(el => el.remove());
 
     const container = document.createElement('div');
     container.className = 'asmr-playlist-player-controls';
@@ -131,7 +124,10 @@ function ensurePlaylistControls() {
         </button>
     `;
 
-    playerBar.insertBefore(container, playerBar.firstChild);
+    // Append to document.body instead of the player bar — the host app's Vue 2
+    // re-renders the player bar on playback state changes, which strips our
+    // injected children. Since we use position:fixed, body works fine.
+    document.body.appendChild(container);
     playlistControlsEl = container;
 
     // Bind click handlers
@@ -192,8 +188,8 @@ function updatePlayerBarProgress(current: number, total: number) {
         progressEl.textContent = `${current} / ${total}`;
     }
 
-    const loop = Config.get('loopPlaylist');
-    const shuffle = Config.get('shuffle');
+    const loop = Config.get('playlistLoopPlaylist');
+    const shuffle = Config.get('playlistShuffle');
 
     // When loop or shuffle is on, prev/next are never disabled
     const prevBtn = playlistControlsEl.querySelector('.asmr-playlist-prev') as HTMLButtonElement | null;

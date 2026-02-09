@@ -9,6 +9,7 @@ export class PageTitleManager {
     private observer: MutationObserver | null = null;
     private suffix = ' - ASMR Online';
     private cleanups: (() => void)[] = [];
+    private titleUpdateEpoch = 0;
 
     constructor() {
         this.bridge = KikoeruBridge.getInstance();
@@ -68,21 +69,25 @@ export class PageTitleManager {
     private async updateTitle(baseTitle: string) {
         if (!baseTitle || baseTitle === 'undefined') return;
 
+        const epoch = ++this.titleUpdateEpoch;
         this.currentTitle = baseTitle;
 
         // Try to translate if it contains JP/CN characters and user's lang differs
         if (/[\u3040-\u30ff\u4e00-\u9faf]/.test(baseTitle) && !TranslationService.isUserLang(baseTitle)) {
             try {
                 const translated = await TranslationService.translate(baseTitle);
+                if (epoch !== this.titleUpdateEpoch) return;
                 if (translated && translated !== baseTitle) {
                     this.applyTitle(translated);
                     return;
                 }
             } catch (e) {
                 Logger.warn('[PageTitleManager] Title translation failed', e);
+                if (epoch !== this.titleUpdateEpoch) return;
             }
         }
 
+        if (epoch !== this.titleUpdateEpoch) return;
         this.applyTitle(baseTitle);
     }
 

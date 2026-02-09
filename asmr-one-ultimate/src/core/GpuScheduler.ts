@@ -183,7 +183,7 @@ class GpuSchedulerImpl {
     initialize(): void {
         // Listen for GPU device-lost events from any worker
         EventBus.on('gpu:device-lost', ({ worker }: { worker: WorkerName }) => {
-            this.onGpuFailure(worker);
+            this.onGpuFailure(worker, 'device-lost-event');
         });
 
         Logger.debug('[GpuScheduler] Initialized');
@@ -253,14 +253,18 @@ class GpuSchedulerImpl {
     }
 
     /** Report GPU failure for a worker */
-    onGpuFailure(worker: WorkerName): void {
+    onGpuFailure(worker: WorkerName, reason?: string): void {
         this.health.consecutiveFailures++;
         this.health.lastFailureTime = Date.now();
 
-        // Broadcast device loss to all services so they can skip WebGPU.
-        // A true GPU device loss (GPU process crash) affects ALL workers, not just one.
-        // This is distinct from dtype-specific failures (e.g. fp16 on Intel) which are per-service.
-        EventBus.emit('gpu:device-lost-broadcast', { source: worker });
+        const reasonText = String(reason || '');
+        const explicitDeviceLoss = /device lost|instance reference|release session|invalid session/i.test(reasonText);
+        const shouldBroadcast = explicitDeviceLoss || this.health.consecutiveFailures >= CIRCUIT_BREAKER_THRESHOLD;
+        if (shouldBroadcast) {
+            // Broadcast only on explicit device-loss signals (or after repeated failures)
+            // to avoid cascading a single transient worker hiccup into global WebGPU disable.
+            EventBus.emit('gpu:device-lost-broadcast', { source: worker });
+        }
 
         if (this.health.consecutiveFailures >= CIRCUIT_BREAKER_THRESHOLD) {
             this.health.gpuHealthy = false;
@@ -362,7 +366,7 @@ class GpuSchedulerImpl {
             // Check if this is a GPU-related error
             const msg = String((err as Error)?.message || err || '');
             if (/device lost|OOM|out of memory|createBuffer|GPUDevice|WebGPU/i.test(msg)) {
-                this.onGpuFailure(entry.task.worker);
+                this.onGpuFailure(entry.task.worker, msg);
             }
         } finally {
             this.activeLease = null;

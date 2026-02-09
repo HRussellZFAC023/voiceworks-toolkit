@@ -67,7 +67,7 @@ const EMBEDDING_TASK_DOC = 'passage';
 const MAX_DESCRIPTION_CHARS = 1500;
 const MAX_PAYLOAD_CHARS = 5000;
 const MIN_SCORE_THRESHOLD = 0.25;
-const SEARCH_TIMEOUT_MS = 25_000;
+const SEARCH_TIMEOUT_MS = 90_000;
 const TRANSLATION_TIMEOUT_MS = 5_000;
 
 // ============================================================================
@@ -116,6 +116,7 @@ let indexReady = false;
 let indexReadyPromise: Promise<void> | null = null;
 let tagIndexReady: Promise<void> | null = null;
 let searchPriority = false;
+let whisperActive = false;
 let searchAbort: AbortController | null = null;
 const tagById = new Map<number, TagEntry>();
 const tagByName = new Map<string, TagEntry[]>();
@@ -272,9 +273,9 @@ async function getEmbedding(text: string, task: string): Promise<number[] | null
         const embTask = task === EMBEDDING_TASK_QUERY ? 'query' : 'passage';
         const isSearch = task === EMBEDDING_TASK_QUERY;
         return await EmbeddingService.embed(text, embTask, {
-            // Search queries: HIGH priority to jump ahead of background indexing
+            // Search queries: REALTIME so they can run even if another worker is loading models.
             // Indexing: LOW priority + cancellable so search can clear them from the queue
-            priority: isSearch ? Priority.HIGH : Priority.LOW,
+            priority: isSearch ? Priority.REALTIME : Priority.LOW,
             cancellable: !isSearch,
         });
     } catch (err) {
@@ -393,6 +394,7 @@ async function indexWork(work: any): Promise<boolean> {
             await new Promise(resolve => setTimeout(resolve, 500));
         }
     }
+    if (whisperActive || EmbeddingService.isSuspended()) return false;
     const id = String(work.id);
     await ensureIndexReady();
     await ensureModelSynced();
@@ -435,6 +437,11 @@ async function indexWorks(works: any[]): Promise<number> {
                     added += 1;
                     consecutiveFails = 0;
                 } else {
+                    if (whisperActive || EmbeddingService.isSuspended()) {
+                        consecutiveFails = 0;
+                        await new Promise(resolve => setTimeout(resolve, 1000));
+                        continue;
+                    }
                     // indexWork returns false if embedding failed or work already indexed
                     // Only count as failure if it's a new work that failed
                     const id = String(work?.id);
@@ -450,6 +457,11 @@ async function indexWorks(works: any[]): Promise<number> {
                 }
             } catch (e) {
                 Logger.warn('[VectorSearch] Index work failed', e);
+                if (whisperActive || EmbeddingService.isSuspended()) {
+                    consecutiveFails = 0;
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                    continue;
+                }
                 consecutiveFails++;
             }
             if (consecutiveFails >= MAX_CONSECUTIVE_FAILURES) {
@@ -467,6 +479,7 @@ async function indexWorks(works: any[]): Promise<number> {
 }
 
 async function indexCurrentWork(): Promise<void> {
+    if (whisperActive || EmbeddingService.isSuspended()) return;
     const work = (bridge.store.state.AudioPlayer?.work as any);
     if (!work?.id) return;
     const id = String(work.id);
@@ -501,6 +514,10 @@ async function indexCurrentWork(): Promise<void> {
 
 async function bulkIndex(opts?: { maxPages?: number; maxWorks?: number; order?: string; sort?: string; startPage?: number }) {
     if (autoIndexRunning) return;
+    if (whisperActive || EmbeddingService.isSuspended()) {
+        scheduleNextBatch(15_000);
+        return;
+    }
     await ensureIndexReady();
     await ensureModelSynced();
     await ensureTagIndex();
@@ -518,6 +535,11 @@ async function bulkIndex(opts?: { maxPages?: number; maxWorks?: number; order?: 
         let exhausted = false;
         let firstWorkId: string | null = null;
         for (let page = startPage; page <= endPage; page++) {
+            if (whisperActive || EmbeddingService.isSuspended()) {
+                setStatus(t('magicSearchReady'), false);
+                scheduleNextBatch(15_000);
+                return;
+            }
             if (page > startPage) {
                 await new Promise(resolve => setTimeout(resolve, 2000));
             }
@@ -568,7 +590,7 @@ async function bulkIndex(opts?: { maxPages?: number; maxWorks?: number; order?: 
         await refreshIndexCount();
         const total = indexCount.value;
         if (!autoIndexExhausted) {
-            const batchDelay = 5;
+            const batchDelay = 60;
             setStatus(format('magicSearchIndexingContinue', { indexed, cursor: bulkIndexCursor, total, delay: batchDelay }), false);
             scheduleNextBatch(batchDelay * 1000);
         } else {
@@ -585,11 +607,15 @@ async function bulkIndex(opts?: { maxPages?: number; maxWorks?: number; order?: 
 
 async function scheduleAutoIndex(): Promise<void> {
     if (autoIndexRequested || autoIndexRunning) return;
+    if (whisperActive || EmbeddingService.isSuspended()) {
+        scheduleNextBatch(15_000);
+        return;
+    }
     autoIndexRequested = true;
     await bulkIndex({ maxPages: 6, maxWorks: 250, order: 'release', sort: 'desc' });
 }
 
-function scheduleNextBatch(delayMs = 5 * 1000): void {
+function scheduleNextBatch(delayMs = 60 * 1000): void {
     if (autoBatchTimer) return;
     autoBatchTimer = window.setTimeout(async () => {
         autoBatchTimer = null;
@@ -607,6 +633,7 @@ function startIndexWatcher(): void {
 
 async function checkForNewWorks(): Promise<void> {
     if (autoIndexRunning) return;
+    if (whisperActive || EmbeddingService.isSuspended()) return;
     const res = await WorksApi.getWorks({ order: 'release', sort: 'desc', page: 1 });
     const works = res.works || [];
     if (!works.length || !works[0]?.id) return;
@@ -620,6 +647,7 @@ async function checkForNewWorks(): Promise<void> {
 }
 
 async function ensureAutoIndexOnOpen(): Promise<void> {
+    if (whisperActive || EmbeddingService.isSuspended()) return;
     const count = await countIndex();
     if (count > 0) return;
     await scheduleAutoIndex();
@@ -1039,6 +1067,22 @@ on('lang:change', () => {
     void refreshIndexCount();
 });
 
+on('whisper:transcribing', ({ active }) => {
+    whisperActive = !!active;
+    if (active) {
+        Logger.debug('[VectorSearch] Whisper active: pausing embedding index tasks');
+        GpuScheduler.clearCancellable('embedding');
+        if (autoBatchTimer) {
+            window.clearTimeout(autoBatchTimer);
+            autoBatchTimer = null;
+        }
+        return;
+    }
+    if (!autoBatchTimer && !autoIndexRunning && !autoIndexExhausted) {
+        scheduleNextBatch(2_000);
+    }
+});
+
 // Expose open method so the controller can trigger it
 defineExpose({ open });
 </script>
@@ -1051,7 +1095,7 @@ defineExpose({ open });
         @click="open"
     >
         <span class="q-btn__content">
-            <i class="q-icon material-icons" aria-hidden="true">psychology</i>
+            <i class="q-icon material-icons" aria-hidden="true">saved_search</i>
         </span>
     </button>
 

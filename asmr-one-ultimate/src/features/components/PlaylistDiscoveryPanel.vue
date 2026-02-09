@@ -54,8 +54,8 @@ type PlaylistFilterMode = 'all' | 'mine' | 'public' | 'online';
 const BATCH_SIZE = 12;
 const METADATA_BATCH_SIZE = 4;
 const BATCH_COOLDOWN_MS = 300;
-const COVER_UPDATE_CONCURRENCY = 3;
-const COVER_UPDATE_DELAY_MS = 200;
+const COVER_UPDATE_CONCURRENCY = 1;
+const COVER_UPDATE_DELAY_MS = 500;
 const WORKS_PAGE_SIZE = 1;
 
 const STORAGE_KEY = 'asmr_ultimate_discovered_playlists';
@@ -979,10 +979,10 @@ async function loadNextBatch(): Promise<void> {
 
         displayedCount.value = endIdx;
 
-        // Fire-and-forget: covers load in the background without blocking rendering.
-        // Playlists appear immediately with placeholder covers.
+        // Wait for all cover updates to finish before allowing the next batch,
+        // so we don't flood the API with concurrent metadata + cover requests (429).
         if (coverUpdatePromisesList.length > 0) {
-            void Promise.allSettled(coverUpdatePromisesList);
+            await Promise.allSettled(coverUpdatePromisesList);
         }
     } catch (error) {
         Logger.error('[PlaylistDiscovery] Failed to load batch:', error);

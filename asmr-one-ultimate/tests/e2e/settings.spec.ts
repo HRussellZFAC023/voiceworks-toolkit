@@ -17,6 +17,15 @@ test.describe('Settings Page Injection', () => {
     await expect(section).toBeVisible();
   });
 
+  test('Playlist Settings section is injected', async ({ injectedPage, isScriptLoaded }) => {
+    await helpers.gotoSettings(injectedPage);
+    await isScriptLoaded();
+    await injectedPage.waitForTimeout(1500);
+
+    const section = injectedPage.locator('#asmr-playlist-settings-section');
+    await expect(section).toBeVisible();
+  });
+
   test('Magic Search Settings section is injected', async ({ injectedPage, isScriptLoaded }) => {
     await helpers.gotoSettings(injectedPage);
     await isScriptLoaded();
@@ -52,6 +61,7 @@ test.describe('Settings Page Injection', () => {
     const sections = await helpers.hasSettingsSections(injectedPage);
 
     expect(sections.radio).toBe(true);
+    expect(sections.playlist).toBe(true);
     expect(sections.magic).toBe(true);
     expect(sections.whisper).toBe(true);
     expect(sections.storage).toBe(true);
@@ -240,9 +250,11 @@ test.describe('Settings Page Stability', () => {
 
     // Count sections
     const radioSections = await injectedPage.locator('#asmr-radio-settings-section').count();
+    const playlistSections = await injectedPage.locator('#asmr-playlist-settings-section').count();
     const magicSections = await injectedPage.locator('#asmr-magic-settings-section').count();
 
     expect(radioSections).toBe(1);
+    expect(playlistSections).toBe(1);
     expect(magicSections).toBe(1);
   });
 

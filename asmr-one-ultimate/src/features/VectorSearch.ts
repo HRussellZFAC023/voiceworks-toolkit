@@ -114,7 +114,7 @@ export class VectorSearch {
         if (!header || header.querySelector('.asmr-vector-btn')) return;
         const btn = document.createElement('button');
         btn.className = 'q-btn q-btn-flat q-btn-dense asmr-vector-btn text-white';
-        btn.innerHTML = '<span class="q-btn__content"><i class="q-icon material-icons" aria-hidden="true">psychology</i></span>';
+        btn.innerHTML = '<span class="q-btn__content"><i class="q-icon material-icons" aria-hidden="true">saved_search</i></span>';
         btn.title = I18n.t('magicSearchBtn');
         btn.ariaLabel = I18n.t('magicSearchBtn');
         btn.onclick = () => this.openDialog();

@@ -666,6 +666,7 @@ export const helpers = {
     async hasSettingsSections(page: Page) {
         return {
             radio: await page.locator('#asmr-radio-settings-section').count() > 0,
+            playlist: await page.locator('#asmr-playlist-settings-section').count() > 0,
             magic: await page.locator('#asmr-magic-settings-section').count() > 0,
             whisper: await page.locator('#asmr-whisper-settings-section').count() > 0,
             storage: await page.locator('#asmr-storage-settings-section').count() > 0,

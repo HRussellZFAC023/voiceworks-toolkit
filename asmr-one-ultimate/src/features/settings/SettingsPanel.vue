@@ -36,6 +36,7 @@ const enableVectorSearch = useConfig('enableVectorSearch');
 const enableWhisper = useConfig('enableWhisper');
 const enablePlayerTranslator = useConfig('enablePlayerTranslator');
 const autoProgress = useConfig('autoProgress');
+const playlistAutoProgress = useConfig('playlistAutoProgress');
 const enableStoreBackup = useConfig('enableStoreBackup');
 const preferLocalTranslation = useConfig('preferLocalTranslation');
 const enableJpdb = useConfig('enableJpdb');
@@ -45,7 +46,7 @@ const sectionVisibility = computed(() => ({
     whisper: enableWhisper.value,
     translation: enablePlayerTranslator.value,
     jpdb: enableJpdb.value,
-    autoprogress: autoProgress.value,
+    autoprogress: autoProgress.value || playlistAutoProgress.value,
     storage: enableStoreBackup.value,
 }));
 
@@ -456,7 +457,7 @@ const credits = [
             <hr class="q-separator q-separator--horizontal q-separator--dark">
             <SettingsToggle config-key="enableTagFilters" :label="t('enableTagFilters')" :sublabel="t('enableTagFiltersSub')" icon="label_off" />
             <hr class="q-separator q-separator--horizontal q-separator--dark">
-            <SettingsToggle config-key="enableVectorSearch" :label="t('enableVectorSearch')" :sublabel="t('enableVectorSearchSub')" icon="psychology" />
+            <SettingsToggle config-key="enableVectorSearch" :label="t('enableVectorSearch')" :sublabel="t('enableVectorSearchSub')" icon="saved_search" />
             <hr class="q-separator q-separator--horizontal q-separator--dark">
             <SettingsToggle config-key="enableWhisper" :label="t('enableWhisper')" :sublabel="t('enableWhisperSub')" icon="record_voice_over" />
             <hr class="q-separator q-separator--horizontal q-separator--dark">
@@ -565,6 +566,24 @@ const credits = [
             <SettingsToggle config-key="radioUseFlatTracks" :label="t('radioFlatTracks')" :sublabel="t('radioFlatTracksSub')" icon="view_list" />
             <hr class="q-separator q-separator--horizontal q-separator--dark">
             <SettingsToggle config-key="autoProgress" :label="t('autoProgress')" :sublabel="t('autoProgressSub')" icon="fast_forward" />
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- Playlist Settings                                            -->
+        <!-- ============================================================ -->
+        <span class="text-weight-medium text-center flex q-my-md asmr-settings-header" id="asmr-playlist-settings-section-header">{{ t('playlistSettings') }}</span>
+        <div id="asmr-playlist-settings-section" class="asmr-settings-section rounded-borders q-list q-list--bordered q-list--dark bg-black" role="group" aria-labelledby="asmr-playlist-settings-section-header">
+            <SettingsToggle config-key="playlistPlayAllInFolder" :label="t('playAll')" :sublabel="t('playAllSub')" icon="playlist_play" />
+            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <SettingsToggle config-key="playlistAutoFilterFolders" :label="t('autoFilterFolders')" :sublabel="t('autoFilterFoldersSub')" icon="folder_open" />
+            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <SettingsToggle config-key="playlistShuffle" :label="t('shuffle')" :sublabel="t('shuffleSub')" icon="shuffle" />
+            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <SettingsToggle config-key="playlistLoopPlaylist" :label="t('loopPlaylist')" :sublabel="t('loopPlaylistSub')" icon="repeat" />
+            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <SettingsToggle config-key="playlistUseFlatTracks" :label="t('radioFlatTracks')" :sublabel="t('radioFlatTracksSub')" icon="view_list" />
+            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <SettingsToggle config-key="playlistAutoProgress" :label="t('autoProgress')" :sublabel="t('autoProgressSub')" icon="fast_forward" />
         </div>
 
         <!-- ============================================================ -->

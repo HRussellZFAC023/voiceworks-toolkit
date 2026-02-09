@@ -48,12 +48,7 @@ export class SupportButton {
         btn.title = 'Support Development';
         btn.ariaLabel = 'Support Development';
 
-        btn.innerHTML = `
-            <span class="q-focus-helper"></span>
-            <span class="q-btn__content text-center col items-center q-anchor--skip justify-center row">
-                <i class="q-icon material-icons" aria-hidden="true" role="presentation">health_and_safety</i>
-            </span>
-        `;
+        btn.innerHTML = '<span class="q-btn__content"><i class="q-icon material-icons" aria-hidden="true" role="presentation">health_and_safety</i></span>';
 
         // Prepend to container to be prominent? or append?
         // HeaderActions container is usually populated by ensure().

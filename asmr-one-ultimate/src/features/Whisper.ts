@@ -120,6 +120,8 @@ interface CachedTranscript {
     vtt?: string;
     complete?: boolean;
     translations?: Record<string, { text: string; lrc: string; vtt?: string }>;
+    /** Original identity string (pre-hash) for collision detection. Added Feb 2026. */
+    sourceIdentity?: string;
 }
 
 interface TranscriptIndexEntry {
@@ -149,6 +151,7 @@ export class Whisper {
 
     // Pre-decoded PCM buffer for lookahead processing
     private pcmBuffer: Float32Array | null = null;
+    private pcmSourceUrl: string | null = null; // URL the pcmBuffer was decoded from
     private pcmDuration = 0; // seconds
     private transcribedUpTo = 0; // how far we've sent chunks to worker (seconds)
     private processingLoopId: number | null = null;
@@ -160,6 +163,7 @@ export class Whisper {
     private segments: WhisperSegment[] = [];
     private currentTrackSrc: string | null = null;
     private currentCacheKey: string | null = null;
+    private currentCacheIdentity: string | null = null;
     private chunkSendTimes = new Map<number, number>();
     private chunkGenerations = new Map<number, number>();
 
@@ -336,6 +340,13 @@ export class Whisper {
         // Abort any in-flight audio download for the previous track
         this.abortFetch();
 
+        // Flush stale chunks from the worker queue so they don't waste compute time
+        // or delay new track's processing. Results would be generation-filtered anyway,
+        // but flushing prevents the worker from decoding old audio chunks.
+        if (this.worker) {
+            this.worker.postMessage({ type: 'flush-queue' });
+        }
+
         if (this.transcribing) {
             this.stopTranscription('track-change');
         }
@@ -453,34 +464,45 @@ export class Whisper {
         this.transcribedUpTo = 0;
 
         const settings = this.getWhisperSettings();
+        this.currentCacheIdentity = this.buildCacheIdentity(src, settings);
         this.currentCacheKey = this.buildCacheKey(src, settings);
 
         if (settings.cacheTranscripts) {
             const cached = SharedCache.get<CachedTranscript>(this.currentCacheKey);
             if (cached && cached.segments?.length) {
-                Logger.debug('[Whisper] Using cached transcript:', { segments: cached.segments.length, complete: !!cached.complete });
-                this.segments = cached.segments;
-                this.lastSegmentEnd = cached.segments[cached.segments.length - 1]?.end || 0;
-                this.updateTranscriptIndex(this.currentCacheKey, cached);
-                const latest = cached.segments[cached.segments.length - 1];
-                EventBus.emit('whisper:update', {
-                    text: latest?.text || cached.text,
-                    segments: cached.segments,
-                    final: !!cached.complete,
-                    fromCache: true,
-                    live: false,
-                    source: 'cache',
-                });
-                if (cached.complete) {
-                    EventBus.emit('whisper:complete', { text: cached.text });
-                    this.stopTranscription('cache-hit');
-                    return;
+                // Verify the cached transcript's source identity matches ours.
+                // hashString is 32-bit, so collisions are theoretically possible.
+                // Old cache entries (pre-Feb 2026) won't have sourceIdentity — accept them.
+                if (cached.sourceIdentity && cached.sourceIdentity !== this.currentCacheIdentity) {
+                    Logger.warn('[Whisper] Cache key collision detected! Ignoring stale cache.', {
+                        expected: this.currentCacheIdentity,
+                        cached: cached.sourceIdentity,
+                    });
+                } else {
+                    Logger.debug('[Whisper] Using cached transcript:', { segments: cached.segments.length, complete: !!cached.complete });
+                    this.segments = cached.segments;
+                    this.lastSegmentEnd = cached.segments[cached.segments.length - 1]?.end || 0;
+                    this.updateTranscriptIndex(this.currentCacheKey, cached);
+                    const latest = cached.segments[cached.segments.length - 1];
+                    EventBus.emit('whisper:update', {
+                        text: latest?.text || cached.text,
+                        segments: cached.segments,
+                        final: !!cached.complete,
+                        fromCache: true,
+                        live: false,
+                        source: 'cache',
+                    });
+                    if (cached.complete) {
+                        EventBus.emit('whisper:complete', { text: cached.text });
+                        this.stopTranscription('cache-hit');
+                        return;
+                    }
+                    // Incomplete cache — continue transcription from where we left off
+                    Logger.debug('[Whisper] Cache incomplete, continuing transcription from', this.lastSegmentEnd.toFixed(1) + 's');
+                    this.transcribedUpTo = Math.max(0, this.lastSegmentEnd - 2);
+                    this.lastTranslatedSegmentCount = this.segments.length;
+                    this.translateAheadUpTo = this.lastSegmentEnd;
                 }
-                // Incomplete cache — continue transcription from where we left off
-                Logger.debug('[Whisper] Cache incomplete, continuing transcription from', this.lastSegmentEnd.toFixed(1) + 's');
-                this.transcribedUpTo = Math.max(0, this.lastSegmentEnd - 2);
-                this.lastTranslatedSegmentCount = this.segments.length;
-                this.translateAheadUpTo = this.lastSegmentEnd;
             }
         }
 
@@ -503,12 +525,14 @@ export class Whisper {
         this.fetchAbortController = new AbortController();
         try {
             this.pcmBuffer = await this.fetchAndDecodeAudio(trackUrl, this.fetchAbortController.signal);
+            this.pcmSourceUrl = trackUrl;
 
             // Guard: if a track change happened during the async fetch/decode,
             // this startTranscription call is stale — discard the decoded audio.
             if (this.transcriptionGeneration !== startGeneration) {
                 Logger.debug('[Whisper] Track changed during fetch/decode, discarding stale audio');
                 this.pcmBuffer = null;
+                this.pcmSourceUrl = null;
                 return;
             }
 
@@ -565,10 +589,6 @@ export class Whisper {
         this.clearModelLoadTimer();
         this.clearAutoStartTimer();
         this.abortFetch();
-        if (this.gpuRecoveryTimer) {
-            clearTimeout(this.gpuRecoveryTimer);
-            this.gpuRecoveryTimer = null;
-        }
         // Keep buttons active if auto-transcribe is still enabled (track change or cache hit within work)
         const keepActive = this.autoTranscribeWorkId && (reason === 'track-change' || reason === 'cache-hit');
         if (!keepActive) {
@@ -593,6 +613,7 @@ export class Whisper {
         }
         this.stopProcessingLoop();
         this.pcmBuffer = null;
+        this.pcmSourceUrl = null;
         this.pcmDuration = 0;
         this.transcribedUpTo = 0;
 
@@ -627,6 +648,7 @@ export class Whisper {
         this.lastSegmentEnd = 0;
         this.segments = [];
         this.currentCacheKey = null;
+        this.currentCacheIdentity = null;
         this.chunkSendTimes.clear();
         this.chunkGenerations.clear();
         this.finalizeOnIdle = false;
@@ -634,6 +656,7 @@ export class Whisper {
         this.lastTranslatedSegmentCount = 0;
         this.translateAheadUpTo = 0;
         this.pcmBuffer = null;
+        this.pcmSourceUrl = null;
         this.pcmDuration = 0;
         this.transcribedUpTo = 0;
         this.stopProcessingLoop();
@@ -858,6 +881,20 @@ export class Whisper {
             });
             this.handleTrackChange(bridgeSrc);
             return;
+        }
+
+        // Verify pcmBuffer belongs to the current track (sanity check against stale audio)
+        if (this.pcmSourceUrl) {
+            const expectedUrl = this.resolveTrackUrl();
+            if (expectedUrl && expectedUrl !== this.pcmSourceUrl) {
+                Logger.error('[Whisper] PCM buffer mismatch! Buffer from wrong track.', {
+                    pcmSource: this.pcmSourceUrl,
+                    expectedSource: expectedUrl,
+                    currentTrackSrc: this.currentTrackSrc,
+                });
+                this.handleTrackChange(bridgeSrc || this.currentTrackSrc || '');
+                return;
+            }
         }
 
         if (this.pendingChunks >= MAX_PENDING_CHUNKS) return;
@@ -1692,8 +1729,13 @@ export class Whisper {
     // Cache handling
     // ------------------------------------------------------------------------
 
+    /** Build the identity string (pre-hash) for a transcript cache entry. */
+    private buildCacheIdentity(src: string, settings: WhisperSettings): string {
+        return `${src}|${settings.model}|${settings.subtask}|${settings.language}`;
+    }
+
     private buildCacheKey(src: string, settings: WhisperSettings): string {
-        return CacheKeys.whisperTranscript(`${src}|${settings.model}|${settings.subtask}|${settings.language}`);
+        return CacheKeys.whisperTranscript(this.buildCacheIdentity(src, settings));
     }
 
     private persistCache(complete = false): void {
@@ -1717,6 +1759,7 @@ export class Whisper {
             vtt: this.buildVtt(this.segments),
             complete: complete || existing?.complete,
             translations: existing?.translations,
+            sourceIdentity: this.currentCacheIdentity || undefined,
         };
 
         SharedCache.set(this.currentCacheKey, payload, CACHE_TTL_MS);
@@ -1878,7 +1921,7 @@ export class Whisper {
             strideLengthS: 5,
             cacheTranscripts: true,
             autoWarmup: true,
-            allowWasm: Config.get('whisperAllowWasmFallback') !== false,
+            allowWasm: false,
             silenceThreshold: 0,
         };
     }

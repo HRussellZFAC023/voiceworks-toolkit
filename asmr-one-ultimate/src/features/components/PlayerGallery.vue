@@ -613,6 +613,7 @@ onUnmounted(() => {
         :class="{ 'asmr-gallery-img--loaded': imageLoaded }"
         :src="currentImageUrl"
         draggable="false"
+        referrerpolicy="no-referrer"
         alt=""
         @load="onImageLoad"
     />

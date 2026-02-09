@@ -39,6 +39,7 @@ const bodyTranslations = ref<Map<number, string>>(new Map());
 const chipTranslations = ref<Map<string, string>>(new Map());
 const currentWorkId = ref('');
 let loadRequestVersion = 0;
+let titleTranslationRequestVersion = 0;
 
 /** Image retry counters keyed by URL */
 const imageRetries = ref<Map<string, number>>(new Map());
@@ -167,6 +168,13 @@ function onImageError(url: string): void {
     }, delay);
 }
 
+function resetInjectedTitleElements(): void {
+    document.querySelector('.asmr-original-title')?.remove();
+    document.querySelector('.asmr-translated-title')?.remove();
+    const h1 = document.querySelector('h1.text-h6') as HTMLElement | null;
+    if (h1) h1.style.display = '';
+}
+
 // ============================================================================
 // Business Logic
 // ============================================================================
@@ -208,11 +216,8 @@ async function handleRefresh(): Promise<void> {
         SharedCache.set(CacheKeys.translation(text, 'en', 'remote'), null as any, 0);
     });
 
-    // Clean up translated title elements from host DOM
-    document.querySelector('.asmr-original-title')?.remove();
-    document.querySelector('.asmr-translated-title')?.remove();
-    const h1 = document.querySelector('h1.text-h6') as HTMLElement;
-    if (h1) h1.style.display = '';
+    titleTranslationRequestVersion++;
+    resetInjectedTitleElements();
 
     // Reset state and reload
     meta.value = null;
@@ -403,51 +408,85 @@ function paragraphHtml(para: string): string {
 // Title Translation (operates on host DOM, outside Vue scope)
 // ============================================================================
 
-async function translateTitle(originalTitle: string): Promise<void> {
-    if (!originalTitle || (!shouldTranslate.value && !cnToJp.value)) return;
-    if (cnOnlyMode.value && !isChinese(originalTitle)) return;
-    if (!cnOnlyMode.value && TranslationService.isUserLang(originalTitle)) return;
+async function translateTitle(originalTitle: string, expectedLoadVersion: number, expectedWorkId: string): Promise<void> {
+    if (!originalTitle) return;
+
+    const titleRequestId = ++titleTranslationRequestVersion;
+    const shouldSkipTranslation =
+        (!shouldTranslate.value && !cnToJp.value) ||
+        (cnOnlyMode.value && !isChinese(originalTitle)) ||
+        (!cnOnlyMode.value && TranslationService.isUserLang(originalTitle));
+    if (shouldSkipTranslation) {
+        if (
+            expectedLoadVersion === loadRequestVersion &&
+            currentWorkId.value === expectedWorkId &&
+            titleRequestId === titleTranslationRequestVersion
+        ) {
+            resetInjectedTitleElements();
+            emit('title:update', { title: originalTitle });
+        }
+        return;
+    }
 
     try {
         const translated = cnOnlyMode.value
             ? await TranslationService.translate(originalTitle, 'ja')
             : await TranslationService.translate(originalTitle);
-        if (translated && translated !== originalTitle) {
-            const h1 = await SafeUtils.waitForElement('h1.text-h6');
-            if (h1) {
-                if (cnOnlyMode.value) {
-                    // CN→JP: silently replace with Japanese
-                    let transEl = h1.parentElement?.querySelector('.asmr-translated-title') as HTMLElement;
-                    if (!transEl) {
-                        transEl = document.createElement('div');
-                        transEl.className = 'text-h6 asmr-translated-title';
-                        h1.parentElement?.insertBefore(transEl, h1.nextSibling);
-                        (h1 as HTMLElement).style.display = 'none';
-                    }
-                    transEl.textContent = translated;
-                    emit('title:update', { title: translated });
-                } else {
-                    const originalSpan = document.createElement('div');
-                    originalSpan.className = 'text-caption text-grey-5 q-mb-xs asmr-original-title';
-                    originalSpan.textContent = originalTitle;
-
-                    if (!h1.parentElement?.querySelector('.asmr-original-title')) {
-                        h1.parentElement?.insertBefore(originalSpan, h1);
-                    }
-
-                    let transEl = h1.parentElement?.querySelector('.asmr-translated-title') as HTMLElement;
-                    if (!transEl) {
-                        transEl = document.createElement('div');
-                        transEl.className = 'text-h6 asmr-translated-title';
-                        h1.parentElement?.insertBefore(transEl, h1.nextSibling);
-                        (h1 as HTMLElement).style.display = 'none';
-                    }
-                    transEl.textContent = translated;
-
-                    emit('title:update', { title: translated });
-                }
-            }
+        if (
+            expectedLoadVersion !== loadRequestVersion ||
+            currentWorkId.value !== expectedWorkId ||
+            titleRequestId !== titleTranslationRequestVersion
+        ) {
+            return;
         }
+        if (!translated || translated === originalTitle) {
+            resetInjectedTitleElements();
+            emit('title:update', { title: originalTitle });
+            return;
+        }
+
+        const h1 = await SafeUtils.waitForElement('h1.text-h6');
+        if (
+            !h1 ||
+            expectedLoadVersion !== loadRequestVersion ||
+            currentWorkId.value !== expectedWorkId ||
+            titleRequestId !== titleTranslationRequestVersion
+        ) {
+            return;
+        }
+
+        if (cnOnlyMode.value) {
+            // CN->JP: silently replace with Japanese
+            h1.parentElement?.querySelector('.asmr-original-title')?.remove();
+            let transEl = h1.parentElement?.querySelector('.asmr-translated-title') as HTMLElement;
+            if (!transEl) {
+                transEl = document.createElement('div');
+                transEl.className = 'text-h6 asmr-translated-title';
+                h1.parentElement?.insertBefore(transEl, h1.nextSibling);
+            }
+            transEl.textContent = translated;
+            h1.style.display = 'none';
+            emit('title:update', { title: translated });
+            return;
+        }
+
+        let originalSpan = h1.parentElement?.querySelector('.asmr-original-title') as HTMLElement;
+        if (!originalSpan) {
+            originalSpan = document.createElement('div');
+            originalSpan.className = 'text-caption text-grey-5 q-mb-xs asmr-original-title';
+            h1.parentElement?.insertBefore(originalSpan, h1);
+        }
+        originalSpan.textContent = originalTitle;
+
+        let transEl = h1.parentElement?.querySelector('.asmr-translated-title') as HTMLElement;
+        if (!transEl) {
+            transEl = document.createElement('div');
+            transEl.className = 'text-h6 asmr-translated-title';
+            h1.parentElement?.insertBefore(transEl, h1.nextSibling);
+        }
+        transEl.textContent = translated;
+        h1.style.display = 'none';
+        emit('title:update', { title: translated });
     } catch (e) {
         Logger.warn('[WorkMetadataPanel] Title translation failed', e);
     }
@@ -457,22 +496,32 @@ async function translateTitle(originalTitle: string): Promise<void> {
 // Translation Side Effects
 // ============================================================================
 
-async function translateDescription(): Promise<void> {
+async function translateDescription(expectedLoadVersion: number, expectedWorkId: string): Promise<void> {
     if ((!shouldTranslate.value && !cnToJp.value) || !meta.value?.description) return;
-    if (cnOnlyMode.value && !isChinese(meta.value.description)) return;
+    const source = meta.value.description;
+    if (cnOnlyMode.value && !isChinese(source)) return;
     try {
         const translated = cnOnlyMode.value
-            ? await TranslationService.translate(meta.value.description, 'ja')
-            : await TranslationService.translate(meta.value.description);
-        if (translated && translated !== meta.value.description) {
+            ? await TranslationService.translate(source, 'ja')
+            : await TranslationService.translate(source);
+        if (
+            expectedLoadVersion !== loadRequestVersion ||
+            currentWorkId.value !== expectedWorkId ||
+            meta.value?.description !== source
+        ) {
+            return;
+        }
+        if (translated && translated !== source) {
             descriptionTranslated.value = translated;
+        } else {
+            descriptionTranslated.value = '';
         }
     } catch {
         // Silently fail
     }
 }
 
-async function translateChips(): Promise<void> {
+async function translateChips(expectedLoadVersion: number, expectedWorkId: string): Promise<void> {
     if (!shouldTranslate.value && !cnToJp.value) return;
 
     const labelsToTranslate: { key: string; text: string }[] = [];
@@ -500,23 +549,30 @@ async function translateChips(): Promise<void> {
     try {
         const targetLang = cnOnlyMode.value ? 'ja' : undefined;
         const results = await TranslationService.translateBatch(labelsToTranslate.map(l => l.text), targetLang);
+        if (
+            expectedLoadVersion !== loadRequestVersion ||
+            currentWorkId.value !== expectedWorkId
+        ) {
+            return;
+        }
+        const nextMap = new Map(chipTranslations.value);
         results.forEach((translated, i) => {
             const item = labelsToTranslate[i];
             if (translated && translated !== item.text) {
-                chipTranslations.value = new Map(chipTranslations.value);
                 if (cnOnlyMode.value) {
-                    chipTranslations.value.set(item.key, translated);
+                    nextMap.set(item.key, translated);
                 } else {
-                    chipTranslations.value.set(item.key, TranslationService.formatPair(item.text, translated));
+                    nextMap.set(item.key, TranslationService.formatPair(item.text, translated));
                 }
             }
         });
+        chipTranslations.value = nextMap;
     } catch {
         // Silently fail
     }
 }
 
-async function translateBodyParagraphs(): Promise<void> {
+async function translateBodyParagraphs(expectedLoadVersion: number, expectedWorkId: string): Promise<void> {
     if ((!shouldTranslate.value && !cnToJp.value) || bodyParagraphs.value.length === 0) return;
 
     // Extract plain text from HTML paragraphs
@@ -531,6 +587,12 @@ async function translateBodyParagraphs(): Promise<void> {
     try {
         const targetLang = cnOnlyMode.value ? 'ja' : undefined;
         const results = await TranslationService.translateBatch(texts, targetLang);
+        if (
+            expectedLoadVersion !== loadRequestVersion ||
+            currentWorkId.value !== expectedWorkId
+        ) {
+            return;
+        }
         const newMap = new Map(bodyTranslations.value);
         results.forEach((translated, i) => {
             if (translated && translated !== texts[i]) {
@@ -566,6 +628,8 @@ async function getPageWorkDetails(id: string): Promise<any> {
 
 async function loadMetadata(id: string): Promise<void> {
     const version = ++loadRequestVersion;
+    titleTranslationRequestVersion++;
+    resetInjectedTitleElements();
     const work = await getPageWorkDetails(id);
     if (version !== loadRequestVersion) return; // Stale request — newer load started
     if (!work) {
@@ -591,14 +655,14 @@ async function loadMetadata(id: string): Promise<void> {
 
     // Start title translation early (in parallel with DLsite scrape)
     const titleToTranslate = work.title || fallback?.title || '';
-    if (titleToTranslate) translateTitle(titleToTranslate);
+    if (titleToTranslate) translateTitle(titleToTranslate, version, id);
 
     // Phase 0: Render fallback immediately for fast first paint
     if (fallback) {
         meta.value = fallback;
         // Trigger translations after fallback render
-        translateDescription();
-        translateChips();
+        translateDescription(version, id);
+        translateChips(version, id);
     }
 
     try {
@@ -609,14 +673,14 @@ async function loadMetadata(id: string): Promise<void> {
             partial.rjcode = rjCodeStr;
             const merged = mergeMeta(partial, fallback);
             if (merged.title && merged.title !== titleToTranslate) {
-                translateTitle(merged.title);
+                translateTitle(merged.title, version, id);
             }
             meta.value = merged;
             // Re-trigger translations on enriched data
             descriptionTranslated.value = '';
             chipTranslations.value = new Map();
-            translateDescription();
-            translateChips();
+            translateDescription(version, id);
+            translateChips(version, id);
         };
 
         const fullMeta = await scraper.scrapeProgressive(actualScrapeCode, onProgress);
@@ -627,16 +691,16 @@ async function loadMetadata(id: string): Promise<void> {
         const merged = mergeMeta(fullMeta, fallback);
 
         if (merged.title && merged.title !== titleToTranslate) {
-            translateTitle(merged.title);
+            translateTitle(merged.title, version, id);
         }
 
         meta.value = merged;
         descriptionTranslated.value = '';
         chipTranslations.value = new Map();
         bodyTranslations.value = new Map();
-        translateDescription();
-        translateChips();
-        translateBodyParagraphs();
+        translateDescription(version, id);
+        translateChips(version, id);
+        translateBodyParagraphs(version, id);
     } catch (e) {
         Logger.error('[WorkMetadataPanel] Failed to load metadata', e);
         // Fallback already rendered in Phase 0
@@ -649,6 +713,8 @@ async function loadMetadata(id: string): Promise<void> {
 
 watch(workId, (newId, oldId) => {
     if (newId && newId !== oldId) {
+        titleTranslationRequestVersion++;
+        resetInjectedTitleElements();
         // Reset state for new work
         meta.value = null;
         descriptionTranslated.value = '';
@@ -667,6 +733,12 @@ onMounted(() => {
         currentWorkId.value = workId.value;
         loadMetadata(workId.value);
     }
+});
+
+onUnmounted(() => {
+    loadRequestVersion++;
+    titleTranslationRequestVersion++;
+    resetInjectedTitleElements();
 });
 </script>
 
@@ -759,6 +831,7 @@ onMounted(() => {
                                 :src="getImageSrc(url)"
                                 loading="lazy"
                                 alt="Sample"
+                                referrerpolicy="no-referrer"
                                 @error="onImageError(url)"
                             >
                         </button>

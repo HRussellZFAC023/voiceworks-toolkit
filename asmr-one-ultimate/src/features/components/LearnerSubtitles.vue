@@ -832,8 +832,18 @@ function preTranslateAll(lyrics: Array<{ time: number; text: string }>): void {
     if (lyrics.length === 0) return;
     const targetLang = (Config.get('subtitleLang') as string || 'en').toLowerCase();
     const texts = lyrics.map(l => l.text?.trim()).filter(Boolean);
-    if (texts.length === 0 || !TranslationService.canPrefetch(texts.length)) return;
-    const uncached = texts.filter(t => !TranslationService.peekCached(t, targetLang));
+    if (texts.length === 0) return;
+
+    // Very large subtitle files can exceed prefetch limits; still pre-translate
+    // an initial window so early playback lines appear translated quickly.
+    let prefetchTexts = texts;
+    let windowedPrefetch = false;
+    if (!TranslationService.canPrefetch(texts.length)) {
+        prefetchTexts = texts.slice(0, 240);
+        windowedPrefetch = true;
+    }
+
+    const uncached = prefetchTexts.filter(t => !TranslationService.peekCached(t, targetLang));
     if (uncached.length === 0) return;
 
     const first = uncached[0] || '';
@@ -842,7 +852,7 @@ function preTranslateAll(lyrics: Array<{ time: number; text: string }>): void {
     if (key === lastPreTranslatedKey) return;
     lastPreTranslatedKey = key;
 
-    Logger.debug(`[LearnerMode] Pre-translating ${uncached.length}/${texts.length} uncached lines...`);
+    Logger.debug(`[LearnerMode] Pre-translating ${uncached.length}/${prefetchTexts.length} uncached lines${windowedPrefetch ? ' (windowed)' : ''}...`);
 
     const processBatch = (batch: string[], priority: string) => {
         if (batch.length === 0) return;
@@ -852,11 +862,14 @@ function preTranslateAll(lyrics: Array<{ time: number; text: string }>): void {
             if (isChinese(text) && !TranslationService.peekCached(text, 'ja')) cnTexts.push(text);
             if (!TranslationService.peekCached(text, targetLang)) allTexts.push(text);
         }
-        if (cnTexts.length > 0) {
-            TranslationService.translateBatch(cnTexts, 'ja').catch(err => Logger.warn(`[LearnerMode] CN->JA ${priority} batch failed:`, err));
-        }
         if (targetLang !== 'ja' && allTexts.length > 0) {
             TranslationService.translateBatch(allTexts, targetLang).catch(err => Logger.warn(`[LearnerMode] ->${targetLang} ${priority} batch failed:`, err));
+        }
+        if (cnTexts.length > 0) {
+            const cnDelay = targetLang === 'ja' ? 0 : (priority === 'initial' ? 600 : 1200);
+            setTimeout(() => {
+                TranslationService.translateBatch(cnTexts, 'ja').catch(err => Logger.warn(`[LearnerMode] CN->JA ${priority} batch failed:`, err));
+            }, cnDelay);
         }
     };
 
@@ -1563,7 +1576,7 @@ function createControlsEl(small: boolean): HTMLElement {
     div.append(
         createBtn('chevron_left', t('prevLine'), () => seek(-1)),
         createBtn('chevron_right', t('nextLine'), () => seek(1)),
-        createBtn('psychology', t('toggleJP'), () => {
+        createBtn('translate', t('toggleJP'), () => {
             showJP.value = !showJP.value;
         }, !!showJP.value),
         (() => {
@@ -1646,7 +1659,7 @@ function captureControls(parent: HTMLElement, reference: HTMLElement) {
     const excludedIcons = new Set([
         'skip_previous', 'skip_next', 'play_arrow', 'pause',
         'replay_5', 'forward_30', 'volume_up', 'volume_down',
-        'chevron_left', 'chevron_right', 'psychology', 'record_voice_over',
+        'chevron_left', 'chevron_right', 'translate', 'record_voice_over',
     ]);
     const candidates = allButtons.filter(btn => {
         if (btn.classList.contains('learner-control-btn')) return false;
@@ -1743,11 +1756,11 @@ function restoreControls() {
     overflowMenuEl = null;
 }
 
-// Update style for psychology button active state
-function syncPsychologyBtn() {
+// Update style for translate button active state
+function syncToggleJpBtn() {
     document.querySelectorAll('.learner-controls button, .learner-collapsed-controls button').forEach(btn => {
         const icon = btn.querySelector('i');
-        if (icon && icon.textContent?.trim() === 'psychology') {
+        if (icon && icon.textContent?.trim() === 'translate') {
             btn.classList.toggle('learner-btn-active', !!showJP.value);
         }
     });
@@ -1825,7 +1838,7 @@ onMounted(() => {
     on('player:rate-change', (payload) => {
         playbackRate.value = payload.rate;
         syncSpeedUI(payload.rate);
-        syncPsychologyBtn();
+        syncToggleJpBtn();
     });
     on('translation:progress', (payload) => {
         if (payload?.stage === 'ready') updateLyrics();
@@ -1918,8 +1931,8 @@ onUnmounted(() => {
     document.removeEventListener('click', closeOverflowOnOutsideClick, true);
 });
 
-// Watch showJP to sync the psychology button active state
-watch(showJP, () => syncPsychologyBtn());
+// Watch showJP to sync the translate button active state
+watch(showJP, () => syncToggleJpBtn());
 
 // Segment transition: fade-in when primary text changes to a new segment
 watch(primaryText, (val) => {
@@ -1935,10 +1948,10 @@ watch(primaryText, (val) => {
     <div
         ref="expandedRef"
         class="learner-subs-expanded"
-        :class="{ hidden: !showExpanded, 'hide-jp': !showJP }"
+        :class="{ hidden: !showExpanded }"
         aria-live="polite"
     >
-        <div class="learner-jp" :class="{ 'segment-fade': segmentFading }" @animationend="segmentFading = false" lang="ja" role="status">
+        <div v-show="showJP" class="learner-jp" :class="{ 'segment-fade': segmentFading }" @animationend="segmentFading = false" lang="ja" role="status">
             <!-- Karaoke with JPDB furigana -->
             <template v-if="karaokeHighlightStart >= 0 && karaokeSplitIndex >= 0 && jpdbEnabled">
                 <span class="karaoke-past"><template v-for="(seg, i) in furiganaPast" :key="'p'+i"><span v-if="seg.vid !== undefined" class="jpdb-word" :class="[seg.stateClass, seg.pitchClass]" :data-vid="seg.vid" :data-sid="seg.sid" data-jpdb="true"><ruby v-if="seg.rt">{{ seg.base }}<rt class="jpdb-furi">{{ seg.rt }}</rt></ruby><template v-else>{{ seg.base }}</template></span><template v-else>{{ seg.base }}</template></template></span><span class="karaoke-spoken"><template v-for="(seg, i) in furiganaCurrent" :key="'c'+i"><span v-if="seg.vid !== undefined" class="jpdb-word" :class="[seg.stateClass, seg.pitchClass]" :data-vid="seg.vid" :data-sid="seg.sid" data-jpdb="true"><ruby v-if="seg.rt">{{ seg.base }}<rt class="jpdb-furi">{{ seg.rt }}</rt></ruby><template v-else>{{ seg.base }}</template></span><template v-else>{{ seg.base }}</template></template></span><span class="karaoke-upcoming" :class="{ 'karaoke-hidden': !segmentMode }"><template v-for="(seg, i) in furiganaUpcoming" :key="'u'+i"><span v-if="seg.vid !== undefined" class="jpdb-word" :class="[seg.stateClass, seg.pitchClass]" :data-vid="seg.vid" :data-sid="seg.sid" data-jpdb="true"><ruby v-if="seg.rt">{{ seg.base }}<rt class="jpdb-furi">{{ seg.rt }}</rt></ruby><template v-else>{{ seg.base }}</template></span><template v-else>{{ seg.base }}</template></template></span>
@@ -1969,11 +1982,11 @@ watch(primaryText, (val) => {
         <div
             ref="collapsedRef"
             class="learner-subs-collapsed"
-            :class="{ hidden: !showCollapsed, 'hide-jp': !showJP }"
+            :class="{ hidden: !showCollapsed }"
             :style="{ display: showCollapsed ? 'flex' : 'none !important' }"
             aria-live="polite"
         >
-            <div class="learner-jp" :class="{ 'segment-fade': segmentFading }" @animationend="segmentFading = false" lang="ja" role="status">
+            <div v-show="showJP" class="learner-jp" :class="{ 'segment-fade': segmentFading }" @animationend="segmentFading = false" lang="ja" role="status">
                 <!-- Karaoke with JPDB furigana -->
                 <template v-if="karaokeHighlightStart >= 0 && karaokeSplitIndex >= 0 && jpdbEnabled">
                     <span class="karaoke-past"><template v-for="(seg, i) in furiganaPast" :key="'p'+i"><span v-if="seg.vid !== undefined" class="jpdb-word" :class="[seg.stateClass, seg.pitchClass]" :data-vid="seg.vid" :data-sid="seg.sid" data-jpdb="true"><ruby v-if="seg.rt">{{ seg.base }}<rt class="jpdb-furi">{{ seg.rt }}</rt></ruby><template v-else>{{ seg.base }}</template></span><template v-else>{{ seg.base }}</template></template></span><span class="karaoke-spoken"><template v-for="(seg, i) in furiganaCurrent" :key="'c'+i"><span v-if="seg.vid !== undefined" class="jpdb-word" :class="[seg.stateClass, seg.pitchClass]" :data-vid="seg.vid" :data-sid="seg.sid" data-jpdb="true"><ruby v-if="seg.rt">{{ seg.base }}<rt class="jpdb-furi">{{ seg.rt }}</rt></ruby><template v-else>{{ seg.base }}</template></span><template v-else>{{ seg.base }}</template></template></span><span class="karaoke-upcoming" :class="{ 'karaoke-hidden': !segmentMode }"><template v-for="(seg, i) in furiganaUpcoming" :key="'u'+i"><span v-if="seg.vid !== undefined" class="jpdb-word" :class="[seg.stateClass, seg.pitchClass]" :data-vid="seg.vid" :data-sid="seg.sid" data-jpdb="true"><ruby v-if="seg.rt">{{ seg.base }}<rt class="jpdb-furi">{{ seg.rt }}</rt></ruby><template v-else>{{ seg.base }}</template></span><template v-else>{{ seg.base }}</template></template></span>

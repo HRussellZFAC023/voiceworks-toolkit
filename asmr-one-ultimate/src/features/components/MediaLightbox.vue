@@ -560,6 +560,7 @@ function renderImage(wrapper: HTMLElement, item: MediaFile, url: string): void {
     img.alt = item.title;
     img.className = 'media-viewer-image';
     img.draggable = false;
+    img.referrerPolicy = 'no-referrer';
     img.style.cursor = 'default';
     img.style.width = '';
     img.style.height = '';
@@ -809,6 +810,7 @@ function preloadAdjacentImages(): void {
             const item = currentMediaList.value[idx];
             if (!preloadedImages.has(item.hash)) {
                 const img = new Image();
+                img.referrerPolicy = 'no-referrer';
                 img.src = getMediaUrl(item.hash, item);
                 preloadedImages.set(item.hash, img);
             }
@@ -821,6 +823,7 @@ function preloadAdjacentImages(): void {
             currentMediaList.value.forEach((item) => {
                 if (!preloadedImages.has(item.hash)) {
                     const img = new Image();
+                    img.referrerPolicy = 'no-referrer';
                     img.src = getMediaUrl(item.hash, item);
                     preloadedImages.set(item.hash, img);
                 }
@@ -886,6 +889,7 @@ function startAutoRecovery(item: MediaFile, wrapper: HTMLElement): void {
         if (curItem.hash !== item.hash) return;
 
         const img = new Image();
+        img.referrerPolicy = 'no-referrer';
         img.onload = () => {
             if (currentMediaList.value[currentMediaIndex.value].hash === item.hash) {
                 renderMedia(item, 'image');
@@ -1462,6 +1466,7 @@ defineExpose({
                             :src="getThumbnailUrl(item)"
                             :alt="item.title"
                             loading="lazy"
+                            referrerpolicy="no-referrer"
                         >
                         <span v-else class="material-icons">{{ getThumbnailIcon(currentMediaType) }}</span>
                     </button>

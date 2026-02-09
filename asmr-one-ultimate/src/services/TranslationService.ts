@@ -36,6 +36,9 @@ const BATCH_CHUNK_SIZE_GPU_THROTTLED = 8;
 const REMOTE_CONCURRENCY = 12;
 const REMOTE_MIN_INTERVAL_MS = 50;
 const REMOTE_RATE_LIMIT_PAUSE_MS = 60_000;
+// Keep remote batch fallback from starving real-time subtitle/title translations.
+const REMOTE_BATCH_CHUNK_SIZE = Math.max(2, Math.floor(REMOTE_CONCURRENCY / 3));
+const REMOTE_BATCH_YIELD_MS = 0;
 
 // Single-pass quote/fullwidth normalization — compiled once at module scope
 const _quoteMap: Record<string, string> = {
@@ -43,8 +46,6 @@ const _quoteMap: Record<string, string> = {
     '\u00AB': '"', '\u00BB': '"', '\u201E': '"', '\u201C': '"', '\u201D': '"',
     '\u301D': '"', '\u301E': '"', '\u301F': '"', '\u2033': '"',
     '\u2018': "'", '\u2019': "'", '\u201A': "'", '\u2039': "'", '\u203A': "'", '\u2032': "'",
-    '\uFF08': '(', '\uFF09': ')',
-    '\u3010': '[', '\u3011': ']',
     '\u300C': '"', '\u300D': '"',  // 「」 Japanese single quotes
     '\u300E': '"', '\u300F': '"',  // 『』 Japanese double quotes
     '\uFF01': '!', '\uFF1F': '?',
@@ -231,21 +232,6 @@ function glossaryPreProcess(text: string, targetLang: string): [string, boolean]
 }
 
 // ============================================================================
-// Bracket Preprocessing
-// ============================================================================
-
-/**
- * Split multi-sentence text on 。 boundaries for opus-mt translation.
- * MarianMT treats 。 as end-of-sequence and drops subsequent sentences.
- * 【】 brackets pass through to the model (converted to [] by cleanQuotes on output).
- * Returns null if text has only one sentence (no split needed).
- */
-function splitForModel(text: string): string[] | null {
-    const sentences = text.split(/。/).filter(s => s.trim());
-    return sentences.length > 1 ? sentences : null;
-}
-
-// ============================================================================
 // Cache
 // ============================================================================
 
@@ -291,7 +277,14 @@ let rememberedDtype = SharedCache.get<string>(CacheKeys.translationPreferredDtyp
 // GPU contention: throttle translation batches while Whisper is actively transcribing
 let whisperActive = false;
 EventBus.on('whisper:transcribing', ({ active }) => {
-    whisperActive = active;
+    whisperActive = !!active;
+    if (!active) return;
+    // Free translation GPU workers while Whisper is running to reduce
+    // cross-worker WebGPU contention and device-loss risk.
+    if (workers.length > 0) {
+        Logger.log('[TranslationService] Whisper active: unloading local translation workers');
+        terminateWorker();
+    }
 });
 
 // Cross-service device loss: when any worker reports GPU device lost, terminate
@@ -632,11 +625,14 @@ async function translateLocalBatch(texts: string[], targetLang: string): Promise
             const pending = initPromises.get(group.route.model);
             if (pending) {
                 try {
-                    await Promise.race([pending, new Promise((_, rej) => setTimeout(() => rej(new Error('init-wait')), 2000))]);
+                    await Promise.race([pending, new Promise((_, rej) => setTimeout(() => rej(new Error('init-wait')), 15_000))]);
                     entry = getWorker(group.route.model);
                 } catch { /* timed out */ }
             } else {
-                initWorker(group.route.model).catch(() => { });
+                try {
+                    await Promise.race([initWorker(group.route.model), new Promise((_, rej) => setTimeout(() => rej(new Error('init-wait')), 15_000))]);
+                    entry = getWorker(group.route.model);
+                } catch { /* timed out or init failed */ }
             }
             if (!entry) return;
         }
@@ -766,6 +762,7 @@ export const TranslationService = {
      */
     async ensureLocalModelReady(): Promise<void> {
         if (Config.get('preferLocalTranslation') === false) return;
+        if (whisperActive) return;
         // Only load ja-en eagerly (most common). zh-en loads on demand when Chinese
         // text is detected. Loading both creates 2 GPU devices (~400-600MB) which
         // causes buffer allocation failures on GPUs with limited VRAM.
@@ -776,6 +773,7 @@ export const TranslationService = {
      * Force-reload translation models.
      */
     async warmupLocalModel(): Promise<void> {
+        if (whisperActive) return;
         await initWorker(OPUS_JA_EN, true);
         resetIdleUnloadTimer();
     },
@@ -820,18 +818,6 @@ export const TranslationService = {
 
     /** @internal */
     async _translateInner(text: string, targetLang: string): Promise<string> {
-        // 0. Multi-sentence split — opus-mt treats 。as EOS and drops subsequent sentences.
-        //    Split on 。, translate each sentence independently, then join.
-        const sentences = splitForModel(text);
-        if (sentences) {
-            const results = await Promise.all(
-                sentences.map(s => this.translate(s, targetLang)),
-            );
-            const joined = results.join('. ');
-            SharedCache.set(cacheKey(text, targetLang, 'local'), joined, CACHE_TTL_MS);
-            return joined;
-        }
-
         // 1. Glossary exact match — bypasses model entirely
         const glossaryResult = applyGlossary(text, targetLang);
         if (glossaryResult) {
@@ -844,7 +830,7 @@ export const TranslationService = {
 
         // 3. Try local translation (with preprocessed text if glossary modified it)
         //    Normalize input: strip decorative chars (♡♪〜) and convert 「」→"" that confuse opus-mt
-        if (Config.get('preferLocalTranslation') !== false) {
+        if (!whisperActive && Config.get('preferLocalTranslation') !== false) {
             try {
                 const localInput = normalizeForModel(wasModified ? preprocessed : text);
                 const result = await translateLocal(localInput, targetLang);
@@ -927,7 +913,7 @@ export const TranslationService = {
         let remaining: { idx: number; text: string }[] = [];
 
         // 2. Try local batch translation (with glossary-preprocessed texts)
-        if (Config.get('preferLocalTranslation') !== false) {
+        if (!whisperActive && Config.get('preferLocalTranslation') !== false) {
             try {
                 const localResults = await translateLocalBatch(preprocessedTexts, targetLang);
 
@@ -952,25 +938,29 @@ export const TranslationService = {
         // 3. Remote fallback for anything local didn't handle
         if (remaining.length > 0) {
             Logger.debug('[TranslationService] Remote batch:', remaining.length, 'texts');
+            for (let i = 0; i < remaining.length; i += REMOTE_BATCH_CHUNK_SIZE) {
+                const chunk = remaining.slice(i, i + REMOTE_BATCH_CHUNK_SIZE);
+                await Promise.allSettled(chunk.map(async ({ text: original }) => {
+                    const preprocessed = preprocessedMap.get(original) || original;
+                    let translated: string;
+                    try {
+                        translated = await translateRemoteSingle(preprocessed, targetLang);
+                    } catch {
+                        translated = original;
+                    }
+                    translated = this.cleanQuotes(translated);
 
-            const remoteResults = await Promise.allSettled(
-                remaining.map(({ text }) => {
-                    const preprocessed = preprocessedMap.get(text) || text;
-                    return translateRemoteSingle(preprocessed, targetLang).catch(() => text);
-                })
-            );
+                    const indices = seen.get(original) || [];
+                    for (const idx of indices) results[idx] = translated;
 
-            for (let i = 0; i < remaining.length; i++) {
-                const res = remoteResults[i];
-                const original = remaining[i].text;
-                let translated = res.status === 'fulfilled' ? res.value : original;
-                translated = this.cleanQuotes(translated);
+                    if (translated && translated !== original) {
+                        SharedCache.set(cacheKey(original, targetLang, 'remote'), translated, CACHE_TTL_MS);
+                    }
+                }));
 
-                const indices = seen.get(original) || [];
-                for (const idx of indices) results[idx] = translated;
-
-                if (translated && translated !== original) {
-                    SharedCache.set(cacheKey(original, targetLang, 'remote'), translated, CACHE_TTL_MS);
+                // Yield between chunks so real-time single-line calls can interleave.
+                if (i + REMOTE_BATCH_CHUNK_SIZE < remaining.length) {
+                    await new Promise(resolve => setTimeout(resolve, REMOTE_BATCH_YIELD_MS));
                 }
             }
         }
@@ -1062,4 +1052,4 @@ export const TranslationService = {
 };
 
 // Exported for unit testing — not part of the public API
-export const _testExports = { normalizeForModel, splitForModel, isLikelyGarbage };
+export const _testExports = { normalizeForModel, isLikelyGarbage };
