@@ -1,4 +1,5 @@
 import { GM_getValue, GM_setValue } from '$';
+import { openDB } from 'idb';
 import { Logger } from '../core/Utils';
 
 interface Tag {
@@ -130,7 +131,7 @@ export class TagDatabase {
         if (GM_getValue(GM_KEY_MIGRATED, false)) return false;
 
         try {
-            const { openDB } = await import('idb');
+            // openDB is statically imported at top level
             const db = await openDB('asmr-one-ultimate-db', 2, {
                 upgrade(upgradeDb, oldVersion) {
                     if (oldVersion < 1) upgradeDb.createObjectStore('tags', { keyPath: 'id' });

@@ -11,6 +11,7 @@ import { StorageManager } from '../../infrastructure/StorageManager';
 import { TranslationService } from '../../services/TranslationService';
 import { CacheKeys, SharedCache } from '../../core/Cache';
 import { Logger } from '../../core/Utils';
+import { Whisper } from '../Whisper';
 import type { ConfigKey } from '../../types';
 // @ts-ignore – Vite ?raw import
 import PROXY_WORKER_CODE from '../../../dlsite-proxy-worker.js?raw';
@@ -140,9 +141,8 @@ function updateWhisperModelStatus() {
 function downloadWhisperModel() {
     whisperDownloadStatus.value = { isLoading: true, progress: 0, message: t('downloadWhisperModelSub') };
     updateWhisperModelStatus();
-    import('../Whisper').then(({ Whisper }) => {
-        Whisper.getInstance().warmupModel(true);
-    }).catch((e) => { Logger.warn('[SettingsPanel] Failed to warmup Whisper model:', e); });
+    try { Whisper.getInstance().warmupModel(true); }
+    catch (e) { Logger.warn('[SettingsPanel] Failed to warmup Whisper model:', e); }
 }
 
 // ============================================================================
