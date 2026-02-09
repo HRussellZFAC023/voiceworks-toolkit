@@ -1,4 +1,5 @@
 import { Logger } from '../../core/Utils';
+import { getCleanText } from '../../core/DomUtils';
 import { WorkService } from '../../services/WorkService';
 import type { TrackFolder, TrackItem } from '../../types/api';
 import type { MediaFile, WorkTreeComponent } from './types';
@@ -94,24 +95,22 @@ export class ThumbnailManager {
             const iconSection = item.querySelector('.q-item__section--avatar');
             if (!labelEl || !iconSection) return;
 
-            // Skip if already has thumbnail
-            if (iconSection.querySelector('.media-thumb-container')) return;
-
             // Get the raw title text - prefer .q-item__label if present (folders have nested labels)
             const labelDirect = item.querySelector('.q-item__label');
-            let title = (labelDirect || labelEl).textContent?.trim() || '';
+            const labelTarget = labelDirect || labelEl;
+            let title = '';
+
+            title = getCleanText(labelTarget);
 
             // Collapse internal whitespace (from HTML formatting)
             title = title.replace(/\s+/g, ' ');
 
-            // Strip English translation suffix if present: "file.jpg (Translation)"
+            // Strip translation suffix from CSS ::after pseudo-element won't affect textContent,
+            // but strip English translation suffix if present: "file.jpg (Translation)"
             const translationMatch = title.match(/^(.+?)\s*\([^)]+\)$/);
             if (translationMatch) {
                 title = translationMatch[1].trim();
             }
-
-            const ext = this.deps.getFileExtension(title);
-            if (!this.deps.isImage(ext) && !this.deps.isVideo(ext)) return;
 
             // Look up file data
             let fileData = fileMap.get(title);
@@ -125,14 +124,16 @@ export class ThumbnailManager {
                 }
             }
 
-            if (!fileData?.hash) {
-                Logger.debug(`[MediaViewer] Thumbnails: no hash for "${title}"`);
-                return;
-            }
+            if (!fileData?.hash) return;
 
-            // Stash the hash on the DOM element for faster/more reliable access in click handler
+            // Stash the hash on ALL items (not just images) for cross-feature use
+            // (e.g., TranscriptFileInjector needs hashes on audio items)
             (item as HTMLElement).dataset.asmrHash = fileData.hash;
 
+            // Skip thumbnail injection if already has one
+            if (iconSection.querySelector('.media-thumb-container')) return;
+
+            const ext = this.deps.getFileExtension(title);
             if (this.deps.isImage(ext)) {
                 const thumbUrl = this.deps.getMediaUrl(fileData.hash, fileData);
                 this.createThumbnail(iconSection as HTMLElement, thumbUrl, fileData.hash);

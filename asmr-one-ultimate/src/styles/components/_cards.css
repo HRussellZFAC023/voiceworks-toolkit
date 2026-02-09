@@ -1,0 +1,383 @@
+/* ========================================
+   Work Card Redesign
+   Mobile-first responsive layout with
+   equal-height cards and breathing room.
+
+   Two contexts:
+   ┌─ Grid:     #mainContent > [id^="RJ"]
+   │            Variant A — full info (title, circle, stats, price, tags, VA)
+   │
+   └─ Carousel: .swiper-slide > .work-card-intersection
+                Variant B — compact (title, translation, mixed tags/VA/duration)
+
+   Shared rules use :is() to avoid duplication.
+   ======================================== */
+
+/* Shorthand for "any work-card ancestor" used in comments:
+   WC = :is(#mainContent > [id^="RJ"], .work-card-intersection) */
+
+
+/* =============================================
+   1. GRID-ONLY — responsive column overrides
+   ============================================= */
+
+/* Mobile first: 2 columns (override col-xs-12 = 100%) */
+#mainContent > [id^="RJ"] {
+  flex: 0 0 50% !important;
+  max-width: 50% !important;
+  display: flex !important;
+}
+
+@media (min-width: 600px) {
+  #mainContent > [id^="RJ"] {
+    flex: 0 0 33.3333% !important;
+    max-width: 33.3333% !important;
+  }
+}
+
+@media (min-width: 1024px) {
+  #mainContent > [id^="RJ"] {
+    flex: 0 0 25% !important;
+    max-width: 25% !important;
+  }
+}
+
+@media (min-width: 1440px) {
+  #mainContent > [id^="RJ"] {
+    flex: 0 0 20% !important;
+    max-width: 20% !important;
+  }
+}
+
+@media (min-width: 1920px) {
+  #mainContent > [id^="RJ"] {
+    flex: 0 0 16.6667% !important;
+    max-width: 16.6667% !important;
+  }
+}
+
+
+/* =============================================
+   2. FLEX PASS-THROUGH
+   Both contexts use the intersection observer
+   wrapper; carousel slides also need flex.
+   ============================================= */
+
+/* Intersection observer wrapper — pass height through */
+.work-card-intersection,
+.work-card-intersection > div {
+  display: flex !important;
+  flex-direction: column !important;
+  flex: 1 !important;
+  width: 100% !important;
+}
+
+/* Carousel slides — flex container so cards stretch to equal row height */
+.swiper-slide:has(.work-card-intersection) {
+  display: flex !important;
+  flex-direction: column !important;
+}
+
+
+/* =============================================
+   3. SHARED CARD RULES — both grid & carousel
+   ============================================= */
+
+/* --- Card Container --- */
+:is(#mainContent > [id^="RJ"], .work-card-intersection) .q-card {
+  width: 100%;
+  display: flex !important;
+  flex-direction: column !important;
+  border-radius: 12px !important;
+  overflow: hidden !important;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1) !important;
+  transition: transform 0.2s ease, box-shadow 0.2s ease !important;
+}
+
+:is(.body--dark, .q-dark) :is(#mainContent > [id^="RJ"], .work-card-intersection) .q-card {
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35) !important;
+}
+
+@media (hover: hover) {
+  :is(#mainContent > [id^="RJ"], .work-card-intersection) .q-card:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18) !important;
+  }
+
+  :is(.body--dark, .q-dark) :is(#mainContent > [id^="RJ"], .work-card-intersection) .q-card:hover {
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5) !important;
+  }
+}
+
+/* --- Remove separator between image and content --- */
+:is(#mainContent > [id^="RJ"], .work-card-intersection) .q-separator {
+  display: none !important;
+}
+
+/* --- Cover Image --- */
+:is(#mainContent > [id^="RJ"], .work-card-intersection) .q-img {
+  max-width: none !important;
+}
+
+:is(#mainContent > [id^="RJ"], .work-card-intersection) .q-img .q-chip--dense {
+  font-size: 11px !important;
+}
+
+/* --- Content Body --- */
+:is(#mainContent > [id^="RJ"], .work-card-intersection) .q-card > div:last-child {
+  flex: 1 !important;
+  display: flex !important;
+  flex-direction: column !important;
+  padding: 8px 10px !important;
+  gap: 4px !important;
+}
+
+/* --- Title (both variants) --- */
+:is(#mainContent > [id^="RJ"], .work-card-intersection) .ellipsis-2-lines,
+:is(#mainContent > [id^="RJ"], .work-card-intersection) .ellipsis-3-lines {
+  font-size: 0.85rem !important;
+  line-height: 1.4 !important;
+  min-height: 2.8em;
+  margin: 0 !important;
+  padding: 0 !important;
+  font-weight: 500 !important;
+  letter-spacing: normal !important;
+}
+
+/* 3-line variant (carousel) gets more reserved height */
+:is(#mainContent > [id^="RJ"], .work-card-intersection) .ellipsis-3-lines {
+  min-height: 4.2em;
+}
+
+/* Title link styling in variant B */
+:is(#mainContent > [id^="RJ"], .work-card-intersection) .ellipsis-3-lines > a {
+  color: inherit !important;
+  text-decoration: none !important;
+}
+
+/* --- Translation Subtitle --- */
+:is(#mainContent > [id^="RJ"], .work-card-intersection) .asmr-card-translation {
+  padding: 0 !important;
+  margin: -2px 0 0 !important;
+  font-size: 11px !important;
+  line-height: 1.3 !important;
+  -webkit-line-clamp: 1 !important;
+  line-clamp: 1 !important;
+  opacity: 0.6;
+}
+
+/* --- Tags / Metadata Area --- */
+:is(#mainContent > [id^="RJ"], .work-card-intersection) .q-card > div:last-child > .q-ma-xs {
+  margin: 0 !important;
+  padding: 0 !important;
+  display: flex !important;
+  flex-wrap: wrap !important;
+  gap: 3px !important;
+}
+
+/* Tag wrapper divs — reset inline margins */
+:is(#mainContent > [id^="RJ"], .work-card-intersection) .q-ma-xs > div {
+  margin: 0 !important;
+}
+
+/* All chips — compact sizing */
+:is(#mainContent > [id^="RJ"], .work-card-intersection) .q-ma-xs .q-chip {
+  font-size: 10px !important;
+  height: 20px !important;
+  padding: 0 6px !important;
+  margin: 0 !important;
+  border-radius: 4px !important;
+}
+
+/* --- Bottom Section (pinned to card bottom) --- */
+/* Variant A: .q-card__actions is VA section */
+:is(#mainContent > [id^="RJ"], .work-card-intersection) .q-card__actions {
+  margin-top: auto !important;
+  padding: 6px 0 2px !important;
+  border-top: 1px solid var(--asmr-border-color);
+}
+
+:is(#mainContent > [id^="RJ"], .work-card-intersection) .q-card__actions .q-chip {
+  font-size: 11px !important;
+  height: 24px !important;
+  border-radius: 6px !important;
+}
+
+/* Variant B in grid: push mixed tag area to the bottom */
+#mainContent > [id^="RJ"] .q-card > div:last-child > .q-ma-xs:last-child {
+  margin-top: auto !important;
+}
+/* Carousel: let content flow naturally from top — empty space goes to
+   the card bottom, not mid-card between title and tags */
+
+
+/* =============================================
+   4. GRID-SPECIFIC — variant A only
+   (circle, stats, price, VA separation)
+   ============================================= */
+
+/* Clip genre tags at ~2 rows when VA section follows */
+#mainContent > [id^="RJ"] .q-ma-xs:has(~ .q-card__actions) {
+  max-height: 54px;
+  overflow: hidden;
+}
+
+/* Circle / Maker Name */
+#mainContent > [id^="RJ"] .q-card > div:last-child > .text-subtitle1,
+#mainContent > [id^="RJ"] .q-card > div:last-child > div > .text-subtitle1 {
+  margin: 0 !important;
+  padding: 0 !important;
+}
+
+#mainContent > [id^="RJ"] .text-subtitle1 {
+  font-size: 0.78rem !important;
+  line-height: 1.3 !important;
+}
+
+#mainContent > [id^="RJ"] .q-card > div:last-child .q-ml-sm.q-mb-xs {
+  margin: 0 !important;
+}
+
+/* Stats / Rating Row */
+#mainContent > [id^="RJ"] .q-card > div:last-child > .row.items-center {
+  flex-wrap: wrap !important;
+  gap: 1px 6px !important;
+  font-size: 0.75rem !important;
+  line-height: 1.3 !important;
+}
+
+#mainContent > [id^="RJ"] .q-card > div:last-child > .row.items-center > .col-auto {
+  margin: 0 !important;
+  padding: 0 !important;
+}
+
+/* Hide star icons — numeric score is more readable on narrow cards */
+#mainContent > [id^="RJ"] .q-rating {
+  display: none !important;
+}
+
+#mainContent > [id^="RJ"] .row.items-center .text-body1 {
+  font-size: 0.8rem !important;
+  font-weight: 600 !important;
+}
+
+#mainContent > [id^="RJ"] .q-card > div:last-child > .row.items-center .q-icon {
+  font-size: 14px !important;
+}
+
+#mainContent > [id^="RJ"] .row.items-center .text-white,
+#mainContent > [id^="RJ"] .row.items-center .text-grey {
+  font-size: 0.75rem !important;
+}
+
+#mainContent > [id^="RJ"] .row.items-center a.text-blue {
+  font-size: 0.7rem !important;
+}
+
+/* Price & Sales */
+#mainContent > [id^="RJ"] .text-h6.text-red {
+  font-size: 0.9rem !important;
+  margin: 0 !important;
+  padding: 0 !important;
+}
+
+#mainContent > [id^="RJ"] .q-card > div:last-child > div:has(> .text-h6.text-red) {
+  font-size: 0.78rem !important;
+  line-height: 1.4 !important;
+}
+
+#mainContent > [id^="RJ"] .q-card > div:last-child > div:has(> .text-h6.text-red) .q-chip {
+  height: 18px !important;
+  font-size: 9px !important;
+}
+
+
+/* =============================================
+   5. CAROUSEL-SPECIFIC — swiper slides
+   ============================================= */
+
+/* Give swiper slides a little more breathing room */
+.swiper-container:has(.work-card-intersection) {
+  padding: 4px 2px 8px !important;
+}
+
+/* Carousel translation — 2-line since slides are wider */
+.work-card-intersection .asmr-card-translation {
+  -webkit-line-clamp: 2 !important;
+  line-clamp: 2 !important;
+}
+
+
+/* =============================================
+   6. MOBILE OPTIMIZATIONS (< 600px)
+   ============================================= */
+@media (max-width: 599px) {
+  /* Tighter content padding */
+  :is(#mainContent > [id^="RJ"], .work-card-intersection) .q-card > div:last-child {
+    padding: 8px !important;
+    gap: 4px !important;
+  }
+
+  /* Smaller title */
+  :is(#mainContent > [id^="RJ"], .work-card-intersection) .ellipsis-2-lines,
+  :is(#mainContent > [id^="RJ"], .work-card-intersection) .ellipsis-3-lines {
+    font-size: 0.78rem !important;
+  }
+
+  /* 3-line becomes 2-line on mobile */
+  :is(#mainContent > [id^="RJ"], .work-card-intersection) .ellipsis-3-lines {
+    -webkit-line-clamp: 2 !important;
+    line-clamp: 2 !important;
+    min-height: 2.8em;
+  }
+
+  /* Smaller chips on mobile */
+  :is(#mainContent > [id^="RJ"], .work-card-intersection) .q-ma-xs .q-chip {
+    font-size: 9px !important;
+    height: 18px !important;
+    padding: 0 5px !important;
+  }
+
+  /* Smaller image badges */
+  :is(#mainContent > [id^="RJ"], .work-card-intersection) .q-img .q-chip--dense {
+    font-size: 10px !important;
+  }
+
+  :is(#mainContent > [id^="RJ"], .work-card-intersection) .q-img .absolute-bottom-right {
+    font-size: 10px !important;
+    padding: 3px !important;
+  }
+
+  /* Grid-only mobile: hide DLsite link */
+  #mainContent > [id^="RJ"] .row.items-center > .col-auto:last-child {
+    display: none !important;
+  }
+
+  /* Grid-only mobile: 1 row of genre tags when VA follows */
+  #mainContent > [id^="RJ"] .q-ma-xs:has(~ .q-card__actions) {
+    max-height: 24px !important;
+  }
+
+  #mainContent > [id^="RJ"] .text-subtitle1 {
+    font-size: 0.72rem !important;
+  }
+
+  #mainContent > [id^="RJ"] .text-h6.text-red {
+    font-size: 0.82rem !important;
+  }
+
+  :is(#mainContent > [id^="RJ"], .work-card-intersection) .q-card__actions .q-chip {
+    font-size: 10px !important;
+    height: 22px !important;
+  }
+}
+
+
+/* =============================================
+   7. PRINT
+   ============================================= */
+@media print {
+  #mainContent > [id^="RJ"] {
+    break-inside: avoid;
+  }
+}

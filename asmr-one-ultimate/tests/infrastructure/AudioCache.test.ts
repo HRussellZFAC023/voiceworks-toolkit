@@ -4,7 +4,7 @@ import { AudioCache } from '../../src/infrastructure/AudioCache';
 // Mock IDB
 const mockDB = {
     get: vi.fn(),
-    put: vi.fn(),
+    put: vi.fn().mockResolvedValue(undefined),
     createObjectStore: vi.fn(() => ({ createIndex: vi.fn() })),
 };
 

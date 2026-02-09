@@ -23,19 +23,13 @@ const CACHE_TTL_MS = 1000 * 60 * 60 * 24 * 30; // 30 days
 const PREFETCH_MAX_LINES = 1000;
 
 // Timeouts: greedy decoding is 3-4x faster than beam search
-// WASM gets longer timeouts (model compile + no GPU acceleration)
 const SINGLE_TIMEOUT_MS = 15_000;
-const SINGLE_TIMEOUT_WASM_MS = 20_000;
 const BATCH_TIMEOUT_BASE_MS = 15_000;
-const BATCH_TIMEOUT_BASE_WASM_MS = 30_000;
 const BATCH_TIMEOUT_PER_ITEM_MS = 50;
-const BATCH_TIMEOUT_PER_ITEM_WASM_MS = 150;
 
 // Larger chunks = fewer round-trips, better GPU utilization.
-// WASM stays small to keep per-chunk inference short so live singles can interleave.
+// When Whisper is actively transcribing, reduce batch size to avoid GPU contention.
 const BATCH_CHUNK_SIZE_GPU = 64;
-const BATCH_CHUNK_SIZE_WASM = 16;
-// When Whisper is actively transcribing, reduce GPU batch size to avoid GPU contention
 const BATCH_CHUNK_SIZE_GPU_THROTTLED = 8;
 
 // Remote (Google Translate) settings
@@ -69,7 +63,6 @@ const _quoteRegex = new RegExp(
  */
 const _modelNormQuoteOpen = /[「『]/g;
 const _modelNormQuoteClose = /[」』]/g;
-const _modelNormBrackets = /【[^】]*】/g;
 const _modelNormWaveDash = /[〜～]/g;
 const _modelNormEllipsis = /…/g;
 const _modelNormMultiply = /[×✕✖・]/g;
@@ -79,7 +72,6 @@ function normalizeForModel(text: string): string {
     return text
         .replace(_modelNormQuoteOpen, '"')      // 「『 → " (prevents model stopping at quote boundary)
         .replace(_modelNormQuoteClose, '"')     // 」』 → "
-        .replace(_modelNormBrackets, ' ')       // 【...】 → strip (metadata confuses model, causes hallucinations)
         .replace(_modelNormWaveDash, '')        // 〜～ → strip (causes hallucinations like "hospital")
         .replace(_modelNormEllipsis, '...')     // … → ... (better tokenization)
         .replace(_modelNormMultiply, ', ')      // × → ", " (DLsite tag separator: 純愛×催眠 → 純愛, 催眠)
@@ -245,7 +237,7 @@ function glossaryPreProcess(text: string, targetLang: string): [string, boolean]
 /**
  * Split multi-sentence text on 。 boundaries for opus-mt translation.
  * MarianMT treats 。 as end-of-sequence and drops subsequent sentences.
- * 【】 brackets are stripped by normalizeForModel() before reaching the model.
+ * 【】 brackets pass through to the model (converted to [] by cleanQuotes on output).
  * Returns null if text has only one sentence (no split needed).
  */
 function splitForModel(text: string): string[] | null {
@@ -293,10 +285,8 @@ let webgpuFailed = false;
 // dtype that worked last time — sent to new workers to skip failed candidates (persisted across sessions)
 let rememberedDtype = SharedCache.get<string>(CacheKeys.translationPreferredDtype()) || '';
 
-// No cross-service webgpu:failed propagation — each service independently tries WebGPU
-// with its own dtype cascade (fp32 on Intel, etc.). Serialized warmup in main.ts prevents
-// device contention. Cross-service propagation was too aggressive: one service's fp16
-// failure would permanently lock all services into WASM for the entire session.
+// Translation is WebGPU-only (no WASM fallback). If GPU fails, webgpuFailed is set
+// and all subsequent translateLocal() calls return null → falls through to Google Translate.
 
 // GPU contention: throttle translation batches while Whisper is actively transcribing
 let whisperActive = false;
@@ -304,16 +294,14 @@ EventBus.on('whisper:transcribing', ({ active }) => {
     whisperActive = active;
 });
 
-// Cross-service device loss: when any worker reports GPU device lost, tell all
-// translation workers to skip WebGPU. A GPU process crash affects ALL workers.
+// Cross-service device loss: when any worker reports GPU device lost, terminate
+// translation workers. Google Translate handles the fallback (faster than WASM).
 EventBus.on('gpu:device-lost-broadcast', ({ source }) => {
     if (source === 'translation') return; // Already handled by our own error path
-    if (webgpuFailed) return; // Already on WASM
-    Logger.warn(`[TranslationService] GPU device lost in ${source} worker — switching to WASM`);
+    if (webgpuFailed) return;
+    Logger.warn(`[TranslationService] GPU device lost in ${source} worker — falling back to remote`);
     webgpuFailed = true;
-    for (const w of workers) {
-        w.worker.postMessage({ type: 'skip-webgpu' });
-    }
+    terminateWorker();
 });
 
 // In-flight dedup: prevent duplicate translate() calls for the same text+lang
@@ -358,20 +346,18 @@ function clearIdleUnloadTimer(): void {
 }
 
 function getSingleTimeout(): number {
-    return webgpuFailed ? SINGLE_TIMEOUT_WASM_MS : SINGLE_TIMEOUT_MS;
+    return SINGLE_TIMEOUT_MS;
 }
 
 function getBatchTimeout(itemCount: number): number {
-    const base = webgpuFailed ? BATCH_TIMEOUT_BASE_WASM_MS : BATCH_TIMEOUT_BASE_MS;
-    const perItem = webgpuFailed ? BATCH_TIMEOUT_PER_ITEM_WASM_MS : BATCH_TIMEOUT_PER_ITEM_MS;
-    return base + itemCount * perItem;
+    return BATCH_TIMEOUT_BASE_MS + itemCount * BATCH_TIMEOUT_PER_ITEM_MS;
 }
 
 function terminateWorker(model?: string): void {
     const toKill = model ? workers.filter(w => w.model === model) : workers;
     for (const w of toKill) {
         w.worker.postMessage({ type: 'cleanup' });
-        setTimeout(() => w.worker.terminate(), 300);
+        setTimeout(() => w.worker.terminate(), 500);
         for (const [, req] of w.pending) {
             clearTimeout(req.timer);
             req.reject(new Error('Worker terminated'));
@@ -400,20 +386,13 @@ function handleWorkerMessage(entry: WorkerEntry, model: string, onReady: () => v
         const msg = e.data;
 
         if (msg.status === 'initiate') {
-            // Worker reports its initial backend — track it so we can detect cascade later
-            entry.backend = msg.backend || 'wasm';
+            // Worker reports its initial backend
+            entry.backend = msg.backend || 'webgpu';
             return;
         }
 
         if (msg.status === 'ready') {
-            if (msg.backend === 'wasm' && entry.backend && entry.backend !== 'wasm') {
-                webgpuFailed = true;
-                EventBus.emit('webgpu:failed', { source: 'translation' });
-                for (const w of workers) {
-                    if (w !== entry) w.worker.postMessage({ type: 'skip-webgpu' });
-                }
-            }
-            entry.backend = msg.backend || 'wasm';
+            entry.backend = msg.backend || 'webgpu';
             // Remember successful dtype so future workers skip failed candidates
             if (msg.dtype) {
                 rememberedDtype = msg.dtype;
@@ -444,20 +423,19 @@ function handleWorkerMessage(entry: WorkerEntry, model: string, onReady: () => v
                 if (isGpuError && !webgpuFailed) {
                     webgpuFailed = true;
                     EventBus.emit('webgpu:failed', { source: 'translation' });
-                    Logger.warn('[TranslationService] WebGPU inference failed, restarting on WASM');
-                    const models = [...new Set(workers.map(w => w.model))];
+                    Logger.warn('[TranslationService] WebGPU inference failed, falling back to remote');
                     terminateWorker();
-                    for (const m of models) initWorker(m).catch(() => { });
+                    // Don't restart on WASM — Google Translate is faster
                 }
             } else if (!resolved) {
                 if (isGpuError && !webgpuFailed) {
                     webgpuFailed = true;
                     EventBus.emit('webgpu:failed', { source: 'translation' });
-                    Logger.warn('[TranslationService] WebGPU init failed, retrying on WASM');
+                    Logger.warn('[TranslationService] WebGPU init failed, falling back to remote');
                     resolved = true;
-                    onError(new Error(err));
                     terminateWorker();
-                    initWorker(model).catch(() => { });
+                    onError(new Error(err));
+                    // Don't restart on WASM — Google Translate is faster
                 } else {
                     resolved = true;
                     EventBus.emit('translation:progress', {
@@ -517,6 +495,16 @@ function initWorker(model: string, force = false): Promise<void> {
         terminateWorker(model);
     }
 
+    // Free GPU memory: terminate workers for other models before loading a new one.
+    // Only one translation model should occupy GPU at a time to avoid buffer allocation failures.
+    if (!webgpuFailed) {
+        const otherModelWorkers = workers.filter(w => w.model !== model && w.pending.size === 0);
+        for (const w of otherModelWorkers) {
+            Logger.log(`[TranslationService] Freeing GPU: terminating ${w.model} before loading ${model}`);
+            terminateWorker(w.model);
+        }
+    }
+
     // Acquire a load lease from GpuScheduler to prevent concurrent model loading.
     // Only one worker loads a model at a time (requestAdapter + requestDevice + ONNX compile).
     const promise = GpuScheduler.acquireLoadLease('translation').then(releaseLease => {
@@ -537,14 +525,8 @@ function initWorker(model: string, force = false): Promise<void> {
                 };
                 workers.push(entry);
 
-                if (webgpuFailed) {
-                    entry.worker.postMessage({ type: 'skip-webgpu' });
-                }
-                // Only send cached dtype hint if it's relevant. WASM-only dtypes (q8/q4)
-                // are useless when GPU is available — worker uses fp32 on WebGPU anyway,
-                // and q8 is the default WASM fallback order.
-                const isWasmOnlyDtype = ['q8', 'q4'].includes(rememberedDtype);
-                if (rememberedDtype && !(isWasmOnlyDtype && DeviceCapabilities.profile.hasGpu && !webgpuFailed)) {
+                // Send cached dtype hint (WebGPU only — skip WASM-only dtypes)
+                if (rememberedDtype && !['q8', 'q4'].includes(rememberedDtype)) {
                     entry.worker.postMessage({ type: 'preferred-dtype', dtype: rememberedDtype });
                 }
                 // Send persisted CDN preference so worker tries known-good CDN first
@@ -663,9 +645,7 @@ async function translateLocalBatch(texts: string[], targetLang: string): Promise
         // This naturally staggers timeouts and creates interleave points where
         // single-text requests (live whisper) can jump the worker queue.
         // Adaptive: converge chunk size based on observed ms-per-item throughput.
-        let chunkSize = webgpuFailed
-            ? BATCH_CHUNK_SIZE_WASM
-            : whisperActive ? BATCH_CHUNK_SIZE_GPU_THROTTLED : BATCH_CHUNK_SIZE_GPU;
+        let chunkSize = whisperActive ? BATCH_CHUNK_SIZE_GPU_THROTTLED : BATCH_CHUNK_SIZE_GPU;
         if (adaptiveChunkSize > 0) chunkSize = whisperActive ? Math.max(4, adaptiveChunkSize >> 1) : adaptiveChunkSize;
 
         for (let i = 0; i < group.texts.length; i += chunkSize) {
@@ -684,9 +664,9 @@ async function translateLocalBatch(texts: string[], targetLang: string): Promise
                 });
                 const elapsedMs = performance.now() - t0;
 
-                // Adapt chunk size: target 2-5s per chunk (GPU=3s, WASM=5s)
+                // Adapt chunk size: target ~3s per chunk
                 if (chunkTexts.length >= 4 && elapsedMs > 100) {
-                    const targetMs = webgpuFailed ? 5000 : 3000;
+                    const targetMs = 3000;
                     const msPerItem = elapsedMs / chunkTexts.length;
                     const ideal = Math.round(targetMs / msPerItem);
                     adaptiveChunkSize = Math.max(4, Math.min(128, ideal));
@@ -786,18 +766,17 @@ export const TranslationService = {
      */
     async ensureLocalModelReady(): Promise<void> {
         if (Config.get('preferLocalTranslation') === false) return;
-        // Sequential loading: avoid creating 2 GPU devices simultaneously
+        // Only load ja-en eagerly (most common). zh-en loads on demand when Chinese
+        // text is detected. Loading both creates 2 GPU devices (~400-600MB) which
+        // causes buffer allocation failures on GPUs with limited VRAM.
         await initWorker(OPUS_JA_EN, false);
-        await initWorker(OPUS_ZH_EN, false);
     },
 
     /**
      * Force-reload translation models.
      */
     async warmupLocalModel(): Promise<void> {
-        // Sequential loading: avoid creating 2 GPU devices simultaneously
         await initWorker(OPUS_JA_EN, true);
-        await initWorker(OPUS_ZH_EN, true);
         resetIdleUnloadTimer();
     },
 

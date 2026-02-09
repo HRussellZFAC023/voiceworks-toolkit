@@ -76,7 +76,6 @@ const { t, format } = useI18n();
 // Reactive State
 // ============================================================================
 
-const works = ref<WorkItem[]>([]);
 const sentinelState = ref<SentinelState>('idle');
 const isLoading = ref(false);
 const currentPage = ref(1);
@@ -92,6 +91,18 @@ let retryCount = 0;
 let retryDelay = 0;
 let retryTimer: number | null = null;
 let debounceTimer: number | null = null;
+
+// Track DOM-injected card IDs for dedup
+const injectedCardIds = new Set<string>();
+
+// Prefetch state
+interface PrefetchResult {
+    page: number;
+    works: WorkItem[];
+    pagination?: PaginationData;
+}
+let prefetchedResult: PrefetchResult | null = null;
+let prefetching = false;
 
 // Template refs
 const sentinelRef = ref<HTMLElement | null>(null);
@@ -159,27 +170,171 @@ function formatDuration(seconds: number): string {
     return `${minutes}m`;
 }
 
-function getStars(rating: number): Array<{ icon: string; color: string }> {
+function escapeHtml(str: string): string {
+    const div = document.createElement('div');
+    div.textContent = str;
+    return div.innerHTML;
+}
+
+function createStarRatingHTML(rating: number): string {
     const fullStars = Math.floor(rating);
     const hasHalf = rating - fullStars >= 0.5;
     const color = rating >= 4.5 ? 'text-amber' : 'text-blue';
-    const result: Array<{ icon: string; color: string }> = [];
+    let html = '<div class="q-rating row inline items-center" style="font-size: 24px;">';
     for (let i = 1; i <= 5; i++) {
-        let icon: string;
-        if (i <= fullStars) {
-            icon = 'star';
-        } else if (i === fullStars + 1 && hasHalf) {
-            icon = 'star_half';
-        } else {
-            icon = 'star_border';
-        }
-        result.push({ icon, color });
+        const icon = i <= fullStars ? 'star' : (i === fullStars + 1 && hasHalf ? 'star_half' : 'star_border');
+        html += `<div class="q-rating__icon-container flex flex-center"><i class="q-icon notranslate material-icons q-rating__icon ${color}">${icon}</i></div>`;
     }
-    return result;
+    html += '</div>';
+    return html;
 }
 
-function isAllAges(work: WorkItem): boolean {
-    return work.age_category_string === 'all-ages' || work.nsfw === false;
+/**
+ * Find the host app's works grid, excluding our own component.
+ * Uses multiple strategies since the grid's CSS classes vary across versions.
+ */
+function findHostGrid(): HTMLElement | null {
+    const ownRoot = document.getElementById('asmr-infinite-scroll-root');
+
+    // Strategy 1: q-col-gutter elements excluding horizontal carousels
+    const candidates = document.querySelectorAll('[class*="q-col-gutter"]');
+    let fallback: HTMLElement | null = null;
+    for (const el of candidates) {
+        if (ownRoot?.contains(el)) continue;
+        if (el.classList.contains('no-wrap')) continue;
+        if (el.className.includes('q-col-gutter-y-')) return el as HTMLElement;
+        if (!fallback) fallback = el as HTMLElement;
+    }
+    if (fallback) return fallback;
+
+    // Strategy 2: Find grid as previous sibling of pagination container
+    const pagination = document.querySelector('.q-pagination') || document.querySelector('.ant-pagination');
+    if (pagination) {
+        const paginationWrapper = pagination.closest('.row.justify-center') || pagination.parentElement;
+        if (paginationWrapper) {
+            let prev = paginationWrapper.previousElementSibling as HTMLElement | null;
+            while (prev) {
+                if (prev.classList.contains('row') && prev.querySelectorAll('.q-card').length > 0) {
+                    return prev;
+                }
+                prev = prev.previousElementSibling as HTMLElement | null;
+            }
+        }
+    }
+
+    // Strategy 3: Find parent of work cards (cards wrapped in col-* divs)
+    const cards = document.querySelectorAll('.q-card');
+    for (const card of cards) {
+        if (ownRoot?.contains(card)) continue;
+        // Card → col wrapper → grid row
+        const colWrapper = card.closest('[class*="col-xs-"], [class*="col-sm-"], [class*="col-md-"]');
+        if (colWrapper?.parentElement) {
+            const grid = colWrapper.parentElement as HTMLElement;
+            // Ensure it's a real grid (has multiple card children) and not a carousel
+            if (grid.children.length > 1 && !grid.classList.contains('no-wrap')) {
+                return grid;
+            }
+        }
+    }
+
+    return null;
+}
+
+/**
+ * DOM fallback: append work cards directly into the host grid.
+ * Used when Vue store integration fails.
+ */
+function appendWorksToHostGrid(newWorks: WorkItem[]): string[] {
+    const grid = findHostGrid();
+    if (!grid) {
+        Logger.warn('[InfiniteScrollGrid] Could not find host grid for DOM fallback');
+        return [];
+    }
+
+    const addedIds: string[] = [];
+    for (const work of newWorks) {
+        const rjCode = getRjCode(work);
+        if (document.getElementById(rjCode) || injectedCardIds.has(rjCode)) continue;
+
+        const title = getTitle(work);
+        const circle = getCircleName(work);
+        const coverUrl = getCoverUrl(work);
+        const releaseDate = getReleaseDate(work);
+        const rating = getRating(work);
+        const ratingCount = getRatingCount(work);
+        const reviewCount = work.review_count || 0;
+        const price = work.price || 0;
+        const sales = work.dl_count || work.sales || 0;
+        const duration = work.duration ? formatDuration(work.duration) : '';
+        const allAges = work.age_category_string === 'all-ages' || work.nsfw === false;
+
+        const col = document.createElement('div');
+        col.className = 'col-xs-12 col-sm-4 col-md-3 col-lg-2 col-xl-2';
+        col.id = rjCode;
+        col.innerHTML = `
+            <div class="q-intersection fit work-card-intersection" style="min-height: 200px;">
+                <div>
+                    <div class="fit q-card q-card--dark q-dark">
+                        <a href="/work/${rjCode}">
+                            <div role="img" aria-label="Cover of ${escapeHtml(title)}" class="q-img overflow-hidden q-img--menu" style="max-width: 560px;">
+                                <div style="padding-bottom: 75%;"></div>
+                                <div class="q-img__image absolute-full" style="background-size: cover; background-position: 50% 50%; background-image: url('${coverUrl}');">
+                                    <img src="${coverUrl}" aria-hidden="true" class="absolute-full fit">
+                                </div>
+                                <div class="q-img__content absolute-full">
+                                    <div class="absolute-top-left transparent" style="padding: 0px;">
+                                        <div class="q-chip row inline no-wrap items-center q-ma-sm bg-brown text-white q-chip--colored q-chip--dense q-chip--square q-chip--dark q-dark">
+                                            <div class="q-chip__content col row no-wrap items-center q-anchor--skip">${rjCode}</div>
+                                        </div>
+                                    </div>
+                                    <div class="absolute-bottom-right" style="padding: 5px;">${releaseDate}</div>
+                                </div>
+                            </div>
+                        </a>
+                        <hr class="q-separator q-separator--horizontal q-separator--dark">
+                        <div>
+                            <div class="q-mx-sm text-h6 text-weight-regular ellipsis-2-lines">${escapeHtml(title)}</div>
+                            <div class="q-ml-sm q-mb-xs text-subtitle1 text-weight-regular">
+                                <div class="text-grey ellipsis">${escapeHtml(circle)}</div>
+                            </div>
+                            <div class="row items-center">
+                                <div class="col-auto q-ml-sm">${createStarRatingHTML(rating)}</div>
+                                <div class="col-auto">
+                                    <span class="text-weight-medium text-body1 text-red">${rating.toFixed(2)}</span>
+                                    <span class="text-grey">(${ratingCount})</span>
+                                </div>
+                                <div class="col-auto q-ml-xs">
+                                    <i class="q-icon notranslate material-icons" style="font-size: 18px;">chat</i>
+                                    <span class="text-grey">(${reviewCount})</span>
+                                </div>
+                                ${duration ? `<div class="col-auto q-ml-xs">
+                                    <i class="q-icon text-white notranslate material-icons" style="font-size: 18px;">schedule</i>
+                                    <span class="text-white">(${duration})</span>
+                                </div>` : ''}
+                                <div class="col-auto q-ml-xs">
+                                    <i class="q-icon notranslate material-icons" style="font-size: 18px;">launch</i>
+                                    <a href="https://www.dlsite.com/maniax/work/=/product_id/${rjCode}.html" rel="noreferrer noopener" target="_blank" class="text-blue">DLsite</a>
+                                </div>
+                            </div>
+                            <div>
+                                <span class="q-mx-sm text-weight-medium text-h6 text-red">${price} JPY </span>
+                                <span>Sales: ${sales}</span>
+                                ${allAges ? '<div class="q-chip row inline no-wrap items-center q-py-sm q-chip--dense q-chip--outline q-chip--square q-chip--dark q-dark text-green" style="font-size: 10px; margin-top: 0px;"><div class="q-chip__content col row no-wrap items-center q-anchor--skip">All-ages</div></div>' : ''}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>`;
+
+        grid.appendChild(col);
+        injectedCardIds.add(rjCode);
+        addedIds.push(rjCode);
+    }
+
+    if (addedIds.length > 0) {
+        Logger.info(`[InfiniteScrollGrid] Appended ${addedIds.length} cards to host grid`);
+    }
+    return addedIds;
 }
 
 // ============================================================================
@@ -261,13 +416,14 @@ function restorePagination(): void {
 // API URL Building
 // ============================================================================
 
-function buildApiUrl(): string | null {
+function buildApiUrl(pageOverride?: number): string | null {
     const path = route.value.path;
     const query = route.value.query || {};
+    const page = pageOverride ?? currentPage.value;
 
     if (path === '/' || path === '/works' || path.startsWith('/works')) {
         const params = new URLSearchParams();
-        params.set('page', String(currentPage.value));
+        params.set('page', String(page));
         params.set('order', query.order || 'release');
         params.set('sort', query.sort || 'desc');
         params.set('subtitle', query.subtitle || '0');
@@ -283,7 +439,7 @@ function buildApiUrl(): string | null {
 
     if (path === '/search') {
         const params = new URLSearchParams();
-        params.set('page', String(currentPage.value));
+        params.set('page', String(page));
         Object.entries(query).forEach(([key, value]) => {
             if (key !== 'page' && value) {
                 params.set(key, String(value));
@@ -295,22 +451,31 @@ function buildApiUrl(): string | null {
     if (path.startsWith('/circle/')) {
         const circleId = path.split('/')[2];
         const params = new URLSearchParams();
-        params.set('page', String(currentPage.value));
+        params.set('page', String(page));
         return `/api/circles/${circleId}/works?${params.toString()}`;
     }
 
     if (path.startsWith('/tag/')) {
         const tagId = path.split('/')[2];
         const params = new URLSearchParams();
-        params.set('page', String(currentPage.value));
+        params.set('page', String(page));
         return `/api/tags/${tagId}/works?${params.toString()}`;
     }
 
     if (path.startsWith('/va/')) {
         const vaId = path.split('/')[2];
         const params = new URLSearchParams();
-        params.set('page', String(currentPage.value));
+        params.set('page', String(page));
         return `/api/vas/${vaId}/works?${params.toString()}`;
+    }
+
+    // Playlist detail page: /playlist?id=xxx
+    if (path === '/playlist' && query.id) {
+        const params = new URLSearchParams();
+        params.set('id', String(query.id));
+        params.set('page', String(page));
+        params.set('pageSize', String(pageSize.value));
+        return `/api/playlist/get-playlist-works?${params.toString()}`;
     }
 
     return null;
@@ -507,87 +672,143 @@ function handleRateLimit(): void {
 }
 
 // ============================================================================
+// Prefetch
+// ============================================================================
+
+/**
+ * Prefetch the next page in the background so it's ready instantly
+ * when the observer triggers.
+ */
+async function prefetchNext(): Promise<void> {
+    if (prefetching || reachedEnd.value) return;
+    if (!paginationUnknown.value && currentPage.value >= totalPages.value) return;
+
+    const targetPage = currentPage.value + 1;
+    if (prefetchedResult?.page === targetPage) return; // Already have it
+
+    prefetching = true;
+    const apiUrl = buildApiUrl(targetPage);
+    if (!apiUrl) { prefetching = false; return; }
+
+    try {
+        const response = await bridge.axios.get<{ pagination?: PaginationData; works?: WorkItem[] }>(apiUrl);
+        const rawWorks = response.data?.works || response.data?.pagination?.works || response.data;
+        prefetchedResult = {
+            page: targetPage,
+            works: Array.isArray(rawWorks) ? rawWorks as WorkItem[] : [],
+            pagination: response.data?.pagination,
+        };
+        Logger.debug(`[InfiniteScrollGrid] Prefetched page ${targetPage} (${prefetchedResult.works.length} works)`);
+    } catch (error) {
+        const status = (error as any)?.response?.status;
+        if (status === 429) {
+            Logger.debug('[InfiniteScrollGrid] Prefetch rate limited, skipping');
+        }
+        prefetchedResult = null;
+    } finally {
+        prefetching = false;
+    }
+}
+
+// ============================================================================
 // Core: Fetch Next Page
 // ============================================================================
+
+/**
+ * Process pagination metadata from API response.
+ */
+function processPagination(pagination: PaginationData): void {
+    const totalCount = pagination.totalCount ?? pagination.total_count;
+    const ps = pagination.pageSize ?? pagination.page_size ?? pageSize.value;
+    const cp = pagination.currentPage ?? pagination.page ?? pagination.current_page;
+    if (typeof ps === 'number' && ps > 0) pageSize.value = ps;
+    if (typeof totalCount === 'number' && totalCount >= 0 && pageSize.value > 0) {
+        const tp = Math.ceil(totalCount / pageSize.value);
+        if (tp > 0) {
+            totalPages.value = Math.max(totalPages.value, tp);
+            paginationUnknown.value = false;
+        }
+    }
+    if (typeof cp === 'number' && cp > 0) {
+        currentPage.value = Math.max(currentPage.value, cp);
+    }
+}
+
+/**
+ * Append works to the grid (Vue store or DOM fallback) and wait for images.
+ */
+async function appendAndWait(typedWorks: WorkItem[]): Promise<void> {
+    const workIdList = typedWorks.map(work => {
+        const id = work.id || work.source_id;
+        return id ? (String(id).startsWith('RJ') ? String(id) : `RJ${id}`) : null;
+    }).filter(Boolean) as string[];
+
+    // Try Vue store integration first
+    const vueHandled = appendWorksViaVue(typedWorks);
+    if (!vueHandled) {
+        appendWorksToHostGrid(typedWorks);
+    }
+
+    Logger.debug(`[InfiniteScrollGrid] Appended ${typedWorks.length} works`);
+    resetBackoff();
+
+    if (!paginationUnknown.value && currentPage.value >= totalPages.value) {
+        reachedEnd.value = true;
+    }
+
+    // Wait for images to load
+    if (workIdList.length > 0) {
+        loadingImageCount.value = workIdList.length;
+        sentinelState.value = 'loading-images';
+        await waitForImagesToLoad(workIdList);
+    }
+}
 
 async function triggerNextPage(): Promise<void> {
     if (isLoading.value) return;
     if (!hasMorePages.value) {
-        Logger.debug('[InfiniteScrollGrid] No more pages');
+        Logger.info('[InfiniteScrollGrid] No more pages');
         sentinelState.value = 'end';
         return;
     }
 
     isLoading.value = true;
     currentPage.value++;
-    sentinelState.value = 'loading';
-    Logger.debug(`[InfiniteScrollGrid] Loading page ${currentPage.value}/${totalPages.value}`);
 
     try {
-        const apiUrl = buildApiUrl();
-        if (!apiUrl) {
-            Logger.warn('[InfiniteScrollGrid] Could not determine API URL');
-            isLoading.value = false;
-            sentinelState.value = 'idle';
-            return;
+        let rawWorks: unknown[];
+        let pagination: PaginationData | undefined;
+
+        // Use prefetched data if available for this page
+        if (prefetchedResult?.page === currentPage.value) {
+            rawWorks = prefetchedResult.works;
+            pagination = prefetchedResult.pagination;
+            prefetchedResult = null;
+            Logger.info(`[InfiniteScrollGrid] Using prefetched page ${currentPage.value}`);
+        } else {
+            // Fresh fetch — show loading spinner
+            sentinelState.value = 'loading';
+            Logger.info(`[InfiniteScrollGrid] Fetching page ${currentPage.value}/${totalPages.value}`);
+
+            const apiUrl = buildApiUrl();
+            if (!apiUrl) {
+                Logger.warn('[InfiniteScrollGrid] Could not determine API URL');
+                isLoading.value = false;
+                sentinelState.value = 'idle';
+                return;
+            }
+
+            const response = await bridge.axios.get<{ pagination?: PaginationData; works?: WorkItem[] }>(apiUrl);
+            rawWorks = response.data?.works || response.data?.pagination?.works || response.data;
+            pagination = response.data?.pagination;
         }
 
-        const response = await bridge.axios.get<{ pagination?: PaginationData; works?: WorkItem[] }>(apiUrl);
-        const pagination = response.data?.pagination;
-        if (pagination) {
-            const totalCount = pagination.totalCount ?? pagination.total_count;
-            const ps = pagination.pageSize ?? pagination.page_size ?? pageSize.value;
-            const cp = pagination.currentPage ?? pagination.page ?? pagination.current_page;
-            if (typeof ps === 'number' && ps > 0) pageSize.value = ps;
-            if (typeof totalCount === 'number' && totalCount >= 0 && pageSize.value > 0) {
-                const tp = Math.ceil(totalCount / pageSize.value);
-                if (tp > 0) {
-                    totalPages.value = Math.max(totalPages.value, tp);
-                    paginationUnknown.value = false;
-                }
-            }
-            if (typeof cp === 'number' && cp > 0) {
-                currentPage.value = Math.max(currentPage.value, cp);
-            }
-        }
-
-        const rawWorks = response.data?.works || response.data?.pagination?.works || response.data;
+        if (pagination) processPagination(pagination);
 
         if (Array.isArray(rawWorks) && rawWorks.length > 0) {
-            const typedWorks = rawWorks as WorkItem[];
-
-            // Extract work IDs
-            const workIdList = typedWorks.map(work => {
-                const id = work.id || work.source_id;
-                return id ? (String(id).startsWith('RJ') ? String(id) : `RJ${id}`) : null;
-            }).filter(Boolean) as string[];
-
-            // Try Vue store integration first
-            const vueHandled = appendWorksViaVue(typedWorks);
-
-            if (!vueHandled) {
-                // DOM fallback: add to our own reactive works list
-                const existingIds = new Set(works.value.map(w => String(w.id || w.source_id)));
-                const newWorks = typedWorks.filter(w => {
-                    const wid = String(w.id || w.source_id);
-                    return !existingIds.has(wid);
-                });
-                works.value.push(...newWorks);
-            }
-
-            Logger.debug(`[InfiniteScrollGrid] Appended ${typedWorks.length} works`);
-            resetBackoff();
-
-            if (!paginationUnknown.value && currentPage.value >= totalPages.value) {
-                reachedEnd.value = true;
-            }
-
-            // Wait for images to load
-            if (workIdList.length > 0) {
-                loadingImageCount.value = workIdList.length;
-                sentinelState.value = 'loading-images';
-                await waitForImagesToLoad(workIdList);
-            }
+            await appendAndWait(rawWorks as WorkItem[]);
+            // Start prefetching the next page
+            void prefetchNext();
         } else {
             Logger.debug('[InfiniteScrollGrid] No more works returned');
             totalPages.value = currentPage.value;
@@ -626,7 +847,7 @@ function attachToCurrentPage(): void {
     const path = route.value.path;
     reachedEnd.value = false;
     paginationUnknown.value = false;
-    works.value = [];
+    injectedCardIds.clear();
 
     // Skip pages with their own infinite scroll
     if (path === '/playlists') {
@@ -634,16 +855,29 @@ function attachToCurrentPage(): void {
         return;
     }
 
+    // Playlist detail page may use a non-standard pagination component
+    const isPlaylistPage = path === '/playlist' && route.value.query?.id;
+
     const pagination = findPaginationComponent();
-    if (!pagination) {
-        Logger.debug('[InfiniteScrollGrid] No pagination found on', path);
+    if (!pagination && !isPlaylistPage) {
+        Logger.info('[InfiniteScrollGrid] No pagination found on', path);
         return;
     }
 
-    parsePaginationState();
-    Logger.debug(`[InfiniteScrollGrid] Attaching to ${path} (page ${currentPage.value}/${totalPages.value})`);
+    if (pagination) {
+        parsePaginationState();
+    } else {
+        // Playlist page without standard pagination — use unknown mode
+        // so we keep fetching until the API returns empty results
+        paginationUnknown.value = true;
+    }
+
+    Logger.info(`[InfiniteScrollGrid] Attaching to ${path} (page ${currentPage.value}/${totalPages.value})`);
     hidePagination();
     setupObserver();
+
+    // Start prefetching page 2 immediately so it's ready when the user scrolls
+    void prefetchNext();
 }
 
 // ============================================================================
@@ -670,6 +904,13 @@ function setupObserver(): void {
         );
 
         observer.observe(sentinelRef.value);
+
+        // If sentinel is already near viewport (short page), trigger immediately.
+        // IntersectionObserver fires async so this covers the race condition.
+        const rect = sentinelRef.value.getBoundingClientRect();
+        if (rect.top < window.innerHeight + 600) {
+            void triggerNextPage();
+        }
     });
 }
 
@@ -685,6 +926,8 @@ function cleanup(): void {
     currentPage.value = 1;
     totalPages.value = 1;
     sentinelState.value = 'idle';
+    prefetchedResult = null;
+    prefetching = false;
 
     if (debounceTimer) {
         clearTimeout(debounceTimer);
@@ -728,137 +971,6 @@ onUnmounted(() => {
 </script>
 
 <template>
-    <!-- DOM-fallback work cards (only rendered when Vue store integration fails) -->
-    <div
-        v-if="works.length > 0"
-        class="row q-col-gutter-x-sm q-col-gutter-y-lg infinite-scroll-fallback-grid"
-    >
-        <div
-            v-for="work in works"
-            :key="getRjCode(work)"
-            :id="getRjCode(work)"
-            class="col-xs-12 col-sm-4 col-md-3 col-lg-2 col-xl-2"
-        >
-            <div class="q-intersection fit work-card-intersection" style="min-height: 200px;">
-                <div>
-                    <div class="fit q-card q-card--dark q-dark">
-                        <a :href="`/work/${getRjCode(work)}`">
-                            <div
-                                role="img"
-                                :aria-label="`Cover of ${getTitle(work)}`"
-                                class="q-img overflow-hidden q-img--menu"
-                                style="max-width: 560px;"
-                            >
-                                <div style="padding-bottom: 75%;"></div>
-                                <div
-                                    class="q-img__image absolute-full"
-                                    :style="{
-                                        backgroundSize: 'cover',
-                                        backgroundPosition: '50% 50%',
-                                        backgroundImage: `url('${getCoverUrl(work)}')`
-                                    }"
-                                >
-                                    <img
-                                        :src="getCoverUrl(work)"
-                                        aria-hidden="true"
-                                        class="absolute-full fit"
-                                    >
-                                </div>
-                                <div class="q-img__content absolute-full">
-                                    <div class="absolute-top-left transparent" style="padding: 0px;">
-                                        <div class="q-chip row inline no-wrap items-center q-ma-sm bg-brown text-white q-chip--colored q-chip--dense q-chip--square q-chip--dark q-dark">
-                                            <div class="q-chip__content col row no-wrap items-center q-anchor--skip">
-                                                {{ getRjCode(work) }}
-                                            </div>
-                                        </div>
-                                    </div>
-                                    <div class="absolute-bottom-right" style="padding: 5px;">
-                                        {{ getReleaseDate(work) }}
-                                    </div>
-                                </div>
-                            </div>
-                        </a>
-
-                        <hr class="q-separator q-separator--horizontal q-separator--dark">
-
-                        <div>
-                            <div class="q-mx-sm text-h6 text-weight-regular ellipsis-2-lines">
-                                <a
-                                    :href="`/work/${getRjCode(work)}`"
-                                    style="color: inherit;"
-                                    :title="getTitle(work)"
-                                >
-                                    {{ getTitle(work) }}
-                                </a>
-                            </div>
-
-                            <div class="q-ml-sm q-mb-xs text-subtitle1 text-weight-regular">
-                                <div class="text-grey ellipsis">{{ getCircleName(work) }}</div>
-                            </div>
-
-                            <!-- Rating row -->
-                            <div class="row items-center">
-                                <div class="col-auto q-ml-sm">
-                                    <div class="q-rating row inline items-center" style="font-size: 24px;">
-                                        <div
-                                            v-for="(star, idx) in getStars(getRating(work))"
-                                            :key="idx"
-                                            class="q-rating__icon-container flex flex-center"
-                                        >
-                                            <i :class="['q-icon notranslate material-icons q-rating__icon', star.color]">
-                                                {{ star.icon }}
-                                            </i>
-                                        </div>
-                                    </div>
-                                </div>
-                                <div class="col-auto">
-                                    <span class="text-weight-medium text-body1 text-red">
-                                        {{ getRating(work).toFixed(2) }}
-                                    </span>
-                                    <span class="text-grey">({{ getRatingCount(work) }})</span>
-                                </div>
-                                <div class="col-auto q-ml-xs">
-                                    <i class="q-icon notranslate material-icons" style="font-size: 18px;">chat</i>
-                                    <span class="text-grey">({{ work.review_count || 0 }})</span>
-                                </div>
-                                <div v-if="work.duration" class="col-auto q-ml-xs">
-                                    <i class="q-icon text-white notranslate material-icons" style="font-size: 18px;">schedule</i>
-                                    <span class="text-white">({{ formatDuration(work.duration) }})</span>
-                                </div>
-                                <div class="col-auto q-ml-xs">
-                                    <i class="q-icon notranslate material-icons" style="font-size: 18px;">launch</i>
-                                    <a
-                                        :href="`https://www.dlsite.com/maniax/work/=/product_id/${getRjCode(work)}.html`"
-                                        rel="noreferrer noopener"
-                                        target="_blank"
-                                        class="text-blue"
-                                    >DLsite</a>
-                                </div>
-                            </div>
-
-                            <!-- Price / Sales -->
-                            <div>
-                                <span class="q-mx-sm text-weight-medium text-h6 text-red">
-                                    {{ work.price || 0 }} JPY
-                                </span>
-                                <span>{{ format('infScrollSales', { count: work.dl_count || work.sales || 0 }) }}</span>
-                                <div
-                                    v-if="isAllAges(work)"
-                                    class="q-chip row inline no-wrap items-center q-py-sm q-chip--dense q-chip--outline q-chip--square q-chip--dark q-dark text-green"
-                                    style="font-size: 10px; margin-top: 0px;"
-                                >
-                                    <div class="q-chip__content col row no-wrap items-center q-anchor--skip">
-                                        {{ t('infScrollAllAges') }}
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-
     <!-- Sentinel / Loading States -->
     <div
         ref="sentinelRef"
@@ -907,9 +1019,5 @@ onUnmounted(() => {
 <style scoped>
 .infinite-scroll-sentinel {
     pointer-events: none;
-}
-
-.infinite-scroll-fallback-grid {
-    width: 100%;
 }
 </style>

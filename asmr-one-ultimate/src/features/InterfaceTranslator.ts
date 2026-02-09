@@ -40,6 +40,32 @@ export class InterfaceTranslator {
         '昇順': 'Ascending',
     };
 
+    /** CN → JP static map (used when translateCnToJp is on and translateMode is off) */
+    private readonly cnToJpMap: Record<string, string> = {
+        '取消定时': 'タイマーキャンセル',
+        '取消': 'キャンセル',
+        '确定': 'OK',
+        '加入时间': '最新',
+        '发布时间': 'リリース日',
+        '用户评分': 'ユーザー評価',
+        '销量排序': 'ダウンロード数',
+        '评论数': 'レビュー数',
+        '价格': '価格',
+        '评价排序': 'DLsite 評価',
+        'R18排序': 'R18',
+        '随机': 'ランダム',
+        'RJ号排序': 'RJ コード',
+        '排序方式': '並び替え',
+        '降序': '降順',
+        '升序': '昇順',
+    };
+
+    private readonly cnToJpPatterns = [
+        { regex: /将于(\d{2}:\d{2})停止播放/g, replace: '$1に再生を停止します' },
+        { regex: /🔥 热门作品/g, replace: '🔥 人気作品' },
+        { regex: /🌟 推荐作品/g, replace: '🌟 おすすめ作品' },
+    ];
+
     private readonly patterns = [
         {
             regex: /将于(\d{2}:\d{2})停止播放/g,
@@ -86,7 +112,14 @@ export class InterfaceTranslator {
     }
 
     private translate(): void {
-        if (!AppStore.getConfig('translateMode')) return;
+        const translateMode = !!AppStore.getConfig('translateMode');
+        const cnToJp = !!AppStore.getConfig('translateCnToJp');
+        if (!translateMode && !cnToJp) return;
+
+        const cnOnlyMode = !translateMode && cnToJp;
+        const map = cnOnlyMode ? this.cnToJpMap : this.translationMap;
+        const pats = cnOnlyMode ? this.cnToJpPatterns : this.patterns;
+
         // Narrowed selectors: removed `.q-tooltip *` (unbounded descendant match).
         // `:not([data-asmritran])` skips already-processed elements at browser engine level.
         const candidates = document.querySelectorAll(
@@ -108,8 +141,8 @@ export class InterfaceTranslator {
             if (!text) return;
 
             // Direct mapping
-            if (this.translationMap[text]) {
-                const translated = this.translationMap[text];
+            if (map[text]) {
+                const translated = map[text];
                 htmlEl.textContent = translated;
                 htmlEl.dataset.asmritran = translated;
                 this.processedElements.add(htmlEl);
@@ -120,7 +153,7 @@ export class InterfaceTranslator {
             let newText = text;
             let matched = false;
 
-            for (const pattern of this.patterns) {
+            for (const pattern of pats) {
                 pattern.regex.lastIndex = 0;
                 const replaced = newText.replace(pattern.regex, pattern.replace);
                 if (replaced !== newText) {

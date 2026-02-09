@@ -7,11 +7,24 @@
 
 function getWorkerCode(): string {
     return `
+let gpuDeviceLost = false;
+
 self.addEventListener('unhandledrejection', (event) => {
     const reason = event.reason;
     const message = reason && reason.message ? reason.message : String(reason || 'Unknown error');
     if (/WebGPU Context Provider|context.*provider|device lost|GPUDevice|createComputePipeline|createShaderModule|mapAsync|Instance reference|AbortError/i.test(message)) {
-        console.warn('[Embedding Worker] Suppressed non-fatal WebGPU error:', message);
+        event.preventDefault();
+        // Fatal GPU device loss — notify host so it can broadcast to other workers
+        if (/device lost|Instance reference/i.test(message)) {
+            if (!gpuDeviceLost) {
+                gpuDeviceLost = true;
+                skipWebgpu = true;
+                console.error('[Embedding Worker] Fatal GPU device loss:', message);
+                self.postMessage({ status: 'gpu-device-lost', data: { message } });
+            }
+        } else {
+            console.warn('[Embedding Worker] Suppressed non-fatal WebGPU error:', message);
+        }
         return;
     }
     self.postMessage({ status: 'error', data: { message } });
@@ -169,6 +182,7 @@ async function releaseGpuResources() {
 let pipelineInstance = null;
 let currentModelName = null;
 let pipelineReady = false;
+let pipelineLoading = null; // Serializes concurrent ensurePipeline calls
 
 async function ensurePipeline(modelName, _cascadeDepth) {
     if (!_cascadeDepth) _cascadeDepth = 0;
@@ -180,6 +194,27 @@ async function ensurePipeline(modelName, _cascadeDepth) {
         return pipelineInstance;
     }
 
+    // Serialize concurrent pipeline loads — prevents duplicate model downloads
+    // when multiple embed calls fail simultaneously and all try to reload
+    if (pipelineLoading) {
+        await pipelineLoading;
+        if (pipelineReady && currentModelName === modelName && pipelineInstance) {
+            return pipelineInstance;
+        }
+    }
+
+    const loadPromise = _loadPipeline(modelName, _cascadeDepth);
+    pipelineLoading = loadPromise;
+    try {
+        return await loadPromise;
+    } finally {
+        if (pipelineLoading === loadPromise) {
+            pipelineLoading = null;
+        }
+    }
+}
+
+async function _loadPipeline(modelName, _cascadeDepth) {
     if (pipelineInstance) {
         try { pipelineInstance.dispose?.(); } catch {}
         pipelineInstance = null;
@@ -339,6 +374,68 @@ async function embed(texts) {
     return meanPool(output, null);
 }
 
+// ---- GPU error recovery ----
+
+const GPU_ERROR_RE = /createBuffer|RangeError|out of memory|OOM|allocation|shader|device lost|GPUDevice|createComputePipeline|createShaderModule/i;
+
+/**
+ * Switch to WASM backend. Serialized: if already switching, returns the
+ * in-progress promise so concurrent callers don't double-dispose.
+ */
+let wasmSwitchPromise = null;
+
+async function switchToWasm(errMsg) {
+    if (wasmSwitchPromise) return wasmSwitchPromise;
+    wasmSwitchPromise = (async () => {
+        console.warn('[Embedding Worker] GPU inference failed, falling back to WASM:', errMsg);
+        skipWebgpu = true;
+        if (!gpuDeviceLost) {
+            gpuDeviceLost = true;
+            self.postMessage({ status: 'gpu-device-lost', data: { message: errMsg } });
+        }
+        if (pipelineInstance) {
+            try { pipelineInstance.dispose?.(); } catch {}
+            pipelineInstance = null;
+            pipelineReady = false;
+        }
+        await releaseGpuResources();
+        self.postMessage({ status: 'initiate', backend: 'wasm', vendor: '' });
+    })();
+    try {
+        await wasmSwitchPromise;
+    } finally {
+        wasmSwitchPromise = null;
+    }
+}
+
+/**
+ * Attempt embed with GPU error recovery.
+ * If GPU fails, switches to WASM and retries.
+ * Handles race condition where concurrent calls fail simultaneously:
+ * switchToWasm() is serialized, and ensurePipeline() has a loading gate.
+ */
+async function embedWithRecovery(texts) {
+    try {
+        return await embed(texts);
+    } catch (err) {
+        const errMsg = String(err?.message || err || '');
+        if (!GPU_ERROR_RE.test(errMsg)) throw err;
+
+        // GPU error — switch to WASM if not already there
+        if (currentBackend !== 'wasm') {
+            await switchToWasm(errMsg);
+        } else if (!gpuDeviceLost) {
+            // Already on WASM but got a GPU error from an old session's in-flight op.
+            // Report device loss but don't need to switch backends.
+            gpuDeviceLost = true;
+            self.postMessage({ status: 'gpu-device-lost', data: { message: errMsg } });
+        }
+
+        // Retry on WASM — ensurePipeline will create/return WASM pipeline
+        return await embed(texts);
+    }
+}
+
 // ---- Message handler ----
 
 let readySent = false;
@@ -374,46 +471,20 @@ self.addEventListener('message', async (event) => {
 
     if (msg.type === 'embed') {
         try {
-            const results = await embed([msg.text]);
+            const results = await embedWithRecovery([msg.text]);
             self.postMessage({ status: 'complete', data: results[0], id: msg.id });
         } catch (err) {
-            const errMsg = String(err?.message || err || '');
-            const isGpuError = /createBuffer|RangeError|out of memory|OOM|allocation|shader|device lost|GPUDevice|createComputePipeline|createShaderModule/i.test(errMsg);
-
-            if (currentBackend !== 'wasm' && isGpuError) {
-                console.warn('[Embedding Worker] GPU inference failed, falling back to WASM:', errMsg);
-                skipWebgpu = true;
-                if (pipelineInstance) {
-                    try { pipelineInstance.dispose?.(); } catch {}
-                    pipelineInstance = null;
-                    pipelineReady = false;
-                }
-                await releaseGpuResources();
-                self.postMessage({ status: 'initiate', backend: 'wasm', vendor: '' });
-                try {
-                    const results = await embed([msg.text]);
-                    self.postMessage({ status: 'complete', data: results[0], id: msg.id });
-                    return;
-                } catch (retryErr) {
-                    self.postMessage({ status: 'error', data: { message: String(retryErr?.message || retryErr) }, id: msg.id });
-                    return;
-                }
-            }
-            self.postMessage({ status: 'error', data: { message: errMsg }, id: msg.id });
+            self.postMessage({ status: 'error', data: { message: String(err?.message || err || '') }, id: msg.id });
         }
         return;
     }
 
     if (msg.type === 'embed-batch') {
         try {
-            const results = await embed(msg.texts);
+            const results = await embedWithRecovery(msg.texts);
             self.postMessage({ status: 'complete', data: results, id: msg.id });
         } catch (err) {
-            self.postMessage({
-                status: 'error',
-                data: { message: String(err?.message || err || '') },
-                id: msg.id,
-            });
+            self.postMessage({ status: 'error', data: { message: String(err?.message || err || '') }, id: msg.id });
         }
         return;
     }

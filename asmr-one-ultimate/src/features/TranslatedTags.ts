@@ -4,6 +4,7 @@ import { Logger } from '../core/Logger';
 import { Config, I18n } from '../core/Config';
 import { CentralObserver } from '../core/CentralObserver';
 import { EventBus } from '../core/EventBus';
+import { isChinese } from '../core/DomUtils';
 import type { TagEntry } from '../types/api';
 
 declare const unsafeWindow: Window & typeof globalThis;
@@ -239,9 +240,13 @@ export class TranslatedTags {
      * Uses a two-pass approach: collect all pending translations, then batch-translate.
      */
     public augmentTags(): void {
-        if (!Config.get('translateMode')) return;
+        const translateMode = !!Config.get('translateMode');
+        const cnToJp = !!Config.get('translateCnToJp');
+        if (!translateMode && !cnToJp) return;
 
-        const targetLang = this.targetLang;
+        // CN-only mode: translateMode off but cnToJp on — only replace Chinese text with Japanese
+        const cnOnlyMode = !translateMode && cnToJp;
+        const targetLang = cnOnlyMode ? 'ja' : this.targetLang;
         // 'pair' = formatPair(original, translated), 'raw' = translated only, 'worktree' = cleaned + ext
         type PendingItem = {
             el: HTMLElement;
@@ -275,7 +280,7 @@ export class TranslatedTags {
                     ? this.tags.find(tag => String(tag.id) === String(dataId))
                     : this.tags.find(tag => tag.ja === text || tag.en === text);
 
-                if (match?.en && match.ja !== match.en) {
+                if (!cnOnlyMode && match?.en && match.ja !== match.en) {
                     const formatted = TranslationService.formatPair(match.ja, match.en);
                     this.processedElements.add(chip);
                     chip.dataset.asmrtag = text;
@@ -289,16 +294,18 @@ export class TranslatedTags {
                 // Extract base text (strip ruby furigana) for cleaner translation
                 const baseText = this.extractBaseText(content);
                 if (this.looksJapanese(baseText) && !this.shouldSkipAutoTranslate(baseText, targetLang)) {
+                    if (cnOnlyMode && !isChinese(baseText)) continue;
                     this.markTranslationPending(chip, text);
-                    pending.push({ el: chip, originalText: text, translateKey: baseText, format: 'pair', apply: (v) => { content.textContent = v; } });
+                    pending.push({ el: chip, originalText: text, translateKey: baseText, format: cnOnlyMode ? 'raw' : 'pair', apply: (v) => { content.textContent = v; } });
                 }
             }
 
             // 2. List Items (Groups, VAs, work tree files)
             const listItems = Array.from(document.querySelectorAll('.q-item__label:not(.q-item__label--caption)')) as HTMLElement[];
             for (const item of listItems) {
-                const text = (item.textContent || '').trim();
+                const text = this.extractBaseText(item);
                 if (!text || !this.looksJapanese(text)) continue;
+                if (cnOnlyMode && !isChinese(text)) continue;
                 const isListing = location.pathname.includes('/circles') || location.pathname.includes('/vas') || location.pathname.includes('/works');
                 const isWorkTree = item.closest('#work-tree, .work-tree') !== null;
                 if (!isListing && !isWorkTree) continue;
@@ -311,21 +318,22 @@ export class TranslatedTags {
                     const translateKey = fileInfo ? fileInfo.input : text;
                     pending.push({ el: item, originalText: text, translateKey, format: 'worktree', fileExt: fileInfo?.ext || '', scopeKey, apply: (v) => { this.applyWorkTreeTranslation(item, text, v); } });
                 } else if (!this.shouldSkipAutoTranslate(text, targetLang)) {
-                    pending.push({ el: item, originalText: text, translateKey: text, format: 'pair', scopeKey, apply: (v) => { item.textContent = v; } });
+                    pending.push({ el: item, originalText: text, translateKey: text, format: cnOnlyMode ? 'raw' : 'pair', scopeKey, apply: (v) => { item.textContent = v; } });
                 }
             }
 
             // 3. Breadcrumbs
             const breadcrumbs = Array.from(document.querySelectorAll('#work-tree .q-breadcrumbs__el span, .work-tree .q-breadcrumbs__el span')) as HTMLElement[];
             for (const span of breadcrumbs) {
-                const text = (span.textContent || '').trim();
+                const text = this.extractBaseText(span);
                 if (!text || !this.looksJapanese(text)) continue;
+                if (cnOnlyMode && !isChinese(text)) continue;
                 const scopeKey = this.getCurrentWorkTreeKey();
                 if (this.processedElements.has(span) && this.shouldSkipTranslation(span, text, scopeKey)) continue;
                 if (this.shouldSkipAutoTranslate(text, targetLang)) continue;
 
                 this.markTranslationPending(span, text, scopeKey);
-                pending.push({ el: span, originalText: text, translateKey: text, format: 'pair', scopeKey, apply: (v) => { span.textContent = v; } });
+                pending.push({ el: span, originalText: text, translateKey: text, format: cnOnlyMode ? 'raw' : 'pair', scopeKey, apply: (v) => { span.textContent = v; } });
             }
 
             // 4. Anchors
@@ -336,11 +344,12 @@ export class TranslatedTags {
                 if (this.hasExistingRomanization(text)) continue;
                 const baseText = this.extractBaseText(anchor);
                 if (!this.looksJapanese(baseText)) continue;
+                if (cnOnlyMode && !isChinese(baseText)) continue;
                 if (this.processedElements.has(anchor) && this.shouldSkipTranslation(anchor, text)) continue;
                 if (this.shouldSkipAutoTranslate(baseText, targetLang)) continue;
 
                 this.markTranslationPending(anchor, text);
-                pending.push({ el: anchor, originalText: text, translateKey: baseText, format: 'pair', apply: (v) => { anchor.textContent = v; } });
+                pending.push({ el: anchor, originalText: text, translateKey: baseText, format: cnOnlyMode ? 'raw' : 'pair', apply: (v) => { anchor.textContent = v; } });
             }
 
             // 5. Work Card Circles / Studios
@@ -351,11 +360,12 @@ export class TranslatedTags {
                 if (this.hasExistingRomanization(text)) continue;
                 const baseText = this.extractBaseText(el);
                 if (!this.looksJapanese(baseText)) continue;
+                if (cnOnlyMode && !isChinese(baseText)) continue;
                 if (this.processedElements.has(el) && this.shouldSkipTranslation(el, text)) continue;
                 if (this.shouldSkipAutoTranslate(baseText, targetLang)) continue;
 
                 this.markTranslationPending(el, text);
-                pending.push({ el, originalText: text, translateKey: baseText, format: 'pair', apply: (v) => { el.textContent = v; } });
+                pending.push({ el, originalText: text, translateKey: baseText, format: cnOnlyMode ? 'raw' : 'pair', apply: (v) => { el.textContent = v; } });
             }
 
             // 6. Work Titles — keep original, show translated subtitle below
@@ -363,24 +373,30 @@ export class TranslatedTags {
             for (const el of workTitles) {
                 const text = (el.textContent || '').trim();
                 if (!text || !this.looksJapanese(text)) continue;
+                if (cnOnlyMode && !isChinese(text)) continue;
                 if (this.processedElements.has(el) && this.shouldSkipTranslation(el, text)) continue;
 
                 this.markTranslationPending(el, text);
-                pending.push({ el, originalText: text, translateKey: text, format: 'raw', apply: (v) => {
-                    // Keep original text in the anchor, add translated subtitle after the clamped container
-                    const container = el.closest('.ellipsis-3-lines, .ellipsis-2-lines, .text-h6') as HTMLElement;
-                    if (container && container.parentElement) {
-                        let sub = container.nextElementSibling as HTMLElement;
-                        if (!sub || !sub.classList.contains('asmr-card-translation')) {
-                            sub = document.createElement('div');
-                            sub.className = 'asmr-card-translation';
-                            container.after(sub);
+                if (cnOnlyMode) {
+                    // CN→JP: silently replace title text with Japanese
+                    pending.push({ el, originalText: text, translateKey: text, format: 'raw', apply: (v) => { el.textContent = v; } });
+                } else {
+                    pending.push({ el, originalText: text, translateKey: text, format: 'raw', apply: (v) => {
+                        // Keep original text in the anchor, add translated subtitle after the clamped container
+                        const container = el.closest('.ellipsis-3-lines, .ellipsis-2-lines, .text-h6') as HTMLElement;
+                        if (container && container.parentElement) {
+                            let sub = container.nextElementSibling as HTMLElement;
+                            if (!sub || !sub.classList.contains('asmr-card-translation')) {
+                                sub = document.createElement('div');
+                                sub.className = 'asmr-card-translation';
+                                container.after(sub);
+                            }
+                            sub.textContent = v;
+                            sub.title = v;
                         }
-                        sub.textContent = v;
-                        sub.title = v;
-                    }
-                    el.title = v;
-                } });
+                        el.title = v;
+                    } });
+                }
             }
 
         } finally {
@@ -571,7 +587,8 @@ export class TranslatedTags {
 
     private applyWorkTreeTranslation(el: HTMLElement, original: string, translated: string): void {
         // Keep the original text intact so Vue can safely re-render when items change.
-        const currentText = (el.textContent || '').trim();
+        // Use extractBaseText to ignore furigana ruby annotations when comparing.
+        const currentText = this.extractBaseText(el);
         if (currentText !== original) {
             el.textContent = original;
         }

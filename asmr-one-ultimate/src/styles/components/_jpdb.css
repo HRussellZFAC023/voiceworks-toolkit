@@ -160,8 +160,11 @@
     to   { opacity: 1; transform: translateY(0); }
 }
 
-/* Header: spelling with furigana */
+/* Header: spelling with furigana + pitch accent top-right */
 .jpdb-popover-header {
+    display: flex;
+    align-items: flex-end;
+    gap: 8px;
     margin-bottom: 8px;
 }
 
@@ -195,14 +198,15 @@
 .jpdb-popover-spelling.jpdb-suspended    { color: #999; }
 .jpdb-popover-spelling.jpdb-not-in-deck  { color: var(--asmr-text-primary); }
 
-/* Pitch accent diagram */
+/* Pitch accent diagram (inline in header, top-right) */
 .jpdb-popover-pitch {
-    margin-bottom: 8px;
+    margin-left: auto;
+    flex-shrink: 0;
 }
 
 .jpdb-popover-pitch svg {
     display: block;
-    height: 24px;
+    height: 40px;
 }
 
 /* Part of speech */
@@ -451,7 +455,7 @@
 /* --- Subtitle Furigana (inside LearnerMode) --- */
 
 .learner-jp .jpdb-furi {
-    font-size: 0.45em;
+    font-size: 0.55em;
 }
 
 .learner-jp .jpdb-word {
@@ -463,14 +467,14 @@
 
 @media (max-width: 768px) {
     .learner-jp .jpdb-furi {
-        font-size: 0.5em;
+        font-size: 0.55em;
     }
 }
 
 /* --- Pitch Accent SVG in Popover --- */
 
 .jpdb-pitch-mora {
-    font-size: 11px;
+    font-size: 13px;
     fill: var(--asmr-text-primary);
 }
 

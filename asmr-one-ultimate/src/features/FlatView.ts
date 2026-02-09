@@ -137,6 +137,7 @@ export class FlatView {
         // Create backdrop (mobile: click to close)
         this.backdropEl = document.createElement('div');
         this.backdropEl.className = 'asmr-flat-backdrop';
+        this.backdropEl.setAttribute('aria-hidden', 'true');
         this.backdropEl.addEventListener('click', () => this.hide());
         document.body.appendChild(this.backdropEl);
 
@@ -380,11 +381,19 @@ export class FlatView {
             </div>
         `;
 
-        // Attach click handlers
+        // Attach click and keyboard handlers
         this.bodyEl.querySelectorAll('[data-asmr-flat-idx]').forEach(el => {
-            el.addEventListener('click', () => {
+            const handleActivate = () => {
                 const idx = parseInt((el as HTMLElement).dataset.asmrFlatIdx || '0', 10);
                 this.onClickItem(this.currentItems[idx], audioItems);
+            };
+            el.addEventListener('click', handleActivate);
+            el.addEventListener('keydown', (e: Event) => {
+                const ke = e as KeyboardEvent;
+                if (ke.key === 'Enter' || ke.key === ' ') {
+                    ke.preventDefault();
+                    handleActivate();
+                }
             });
         });
 

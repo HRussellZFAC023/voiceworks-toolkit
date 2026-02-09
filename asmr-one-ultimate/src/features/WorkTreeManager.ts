@@ -1,13 +1,17 @@
 /**
  * WorkTreeManager - Coordinates folder diving and flat view prefetching.
  *
- * Ensures host app's folder diver runs first, then applies our own
- * folder dive ONLY if the current view has no direct audio files.
+ * "Nuke & Enhance" pattern:
+ * - Sync watcher sets _vnode=null on path change → Vue creates fresh DOM
+ * - hook:updated runs a single coordinated enhancement pass
+ * - No DOM cleanup needed (fresh DOM has no stale content)
  */
 
 import { KikoeruBridge } from '../infrastructure/KikoeruBridge';
 import { Logger, Config } from '../core/Utils';
 import { EventBus } from '../core/EventBus';
+import { CentralObserver } from '../core/CentralObserver';
+import { getCleanText } from '../core/DomUtils';
 import { FolderDiver } from './FolderDiver';
 import { FlatViewController } from './FlatViewController';
 import { WorkService } from '../services/WorkService';
@@ -44,11 +48,15 @@ export class WorkTreeManager {
     private lastPathKey = '';
     private treeObserver: MutationObserver | null = null;
     private manualOverrideUntil = 0;
-    private pendingFolderSync = false;
-    private pendingPathKey = '';
     private autoDiveInProgress = false;
     private manualRouteKey = '';
     private manualRouteWorkId: string | null = null;
+    private lastHostPathKey = '';
+    private hostPathWatcherCleanup: (() => void) | null = null;
+    private treeVmHooked = false;
+    private syncWatcherCleanup: (() => void) | null = null;
+    /** Dedup key for worktree:path-change emission from enhanceWorkTree */
+    private lastEnhancedPathKey = '';
 
     private constructor() {
         this.bridge = KikoeruBridge.getInstance();
@@ -69,6 +77,7 @@ export class WorkTreeManager {
 
         this.flatView.enable();
         this.watchRoute();
+        this.watchHostPath();
         this.observeWorkTreeDom();
         this.watchManualNav();
 
@@ -86,6 +95,12 @@ export class WorkTreeManager {
         this.flatView.disable();
         this.treeObserver?.disconnect();
         this.treeObserver = null;
+        this.hostPathWatcherCleanup?.();
+        this.hostPathWatcherCleanup = null;
+        this.syncWatcherCleanup?.();
+        this.syncWatcherCleanup = null;
+        this.treeVmHooked = false;
+        this.bridge.invalidateWorkTreeCache();
         this.diveToken++;
     }
 
@@ -104,8 +119,6 @@ export class WorkTreeManager {
             const workId = this.getWorkIdFromRoute(to);
             if (!workId) return;
 
-            // P1 FIX: Detect manual "up" navigation via route change (back button or breadcrumbs)
-            // If the work is the same but the path is shorter, it's a manual "up" interaction.
             const toPath = this.getSegmentsFromRoute(to);
             const fromPath = this.getSegmentsFromRoute(from);
             const sameWork = this.getWorkIdFromRoute(from) === workId;
@@ -119,7 +132,6 @@ export class WorkTreeManager {
             }
 
             if (sameWork && routeChanged && !this.autoDiveInProgress) {
-                // Any manual URL change should pause auto-dive for this route
                 this.handleManual();
                 this.manualRouteWorkId = String(workId);
                 this.manualRouteKey = routeKey;
@@ -142,7 +154,8 @@ export class WorkTreeManager {
         if (this.currentWorkId === workId) return;
         this.currentWorkId = workId;
         this.diveToken++;
-        this.lastPathKey = ''; // Reset path key on work change
+        this.lastPathKey = '';
+        this.lastEnhancedPathKey = '';
         this.manualRouteKey = '';
         this.manualRouteWorkId = null;
 
@@ -186,7 +199,6 @@ export class WorkTreeManager {
                 return;
             }
 
-            // Fallback: fetch full tree and attempt a dive from current path
             try {
                 Logger.debug('[WorkTreeManager] Host tree unavailable, falling back to API tracks');
                 const tree = await WorkService.getTracks(workId);
@@ -276,13 +288,83 @@ export class WorkTreeManager {
                 resolve(lastSeen);
             }, HOST_DIVER_WAIT_TIMEOUT);
 
-            // Run an initial check without waiting for a mutation.
             check();
         });
     }
 
-    private delay(ms: number): Promise<void> {
-        return new Promise((resolve) => setTimeout(resolve, ms));
+    // =========================================================================
+    // Path Sync & Route Helpers
+    // =========================================================================
+
+    /**
+     * Sync the WorkTree component path to match the route.
+     * Setting path triggers the sync watcher (_vnode=null) → Vue creates fresh DOM
+     * → hook:updated fires enhanceWorkTree.
+     */
+    private syncWorkTreeToRoute(path: string[]): void {
+        const treeVm = this.bridge.findWorkTreeComponent() as any;
+        if (!treeVm) return;
+
+        this.installTreeHooks(treeVm);
+
+        const currentPath = Array.isArray(treeVm.path) ? treeVm.path : [];
+        const targetPath = Array.isArray(path) ? path : [];
+        if (arraysEqual(currentPath, targetPath)) return;
+
+        // Validate path exists in tree before setting it
+        const tree = treeVm.tree || treeVm.$data?.tree || treeVm._data?.tree;
+        if (Array.isArray(tree) && targetPath.length > 0) {
+            const resolved = this.folderDiver.getNodesAtPath(tree, targetPath);
+            if (resolved === tree) {
+                Logger.warn('[WorkTreeManager] Path not found in tree, skipping path update', {
+                    path: targetPath.join('/'),
+                    treeLength: tree.length
+                });
+                return;
+            }
+        }
+
+        // Set path — sync watcher fires immediately, nukes _vnode.
+        // Vue then creates fresh DOM, hook:updated runs enhanceWorkTree.
+        if (typeof treeVm.$set === 'function') {
+            treeVm.$set(treeVm, 'path', [...targetPath]);
+        } else if (Array.isArray(treeVm.path)) {
+            treeVm.path.splice(0, treeVm.path.length, ...targetPath);
+        } else {
+            treeVm.path = [...targetPath];
+        }
+
+        this.lastHostPathKey = targetPath.join('\x00');
+        this.folderDiver.syncPath(targetPath);
+        Logger.debug('[WorkTreeManager] Synced WorkTree path with route', { path: targetPath.join('/') || '(root)' });
+    }
+
+    /**
+     * Watch treeVm.path for changes made by the HOST app (folder clicks, breadcrumbs).
+     * The host updates path internally without changing the route. We watch it to
+     * keep FolderDiver in sync. Enhancement is handled by hook:updated.
+     */
+    private watchHostPath(): void {
+        const app = this.bridge.app;
+        if (!app?.$watch) return;
+
+        const getPathKey = (): string => {
+            const treeVm = this.bridge.findWorkTreeComponent() as any;
+            if (!treeVm?.path || !Array.isArray(treeVm.path)) return '';
+            this.installTreeHooks(treeVm);
+            return treeVm.path.join('\x00');
+        };
+
+        this.lastHostPathKey = getPathKey();
+
+        this.hostPathWatcherCleanup = app.$watch(getPathKey, (next: string, prev: string) => {
+            if (next === prev) return;
+            this.lastHostPathKey = next;
+            const newPath = next ? next.split('\x00') : [];
+            this.folderDiver.syncPath(newPath);
+            // Enhancement (markItemTypes, copy/transcript buttons, path-change event)
+            // is handled by hook:updated → enhanceWorkTree
+        });
     }
 
     private getWorkIdFromRoute(route?: { path?: string; params?: { id?: string }; query?: any } | null): string | null {
@@ -359,112 +441,220 @@ export class WorkTreeManager {
         return Object.prototype.hasOwnProperty.call(query, 'path');
     }
 
-    private syncWorkTreeToRoute(path: string[]): void {
-        const treeVm = this.bridge.findWorkTreeComponent() as any;
-        if (!treeVm) return;
+    // =========================================================================
+    // "Nuke & Enhance" — Core Pattern
+    // =========================================================================
 
-        const currentPath = Array.isArray(treeVm.path) ? treeVm.path : [];
-        const targetPath = Array.isArray(path) ? path : [];
-        const samePath = arraysEqual(currentPath, targetPath);
+    /**
+     * Install sync watcher + lifecycle hooks on the WorkTree Vue component.
+     *
+     * Sync watcher on `path`:
+     * - Fires IMMEDIATELY inside the reactive setter (before Vue queues render)
+     * - Sets _vnode=null → Vue does a full mount (creates fresh DOM from scratch)
+     * - No stale vnode.elm references, no cleanup needed
+     *
+     * hook:updated:
+     * - Fires after Vue renders fresh DOM
+     * - Runs single coordinated enhancement pass (item types, buttons, events)
+     *
+     * hook:beforeDestroy:
+     * - Clears treeVmHooked so hooks are reinstalled on new VM instance
+     */
+    private installTreeHooks(treeVm: any): void {
+        if (this.treeVmHooked) return;
+        if (!treeVm?.$watch || !treeVm?.$on) return;
+        this.treeVmHooked = true;
 
-        if (!samePath) {
-            // Mark that we need to sync fatherFolder for this new path
-            this.pendingFolderSync = true;
-            this.pendingPathKey = targetPath.join('\x00');
-
-            // Notify translation system to reset BEFORE Vue updates DOM
-            // This prevents stale translated text from persisting on reused DOM elements
-            EventBus.emit('worktree:path-change', { path: targetPath });
-
-            if (typeof treeVm.$set === 'function') {
-                treeVm.$set(treeVm, 'path', [...targetPath]);
-            } else if (Array.isArray(treeVm.path)) {
-                treeVm.path.splice(0, treeVm.path.length, ...targetPath);
-            } else {
-                treeVm.path = [...targetPath];
-            }
-        }
-
-        const tree = treeVm.tree || treeVm.$data?.tree || treeVm._data?.tree;
-        // IMPORTANT: Always access fatherFolder through the reactive property (treeVm.fatherFolder)
-        // NOT through $data or _data which bypasses Vue's reactivity system
-        const folderTarget = treeVm.fatherFolder;
-        if (Array.isArray(tree) && Array.isArray(folderTarget)) {
-            const nextFolder = this.folderDiver.getNodesAtPath(tree, targetPath);
-
-            // Validate nextFolder is correct for the path (not a fallback to root)
-            // If path is non-empty but nextFolder equals root tree, path wasn't found
-            const isRootFallback = targetPath.length > 0 && nextFolder === tree;
-            if (isRootFallback) {
-                Logger.warn('[WorkTreeManager] Path not found in tree, skipping fatherFolder update', {
-                    path: targetPath.join('/'),
-                    treeLength: tree.length
-                });
-                return;
-            }
-
-            // Use pendingFolderSync to ensure update happens even if tree loaded after path change
-            const needsUpdate = this.pendingFolderSync || !this.isSameFolder(folderTarget, nextFolder);
-            if (needsUpdate && nextFolder.length > 0) {
-                const nextItems = [...nextFolder];
-                // Use $set for guaranteed reactivity, falling back to splice on the reactive array
-                if (typeof treeVm.$set === 'function') {
-                    treeVm.$set(treeVm, 'fatherFolder', nextItems);
-                } else {
-                    // Splice on the reactive property directly
-                    treeVm.fatherFolder.splice(0, treeVm.fatherFolder.length, ...nextItems);
-                }
-
-                // Mark sync complete if this is the pending path
-                if (this.pendingPathKey === targetPath.join('\x00')) {
-                    this.pendingFolderSync = false;
-                }
-                Logger.debug('[WorkTreeManager] Updated fatherFolder with', nextItems.length, 'items for path', targetPath.join('/') || '(root)');
-            }
-        }
-
-        if (typeof treeVm.$forceUpdate === 'function') {
+        // Sync watcher: nuke vnode + force update BEFORE Vue's render watcher.
+        // Vue sees prevVnode=null → full mount (fresh DOM, no stale refs).
+        // $forceUpdate() ensures render is scheduled even during Vue's scheduler flush
+        // (matches KikoeruBridge.forceWorkTreeRerender() which also calls both).
+        const unwatch = treeVm.$watch('path', () => {
+            Logger.debug('[WorkTreeManager] Sync path watcher: nuking vnode for fresh render');
+            treeVm._vnode = null;
             treeVm.$forceUpdate();
-        }
-        this.folderDiver.syncPath(targetPath);
-        Logger.debug('[WorkTreeManager] Synced WorkTree path with route', { path: targetPath.join('/') || '(root)' });
+
+            // Pre-render: reset TranslatedTags/FuriganaRenderer state BEFORE Vue renders.
+            // TranslatedTags modifies .q-item__label textContent (detaches Vue's text nodes).
+            // Resetting here strips data-asmrtag attributes on the OLD DOM so Vue can patch
+            // correctly even if _vnode=null somehow fails to create fresh DOM.
+            const path = Array.isArray(treeVm.path) ? [...treeVm.path] : [];
+            const pathKey = path.join('\x00');
+            if (pathKey !== this.lastEnhancedPathKey) {
+                this.lastEnhancedPathKey = pathKey;
+                if (!this.autoDiveInProgress) {
+                    EventBus.emit('worktree:path-change', { path });
+                    Logger.debug('[WorkTreeManager] Path changed (pre-render)', { path: path.join('/') || '(root)' });
+                }
+            }
+        }, { sync: true, deep: true });
+        this.syncWatcherCleanup = unwatch || null;
+
+        // After every render: single coordinated enhancement pass.
+        treeVm.$on('hook:updated', () => {
+            this.enhanceWorkTree(treeVm);
+        });
+
+        // Also on initial mount (hook:updated only fires on re-renders).
+        treeVm.$on('hook:mounted', () => {
+            this.enhanceWorkTree(treeVm);
+        });
+
+        // Detect component destruction → re-install hooks on recreation.
+        treeVm.$on('hook:beforeDestroy', () => {
+            Logger.debug('[WorkTreeManager] WorkTree VM destroyed, clearing hooks');
+            this.treeVmHooked = false;
+            this.syncWatcherCleanup = null;
+            this.lastEnhancedPathKey = '';
+            this.bridge.invalidateWorkTreeCache();
+        });
+
+        Logger.debug('[WorkTreeManager] Installed sync watcher + lifecycle hooks on WorkTree');
     }
 
-    private isSameFolder(a: any[], b: any[]): boolean {
-        if (a === b) return true;
-        if (!Array.isArray(a) || !Array.isArray(b)) return false;
-        if (a.length !== b.length) return false;
-        for (let i = 0; i < a.length; i++) {
-            const aItem = a[i];
-            const bItem = b[i];
-            const aKey = aItem?.hash || aItem?.title || aItem?.name || '';
-            const bKey = bItem?.hash || bItem?.title || bItem?.name || '';
-            if (aKey !== bKey) return false;
-        }
-        return true;
+    /**
+     * Single coordinated enhancement pass after Vue renders fresh DOM.
+     * Called from hook:updated and hook:mounted on the WorkTree VM.
+     *
+     * 1. Mark item types from fatherFolder data
+     * 2. Emit worktree:enhanced for WorkTreeCopy/TranscriptFileInjector
+     * 3. Verify DOM matches data (safety net)
+     *
+     * Note: worktree:path-change is emitted in the sync watcher (before render)
+     * so TranslatedTags/FuriganaRenderer reset state BEFORE Vue renders fresh DOM.
+     */
+    private enhanceWorkTree(treeVm: any): void {
+        const workTree = document.getElementById('work-tree');
+        if (!workTree) return;
+
+        // 0. Force correct text on reused DOM elements.
+        //    Vue 2 reuses elements via :key="index". Features like FuriganaRenderer
+        //    and TranslatedTags modify .q-item__label, detaching Vue's tracked text
+        //    nodes. On navigation, Vue writes new text to detached nodes — the visible
+        //    DOM keeps stale content. This fixup runs synchronously in hook:updated
+        //    (before browser paint) and overwrites stale text from fatherFolder data.
+        this.fixWorkTreeText(treeVm, workTree);
+
+        // 1. Mark item types from fatherFolder
+        this.markItemTypes();
+
+        // 2. Trigger copy buttons + transcript chips
+        EventBus.emit('worktree:enhanced', { workTree });
     }
 
+    /**
+     * Force-correct .q-item__label text from fatherFolder data.
+     *
+     * Runs synchronously after every Vue render (hook:updated / hook:mounted).
+     * Compares each label's clean text (stripping furigana/translation artifacts)
+     * with the expected title from fatherFolder. On mismatch, resets the element
+     * to the correct text and strips stale feature state.
+     *
+     * This makes the work tree resilient to DOM corruption from any source
+     * (FuriganaRenderer ruby replacement, TranslatedTags, or Vue patch failures).
+     */
+    private fixWorkTreeText(treeVm: any, workTree: HTMLElement): void {
+        try {
+            const fatherFolder = treeVm.fatherFolder;
+            if (!Array.isArray(fatherFolder) || fatherFolder.length === 0) return;
+
+            const labels = workTree.querySelectorAll('.q-item__label:not(.q-item__label--caption)');
+            if (labels.length === 0) return;
+
+            // Collect mismatches first, then batch-fix inside withModification
+            // to avoid triggering CentralObserver (FuriganaRenderer, TranslatedTags)
+            const fixes: Array<{ label: HTMLElement; expected: string }> = [];
+
+            for (let i = 0; i < Math.min(labels.length, fatherFolder.length); i++) {
+                const label = labels[i] as HTMLElement;
+                const expected = fatherFolder[i]?.title;
+                if (!label || !expected) continue;
+
+                // getCleanText reads data-jpdb-original if furigana was applied,
+                // or strips <rt>/<rp> from ruby annotations, falling back to textContent
+                const domText = getCleanText(label);
+                if (domText === expected || domText.includes(expected)) continue;
+
+                fixes.push({ label, expected });
+            }
+
+            if (fixes.length === 0) return;
+
+            CentralObserver.withModification(() => {
+                for (const { label, expected } of fixes) {
+                    // Mismatch: force correct text and strip stale feature state
+                    label.textContent = expected;
+                    delete label.dataset.asmrtag;
+                    delete label.dataset.asmrtagState;
+                    delete label.dataset.asmrtagScope;
+                    delete label.dataset.asmrtagTranslation;
+                    label.classList.remove('asmr-translated');
+                    label.classList.remove('asmr-worktree-translation');
+                    label.removeAttribute('data-jpdb');
+                    label.removeAttribute('data-jpdb-original');
+                }
+            });
+
+            if (fixes.length > 0) {
+                Logger.debug(`[WorkTreeManager] Fixed ${fixes.length} stale label(s)`);
+            }
+        } catch {
+            // fatherFolder computed may throw if path is invalid — ignore
+        }
+    }
+
+    /**
+     * Mark each q-item with data-item-type from fatherFolder.
+     * Features check this attribute before injecting elements
+     * (e.g., skip transcript buttons on folders).
+     */
+    private markItemTypes(): void {
+        const treeVm = this.bridge.workTreeVm as any;
+        const fatherFolder = treeVm?.fatherFolder;
+        if (!Array.isArray(fatherFolder) || fatherFolder.length === 0) return;
+
+        const workTree = document.getElementById('work-tree');
+        if (!workTree) return;
+
+        const items = workTree.querySelectorAll('.q-list > .q-item');
+        items.forEach((item, i) => {
+            if (i >= fatherFolder.length) return;
+            const data = fatherFolder[i];
+            if (!data) return;
+            (item as HTMLElement).dataset.itemType = data.type || 'unknown';
+        });
+    }
+
+    // =========================================================================
+    // DOM Observation (auto-dive only)
+    // =========================================================================
+
+    /**
+     * Observe work tree DOM changes for auto-dive detection and lazy hook installation.
+     * Does NOT handle enhancement — that's done by hook:updated.
+     */
     private observeWorkTreeDom(): void {
         if (this.treeObserver) return;
         const root = document.getElementById('work-tree') || document.body;
         this.treeObserver = new MutationObserver(() => {
+            // Lazily install hooks when WorkTree component becomes available
+            if (!this.treeVmHooked) {
+                const treeVm = this.bridge.findWorkTreeComponent() as any;
+                if (treeVm) this.installTreeHooks(treeVm);
+            }
+
             const workId = this.getWorkIdFromRoute(this.bridge.route) || this.bridge.currentWorkId;
             const hasItems = !!document.querySelector('#work-tree .q-item');
             if (!hasItems) return;
-
-            const routePath = this.getSegmentsFromRoute(this.bridge.route);
-            if (workId) {
-                this.syncWorkTreeToRoute(routePath);
-            }
 
             if (!workId || !Config.get('autoFilterFolders')) return;
 
             const pathKey = this.folderDiver.getHostPath().join('/');
             const now = Date.now();
 
-            // Only throttle if we are on the EXACT SAME path in the same work AND sync is complete
+            // Throttle: skip if same work + same path + within 2s
             if (this.domDiveWorkId === workId && this.lastPathKey === pathKey &&
-                now - this.domDiveAt < 2000 && !this.pendingFolderSync) {
+                now - this.domDiveAt < 2000) {
                 return;
             }
 

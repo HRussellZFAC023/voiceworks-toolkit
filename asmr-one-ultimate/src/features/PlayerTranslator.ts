@@ -1,7 +1,7 @@
 import { CentralObserver } from '../core/CentralObserver';
 import { TranslationService } from '../services/TranslationService';
 import { I18n } from '../core/Utils';
-import { PLAYER_BAR_SELECTOR } from '../core/DomUtils';
+import { PLAYER_BAR_SELECTOR, isChinese } from '../core/DomUtils';
 import { AppStore } from '../store/AppStore';
 import { EventBus } from '../core/EventBus';
 
@@ -96,25 +96,31 @@ export class PlayerTranslator {
     }
 
     private async checkPlayer() {
-        if (!AppStore.getConfig('translateMode')) return;
+        const translateMode = !!AppStore.getConfig('translateMode');
+        const cnToJp = !!AppStore.getConfig('translateCnToJp');
+        if (!translateMode && !cnToJp) return;
         const playerBar = document.querySelector(PLAYER_BAR_SELECTOR + ', .audio-player');
         if (!playerBar) return;
 
+        const cnOnlyMode = !translateMode && cnToJp;
         const titleEl = playerBar.querySelector('.q-toolbar__title, .text-h6, .text-weight-bold.text-body1') as HTMLElement;
         const artistEl = playerBar.querySelector('.text-subtitle2, .text-caption, .text-grey-5') as HTMLElement;
         const trackNameEl = playerBar.querySelector('.ellipsis-2-lines') as HTMLElement;
 
         // Run all translations concurrently instead of sequentially
         const tasks: Promise<void>[] = [];
-        if (titleEl) tasks.push(this.translateElement(titleEl, 'title'));
-        if (artistEl) tasks.push(this.translateElement(artistEl, 'artist'));
-        if (trackNameEl) tasks.push(this.translateTrackName(trackNameEl));
+        if (titleEl) tasks.push(this.translateElement(titleEl, 'title', cnOnlyMode));
+        if (artistEl) tasks.push(this.translateElement(artistEl, 'artist', cnOnlyMode));
+        if (trackNameEl) tasks.push(this.translateTrackName(trackNameEl, cnOnlyMode));
         await Promise.all(tasks);
     }
 
-    private async translateElement(el: HTMLElement, _type: 'title' | 'artist') {
+    private async translateElement(el: HTMLElement, _type: 'title' | 'artist', cnOnlyMode = false) {
         const rawText = el.textContent?.trim() || '';
         if (!rawText) return;
+
+        // In CN-only mode, skip non-Chinese text
+        if (cnOnlyMode && !isChinese(rawText)) return;
 
         const source = el.dataset.asmrSource;
         const translatedText = el.dataset.asmrTranslatedText;
@@ -128,12 +134,20 @@ export class PlayerTranslator {
         if (!text) return;
 
         const epoch = this._epoch;
-        const targetLang = I18n.lang === 'zh' ? 'zh-CN' : I18n.lang;
+        const targetLang = cnOnlyMode ? 'ja' : (I18n.lang === 'zh' ? 'zh-CN' : I18n.lang);
         try {
             const translated = await TranslationService.translate(text, targetLang);
             if (this._epoch !== epoch) return; // track changed while translating
             if (translated && translated !== text) {
-                this.updateElement(el, text, translated);
+                if (cnOnlyMode) {
+                    // CN→JP: silently replace text content
+                    el.textContent = translated;
+                    el.dataset.asmrTranslated = 'true';
+                    el.dataset.asmrSource = text;
+                    el.dataset.asmrTranslatedText = translated;
+                } else {
+                    this.updateElement(el, text, translated);
+                }
             } else {
                 this.markOriginal(el, text);
             }
@@ -148,7 +162,7 @@ export class PlayerTranslator {
      * Strips number prefix and file extension, translates the core text,
      * then displays as "Original (Translated)" using updateElement.
      */
-    private async translateTrackName(el: HTMLElement) {
+    private async translateTrackName(el: HTMLElement, cnOnlyMode = false) {
         const rawText = el.textContent?.trim() || '';
         if (!rawText) return;
 
@@ -158,15 +172,22 @@ export class PlayerTranslator {
             const translated = el.dataset.asmrTranslatedText;
             // Vue may re-render the original text over our translation — re-apply
             if (source && rawText === source && translated) {
-                this.updateElement(el, source, translated);
+                if (cnOnlyMode) {
+                    el.textContent = translated;
+                } else {
+                    this.updateElement(el, source, translated);
+                }
                 return;
             }
             // Still showing our translation pair (textContent contains both)
             if (source && translated && rawText.includes(source) && rawText.includes(translated)) return;
         }
 
-        // Detect Japanese content
+        // Detect CJK content
         if (!/[\u3040-\u30ff\u4e00-\u9faf]/.test(rawText)) return;
+
+        // In CN-only mode, skip non-Chinese text
+        if (cnOnlyMode && !isChinese(rawText)) return;
 
         // Strip track number prefix (e.g. "1," or "01." or "01 ") and file extension
         const stripped = rawText
@@ -175,13 +196,23 @@ export class PlayerTranslator {
         if (!stripped) return;
 
         const epoch = this._epoch;
-        const targetLang = I18n.lang === 'zh' ? 'zh-CN' : I18n.lang;
+        const targetLang = cnOnlyMode ? 'ja' : (I18n.lang === 'zh' ? 'zh-CN' : I18n.lang);
         try {
             const translated = await TranslationService.translate(stripped, targetLang);
             if (this._epoch !== epoch) return; // track changed while translating
             if (translated && translated !== stripped) {
                 const cleaned = TranslationService.cleanQuotes(translated);
-                this.updateElement(el, rawText, cleaned);
+                if (cnOnlyMode) {
+                    // CN→JP: reconstruct with prefix/extension but JP core text
+                    const prefix = rawText.match(/^\d+[\s.,、\-_·]+/)?.[0] || '';
+                    const ext = rawText.match(/\.[a-z0-9]{2,5}$/i)?.[0] || '';
+                    el.textContent = prefix + cleaned + ext;
+                    el.dataset.asmrTranslated = 'true';
+                    el.dataset.asmrSource = rawText;
+                    el.dataset.asmrTranslatedText = el.textContent;
+                } else {
+                    this.updateElement(el, rawText, cleaned);
+                }
             } else {
                 this.markOriginal(el, rawText);
             }

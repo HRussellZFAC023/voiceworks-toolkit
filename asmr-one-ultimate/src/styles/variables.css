@@ -18,9 +18,12 @@
     /* Semantic Text — Light Mode */
     --asmr-text-primary: #000000;
     --asmr-text-secondary: #444444;
-    --asmr-text-tertiary: #666666;
-    --asmr-text-disabled: rgba(128, 128, 128, 0.6);
+    --asmr-text-tertiary: #595959;
+    --asmr-text-disabled: rgba(128, 128, 128, 0.75);
     --asmr-text-inverted: #ffffff;
+
+    /* Subtitle background — glassmorphic tint */
+    --asmr-subs-bg: rgba(255, 255, 255, 0.15);
 
     /* Borders */
     --asmr-border-color: rgba(128, 128, 128, 0.2);
@@ -66,9 +69,10 @@
     --asmr-text-primary: #ffffff;
     --asmr-text-secondary: rgba(255, 255, 255, 0.9);
     --asmr-text-tertiary: rgba(255, 255, 255, 0.7);
-    --asmr-text-disabled: rgba(255, 255, 255, 0.5);
+    --asmr-text-disabled: rgba(255, 255, 255, 0.6);
     --asmr-text-inverted: #000000;
 
+    --asmr-subs-bg: rgba(18, 18, 18, 0.25);
     --asmr-border-color: rgba(255, 255, 255, 0.1);
 
     --asmr-hover-bg: rgba(255, 255, 255, 0.1);

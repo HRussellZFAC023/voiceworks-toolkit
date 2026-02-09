@@ -12,6 +12,7 @@ import { TranslationService } from '../../services/TranslationService';
 import { TranslatedTags } from '../TranslatedTags';
 import { MediaViewerController } from '../MediaViewerController';
 import { Logger, SafeUtils } from '../../core/Utils';
+import { isChinese } from '../../core/DomUtils';
 
 // ============================================================================
 // Composables
@@ -22,6 +23,7 @@ const { t, format } = useI18n();
 const { emit } = useEventBus();
 const route = useRoute();
 const translateMode = useConfig('translateMode');
+const cnToJpConfig = useConfig('translateCnToJp');
 
 // ============================================================================
 // State
@@ -36,6 +38,7 @@ const descriptionTranslated = ref('');
 const bodyTranslations = ref<Map<number, string>>(new Map());
 const chipTranslations = ref<Map<string, string>>(new Map());
 const currentWorkId = ref('');
+let loadRequestVersion = 0;
 
 /** Image retry counters keyed by URL */
 const imageRetries = ref<Map<string, number>>(new Map());
@@ -46,6 +49,8 @@ const imageSrcs = ref<Map<string, string>>(new Map());
 // ============================================================================
 
 const shouldTranslate = computed(() => !!translateMode.value);
+const cnToJp = computed(() => !!cnToJpConfig.value);
+const cnOnlyMode = computed(() => !shouldTranslate.value && cnToJp.value);
 
 const workId = computed(() => {
     const params = route.value?.params;
@@ -387,18 +392,11 @@ function sanitizeBody(body: string): string {
     return s;
 }
 
-function escapeHtml(text: string): string {
-    return text
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#039;');
-}
-
-/** Convert newlines in a paragraph to <br> for v-html rendering */
+/** Convert newlines in a paragraph to <br> for v-html rendering.
+ *  sanitizeBody() already strips dangerous tags (script/iframe/object/style),
+ *  so the output is safe for v-html without additional escaping. */
 function paragraphHtml(para: string): string {
-    return escapeHtml(para).replace(/\n/g, '<br>');
+    return para.replace(/\n/g, '<br>');
 }
 
 // ============================================================================
@@ -406,32 +404,48 @@ function paragraphHtml(para: string): string {
 // ============================================================================
 
 async function translateTitle(originalTitle: string): Promise<void> {
-    if (!originalTitle || !shouldTranslate.value) return;
-    if (TranslationService.isUserLang(originalTitle)) return;
+    if (!originalTitle || (!shouldTranslate.value && !cnToJp.value)) return;
+    if (cnOnlyMode.value && !isChinese(originalTitle)) return;
+    if (!cnOnlyMode.value && TranslationService.isUserLang(originalTitle)) return;
 
     try {
-        const translated = await TranslationService.translate(originalTitle);
+        const translated = cnOnlyMode.value
+            ? await TranslationService.translate(originalTitle, 'ja')
+            : await TranslationService.translate(originalTitle);
         if (translated && translated !== originalTitle) {
             const h1 = await SafeUtils.waitForElement('h1.text-h6');
             if (h1) {
-                const originalSpan = document.createElement('div');
-                originalSpan.className = 'text-caption text-grey-5 q-mb-xs asmr-original-title';
-                originalSpan.textContent = originalTitle;
+                if (cnOnlyMode.value) {
+                    // CN→JP: silently replace with Japanese
+                    let transEl = h1.parentElement?.querySelector('.asmr-translated-title') as HTMLElement;
+                    if (!transEl) {
+                        transEl = document.createElement('div');
+                        transEl.className = 'text-h6 asmr-translated-title';
+                        h1.parentElement?.insertBefore(transEl, h1.nextSibling);
+                        (h1 as HTMLElement).style.display = 'none';
+                    }
+                    transEl.textContent = translated;
+                    emit('title:update', { title: translated });
+                } else {
+                    const originalSpan = document.createElement('div');
+                    originalSpan.className = 'text-caption text-grey-5 q-mb-xs asmr-original-title';
+                    originalSpan.textContent = originalTitle;
 
-                if (!h1.parentElement?.querySelector('.asmr-original-title')) {
-                    h1.parentElement?.insertBefore(originalSpan, h1);
+                    if (!h1.parentElement?.querySelector('.asmr-original-title')) {
+                        h1.parentElement?.insertBefore(originalSpan, h1);
+                    }
+
+                    let transEl = h1.parentElement?.querySelector('.asmr-translated-title') as HTMLElement;
+                    if (!transEl) {
+                        transEl = document.createElement('div');
+                        transEl.className = 'text-h6 asmr-translated-title';
+                        h1.parentElement?.insertBefore(transEl, h1.nextSibling);
+                        (h1 as HTMLElement).style.display = 'none';
+                    }
+                    transEl.textContent = translated;
+
+                    emit('title:update', { title: translated });
                 }
-
-                let transEl = h1.parentElement?.querySelector('.asmr-translated-title') as HTMLElement;
-                if (!transEl) {
-                    transEl = document.createElement('div');
-                    transEl.className = 'text-h6 asmr-translated-title';
-                    h1.parentElement?.insertBefore(transEl, h1.nextSibling);
-                    (h1 as HTMLElement).style.display = 'none';
-                }
-                transEl.textContent = translated;
-
-                emit('title:update', { title: translated });
             }
         }
     } catch (e) {
@@ -444,9 +458,12 @@ async function translateTitle(originalTitle: string): Promise<void> {
 // ============================================================================
 
 async function translateDescription(): Promise<void> {
-    if (!shouldTranslate.value || !meta.value?.description) return;
+    if ((!shouldTranslate.value && !cnToJp.value) || !meta.value?.description) return;
+    if (cnOnlyMode.value && !isChinese(meta.value.description)) return;
     try {
-        const translated = await TranslationService.translate(meta.value.description);
+        const translated = cnOnlyMode.value
+            ? await TranslationService.translate(meta.value.description, 'ja')
+            : await TranslationService.translate(meta.value.description);
         if (translated && translated !== meta.value.description) {
             descriptionTranslated.value = translated;
         }
@@ -456,16 +473,17 @@ async function translateDescription(): Promise<void> {
 }
 
 async function translateChips(): Promise<void> {
-    if (!shouldTranslate.value) return;
+    if (!shouldTranslate.value && !cnToJp.value) return;
 
     const labelsToTranslate: { key: string; text: string }[] = [];
 
     for (const chip of chips.value) {
         const text = chip.label.trim();
         if (!text || !/[\u3040-\u30ff\u4e00-\u9faf]/.test(text)) continue;
+        if (cnOnlyMode.value && !isChinese(text)) continue;
 
-        // Try tag pre-translation first
-        if (chip.tagId) {
+        // Try tag pre-translation first (skip in CN-only mode)
+        if (!cnOnlyMode.value && chip.tagId) {
             const tagList = TranslatedTags.getInstance().getTagList();
             const match = tagList.find(t => t.id === chip.tagId || t.ja === text);
             if (match?.en && match.ja && match.en !== match.ja) {
@@ -480,12 +498,17 @@ async function translateChips(): Promise<void> {
     if (labelsToTranslate.length === 0) return;
 
     try {
-        const results = await TranslationService.translateBatch(labelsToTranslate.map(l => l.text));
+        const targetLang = cnOnlyMode.value ? 'ja' : undefined;
+        const results = await TranslationService.translateBatch(labelsToTranslate.map(l => l.text), targetLang);
         results.forEach((translated, i) => {
             const item = labelsToTranslate[i];
             if (translated && translated !== item.text) {
                 chipTranslations.value = new Map(chipTranslations.value);
-                chipTranslations.value.set(item.key, TranslationService.formatPair(item.text, translated));
+                if (cnOnlyMode.value) {
+                    chipTranslations.value.set(item.key, translated);
+                } else {
+                    chipTranslations.value.set(item.key, TranslationService.formatPair(item.text, translated));
+                }
             }
         });
     } catch {
@@ -494,7 +517,7 @@ async function translateChips(): Promise<void> {
 }
 
 async function translateBodyParagraphs(): Promise<void> {
-    if (!shouldTranslate.value || bodyParagraphs.value.length === 0) return;
+    if ((!shouldTranslate.value && !cnToJp.value) || bodyParagraphs.value.length === 0) return;
 
     // Extract plain text from HTML paragraphs
     const tempDiv = document.createElement('div');
@@ -506,7 +529,8 @@ async function translateBodyParagraphs(): Promise<void> {
     if (texts.length === 0) return;
 
     try {
-        const results = await TranslationService.translateBatch(texts);
+        const targetLang = cnOnlyMode.value ? 'ja' : undefined;
+        const results = await TranslationService.translateBatch(texts, targetLang);
         const newMap = new Map(bodyTranslations.value);
         results.forEach((translated, i) => {
             if (translated && translated !== texts[i]) {
@@ -541,7 +565,9 @@ async function getPageWorkDetails(id: string): Promise<any> {
 }
 
 async function loadMetadata(id: string): Promise<void> {
+    const version = ++loadRequestVersion;
     const work = await getPageWorkDetails(id);
+    if (version !== loadRequestVersion) return; // Stale request — newer load started
     if (!work) {
         Logger.warn('[WorkMetadataPanel] Work details missing for', id);
         return;
@@ -686,7 +712,7 @@ onMounted(() => {
 
             <!-- Chips: circle, CVs, tags -->
             <div class="asmr-meta-chips">
-                <div
+                <button
                     v-for="chip in chips"
                     :key="chip.key"
                     class="asmr-chip-tag"
@@ -696,7 +722,7 @@ onMounted(() => {
                 >
                     <i v-if="chip.icon" class="material-icons asmr-chip-icon">{{ chip.icon }}</i>
                     <span class="asmr-chip-label">{{ chipDisplayLabel(chip) }}</span>
-                </div>
+                </button>
             </div>
 
             <!-- Brief description (above the fold) -->
@@ -722,10 +748,11 @@ onMounted(() => {
                 <div v-if="detailsExpanded" class="asmr-meta-details">
                     <!-- Sample images gallery -->
                     <div v-if="imageSamples.length" class="asmr-meta-gallery">
-                        <div
+                        <button
                             v-for="(url, idx) in imageSamples"
                             :key="url"
                             class="asmr-meta-gallery-item"
+                            :aria-label="'Image ' + (idx + 1)"
                             @click="openImageViewer(imageSamples, idx)"
                         >
                             <img
@@ -734,7 +761,7 @@ onMounted(() => {
                                 alt="Sample"
                                 @error="onImageError(url)"
                             >
-                        </div>
+                        </button>
                     </div>
 
                     <!-- Full body content with paragraph-aligned translations -->
@@ -746,7 +773,7 @@ onMounted(() => {
                                 class="asmr-meta-body-row"
                             >
                                 <!-- eslint-disable-next-line vue/no-v-html -->
-                                <div class="asmr-meta-body-cell asmr-meta-body-cell--original" v-html="paragraphHtml(para)"></div>
+                                <div class="asmr-meta-body-cell asmr-meta-body-cell--original" v-html="cnOnlyMode && bodyTranslations.get(idx) ? bodyTranslations.get(idx) : paragraphHtml(para)"></div>
                                 <div
                                     v-if="shouldTranslate && bodyTranslations.get(idx)"
                                     class="asmr-meta-body-cell asmr-meta-body-cell--translated"
@@ -906,6 +933,8 @@ onMounted(() => {
     cursor: pointer;
     transition: opacity 0.15s, box-shadow 0.15s;
     line-height: 1.4;
+    background: none;
+    border: none;
 }
 
 .asmr-chip-tag:hover {
@@ -1013,7 +1042,9 @@ onMounted(() => {
     overflow: hidden;
     cursor: pointer;
     transition: box-shadow 0.15s;
-    background: var(--asmr-bg-tertiary);
+    background: none;
+    border: none;
+    padding: 0;
 }
 
 .asmr-meta-gallery-item:hover {

@@ -339,7 +339,9 @@ class HttpClientImpl {
         const request = execute();
         const promise = request.then((r) => r.data);
         // Prevent unhandled rejection if the request fails and no parallel call awaits this promise
-        promise.catch(() => { });
+        promise.catch(err => {
+            Logger.debug(`[HttpClient] Deduped request failed (handled by caller): ${fullUrl}`, err);
+        });
         this.inFlight.set(fullUrl, promise);
 
         try {

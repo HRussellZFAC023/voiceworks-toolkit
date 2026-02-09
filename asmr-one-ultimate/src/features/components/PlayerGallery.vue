@@ -58,7 +58,7 @@ const counterText = computed(() =>
     hasMultipleImages.value ? `${currentIndex.value + 1} / ${imageCount.value}` : ''
 );
 const currentImageUrl = computed(() => images.value[currentIndex.value] || '');
-const showImage = computed(() => currentImageUrl.value !== '' && (isFullscreen.value || currentIndex.value > 0));
+const showImage = computed(() => currentImageUrl.value !== '');
 
 // -- Image load state --
 
@@ -549,7 +549,7 @@ watch([galleryAutoSlideshow, galleryAutoSlideshowInterval], () => {
 watch(showImage, (show) => {
     const albumart = document.querySelector('.audio-player .albumart') as HTMLElement;
     if (albumart) albumart.classList.toggle('asmr-gallery-active', show);
-});
+}, { immediate: true });
 
 // -- Lifecycle --
 
@@ -595,6 +595,10 @@ onUnmounted(() => {
         albumartEl.removeEventListener('touchend', onTouchEnd);
         albumartEl = null;
     }
+
+    // Clean up gallery-active class to prevent stale state on remount
+    const albumart = document.querySelector('.audio-player .albumart') as HTMLElement;
+    if (albumart) albumart.classList.remove('asmr-gallery-active');
 
     stopSlideshow();
     disconnectGalleryObserver();

@@ -97,6 +97,7 @@ export class PlaylistDiscovery {
     private preloadedImageUrls = new Set<string>();
     private likedPlaylistsCache: PlaylistEntry[] | null = null;
     private ownedPlaylistsCache: PlaylistEntry[] | null = null;
+    private backgroundTimers: ReturnType<typeof setTimeout>[] = [];
 
     private constructor() {
         this.bridge = KikoeruBridge.getInstance();
@@ -171,6 +172,7 @@ export class PlaylistDiscovery {
 
         // Wait for the page to load
         await this.waitForPlaylistsPage();
+        if (!this.isActive) return;
 
         // Hide native grid + pagination (native grid is empty on SPA nav; we take over display)
         this.hideNativeGridAndPagination();
@@ -197,6 +199,9 @@ export class PlaylistDiscovery {
 
         // Fetch user's playlists for "All" mode sorting
         await this.fetchUserPlaylists();
+
+        // Bail out if user navigated away during fetch
+        if (!this.isActive) return;
 
         // Apply current filter mode (user playlists first in "all" mode)
         this.applyFilterMode();
@@ -618,7 +623,8 @@ export class PlaylistDiscovery {
     }
 
     private revalidateUserPlaylistsInBackground(): void {
-        setTimeout(async () => {
+        const timer = setTimeout(async () => {
+            if (!this.isActive) return;
             try {
                 // Fetch owned + liked in parallel
                 const [owned, liked] = await Promise.all([
@@ -655,6 +661,7 @@ export class PlaylistDiscovery {
                 // Silent failure for background revalidation
             }
         }, 3000);
+        this.backgroundTimers.push(timer);
     }
 
     /** Convert PlaylistEntry[] to DiscoveredPlaylist[], sorted by created_at desc */
@@ -1144,17 +1151,19 @@ export class PlaylistDiscovery {
             </span>
             <button id="search-google-btn"
                     class="q-btn q-btn-item non-selectable no-outline q-btn--flat q-btn--rectangle q-btn--actionable q-focusable q-hoverable asmr-playlist-action"
-                    title="${this.escapeHtml(I18n.t('playlistFindMore'))}">
+                    title="${this.escapeHtml(I18n.t('playlistFindMore'))}"
+                    aria-label="${this.escapeHtml(I18n.t('playlistFindMore'))}">
                 <span class="q-btn__content text-center col items-center q-anchor--skip justify-center row">
-                    <i class="q-icon notranslate material-icons">search</i>
+                    <i class="q-icon notranslate material-icons" aria-hidden="true">search</i>
                     ${this.escapeHtml(I18n.t('playlistFindMore'))}
                 </span>
             </button>
             <button id="playlists-randomize-btn"
                     class="q-btn q-btn-item non-selectable no-outline q-btn--flat q-btn--rectangle q-btn--actionable q-focusable q-hoverable asmr-playlist-action"
-                    title="${this.escapeHtml(I18n.t('playlistRandomize'))}">
+                    title="${this.escapeHtml(I18n.t('playlistRandomize'))}"
+                    aria-label="${this.escapeHtml(I18n.t('playlistRandomize'))}">
                 <span class="q-btn__content text-center col items-center q-anchor--skip justify-center row">
-                    <i class="q-icon notranslate material-icons">shuffle</i>
+                    <i class="q-icon notranslate material-icons" aria-hidden="true">shuffle</i>
                     ${this.escapeHtml(I18n.t('playlistRandomize'))}
                 </span>
             </button>
@@ -1196,6 +1205,7 @@ export class PlaylistDiscovery {
                 filterInput.type = 'text';
                 filterInput.className = 'asmr-playlist-text-filter';
                 filterInput.placeholder = I18n.t('playlistFilterPlaceholder');
+                filterInput.ariaLabel = I18n.t('playlistFilterPlaceholder');
                 filterInput.value = this.textFilter;
                 const qSpace = nativeDropdownRow.querySelector('.q-space');
                 if (qSpace) {
@@ -1482,6 +1492,12 @@ export class PlaylistDiscovery {
 
         const pump = async () => {
             while (this.coverUpdateQueue.length > 0) {
+                // Bail out immediately if we navigated away
+                if (!this.isActive) {
+                    this.drainCoverUpdateQueue();
+                    break;
+                }
+
                 // Check for rate limit
                 const now = Date.now();
                 if (now < this.rateLimitUntil) {
@@ -1531,6 +1547,15 @@ export class PlaylistDiscovery {
 
     private delay(ms: number): Promise<void> {
         return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    /** Resolve and discard all queued cover updates without making API calls */
+    private drainCoverUpdateQueue(): void {
+        for (const item of this.coverUpdateQueue) {
+            item.resolve();
+            this.coverUpdatePromises.delete(item.id);
+        }
+        this.coverUpdateQueue.length = 0;
     }
 
     private async updatePlaylistCoverAndCount(playlist: FetchedPlaylist, pageSize: number): Promise<boolean> {
@@ -1609,7 +1634,8 @@ export class PlaylistDiscovery {
     }
 
     private scheduleBackgroundCoverRevalidation(playlistId: string, playlist: FetchedPlaylist, pageSize: number): void {
-        setTimeout(async () => {
+        const timer = setTimeout(async () => {
+            if (!this.isActive) return;
             try {
                 const worksData = await apiRequest<PlaylistWorksResponse>('/api/playlist/get-playlist-works', {
                     id: playlistId, page: 1, pageSize,
@@ -1649,6 +1675,7 @@ export class PlaylistDiscovery {
                 // Silent failure for background revalidation
             }
         }, 2000 + Math.random() * 3000);
+        this.backgroundTimers.push(timer);
     }
 
     private showSearchingStatus(): void {
@@ -1741,7 +1768,7 @@ export class PlaylistDiscovery {
     }
 
     private async loadNextBatch(): Promise<void> {
-        if (this.isLoading) return;
+        if (this.isLoading || !this.isActive) return;
         this.isLoading = true;
         this.updateStatusText();
 
@@ -1874,6 +1901,7 @@ export class PlaylistDiscovery {
                     );
 
                     // Stream results as they come in (no batching delay)
+                    if (!this.isActive) break;
                     results.forEach(result => {
                         if (result.status === 'fulfilled' && result.value) {
                             if (!result.value.ok) {
@@ -1919,6 +1947,7 @@ export class PlaylistDiscovery {
                     });
 
                     if (i + FETCH_BATCH_SIZE < uncachedItems.length) {
+                        if (!this.isActive) break; // Stop fetching if navigated away
                         await this.delay(this.BATCH_COOLDOWN_MS);
                     }
                 }
@@ -1945,9 +1974,9 @@ export class PlaylistDiscovery {
 
             // Check if infinite scroll is enabled before auto-loading next batch
             const infiniteScrollEnabled = AppStore.getConfig('enableInfiniteScroll');
-            if (infiniteScrollEnabled && this.sentinelInView && this.displayedCount < this.publicPlaylists.length) {
+            if (infiniteScrollEnabled && this.isActive && this.sentinelInView && this.displayedCount < this.publicPlaylists.length) {
                 setTimeout(() => {
-                    if (!this.isLoading && this.sentinelInView) {
+                    if (!this.isLoading && this.isActive && this.sentinelInView) {
                         this.queueLoadNextBatch();
                     }
                 }, this.BATCH_COOLDOWN_MS);
@@ -2375,8 +2404,17 @@ export class PlaylistDiscovery {
         this.isActive = false;
         this.sentinelInView = false;
         this.isBulkLoading = false;
+        this.isLoading = false;
         this.loadNextBatchPromise = null;
         this.textFilter = '';
+
+        // Cancel all pending background timers (revalidation, etc.)
+        for (const t of this.backgroundTimers) clearTimeout(t);
+        this.backgroundTimers.length = 0;
+
+        // Drain cover update queue so pump loop exits without making API calls
+        this.drainCoverUpdateQueue();
+
         if (this.textFilterDebounceTimer) {
             clearTimeout(this.textFilterDebounceTimer);
             this.textFilterDebounceTimer = null;

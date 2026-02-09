@@ -1,7 +1,8 @@
 /**
  * TranslationWorkerLoader - Local translation worker (Transformers.js)
  *
- * Runs opus-mt translation models in a Web Worker. Supports WebGPU and WASM.
+ * Runs opus-mt translation models in a Web Worker. WebGPU only — no WASM fallback.
+ * If GPU fails, host falls through to Google Translate (faster than WASM).
  * Greedy decoding for speed. MarianMT architecture (fixed source→target direction).
  */
 
@@ -92,12 +93,11 @@ function withTimeout(promise, ms, label) {
     ]).finally(() => clearTimeout(timer));
 }
 
-// ---- Backend detection ----
+// ---- Backend detection (WebGPU only) ----
 
-let currentBackend = 'wasm';
+let currentBackend = 'webgpu';
 let currentVendor = '';
 let currentDtype = '';
-let skipWebgpu = false;
 let preferredDtype = '';
 
 async function detectWebGPU() {
@@ -125,49 +125,34 @@ async function detectWebGPU() {
     }
 }
 
-async function detectBackend() {
-    // Cascade: WebGPU > WASM
-    if (!skipWebgpu) {
-        const webgpu = await detectWebGPU();
-        if (webgpu) return webgpu;
+function getDtypeCandidates(vendor) {
+    // Firefox: fp16 shader compilation hangs on Firefox WebGPU
+    if (isFirefox) {
+        console.log('[Translation Worker] Firefox: using fp32 only (fp16 hangs)');
+        return ['fp32'];
     }
-    return { device: 'wasm', vendor: '', maxBuf: 0 };
-}
-
-function getDtypeCandidates(device, vendor, maxBuf) {
-    if (device === 'webgpu') {
-        // Firefox: fp16 shader compilation hangs on Firefox WebGPU
-        if (isFirefox) {
-            console.log('[Translation Worker] Firefox: using fp32 only (fp16 hangs)');
-            return ['fp32'];
-        }
-        const isIntel = /intel|xe|arc/i.test(vendor);
-        const isQualcomm = /qualcomm|adreno/i.test(vendor);
-        // Intel Xe-2 HPG / Qualcomm Adreno: fp32 first (fp16 may produce garbage)
-        // Others (Apple, NVIDIA, AMD): fp16 first (uses less memory, faster)
-        const candidates = (isIntel || isQualcomm) ? ['fp32', 'fp16'] : ['fp16', 'fp32'];
-        if (preferredDtype && candidates.includes(preferredDtype)) {
-            return [preferredDtype, ...candidates.filter(d => d !== preferredDtype)];
-        }
-        return candidates;
+    const isIntel = /intel|xe|arc/i.test(vendor);
+    const isQualcomm = /qualcomm|adreno/i.test(vendor);
+    // Intel Xe-2 HPG / Qualcomm Adreno: fp32 first (fp16 may produce garbage)
+    // Others (Apple, NVIDIA, AMD): fp16 first (uses less memory, faster)
+    const candidates = (isIntel || isQualcomm) ? ['fp32', 'fp16'] : ['fp16', 'fp32'];
+    if (preferredDtype && candidates.includes(preferredDtype)) {
+        return [preferredDtype, ...candidates.filter(d => d !== preferredDtype)];
     }
-    const wasmCandidates = ['q8', 'q4'];
-    if (preferredDtype && wasmCandidates.includes(preferredDtype)) {
-        return [preferredDtype, ...wasmCandidates.filter(d => d !== preferredDtype)];
-    }
-    return wasmCandidates;
+    return candidates;
 }
 
 // ---- GPU memory cleanup ----
 
 /**
  * Release GPU memory after failed pipeline creation.
- * Yield to event loop so browser GC can reclaim orphaned GPU buffers.
+ * Multiple yields to event loop so browser GC can reclaim orphaned GPU buffers.
  * Note: ort.env.webgpu.device manipulation is intentionally omitted —
  * ONNX Runtime ignores pre-set device references (issue #26107).
  */
 async function releaseGpuResources() {
-    await new Promise(r => setTimeout(r, 100));
+    await new Promise(r => setTimeout(r, 250));
+    await new Promise(r => setTimeout(r, 250));
 }
 
 // ---- Pipeline management ----
@@ -176,10 +161,7 @@ let pipelineInstance = null;
 let currentModelName = null;
 let pipelineReady = false;
 
-async function ensurePipeline(modelName, _cascadeDepth) {
-    if (!_cascadeDepth) _cascadeDepth = 0;
-    if (_cascadeDepth > 3) throw new Error('Failed to load model on all backends: ' + modelName);
-
+async function ensurePipeline(modelName) {
     await loadTransformers();
 
     if (pipelineReady && currentModelName === modelName && pipelineInstance) {
@@ -191,11 +173,15 @@ async function ensurePipeline(modelName, _cascadeDepth) {
         try { pipelineInstance.dispose?.(); } catch {}
         pipelineInstance = null;
         pipelineReady = false;
+        await releaseGpuResources();
     }
 
-    const backend = await detectBackend();
-    currentBackend = backend.device;
-    currentVendor = backend.vendor;
+    const webgpu = await detectWebGPU();
+    if (!webgpu) {
+        throw new Error('WebGPU not available for translation');
+    }
+    currentBackend = 'webgpu';
+    currentVendor = webgpu.vendor;
 
     self.postMessage({ status: 'initiate', backend: currentBackend, vendor: currentVendor });
 
@@ -214,16 +200,13 @@ async function ensurePipeline(modelName, _cascadeDepth) {
         }
     };
 
-    const dtypeCandidates = getDtypeCandidates(currentBackend, currentVendor, backend.maxBuf);
+    const dtypeCandidates = getDtypeCandidates(currentVendor);
 
-    // No viable dtypes for this backend (e.g. Intel/Qualcomm iGPU) — skip directly
-    // without clearing cache (nothing was downloaded for this backend)
     if (dtypeCandidates.length === 0) {
-        console.log('[Translation Worker] No viable dtypes for', currentBackend, '— cascading');
-        if (currentBackend === 'webgpu') skipWebgpu = true;
-        return ensurePipeline(modelName, _cascadeDepth + 1);
+        throw new Error('No viable WebGPU dtypes for translation');
     }
 
+    let lastError = '';
     for (const dtype of dtypeCandidates) {
         for (let hubIdx = 0; hubIdx < HUB_BASE_URLS.length; hubIdx++) {
             const hubUrl = HUB_BASE_URLS[hubIdx];
@@ -236,23 +219,21 @@ async function ensurePipeline(modelName, _cascadeDepth) {
                 const candidate = await withTimeout(
                     pipeline('translation', modelName, {
                         progress_callback: progressCb,
-                        device: currentBackend,
+                        device: 'webgpu',
                         dtype,
                     }),
                     PIPELINE_TIMEOUT_MS,
                     'Pipeline creation (' + dtype + ')'
                 );
-                console.log('[Translation Worker] Model loaded on', currentBackend,
+                console.log('[Translation Worker] Model loaded on WebGPU',
                     '(' + currentVendor + ') [' + dtype + ']:', modelName);
 
-                // Validate output quality (fp16/q8 can produce gibberish on some backends)
-                if (currentBackend === 'webgpu') {
-                    const valid = await validatePipeline(candidate, modelName);
-                    if (!valid) {
-                        console.warn('[Translation Worker] Dtype', dtype, 'failed validation, trying next...');
-                        try { candidate.dispose?.(); } catch {}
-                        break; // try next dtype
-                    }
+                // Validate output quality (fp16 can produce gibberish on some backends)
+                const valid = await validatePipeline(candidate, modelName);
+                if (!valid) {
+                    console.warn('[Translation Worker] Dtype', dtype, 'failed validation, trying next...');
+                    try { candidate.dispose?.(); } catch {}
+                    break; // try next dtype
                 }
 
                 pipelineInstance = candidate;
@@ -265,42 +246,35 @@ async function ensurePipeline(modelName, _cascadeDepth) {
                 const isMemErr = /allocation|out of memory|OOM|RangeError|createbuffer/i.test(msg);
                 const isContextErr = /WebGPU Context Provider|context.*provider|device lost|GPUDevice|createComputePipeline|createShaderModule/i.test(msg);
                 const isTimeout = /timed out/i.test(msg);
-                // ONNX Runtime sometimes throws bare numeric errors (buffer size) on session creation failure
                 const isOrtNumericErr = /^\\d+$/.test(msg.trim());
                 const isGpuErr = isMemErr || isContextErr || isTimeout || isOrtNumericErr;
 
                 console.warn('[Translation Worker] Load error:', dtype, hubUrl, msg, err);
+                lastError = msg;
 
                 // Release leaked GPU resources from partially-created ONNX sessions
-                if (currentBackend === 'webgpu' && isGpuErr) {
+                if (isGpuErr) {
                     await releaseGpuResources();
                 }
 
-                // WebGPU context failed — cascade to next backend
-                if (isContextErr && currentBackend === 'webgpu') {
-                    console.warn('[Translation Worker] WebGPU context failed');
-                    skipWebgpu = true;
-                    return ensurePipeline(modelName, _cascadeDepth + 1);
+                // Buffer allocation failed — larger dtypes will also fail.
+                // Context/device errors are unrecoverable. Throw immediately.
+                if (isMemErr || isContextErr) {
+                    await clearModelCache(modelName);
+                    throw new Error('WebGPU failed: ' + msg);
                 }
 
-                // Memory/session error or pipeline timeout — skip remaining hubs, try next dtype
+                // Timeout or ORT numeric error — skip remaining hubs, try next dtype
                 if (isGpuErr) break;
-                // Other errors (network, WASM abort) — try next hub URL
+                // Other errors (network) — try next hub URL
             }
         }
     }
 
-    // All candidates for current backend exhausted — release GPU memory and clear
-    // potentially corrupt cache entries before cascading to the next backend
-    if (currentBackend === 'webgpu') {
-        console.warn('[Translation Worker] All WebGPU candidates failed, releasing GPU and clearing cache');
-        await releaseGpuResources();
-        await clearModelCache(modelName);
-        skipWebgpu = true;
-        return ensurePipeline(modelName, _cascadeDepth + 1);
-    }
-
-    throw new Error('Failed to load model: ' + modelName);
+    // All WebGPU dtypes exhausted
+    await releaseGpuResources();
+    await clearModelCache(modelName);
+    throw new Error('All WebGPU dtypes failed for ' + modelName + ': ' + lastError);
 }
 
 // ---- Validation ----
@@ -373,34 +347,8 @@ async function translate(msg) {
         no_repeat_ngram_size: 3,
     };
 
-    try {
-        const output = await pipelineInstance(text, options);
-        return extractResult(text, output);
-    } catch (err) {
-        const errMsg = String(err?.message || err || '');
-        const isGpuError = /createBuffer|RangeError|out of memory|OOM|allocation|shader|device lost|GPUDevice|createComputePipeline|createShaderModule/i.test(errMsg)
-            || /^\\d+$/.test(errMsg.trim());
-
-        // GPU inference failed — dispose pipeline, release GPU memory, switch backend, retry once
-        if (currentBackend !== 'wasm' && isGpuError) {
-            console.warn('[Translation Worker] GPU inference failed, falling back to WASM:', errMsg);
-            skipWebgpu = true;
-            // Dispose the broken GPU pipeline and release GPU memory
-            if (pipelineInstance) {
-                try { pipelineInstance.dispose?.(); } catch {}
-                pipelineInstance = null;
-                pipelineReady = false;
-            }
-            await releaseGpuResources();
-            // Notify host about backend change
-            self.postMessage({ status: 'initiate', backend: 'wasm', vendor: '' });
-            // Retry: ensurePipeline will now pick WASM
-            await ensurePipeline(model);
-            const output = await pipelineInstance(text, options);
-            return extractResult(text, output);
-        }
-        throw err;
-    }
+    const output = await pipelineInstance(text, options);
+    return extractResult(text, output);
 }
 
 // ---- Job queue with coalescing ----
@@ -470,12 +418,6 @@ let readySent = false;
 
 self.addEventListener('message', async (event) => {
     const msg = event.data;
-
-    if (msg.type === 'skip-webgpu') {
-        skipWebgpu = true;
-        console.log('[Translation Worker] WebGPU disabled by host');
-        return;
-    }
 
     if (msg.type === 'preferred-dtype') {
         preferredDtype = msg.dtype || '';

@@ -91,6 +91,24 @@ export class VectorSearch {
         }
     }
 
+    public disable(): void {
+        if (this.autoSeedTimer) {
+            clearTimeout(this.autoSeedTimer);
+            this.autoSeedTimer = null;
+        }
+        if (this.autoWatchTimer) {
+            clearInterval(this.autoWatchTimer);
+            this.autoWatchTimer = null;
+        }
+        if (this.autoBatchTimer) {
+            clearTimeout(this.autoBatchTimer);
+            this.autoBatchTimer = null;
+        }
+        this.langCleanup?.();
+        this.langCleanup = null;
+        this.removeKeyHandler();
+    }
+
     private attachButton(): void {
         const header = HeaderActions.ensure();
         if (!header || header.querySelector('.asmr-vector-btn')) return;
@@ -98,6 +116,7 @@ export class VectorSearch {
         btn.className = 'q-btn q-btn-flat q-btn-dense asmr-vector-btn text-white';
         btn.innerHTML = '<span class="q-btn__content"><i class="q-icon material-icons" aria-hidden="true">psychology</i></span>';
         btn.title = I18n.t('magicSearchBtn');
+        btn.ariaLabel = I18n.t('magicSearchBtn');
         btn.onclick = () => this.openDialog();
         header.appendChild(btn);
     }
@@ -545,6 +564,9 @@ export class VectorSearch {
         pageResults.forEach(({ entry, score }) => {
             const row = document.createElement('div');
             row.className = 'asmr-vector-result'; // CSS handles flex layout
+            row.setAttribute('role', 'link');
+            row.tabIndex = 0;
+            row.ariaLabel = entry.title;
 
             const description = (entry.description || '').trim();
             const tags = entry.tags.slice(0, 3).filter(Boolean).join(' · ');
@@ -556,7 +578,7 @@ export class VectorSearch {
             row.innerHTML = `
                 <div class="asmr-vector-thumb">
                     ${coverSrc ? `<img src="${coverSrc}" alt="" referrerpolicy="no-referrer">` : ''}
-                    <div class="asmr-vector-thumb-placeholder${coverSrc ? '' : ' visible'}"><i class="material-icons">music_note</i></div>
+                    <div class="asmr-vector-thumb-placeholder${coverSrc ? '' : ' visible'}"><i class="material-icons" aria-hidden="true">music_note</i></div>
                 </div>
                 <div class="q-item__section q-pa-sm asmr-result-content">
                     <div class="asmr-vector-title" title="${entry.title}">${entry.title}</div>
@@ -568,14 +590,21 @@ export class VectorSearch {
                     </div>
                 </div>
                 <div class="column justify-center q-pr-sm">
-                    <button class="q-btn q-btn-flat q-btn-round asmr-accent">
-                         <i class="material-icons asmr-play-icon">play_circle</i>
+                    <button class="q-btn q-btn-flat q-btn-round asmr-accent" aria-label="${I18n.t('magicSearchPlay') || 'Play'}">
+                         <i class="material-icons asmr-play-icon" aria-hidden="true">play_circle</i>
                     </button>
                 </div>
             `;
-            row.addEventListener('click', () => {
+            const navigateToWork = () => {
                 this.bridge.router.push(`/work/${entry.id}`);
                 this.closeDialog();
+            };
+            row.addEventListener('click', navigateToWork);
+            row.addEventListener('keydown', (e: KeyboardEvent) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    navigateToWork();
+                }
             });
             list.appendChild(row);
 

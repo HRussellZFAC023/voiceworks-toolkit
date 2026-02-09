@@ -135,22 +135,22 @@ export class TagFilters {
         this.overlay.appendChild(label);
 
         for (const [id, name] of this.activeFilters.entries()) {
-            const chip = document.createElement('div');
+            const chip = document.createElement('button');
+            chip.type = 'button';
             chip.className = 'q-chip row inline no-wrap items-center q-chip--dense bg-primary text-white';
+            chip.ariaLabel = I18n.format('filtersRemove', { name }) || `Remove filter: ${name}`;
             chip.innerHTML = `
-                <div class="q-chip__content col row no-wrap items-center">${name}</div>
-                <i class="q-icon material-icons q-chip__icon q-chip__icon--remove cursor-pointer">cancel</i>
+                <span class="q-chip__content col row no-wrap items-center">${name}</span>
+                <i class="q-icon material-icons q-chip__icon q-chip__icon--remove" aria-hidden="true">cancel</i>
             `;
             chip.addEventListener('click', () => this.removeFilter(id));
-            chip.querySelector('i')?.addEventListener('click', ((e: MouseEvent) => {
-                e.stopPropagation();
-                this.removeFilter(id);
-            }) as EventListener);
             this.overlay.appendChild(chip);
         }
 
         const clearBtn = document.createElement('button');
+        clearBtn.type = 'button';
         clearBtn.className = 'q-btn q-btn-dense q-btn-flat text-negative';
+        clearBtn.ariaLabel = I18n.t('filtersClear');
         clearBtn.textContent = I18n.t('filtersClear');
         clearBtn.addEventListener('click', () => {
             this.activeFilters.clear();

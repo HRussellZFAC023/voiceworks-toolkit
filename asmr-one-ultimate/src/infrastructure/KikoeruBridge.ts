@@ -42,6 +42,8 @@ export class KikoeruBridge {
     private _ready: Promise<void> | null = null;
     private _lastTrackSrc: string | null = null;
     private _lastWorkId: string | null = null;
+    private _unwatchers: Array<() => void> = [];
+    private _cachedWorkTreeVm: KikoeruApp | null = null;
 
     private constructor() {
         Logger.debug('KikoeruBridge instance created');
@@ -131,10 +133,18 @@ export class KikoeruBridge {
      * Setup store watchers for track/work changes
      */
     private setupWatchers(): void {
+        // Clean up old watchers to prevent leaks on script re-injection
+        for (const unwatch of this._unwatchers) {
+            try { unwatch(); } catch (err) {
+                Logger.warn('[KikoeruBridge] Unwatch failed:', err);
+            }
+        }
+        this._unwatchers = [];
+
         const store = this.store;
 
         // Watch for track changes
-        store.watch?.(
+        const unwatch1 = store.watch?.(
             (state) => {
                 const ap = state.AudioPlayer;
                 const track = ap?.currentTrack || ap?.currentPlayingFile
@@ -153,9 +163,10 @@ export class KikoeruBridge {
                 }
             }
         );
+        if (unwatch1) this._unwatchers.push(unwatch1);
 
         // Watch for queue index changes (backup: catches track advances the src watcher may miss)
-        store.watch?.(
+        const unwatch2 = store.watch?.(
             (state) => state.AudioPlayer?.queueIndex,
             (newIndex, oldIndex) => {
                 if (newIndex == null || newIndex === oldIndex) return;
@@ -169,9 +180,10 @@ export class KikoeruBridge {
                 }
             }
         );
+        if (unwatch2) this._unwatchers.push(unwatch2);
 
         // Watch for work changes
-        store.watch?.(
+        const unwatch3 = store.watch?.(
             (state) => state.AudioPlayer?.work?.id,
             (newWorkId) => {
                 const workIdStr = newWorkId ? String(newWorkId) : null;
@@ -185,6 +197,7 @@ export class KikoeruBridge {
                 }
             }
         );
+        if (unwatch3) this._unwatchers.push(unwatch3);
     }
 
     // =========================================================================
@@ -513,6 +526,61 @@ export class KikoeruBridge {
         return this.findComponent((vm: KikoeruApp) => {
             const v = vm as unknown as { tree: unknown[]; path: unknown[]; fatherFolder: unknown };
             return Array.isArray(v.tree) && Array.isArray(v.path) && typeof v.fatherFolder !== 'undefined';
+        });
+    }
+
+    /**
+     * Get the WorkTree Vue component (cached).
+     * Validates the cached instance is still mounted on each access.
+     * Much cheaper than findWorkTreeComponent() which does BFS every call.
+     */
+    public get workTreeVm(): KikoeruApp | null {
+        if (this._cachedWorkTreeVm) {
+            const vm = this._cachedWorkTreeVm as any;
+            // Validate it's still alive and mounted
+            if (!vm._isDestroyed && !vm._isBeingDestroyed && vm.$el?.parentNode) {
+                return this._cachedWorkTreeVm;
+            }
+            this._cachedWorkTreeVm = null;
+        }
+        this._cachedWorkTreeVm = this.findWorkTreeComponent();
+        return this._cachedWorkTreeVm;
+    }
+
+    /** Invalidate the cached WorkTree component reference */
+    public invalidateWorkTreeCache(): void {
+        this._cachedWorkTreeVm = null;
+    }
+
+    /**
+     * Force the WorkTree component to completely re-render from scratch.
+     *
+     * Discards Vue 2's vnode tree (_vnode = null) and calls $forceUpdate.
+     * Vue treats the next render as an initial mount, creating entirely fresh
+     * DOM with valid vnode.elm references.
+     *
+     * Must run in setTimeout(0): Vue 2's scheduler has a has[id] guard that
+     * silently ignores $forceUpdate during the same flush cycle.
+     */
+    public forceWorkTreeRerender(): Promise<void> {
+        const vm = this.workTreeVm as any;
+        if (!vm?.$forceUpdate) return Promise.resolve();
+
+        return new Promise((resolve) => {
+            setTimeout(() => {
+                try {
+                    vm._vnode = null;
+                    vm.$forceUpdate();
+                    Logger.debug('[KikoeruBridge] Forced WorkTree full re-render');
+                } catch (e) {
+                    Logger.warn('[KikoeruBridge] forceWorkTreeRerender failed:', e);
+                }
+                if (vm.$nextTick) {
+                    vm.$nextTick(() => resolve());
+                } else {
+                    resolve();
+                }
+            }, 0);
         });
     }
 

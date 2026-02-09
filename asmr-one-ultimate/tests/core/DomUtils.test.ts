@@ -1,10 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
     findButtonByText,
-    findIconButton,
     findPlayButtons,
     findAudioItems,
-    isAudioFileElement,
     waitForElement,
     waitFor,
     injectStyles,
@@ -17,8 +15,6 @@ import {
     getVueItem,
     getFatherFolder,
     isDarkMode,
-    getThemeColors,
-    isInViewport,
 } from '../../src/core/DomUtils';
 
 describe('DomUtils', () => {
@@ -67,35 +63,6 @@ describe('DomUtils', () => {
         });
     });
 
-    describe('findIconButton', () => {
-        it('should find a button by icon name', () => {
-            document.body.innerHTML = `
-                <div class="q-btn"><i class="material-icons">play_arrow</i></div>
-            `;
-            const btn = findIconButton('play_arrow');
-            expect(btn).not.toBeNull();
-            expect(btn!.classList.contains('q-btn')).toBe(true);
-        });
-
-        it('should return null when icon not found', () => {
-            document.body.innerHTML = '<div class="q-btn"><i class="material-icons">stop</i></div>';
-            expect(findIconButton('play_arrow')).toBeNull();
-        });
-
-        it('should scope to selector', () => {
-            document.body.innerHTML = `
-                <div id="player"><div class="q-btn"><i class="q-icon">skip_next</i></div></div>
-                <div class="q-btn"><i class="q-icon">skip_next</i></div>
-            `;
-            const btn = findIconButton('skip_next', '#player');
-            expect(btn).not.toBeNull();
-        });
-
-        it('should return null when scope not found', () => {
-            expect(findIconButton('play', '#nonexistent')).toBeNull();
-        });
-    });
-
     describe('findPlayButtons', () => {
         it('should find buttons with play_arrow text', () => {
             document.body.innerHTML = `
@@ -132,26 +99,6 @@ describe('DomUtils', () => {
                 const items = findAudioItems();
                 expect(items).toHaveLength(1);
             }
-        });
-    });
-
-    describe('isAudioFileElement', () => {
-        it('should return true for audio files', () => {
-            const el = document.createElement('div');
-            el.textContent = 'track.mp3';
-            expect(isAudioFileElement(el)).toBe(true);
-        });
-
-        it('should return false for non-audio files', () => {
-            const el = document.createElement('div');
-            el.textContent = 'image.png';
-            expect(isAudioFileElement(el)).toBe(false);
-        });
-
-        it('should be case-insensitive', () => {
-            const el = document.createElement('div');
-            el.textContent = 'TRACK.MP3';
-            expect(isAudioFileElement(el)).toBe(true);
         });
     });
 
@@ -390,38 +337,4 @@ describe('DomUtils', () => {
         });
     });
 
-    describe('getThemeColors', () => {
-        it('should return dark theme colors in dark mode', () => {
-            document.body.classList.add('body--dark');
-            const colors = getThemeColors();
-            expect(colors.bg).toBe('#1d1d1d');
-            expect(colors.text).toBe('#ffffff');
-        });
-
-        it('should return light theme colors in light mode', () => {
-            const colors = getThemeColors();
-            expect(colors.bg).toBe('#ffffff');
-            expect(colors.text).toBe('#000000');
-        });
-
-        it('should include accent color', () => {
-            const colors = getThemeColors();
-            expect(colors.accent).toBe('var(--asmr-accent, #f06292)');
-        });
-    });
-
-    // =========================================================================
-    // Viewport
-    // =========================================================================
-
-    describe('isInViewport', () => {
-        it('should handle elements (jsdom has zero dimensions)', () => {
-            const el = document.createElement('div');
-            document.body.appendChild(el);
-            // In jsdom, getBoundingClientRect returns all zeros, which means
-            // top=0, left=0, bottom=0, right=0 — satisfies the conditions
-            const result = isInViewport(el);
-            expect(typeof result).toBe('boolean');
-        });
-    });
 });

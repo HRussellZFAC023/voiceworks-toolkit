@@ -14,6 +14,7 @@
 
 import { KikoeruBridge } from '../infrastructure/KikoeruBridge';
 import { Logger, Config } from '../core/Utils';
+import { getCleanText } from '../core/DomUtils';
 import { CentralObserver } from '../core/CentralObserver';
 import type { KikoeruApp } from '../types';
 import { WorkService } from '../services/WorkService';
@@ -230,7 +231,7 @@ export class MediaViewer {
         const labelEl = qItem.querySelector('.q-item__label');
         if (!labelEl) return;
 
-        let title = labelEl.textContent?.trim() || '';
+        let title = this.getCleanLabelText(labelEl);
         // Strip translation suffix like "file.jpg (Translation)"
         const translationMatch = title.match(/^(.+?)\s*\([^)]+\)$/);
         if (translationMatch) title = translationMatch[1].trim();
@@ -512,7 +513,7 @@ export class MediaViewer {
 
             // Get the raw title text - prefer .q-item__label if present (folders have nested labels)
             const labelDirect = item.querySelector('.q-item__label');
-            let title = (labelDirect || labelEl).textContent?.trim() || '';
+            let title = this.getCleanLabelText(labelDirect || labelEl);
 
             // Collapse internal whitespace (from HTML formatting)
             title = title.replace(/\s+/g, ' ');
@@ -1752,7 +1753,7 @@ export class MediaViewer {
 
             if (!labelEl) return;
 
-            let title = labelEl.textContent?.trim() || '';
+            let title = this.getCleanLabelText(labelEl);
 
             // Clean up title (remove translations like "file.jpg (Translation)")
             const translationMatch = title.match(/^(.+?)\s*\([^)]+\)$/);
@@ -1813,6 +1814,10 @@ export class MediaViewer {
         });
 
         return items;
+    }
+
+    private getCleanLabelText(el: Element): string {
+        return getCleanText(el);
     }
 
     private getFileExtension(filename: string): string {

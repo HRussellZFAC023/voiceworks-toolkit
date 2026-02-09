@@ -73,7 +73,7 @@ export class JpdbController {
             if (!target) return;
 
             e.preventDefault();
-            e.stopPropagation();
+            e.stopImmediatePropagation();
 
             const vid = parseInt(target.getAttribute('data-vid') || '0', 10);
             const sid = parseInt(target.getAttribute('data-sid') || '0', 10);
@@ -82,8 +82,8 @@ export class JpdbController {
             this.showPopover(target, vid, sid);
         };
 
-        // Event delegation on body
-        document.body.addEventListener('click', handleClick, { capture: true });
+        // Event delegation on document (must be higher than host app's handlers)
+        document.addEventListener('click', handleClick, { capture: true });
 
         // Keyboard: hotkey to show + escape to dismiss
         const handleKeydown = (e: KeyboardEvent) => {
@@ -132,7 +132,7 @@ export class JpdbController {
         document.addEventListener('keydown', handleKeydown);
 
         this.popoverCleanup = () => {
-            document.body.removeEventListener('click', handleClick, { capture: true });
+            document.removeEventListener('click', handleClick, { capture: true });
             document.removeEventListener('keydown', handleKeydown);
             this.dismissPopover();
         };
@@ -231,19 +231,21 @@ export class JpdbController {
         // Build popover
         const popover = document.createElement('div');
         popover.className = 'jpdb-popover';
+        popover.setAttribute('role', 'dialog');
+        popover.ariaLabel = card.spelling;
 
         // Only show reading if different from spelling (skip for all-kana words)
         const showReading = card.reading !== card.spelling;
 
         const spellingLink = showReading
-            ? `<ruby>${this.esc(card.spelling)}<rp>(</rp><rt>${this.esc(card.reading)}</rt><rp>)</rp></ruby>`
+            ? this.buildSegmentedRuby(card.spelling, card.reading)
             : this.esc(card.spelling);
 
         popover.innerHTML = `
             <div class="jpdb-popover-header">
                 <a class="jpdb-popover-spelling jpdb-${cardState}" href="https://jpdb.io/vocabulary/${vid}/${encodeURIComponent(card.spelling)}/${encodeURIComponent(card.reading)}" target="_blank" rel="noopener">${spellingLink}</a>
+                ${pitchSvg ? `<div class="jpdb-popover-pitch">${pitchSvg}</div>` : ''}
             </div>
-            ${pitchSvg ? `<div class="jpdb-popover-pitch">${pitchSvg}</div>` : ''}
             <div class="jpdb-popover-pos">${this.esc(card.partOfSpeech.join(', '))}</div>
             <div class="jpdb-popover-meanings">${meaningsHtml}</div>
             <div class="jpdb-popover-meta">
@@ -267,19 +269,39 @@ export class JpdbController {
             btn.setAttribute('disabled', 'true');
 
             try {
-                if (action === 'add') {
-                    await this.handleAddToDeck(vid, sid);
-                } else if (action === 'neverforget') {
-                    await this.handleToggleDeck(vid, sid, card!, 'never-forget',
-                        AppStore.getConfig('jpdbNeverForgetDeck') || 'never-forget');
-                } else if (action === 'blacklist') {
-                    await this.handleToggleDeck(vid, sid, card!, 'blacklisted',
-                        AppStore.getConfig('jpdbBlacklistDeck') || 'blacklist');
-                } else if (action === 'grade') {
+                if (action === 'grade') {
                     const grade = btn.dataset.grade as JPDBGrade;
-                    if (grade) await JpdbService.reviewCard(vid, sid, grade);
+                    const spelling = card!.spelling;
+                    this.dismissPopover();
+                    if (grade) {
+                        JpdbService.reviewCard(vid, sid, grade)
+                            .then(() => JpdbService.fetchCardState(vid, sid, spelling))
+                            .then(refreshed => {
+                                if (refreshed) {
+                                    this.updateWordElements(vid, sid, refreshed.cardState[0] || 'not-in-deck');
+                                }
+                            })
+                            .catch(err => Logger.error('[JPDB] Grade failed:', err));
+                    }
+                } else {
+                    if (action === 'add') {
+                        await this.handleAddToDeck(vid, sid);
+                        this.updateWordElements(vid, sid, 'learning');
+                    } else if (action === 'neverforget') {
+                        await this.handleToggleDeck(vid, sid, card!, 'never-forget',
+                            AppStore.getConfig('jpdbNeverForgetDeck') || 'never-forget');
+                        const updatedCard = JpdbService.getCard(vid, sid);
+                        const newPrimary = updatedCard?.cardState[0] || 'not-in-deck';
+                        this.updateWordElements(vid, sid, newPrimary);
+                    } else if (action === 'blacklist') {
+                        await this.handleToggleDeck(vid, sid, card!, 'blacklisted',
+                            AppStore.getConfig('jpdbBlacklistDeck') || 'blacklist');
+                        const updatedCard = JpdbService.getCard(vid, sid);
+                        const newPrimary = updatedCard?.cardState[0] || 'not-in-deck';
+                        this.updateWordElements(vid, sid, newPrimary);
+                    }
+                    this.dismissPopover();
                 }
-                this.dismissPopover();
             } catch (err) {
                 Logger.error('[JPDB] Action failed:', err);
                 btn.removeAttribute('disabled');
@@ -289,6 +311,7 @@ export class JpdbController {
         // Backdrop
         const backdrop = document.createElement('div');
         backdrop.className = 'jpdb-popover-backdrop';
+        backdrop.setAttribute('aria-hidden', 'true');
         backdrop.addEventListener('click', () => this.dismissPopover());
 
         document.body.appendChild(backdrop);
@@ -323,6 +346,24 @@ export class JpdbController {
         this.activeBackdrop?.remove();
         this.activePopover = null;
         this.activeBackdrop = null;
+    }
+
+    // =========================================================================
+    // DOM State Updates
+    // =========================================================================
+
+    private static readonly STATE_CLASSES = [
+        'jpdb-new', 'jpdb-learning', 'jpdb-known', 'jpdb-due', 'jpdb-failed',
+        'jpdb-locked', 'jpdb-never-forget', 'jpdb-blacklisted', 'jpdb-suspended',
+        'jpdb-not-in-deck', 'jpdb-redundant',
+    ];
+
+    private updateWordElements(vid: number, sid: number, newState: string): void {
+        const els = document.querySelectorAll(`.jpdb-word[data-vid="${vid}"][data-sid="${sid}"]`);
+        for (const el of els) {
+            el.classList.remove(...JpdbController.STATE_CLASSES);
+            el.classList.add(`jpdb-${newState}`);
+        }
     }
 
     // =========================================================================
@@ -502,6 +543,79 @@ export class JpdbController {
     // =========================================================================
     // Utility
     // =========================================================================
+
+    /**
+     * Build per-kanji ruby HTML from spelling + reading.
+     * Splits kanji runs from kana runs, matches shared kana anchors
+     * in the reading, and only annotates the kanji portions.
+     * e.g. 食べる + たべる → <ruby>食<rt>た</rt></ruby>べる
+     */
+    private buildSegmentedRuby(spelling: string, reading: string): string {
+        const isKana = (ch: string) => /[\u3040-\u309f\u30a0-\u30ff]/.test(ch);
+        const toHira = (s: string) => s.replace(/[\u30a0-\u30ff]/g, c =>
+            String.fromCharCode(c.charCodeAt(0) - 0x60));
+
+        // Split spelling into segments: alternating kanji runs and kana runs
+        const segments: { text: string; isKanji: boolean }[] = [];
+        let buf = '';
+        let bufIsKana: boolean | null = null;
+
+        for (const ch of spelling) {
+            const kana = isKana(ch);
+            if (bufIsKana !== null && kana !== bufIsKana) {
+                segments.push({ text: buf, isKanji: !bufIsKana });
+                buf = '';
+            }
+            buf += ch;
+            bufIsKana = kana;
+        }
+        if (buf) segments.push({ text: buf, isKanji: !bufIsKana! });
+
+        // If all kanji or all kana, use simple ruby
+        if (segments.length <= 1) {
+            if (segments[0]?.isKanji) {
+                return `<ruby>${this.esc(spelling)}<rp>(</rp><rt>${this.esc(reading)}</rt><rp>)</rp></ruby>`;
+            }
+            return this.esc(spelling);
+        }
+
+        // Match kana anchors in reading to distribute readings across kanji segments
+        const readingHira = toHira(reading);
+        let readPos = 0;
+        const result: string[] = [];
+
+        for (let i = 0; i < segments.length; i++) {
+            const seg = segments[i];
+
+            if (!seg.isKanji) {
+                // Kana segment — find it in reading and advance past it
+                const segHira = toHira(seg.text);
+                const idx = readingHira.indexOf(segHira, readPos);
+                if (idx >= 0) {
+                    readPos = idx + segHira.length;
+                }
+                result.push(this.esc(seg.text));
+            } else {
+                // Kanji segment — reading runs from readPos to next kana anchor
+                const nextKanaSeg = segments.slice(i + 1).find(s => !s.isKanji);
+                let endPos: number;
+
+                if (nextKanaSeg) {
+                    const nextHira = toHira(nextKanaSeg.text);
+                    const idx = readingHira.indexOf(nextHira, readPos);
+                    endPos = idx >= 0 ? idx : reading.length;
+                } else {
+                    endPos = reading.length;
+                }
+
+                const kanjiReading = reading.slice(readPos, endPos);
+                readPos = endPos;
+                result.push(`<ruby>${this.esc(seg.text)}<rp>(</rp><rt>${this.esc(kanjiReading)}</rt><rp>)</rp></ruby>`);
+            }
+        }
+
+        return result.join('');
+    }
 
     private esc(str: string): string {
         return str

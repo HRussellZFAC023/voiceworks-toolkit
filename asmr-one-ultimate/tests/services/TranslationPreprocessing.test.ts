@@ -101,17 +101,14 @@ describe('normalizeForModel', () => {
         expect(result).toBe('洗脳アプリをくれたJKと、洗脳ベロチューあまあまエッチ。ダウナー, 催眠, 純愛H一途な添い寝');
     });
 
-    it('strips 【】 metadata sections from model input', () => {
-        expect(normalizeForModel('【催眠】エッチ')).toBe('エッチ');
+    it('preserves 【】 brackets (let model handle them)', () => {
+        expect(normalizeForModel('【催眠】エッチ')).toBe('【催眠】エッチ');
     });
 
-    it('strips multi-bracket DLsite metadata', () => {
+    it('preserves multi-bracket text', () => {
         const input = '【お下品オナ鳴き】オナサポ♡【ロリオナ育成ASMR】';
-        expect(normalizeForModel(input)).toBe('オナサポ');
-    });
-
-    it('preserves text when brackets have no closing match', () => {
-        expect(normalizeForModel('【催眠 エッチ')).toBe('【催眠 エッチ');
+        // ♡ stripped, but brackets preserved
+        expect(normalizeForModel(input)).toBe('【お下品オナ鳴き】オナサポ【ロリオナ育成ASMR】');
     });
 
     it('preserves 。 period (splitting handled separately)', () => {

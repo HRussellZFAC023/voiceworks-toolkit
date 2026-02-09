@@ -20,6 +20,7 @@ import { KikoeruBridge } from '../infrastructure/KikoeruBridge';
 import { CentralObserver } from '../core/CentralObserver';
 import { mountApp, type MountedApp } from '../core/MountApp';
 import { Logger } from '../core/Utils';
+import { getCleanText } from '../core/DomUtils';
 import { WorkService } from '../services/WorkService';
 import { ThumbnailManager } from './media/ThumbnailManager';
 import type { MediaFile, WorkTreeComponent } from './media/types';
@@ -239,7 +240,7 @@ export class MediaViewerController {
         const labelEl = qItem.querySelector('.q-item__label');
         if (!labelEl) return;
 
-        let title = labelEl.textContent?.trim() || '';
+        let title = this.getCleanLabelText(labelEl);
         const translationMatch = title.match(/^(.+?)\s*\([^)]+\)$/);
         if (translationMatch) title = translationMatch[1].trim();
         if (!title) return;
@@ -674,7 +675,7 @@ export class MediaViewerController {
             const labelEl = qItem.querySelector('.q-item__label') || qItem.querySelector('.q-item__section--main');
             if (!labelEl) return;
 
-            let title = labelEl.textContent?.trim() || '';
+            let title = this.getCleanLabelText(labelEl);
             const translationMatch = title.match(/^(.+?)\s*\([^)]+\)$/);
             if (translationMatch) title = translationMatch[1].trim();
             if (!title) return;
@@ -769,6 +770,10 @@ export class MediaViewerController {
         s = s.replace(/(\.[a-z0-9]{2,5})+$/, '');
         s = s.replace(/[\s\-_.]+/g, ' ');
         return s.trim();
+    }
+
+    private getCleanLabelText(el: Element): string {
+        return getCleanText(el);
     }
 
     private getFileExtension(filename: string): string {

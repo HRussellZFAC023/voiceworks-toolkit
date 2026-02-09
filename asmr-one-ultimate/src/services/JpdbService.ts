@@ -233,6 +233,24 @@ class JpdbServiceImpl {
         Logger.debug(`[JPDB] Reviewed ${vid}/${sid} as ${grade}`);
     }
 
+    /**
+     * Fetch fresh card state from jpdb (bypasses parseCache).
+     * Used after grading to get the actual SRS state.
+     */
+    async fetchCardState(vid: number, sid: number, spelling: string): Promise<JPDBCard | undefined> {
+        const raw = await this.request<JPDBParseResult>('parse', {
+            text: [spelling],
+            position_length_encoding: 'utf16',
+            token_fields: [...TOKEN_FIELDS],
+            vocabulary_fields: [...VOCABULARY_FIELDS],
+        });
+        const cards = this.vocabToCards(raw.vocabulary);
+        for (const card of cards) {
+            this.cardCache.set(`${card.vid}/${card.sid}`, card);
+        }
+        return this.cardCache.get(`${vid}/${sid}`);
+    }
+
     async addToDeck(deckId: number | string, vid: number, sid: number): Promise<void> {
         await this.request<void>('deck/add-vocabulary', {
             id: deckId,

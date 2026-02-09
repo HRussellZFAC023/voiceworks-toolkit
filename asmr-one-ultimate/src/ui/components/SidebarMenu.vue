@@ -6,7 +6,7 @@ import { useEventBus } from '../../composables/useEventBus';
 import { RadioMode } from '../../features/radio';
 import { PlaylistMode } from '../../features/playlist';
 import { PLAYER_BAR_SELECTOR } from '../../core/DomUtils';
-import { Logger } from '../../core/Utils';
+import { Config, Logger } from '../../core/Utils';
 
 // ============================================================================
 // Props
@@ -30,6 +30,7 @@ const { on } = useEventBus();
 const sfwMode = useConfig('sfwMode');
 const translateMode = useConfig('translateMode');
 const shuffleEnabled = useConfig('shuffle');
+const loopEnabled = useConfig('loopPlaylist');
 
 // ============================================================================
 // Local reactive state
@@ -125,6 +126,9 @@ function ensurePlaylistControls() {
         <button class="asmr-playlist-player-btn asmr-playlist-shuffle" title="${t('shuffle') || 'Shuffle'}" aria-label="${t('shuffle') || 'Shuffle'}">
             <i class="material-icons" aria-hidden="true">shuffle</i>
         </button>
+        <button class="asmr-playlist-player-btn asmr-playlist-loop" title="${t('loopPlaylist') || 'Loop'}" aria-label="${t('loopPlaylist') || 'Loop'}">
+            <i class="material-icons" aria-hidden="true">repeat</i>
+        </button>
     `;
 
     playerBar.insertBefore(container, playerBar.firstChild);
@@ -143,9 +147,14 @@ function ensurePlaylistControls() {
         e.stopPropagation();
         PlaylistMode.getInstance().shuffle();
     });
+    container.querySelector('.asmr-playlist-loop')?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        PlaylistMode.getInstance().toggleLoop();
+    });
 
-    // Initialize shuffle button active state
+    // Initialize shuffle and loop button active states
     updateShuffleButton(container, shuffleEnabled.value);
+    updateLoopButton(container, loopEnabled.value);
 
     // Get current progress
     const pm = PlaylistMode.getInstance();
@@ -164,23 +173,39 @@ function updateShuffleButton(container: HTMLElement, isActive: boolean) {
     }
 }
 
+function updateLoopButton(container: HTMLElement, isActive: boolean) {
+    const btn = container.querySelector('.asmr-playlist-loop');
+    if (btn) {
+        btn.classList.toggle('asmr-playlist-loop-active', isActive);
+    }
+}
+
 function updatePlayerBarProgress(current: number, total: number) {
+    // Reconnect controls if they were destroyed by host app re-render
+    if (playlistActive.value && (!playlistControlsEl || !playlistControlsEl.isConnected)) {
+        ensurePlaylistControls();
+    }
     if (!playlistControlsEl) return;
+
     const progressEl = playlistControlsEl.querySelector('.asmr-playlist-player-progress');
     if (progressEl) {
         progressEl.textContent = `${current} / ${total}`;
     }
 
+    const loop = Config.get('loopPlaylist');
+    const shuffle = Config.get('shuffle');
+
+    // When loop or shuffle is on, prev/next are never disabled
     const prevBtn = playlistControlsEl.querySelector('.asmr-playlist-prev') as HTMLButtonElement | null;
     if (prevBtn) {
-        const disabled = current <= 1;
+        const disabled = !loop && !shuffle && current <= 1;
         prevBtn.disabled = disabled;
         prevBtn.classList.toggle('disabled', disabled);
     }
 
     const nextBtn = playlistControlsEl.querySelector('.asmr-playlist-next') as HTMLButtonElement | null;
     if (nextBtn) {
-        const disabled = current >= total;
+        const disabled = !loop && !shuffle && current >= total;
         nextBtn.disabled = disabled;
         nextBtn.classList.toggle('disabled', disabled);
     }
@@ -252,6 +277,25 @@ on('playlist:shuffleToggled', (payload) => {
         updateShuffleButton(playlistControlsEl, payload.enabled);
     }
 });
+
+on('playlist:loopToggled', (payload) => {
+    if (playlistControlsEl) {
+        updateLoopButton(playlistControlsEl, payload.enabled);
+    }
+});
+
+// ============================================================================
+// Initialize from active PlaylistMode state (handles SFC remount)
+// ============================================================================
+
+const pmInit = PlaylistMode.getInstance();
+if (pmInit.isActive) {
+    playlistActive.value = true;
+    const progress = pmInit.getProgress();
+    playlistCurrent.value = progress.current;
+    playlistTotal.value = progress.total;
+    updatePlaylistHostDOM(true);
+}
 
 // ============================================================================
 // Lifecycle

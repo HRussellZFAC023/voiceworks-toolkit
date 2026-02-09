@@ -60,7 +60,9 @@ export class AudioCache {
         if (entry) {
             // Update lastPlayed
             entry.lastPlayed = Date.now();
-            db.put('blobs', entry); // Fire and forget update
+            db.put('blobs', entry).catch(err => {
+                Logger.warn('[AudioCache] Failed to update lastPlayed:', err);
+            });
             return entry.blob;
         }
         return null;

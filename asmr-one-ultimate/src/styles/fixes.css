@@ -81,6 +81,10 @@
   color: var(--asmr-accent);
 }
 
+.asmr-whisper-btn[data-active="true"] {
+  background: color-mix(in srgb, var(--asmr-accent) 12%, transparent) !important;
+}
+
 /* Remove animation from active state - only animate during loading */
 .asmr-whisper-btn[data-active="true"]:not(.asmr-whisper-loading) i {
   animation: none;
@@ -206,9 +210,17 @@
 /* Transcript download buttons (work tree + flat view) */
 .asmr-transcript-actions {
   display: flex;
-  gap: 6px;
+  flex-direction: row !important;
+  flex-wrap: wrap;
+  gap: 4px;
   margin-left: auto;
   align-items: center;
+  align-self: center;
+  justify-content: flex-end;
+  flex-shrink: 1;
+  min-width: 0;
+  max-width: 50%;
+  padding-left: 4px;
 }
 
 .asmr-transcript-btn {
@@ -216,21 +228,43 @@
   border-radius: 6px;
   padding: 2px 6px;
   font-size: 0.7rem;
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .asmr-transcript-btn .q-icon {
-  font-size: 18px;
+  font-size: 16px;
   margin-right: 2px;
 }
 
 .asmr-transcript-label {
-  font-size: 0.7rem;
+  font-size: 0.65rem;
   text-transform: uppercase;
   letter-spacing: 0.02em;
 }
 
 .asmr-transcript-btn--secondary {
   background: rgba(128, 0, 255, 0.15);
+}
+
+/* Mobile: icon-only transcript buttons to save space */
+@media (max-width: 600px) {
+  .asmr-transcript-actions {
+    gap: 2px;
+    max-width: 40%;
+  }
+
+  .asmr-transcript-btn {
+    padding: 2px 4px;
+  }
+
+  .asmr-transcript-label {
+    display: none;
+  }
+
+  .asmr-transcript-btn .q-icon {
+    margin-right: 0;
+  }
 }
 
 :is(.body--dark, .q-dark) .whisper-error-indicator {
@@ -589,6 +623,14 @@
   outline: none !important;
 }
 
+/* Explicit focus-visible for keyboard navigation */
+.asmr-whisper-btn:focus-visible,
+.asmr-playlist-btn:focus-visible,
+.asmr-vector-btn:focus-visible {
+  outline: 2px solid var(--asmr-accent);
+  outline-offset: 2px;
+}
+
 /* Mobile-first: minimum touch target size (44x44px) */
 .learner-controls button,
 .learner-collapsed-controls button,
@@ -618,7 +660,7 @@
   }
 
   .asmr-whisper-btn[data-active="true"] {
-    outline: 2px solid var(--asmr-accent) !important;
+    outline: 2px solid currentColor !important;
   }
 }
 
@@ -1158,7 +1200,7 @@
 /* ========================================
    Translation Pair (Side-by-side)
    ======================================== */
-.asmr-translation-pair {
+.asmr-translation-pair:not(.media-viewer-text-grid) {
   display: inline;
 }
 

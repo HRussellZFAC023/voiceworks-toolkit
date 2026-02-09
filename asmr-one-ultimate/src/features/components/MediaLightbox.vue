@@ -32,6 +32,7 @@ import { Logger, Config } from '../../core/Utils';
 import { I18n } from '../../core/Config';
 import { gmRequest, retryWithBackoff } from '../../infrastructure/HttpClient';
 import { TranslationService } from '../../services/TranslationService';
+import { isChinese } from '../../core/DomUtils';
 import type { MediaFile, TouchState, DragState } from '../media/types';
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -68,6 +69,7 @@ const emit = defineEmits<{
 const bridge = useBridge();
 const { t, format } = useI18n();
 const translateMode = useConfig('translateMode');
+const cnToJp = useConfig('translateCnToJp');
 const galleryAutoSlideshow = useConfig('galleryAutoSlideshow');
 const galleryAutoSlideshowInterval = useConfig('galleryAutoSlideshowInterval');
 
@@ -771,8 +773,21 @@ function updateTitle(title: string): void {
     mediaTitle.value = title;
     translatedTitle.value = '';
 
-    if (!translateMode.value) return;
     if (!/[\u3040-\u30ff\u4e00-\u9faf]/.test(title)) return;
+
+    // CN→JP mode: silently replace Chinese title with Japanese (shown as main title)
+    const cnOnlyMode = !translateMode.value && cnToJp.value;
+    if (cnOnlyMode) {
+        if (!isChinese(title)) return;
+        TranslationService.translate(title, 'ja').then(result => {
+            if (!result || result === title) return;
+            if (token !== titleTranslationToken.value) return;
+            mediaTitle.value = result; // Replace title directly
+        }).catch(() => {});
+        return;
+    }
+
+    if (!translateMode.value) return;
 
     const targetLang = I18n.lang === 'zh' ? 'zh-CN' : I18n.lang;
     TranslationService.translate(title, targetLang).then(result => {

@@ -313,7 +313,6 @@ const i18nData: I18nData = {
         playlistFilterPlaceholder: 'Filter playlists...',
         playlistOnlineOnly: 'Online only',
         playlistLoadMore: 'Load More',
-        playlistLoadAll: 'Load All',
         playlistLoadingMore: 'Loading more...',
         playlistLoadingDone: 'All playlists loaded.',
         playlistLoadingUser: 'Fetching your playlists...',
@@ -336,7 +335,6 @@ const i18nData: I18nData = {
 
         // Work Tree
         flatView: 'Flat View',
-        flatViewSub: 'Show all files in a single list with folder paths',
         fileListHeader: 'All Files',
         fileListCount: '{count} files',
         fileListClose: 'Close file list',
@@ -439,6 +437,8 @@ const i18nData: I18nData = {
         translateModeSub: 'Translate tags, titles, and UI elements (reload required)',
         preferLocalTranslation: 'On-device translation',
         preferLocalTranslationSub: 'Opus-MT: JA→EN, ZH→EN locally (~105MB each). Google Translate fallback for other directions.',
+        translateCnToJp: 'Chinese → Japanese',
+        translateCnToJpSub: 'Silently replace Chinese text with Japanese (works even when translations are off)',
         autoModelSelection: 'Opus-MT (JA→EN, ZH→EN)',
         modelsLoaded: 'Ready: {models}',
 
@@ -524,6 +524,8 @@ const i18nData: I18nData = {
         hotkeySpeedUp: 'Speed Up',
         hotkeySpeedDown: 'Speed Down',
         hotkeyToggleBlur: 'Toggle Blur',
+        revealTranslation: 'Reveal translation',
+        hideTranslation: 'Hide translation',
         hotkeyToggleJP: 'Toggle Japanese',
         hotkeySpeedReset: 'Reset Speed',
         hotkeyGalleryExclude: 'Hide Image (Gallery)',
@@ -945,7 +947,6 @@ const i18nData: I18nData = {
         playlistFilterPlaceholder: '筛选播放列表...',
         playlistOnlineOnly: '仅在线',
         playlistLoadMore: '加载更多',
-        playlistLoadAll: '加载全部',
         playlistLoadingMore: '正在加载更多...',
         playlistLoadingDone: '已加载全部播放列表。',
         playlistLoadingUser: '正在获取您的播放列表...',
@@ -968,7 +969,6 @@ const i18nData: I18nData = {
 
         // Work Tree
         flatView: '平铺视图',
-        flatViewSub: '将所有文件显示为带有文件夹路径的单一列表',
         fileListHeader: '全部文件',
         fileListCount: '{count} 个文件',
         fileListClose: '关闭文件列表',
@@ -1071,6 +1071,8 @@ const i18nData: I18nData = {
         translateModeSub: '翻译标签、标题和界面元素（需要重新加载）',
         preferLocalTranslation: '本地翻译',
         preferLocalTranslationSub: 'Opus-MT 模型：JA→EN、ZH→EN 本地翻译（约105MB），其他方向使用 Google 翻译',
+        translateCnToJp: '中文 → 日本語',
+        translateCnToJpSub: '将中文文本替换为日语（翻译关闭时也有效）',
         autoModelSelection: 'Opus-MT（JA→EN、ZH→EN）',
         modelsLoaded: '就绪: {models}',
 
@@ -1156,6 +1158,8 @@ const i18nData: I18nData = {
         hotkeySpeedUp: '加速',
         hotkeySpeedDown: '减速',
         hotkeyToggleBlur: '切换模糊',
+        revealTranslation: '显示翻译',
+        hideTranslation: '隐藏翻译',
         hotkeyToggleJP: '切换日语',
         hotkeySpeedReset: '重置速度',
         hotkeyGalleryExclude: '隐藏图片 (图库)',
@@ -1577,7 +1581,6 @@ const i18nData: I18nData = {
         playlistFilterPlaceholder: 'プレイリストを検索...',
         playlistOnlineOnly: 'オンラインのみ',
         playlistLoadMore: 'さらに読み込む',
-        playlistLoadAll: 'すべて読み込む',
         playlistLoadingMore: '読み込み中...',
         playlistLoadingDone: 'すべてのプレイリストを読み込みました。',
         playlistLoadingUser: 'プレイリストを取得中...',
@@ -1600,7 +1603,6 @@ const i18nData: I18nData = {
 
         // Work Tree
         flatView: 'フラット表示',
-        flatViewSub: 'フォルダパス付きで全ファイルを一覧表示',
         fileListHeader: '全ファイル',
         fileListCount: '{count} ファイル',
         fileListClose: 'ファイルリストを閉じる',
@@ -1703,6 +1705,8 @@ const i18nData: I18nData = {
         translateModeSub: 'タグ、タイトル、UI要素を翻訳する（リロードが必要）',
         preferLocalTranslation: 'ローカル翻訳',
         preferLocalTranslationSub: 'Opus-MTモデル：JA→EN、ZH→EN ローカル翻訳（約105MB）。その他はGoogle翻訳',
+        translateCnToJp: '中国語 → 日本語',
+        translateCnToJpSub: '中国語テキストを日本語に置換する（翻訳オフでも有効）',
         autoModelSelection: 'Opus-MT（JA→EN、ZH→EN）',
         modelsLoaded: '準備完了: {models}',
 
@@ -1788,6 +1792,8 @@ const i18nData: I18nData = {
         hotkeySpeedUp: '速度アップ',
         hotkeySpeedDown: '速度ダウン',
         hotkeyToggleBlur: 'ぼかし切替',
+        revealTranslation: '翻訳を表示',
+        hideTranslation: '翻訳を隠す',
         hotkeyToggleJP: '日本語切替',
         hotkeySpeedReset: '速度リセット',
         hotkeyGalleryExclude: '画像を非表示 (ギャラリー)',

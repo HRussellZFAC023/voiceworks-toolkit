@@ -142,15 +142,23 @@ export class InfiniteScrollManager {
             return;
         }
 
+        // Playlist detail page may use a non-standard pagination component
+        const query = this.bridge.route.query || {};
+        const isPlaylistPage = path === '/playlist' && !!query.id;
+
         // Check for pagination components
         const pagination = this.findPaginationComponent();
-        if (!pagination) {
+        if (!pagination && !isPlaylistPage) {
             Logger.debug('[InfiniteScrollManager] No pagination found on', path);
             return;
         }
 
         // Parse initial pagination state
-        this.parsePaginationState();
+        if (pagination) {
+            this.parsePaginationState();
+        } else {
+            this.paginationUnknown = true;
+        }
 
         Logger.debug(`[InfiniteScrollManager] Attaching to ${path} (page ${this.currentPage}/${this.totalPages})`);
 
@@ -560,6 +568,15 @@ export class InfiniteScrollManager {
             const params = new URLSearchParams();
             params.set('page', String(this.currentPage));
             return `/api/vas/${vaId}/works?${params.toString()}`;
+        }
+
+        // Playlist detail page: /playlist?id=xxx
+        if (path === '/playlist' && query.id) {
+            const params = new URLSearchParams();
+            params.set('id', String(query.id));
+            params.set('page', String(this.currentPage));
+            params.set('pageSize', String(this.pageSize));
+            return `/api/playlist/get-playlist-works?${params.toString()}`;
         }
 
         return null;

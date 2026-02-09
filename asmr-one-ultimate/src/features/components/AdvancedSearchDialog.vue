@@ -1007,10 +1007,10 @@ onUnmounted(() => {
             class="q-dialog fullscreen flex-center asmr-dialog-overlay"
             @click="onOverlayClick"
         >
-            <div class="q-card asmr-advanced-search-dialog" @click.stop>
+            <div class="q-card asmr-advanced-search-dialog" role="dialog" aria-modal="true" aria-labelledby="asmr-adv-search-title" @click.stop>
                 <!-- Header -->
                 <div class="asmr-dialog-header">
-                    <h2>{{ t('advSearch') }}</h2>
+                    <h2 id="asmr-adv-search-title">{{ t('advSearch') }}</h2>
                     <button
                         class="q-btn q-btn-flat q-btn-round q-btn-dense asmr-close-btn text-grey-7"
                         :aria-label="t('cancel') || 'Close'"
@@ -1104,6 +1104,7 @@ onUnmounted(() => {
                                         :class="{ active: activePreset === 'short' }"
                                         :title="t('advPresetShortTitle')"
                                         :aria-label="t('advPresetShortAria')"
+                                        :aria-pressed="activePreset === 'short'"
                                         :disabled="generating"
                                         @click="setDuration('0', '30')"
                                     >{{ t('advShort') }}</button>
@@ -1112,6 +1113,7 @@ onUnmounted(() => {
                                         :class="{ active: activePreset === 'medium' }"
                                         :title="t('advPresetMediumTitle')"
                                         :aria-label="t('advPresetMediumAria')"
+                                        :aria-pressed="activePreset === 'medium'"
                                         :disabled="generating"
                                         @click="setDuration('30', '120')"
                                     >{{ t('advMedium') }}</button>
@@ -1120,6 +1122,7 @@ onUnmounted(() => {
                                         :class="{ active: activePreset === 'long' }"
                                         :title="t('advPresetLongTitle')"
                                         :aria-label="t('advPresetLongAria')"
+                                        :aria-pressed="activePreset === 'long'"
                                         :disabled="generating"
                                         @click="setDuration('120', '')"
                                     >{{ t('advLong') }}</button>
@@ -1144,12 +1147,14 @@ onUnmounted(() => {
                                     class="asmr-sort-dir-btn"
                                     :class="{ active: sortDirection === 'desc' }"
                                     :aria-label="t('advSortDescAria')"
+                                    :aria-pressed="sortDirection === 'desc'"
                                     @click="setSortDirection('desc')"
                                 >{{ t('advDesc') }}</button>
                                 <button
                                     class="asmr-sort-dir-btn"
                                     :class="{ active: sortDirection === 'asc' }"
                                     :aria-label="t('advSortAscAria')"
+                                    :aria-pressed="sortDirection === 'asc'"
                                     @click="setSortDirection('asc')"
                                 >{{ t('advAsc') }}</button>
                             </div>

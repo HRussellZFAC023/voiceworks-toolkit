@@ -132,8 +132,9 @@ function resolveModelName(model, multilingual) {
 }
 
 async function releaseGpuResources() {
-    // Yield to event loop so browser GC can reclaim orphaned GPU buffers
-    await new Promise(r => setTimeout(r, 100));
+    // Multiple yields to event loop so browser GC can reclaim orphaned GPU buffers
+    await new Promise(r => setTimeout(r, 250));
+    await new Promise(r => setTimeout(r, 250));
 }
 
 // ------------------------------------------------------------
@@ -301,7 +302,11 @@ function cleanHallucinatedChunks(chunks) {
     });
 }
 
-const SEGMENT_GAP_S = 0.5;
+// Silence threshold for splitting words into separate subtitle segments.
+// 0.5s was too aggressive (splits mid-sentence on breath pauses).
+// 1.5s was too lenient (merges separate sentences into mega-segments).
+// 1.0s balances ASMR breath pauses vs genuine inter-sentence gaps.
+const SEGMENT_GAP_S = 1.0;
 
 function isCJKText(text) {
     return /[\u3040-\u30ff\u4e00-\u9fff]/.test(text);
@@ -408,22 +413,17 @@ async function transcribe(msg) {
         }
     }
 
-    // Note: no_speech_threshold, logprob_threshold, condition_on_prev_tokens
-    // are NOT supported by Transformers.js — they are silently dropped by
-    // GenerationConfig.pick(). Hallucination suppression relies on our
-    // cleanHallucinatedChunks() post-processing filter instead.
+    // Transformers.js only supports a subset of Whisper generation params.
+    // Unsupported (silently dropped): no_speech_threshold, logprob_threshold,
+    // condition_on_prev_tokens, compression_ratio_threshold, top_k, force_full_sequences.
+    // Hallucination suppression relies on cleanHallucinatedChunks() post-processing.
     const pipeOpts = {
-        top_k: 0,
         do_sample: false,
-        temperature: 0,
-        compression_ratio_threshold: 2.0,
-        no_repeat_ngram_size: 3,
         chunk_length_s: msg.chunkLengthS,
         stride_length_s: msg.strideLengthS,
         language: msg.language,
         task: msg.subtask,
         return_timestamps: wordTimestampsSupported ? 'word' : true,
-        force_full_sequences: false,
         chunk_callback,
     };
 
@@ -457,6 +457,13 @@ async function transcribe(msg) {
             pipeOpts.return_timestamps = true;
             try {
                 result = await pipe(msg.audio, pipeOpts);
+                // Retry succeeded, but if original failure was GPU-related (e.g. createBuffer),
+                // report degradation so host can warn other workers (Embedding, Translation)
+                // to switch to WASM before they hit the same dead device.
+                if (isGpuError && !gpuDeviceLost) {
+                    console.warn('[Whisper Worker] GPU degraded — createBuffer failed during word timestamps');
+                    self.postMessage({ status: 'gpu-degraded', data: { message: errMsg } });
+                }
             } catch (retryError) {
                 const retryMsg = retryError.message || String(retryError);
                 self.postMessage({ status: 'error', data: { message: retryMsg }, chunkId });

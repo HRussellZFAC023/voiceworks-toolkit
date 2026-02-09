@@ -10,6 +10,7 @@ import { I18n } from '../core/Config';
 import { MediaViewer } from './MediaViewer';
 import { EventBus } from '../core/EventBus';
 import { AppStore } from '../store/AppStore';
+import { isChinese } from '../core/DomUtils';
 
 /** Escape HTML special characters to prevent XSS */
 function escapeHtml(s: string): string {
@@ -179,37 +180,59 @@ export class WorkMetadata {
         return !!AppStore.getConfig('translateMode');
     }
 
+    private get cnToJpEnabled(): boolean {
+        return !!AppStore.getConfig('translateCnToJp');
+    }
+
     private async translateTitle(originalTitle: string) {
-        if (!originalTitle || !this.shouldTranslate) return;
-        // Skip translation if title is already in user's language
-        if (TranslationService.isUserLang(originalTitle)) return;
+        const cnOnlyMode = !this.shouldTranslate && this.cnToJpEnabled;
+        if (!originalTitle || (!this.shouldTranslate && !this.cnToJpEnabled)) return;
+        // In CN-only mode, skip non-Chinese titles
+        if (cnOnlyMode && !isChinese(originalTitle)) return;
+        // Skip translation if title is already in user's language (only when doing normal translations)
+        if (!cnOnlyMode && TranslationService.isUserLang(originalTitle)) return;
         try {
-            const translated = await TranslationService.translate(originalTitle);
+            const translated = cnOnlyMode
+                ? await TranslationService.translate(originalTitle, 'ja')
+                : await TranslationService.translate(originalTitle);
             if (translated && translated !== originalTitle) {
                 // Find title element and update
                 const h1 = await SafeUtils.waitForElement('h1.text-h6');
                 if (h1) {
-                    const originalSpan = document.createElement('div');
-                    originalSpan.className = 'text-caption text-grey-5 q-mb-xs asmr-original-title';
-                    originalSpan.textContent = originalTitle;
+                    if (cnOnlyMode) {
+                        // CN→JP: silently replace the title with Japanese
+                        let transEl = h1.parentElement?.querySelector('.asmr-translated-title') as HTMLElement;
+                        if (!transEl) {
+                            transEl = document.createElement('div');
+                            transEl.className = 'text-h6 asmr-translated-title';
+                            h1.parentElement?.insertBefore(transEl, h1.nextSibling);
+                            (h1 as HTMLElement).style.display = 'none';
+                        }
+                        transEl.textContent = translated;
+                        EventBus.emit('title:update', { title: translated });
+                    } else {
+                        const originalSpan = document.createElement('div');
+                        originalSpan.className = 'text-caption text-grey-5 q-mb-xs asmr-original-title';
+                        originalSpan.textContent = originalTitle;
 
-                    if (!h1.parentElement?.querySelector('.asmr-original-title')) {
-                        h1.parentElement?.insertBefore(originalSpan, h1);
+                        if (!h1.parentElement?.querySelector('.asmr-original-title')) {
+                            h1.parentElement?.insertBefore(originalSpan, h1);
+                        }
+
+                        // For the translated title, we create a separate element
+                        // instead of overwriting h1.textContent which is managed by Vue
+                        let transEl = h1.parentElement?.querySelector('.asmr-translated-title') as HTMLElement;
+                        if (!transEl) {
+                            transEl = document.createElement('div');
+                            transEl.className = 'text-h6 asmr-translated-title';
+                            h1.parentElement?.insertBefore(transEl, h1.nextSibling);
+                            (h1 as HTMLElement).style.display = 'none'; // Hide the original Vue-managed H1
+                        }
+                        transEl.textContent = translated;
+
+                        // Update tab bar title via PageTitleManager
+                        EventBus.emit('title:update', { title: translated });
                     }
-
-                    // For the translated title, we create a separate element 
-                    // instead of overwriting h1.textContent which is managed by Vue
-                    let transEl = h1.parentElement?.querySelector('.asmr-translated-title') as HTMLElement;
-                    if (!transEl) {
-                        transEl = document.createElement('div');
-                        transEl.className = 'text-h6 asmr-translated-title';
-                        h1.parentElement?.insertBefore(transEl, h1.nextSibling);
-                        (h1 as HTMLElement).style.display = 'none'; // Hide the original Vue-managed H1
-                    }
-                    transEl.textContent = translated;
-
-                    // Update tab bar title via PageTitleManager
-                    EventBus.emit('title:update', { title: translated });
                 }
             }
         } catch (e) {
@@ -326,9 +349,11 @@ export class WorkMetadata {
 
         // Refresh button (far right via margin-left: auto)
         const refreshBtn = document.createElement('button');
+        refreshBtn.type = 'button';
         refreshBtn.className = 'asmr-meta-refresh';
         refreshBtn.title = I18n.t('metaRefresh');
-        refreshBtn.innerHTML = '<i class="material-icons" style="font-size:16px">refresh</i>';
+        refreshBtn.ariaLabel = I18n.t('metaRefresh');
+        refreshBtn.innerHTML = '<i class="material-icons" style="font-size:16px" aria-hidden="true">refresh</i>';
         refreshBtn.addEventListener('click', () => {
             if (!this.currentWorkId) return;
 
@@ -369,9 +394,11 @@ export class WorkMetadata {
         chipRow.className = 'asmr-meta-chips';
 
         const createChip = (label: string, variant: string, icon?: string) => {
-            const chip = document.createElement('div');
+            const chip = document.createElement('button');
+            chip.type = 'button';
             chip.className = `asmr-chip-tag asmr-chip-tag--${variant}`;
-            chip.innerHTML = `${icon ? `<i class="material-icons asmr-chip-icon">${icon}</i>` : ''}<span class="asmr-chip-label">${escapeHtml(label)}</span>`;
+            chip.ariaLabel = label;
+            chip.innerHTML = `${icon ? `<i class="material-icons asmr-chip-icon" aria-hidden="true">${icon}</i>` : ''}<span class="asmr-chip-label">${escapeHtml(label)}</span>`;
             chip.addEventListener('click', () => {
                 window.open(`https://www.dlsite.com/maniax/fsr/=/keyword/${encodeURIComponent(label)}`, '_blank');
             });
@@ -392,9 +419,10 @@ export class WorkMetadata {
             chipRow.appendChild(chip);
         });
 
-        // Batch translate all added chips (only when translation mode is on)
+        // Batch translate all added chips (only when translation mode or cnToJp is on)
         const batchTranslateChips = async () => {
-            if (!this.shouldTranslate) return;
+            const cnOnlyMode = !this.shouldTranslate && this.cnToJpEnabled;
+            if (!this.shouldTranslate && !this.cnToJpEnabled) return;
             const chips = Array.from(chipRow.querySelectorAll('.asmr-chip-tag')) as HTMLElement[];
             const labelsTranslate: { el: HTMLElement, text: string, id?: number }[] = [];
 
@@ -402,17 +430,20 @@ export class WorkMetadata {
                 const labelEl = chip.querySelector('.asmr-chip-label') as HTMLElement;
                 const text = labelEl?.textContent?.trim() || '';
                 if (!text || !/[\u3040-\u30ff\u4e00-\u9faf]/.test(text)) return;
+                if (cnOnlyMode && !isChinese(text)) return;
 
-                // Try tag pre-translation first
-                const tagIdAttr = chip.getAttribute('data-tag-id'); // We should add this
-                const tagId = tagIdAttr ? parseInt(tagIdAttr, 10) : undefined;
-                if (tagId) {
-                    const tagList = TranslatedTags.getInstance().getTagList();
-                    const match = tagList.find(t => t.id === tagId || t.ja === text);
-                    if (match?.en && match.en !== match.ja) {
-                        labelEl.textContent = TranslationService.formatPair(match.ja, match.en);
-                        chip.title = text;
-                        return;
+                // Try tag pre-translation first (skip in CN-only mode — we want JP, not EN)
+                if (!cnOnlyMode) {
+                    const tagIdAttr = chip.getAttribute('data-tag-id');
+                    const tagId = tagIdAttr ? parseInt(tagIdAttr, 10) : undefined;
+                    if (tagId) {
+                        const tagList = TranslatedTags.getInstance().getTagList();
+                        const match = tagList.find(t => t.id === tagId || t.ja === text);
+                        if (match?.en && match.en !== match.ja) {
+                            labelEl.textContent = TranslationService.formatPair(match.ja, match.en);
+                            chip.title = text;
+                            return;
+                        }
                     }
                 }
 
@@ -421,12 +452,18 @@ export class WorkMetadata {
 
             if (labelsTranslate.length === 0) return;
 
-            const results = await TranslationService.translateBatch(labelsTranslate.map(l => l.text));
+            const targetLang = cnOnlyMode ? 'ja' : undefined;
+            const results = await TranslationService.translateBatch(labelsTranslate.map(l => l.text), targetLang);
             results.forEach((translated, i) => {
                 const item = labelsTranslate[i];
                 if (translated && translated !== item.text && item.el.isConnected) {
-                    item.el.textContent = TranslationService.formatPair(item.text, translated);
-                    (item.el.parentElement as HTMLElement).title = item.text;
+                    if (cnOnlyMode) {
+                        // CN→JP: silently replace
+                        item.el.textContent = translated;
+                    } else {
+                        item.el.textContent = TranslationService.formatPair(item.text, translated);
+                        (item.el.parentElement as HTMLElement).title = item.text;
+                    }
                 }
             });
         };
@@ -453,6 +490,13 @@ export class WorkMetadata {
                         descSection.appendChild(transEl);
                     }
                 });
+            } else if (this.cnToJpEnabled && isChinese(meta.description)) {
+                // CN→JP: replace original text inline
+                TranslationService.translate(meta.description, 'ja').then(translated => {
+                    if (translated && translated !== meta.description) {
+                        descEl.textContent = translated;
+                    }
+                });
             }
 
             content.appendChild(descSection);
@@ -463,10 +507,14 @@ export class WorkMetadata {
         detailsContainer.className = 'asmr-meta-details-container';
 
         const toggleBtn = document.createElement('button');
+        toggleBtn.type = 'button';
         toggleBtn.className = 'asmr-meta-toggle';
+        toggleBtn.ariaExpanded = 'false';
         const updateToggle = (expanded: boolean) => {
             const label = expanded ? I18n.t('metaHideDetails') : I18n.t('metaShowDetails');
-            toggleBtn.innerHTML = `<span>${escapeHtml(label)}</span><i class="material-icons">${expanded ? 'expand_less' : 'expand_more'}</i>`;
+            toggleBtn.ariaExpanded = String(expanded);
+            toggleBtn.ariaLabel = label;
+            toggleBtn.innerHTML = `<span>${escapeHtml(label)}</span><i class="material-icons" aria-hidden="true">${expanded ? 'expand_less' : 'expand_more'}</i>`;
         };
         updateToggle(false);
 
@@ -549,7 +597,9 @@ export class WorkMetadata {
                 grid.className = 'asmr-meta-body-grid';
 
                 const shouldTranslate = this.shouldTranslate;
+                const cnToJp = this.cnToJpEnabled;
                 const transCells: { el: HTMLElement, text: string }[] = [];
+                const cnReplaceCells: { el: HTMLElement, text: string }[] = [];
 
                 paragraphs.forEach(para => {
                     const row = document.createElement('div');
@@ -560,16 +610,22 @@ export class WorkMetadata {
                     origCell.innerHTML = para.replace(/\n/g, '<br>');
                     row.appendChild(origCell);
 
+                    const plainText = origCell.textContent || '';
+
                     if (shouldTranslate) {
                         const transCell = document.createElement('div');
                         transCell.className = 'asmr-meta-body-cell asmr-meta-body-cell--translated';
                         transCell.textContent = '...';
                         row.appendChild(transCell);
 
-                        const plainText = origCell.textContent || '';
                         if (plainText.length > 0) {
                             transCells.push({ el: transCell, text: plainText });
                         }
+                    }
+
+                    // CN→JP: collect CN paragraphs for inline replacement
+                    if (cnToJp && plainText.length > 0 && isChinese(plainText)) {
+                        cnReplaceCells.push({ el: origCell, text: plainText });
                     }
 
                     grid.appendChild(row);
@@ -589,6 +645,18 @@ export class WorkMetadata {
                     }).catch(() => {
                         transCells.forEach(c => c.el.textContent = '');
                     });
+                }
+
+                // CN→JP: translate Chinese paragraphs to Japanese and replace inline
+                if (cnReplaceCells.length > 0) {
+                    TranslationService.translateBatch(cnReplaceCells.map(c => c.text), 'ja').then(results => {
+                        results.forEach((translated, i) => {
+                            const cell = cnReplaceCells[i];
+                            if (translated && translated !== cell.text) {
+                                cell.el.textContent = translated;
+                            }
+                        });
+                    }).catch(() => { /* silent */ });
                 }
 
                 bodySection.appendChild(grid);

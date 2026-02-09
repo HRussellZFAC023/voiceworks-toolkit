@@ -9,7 +9,6 @@
 
 import { GM_getValue, GM_setValue } from '$';
 import { EventBus } from '../core/EventBus';
-import { getAudioElement } from '../core/DomUtils';
 import type {
     PluginConfig,
     ConfigKey,
@@ -81,6 +80,7 @@ const CONFIG_DEFAULTS: PluginConfig = {
 
     // Translation
     preferLocalTranslation: true,
+    translateCnToJp: false,
 
     // UI
     autoProgress: false,
@@ -200,8 +200,6 @@ const DEFAULT_RADIO_STATE: RadioModeState = {
 
 const DEFAULT_LEARNER_STATE: LearnerModeState = {
     isActive: false,
-    currentSegment: null,
-    showJapanese: true,
     segments: [],
 };
 
@@ -349,22 +347,6 @@ class AppStoreImpl {
         this.notifyStateListeners();
     }
 
-    /**
-     * Subscribe to state changes
-     */
-    subscribe(listener: (state: AppState) => void): () => void {
-        this._stateListeners.add(listener);
-        return () => this._stateListeners.delete(listener);
-    }
-
-    /**
-     * Reset state to defaults
-     */
-    resetState(): void {
-        this._state = { ...DEFAULT_APP_STATE };
-        this.notifyStateListeners();
-    }
-
     // =========================================================================
     // Host Store Access (Kikoeru's Vuex Store)
     // =========================================================================
@@ -384,13 +366,6 @@ class AppStoreImpl {
             throw new Error('Host store not initialized');
         }
         return this._hostStore;
-    }
-
-    /**
-     * Check if host store is available
-     */
-    get hasHost(): boolean {
-        return this._hostStore !== null;
     }
 
     /**
@@ -424,20 +399,6 @@ class AppStoreImpl {
     }
 
     /**
-     * Get current queue index from host
-     */
-    get queueIndex(): number {
-        return this.player.queueIndex || 0;
-    }
-
-    /**
-     * Check if audio is playing
-     */
-    get isPlaying(): boolean {
-        return this.player.playing || false;
-    }
-
-    /**
      * Dispatch to host store
      */
     dispatch(action: string, payload?: unknown): Promise<unknown> {
@@ -455,73 +416,6 @@ class AppStoreImpl {
             throw new Error('Host store commit not available');
         }
         this._hostStore.commit(mutation, payload);
-    }
-
-    /**
-     * Watch host store state
-     */
-    watch<T>(
-        getter: (state: typeof this.host.state) => T,
-        callback: (value: T, oldValue: T) => void,
-        options?: { immediate?: boolean }
-    ): (() => void) | undefined {
-        return this._hostStore?.watch?.(getter as (state: any) => T, callback, options);
-    }
-
-    /**
-     * Check if action exists in host store
-     */
-    hasAction(action: string): boolean {
-        return !!this._hostStore?._actions?.[action];
-    }
-
-    // =========================================================================
-    // Convenience Methods
-    // =========================================================================
-
-    /**
-     * Play a track
-     */
-    async playTrack(track: PlayerTrack): Promise<void> {
-        if (this.hasAction('AudioPlayer/playTrack')) {
-            await this.dispatch('AudioPlayer/playTrack', track);
-        } else {
-            this.commit('AudioPlayer/SET_TRACK', 0);
-        }
-    }
-
-    /**
-     * Set queue and play
-     */
-    async setQueueAndPlay(tracks: PlayerTrack[], index = 0): Promise<void> {
-        this.commit('AudioPlayer/SET_QUEUE', { queue: tracks, index });
-        if (tracks[index]) {
-            await this.playTrack(tracks[index]);
-        }
-    }
-
-    /**
-     * Pause playback
-     */
-    pause(): void {
-        if (this.hasAction('AudioPlayer/pause')) {
-            this.dispatch('AudioPlayer/pause');
-        } else {
-            const audio = getAudioElement();
-            audio?.pause();
-        }
-    }
-
-    /**
-     * Resume playback
-     */
-    play(): void {
-        if (this.hasAction('AudioPlayer/play')) {
-            this.dispatch('AudioPlayer/play');
-        } else {
-            const audio = getAudioElement();
-            audio?.play();
-        }
     }
 
     // =========================================================================

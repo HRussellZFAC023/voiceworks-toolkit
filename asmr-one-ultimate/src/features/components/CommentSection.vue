@@ -7,6 +7,7 @@ import { ReviewApi } from '../../api/Review';
 import { DLsiteScraper } from '../DLsiteScraper';
 import { TranslationService } from '../../services/TranslationService';
 import { Logger } from '../../core/Logger';
+import { isChinese } from '../../core/DomUtils';
 import type { DLsiteUserReview } from '../../types/dlsite';
 
 // ---------------------------------------------------------------------------
@@ -16,6 +17,7 @@ import type { DLsiteUserReview } from '../../types/dlsite';
 const bridge = useBridge();
 const { t } = useI18n();
 const translateMode = useConfig('translateMode');
+const cnToJp = useConfig('translateCnToJp');
 const scraper = DLsiteScraper.getInstance();
 
 // ---------------------------------------------------------------------------
@@ -420,8 +422,10 @@ async function fetchDLsiteReviewsData(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 function preTranslateReviews(reviews: DLsiteUserReview[]): void {
-    if (!translateMode.value) return;
+    if (!translateMode.value && !cnToJp.value) return;
+    const cnOnlyMode = !translateMode.value && cnToJp.value;
     const texts: string[] = [];
+    const cnTexts: string[] = [];
     for (const review of reviews) {
         if (!review.text) continue;
         const sanitized = sanitizeReviewText(review.text);
@@ -429,27 +433,38 @@ function preTranslateReviews(reviews: DLsiteUserReview[]): void {
         const paragraphs = sanitized.split(/\n\n+/).map(p => p.trim()).filter(p => p.length > 0);
         for (const para of paragraphs) {
             const plain = htmlToPlainText(para.replace(/\n/g, '<br>'));
-            if (plain.length > 0 && !TranslationService.isUserLang(plain)) {
-                texts.push(plain);
+            if (plain.length === 0) continue;
+            if (cnOnlyMode) {
+                if (isChinese(plain)) cnTexts.push(plain);
+            } else {
+                if (!TranslationService.isUserLang(plain)) texts.push(plain);
+                if (cnToJp.value && isChinese(plain)) cnTexts.push(plain);
             }
         }
     }
-    if (texts.length === 0) return;
-    Logger.debug(`[CommentSection] Pre-translating ${texts.length} paragraphs in bulk`);
-    TranslationService.translateBatch(texts).then(() => {
-        Logger.debug(`[CommentSection] Pre-translation complete`);
-    }).catch(err => {
-        Logger.error(`[CommentSection] Pre-translation failed`, err);
-    });
+    if (texts.length > 0) {
+        Logger.debug(`[CommentSection] Pre-translating ${texts.length} paragraphs in bulk`);
+        TranslationService.translateBatch(texts).then(() => {
+            Logger.debug(`[CommentSection] Pre-translation complete`);
+        }).catch(err => {
+            Logger.error(`[CommentSection] Pre-translation failed`, err);
+        });
+    }
+    if (cnTexts.length > 0) {
+        Logger.debug(`[CommentSection] Pre-translating ${cnTexts.length} CN→JA paragraphs`);
+        TranslationService.translateBatch(cnTexts, 'ja').catch(err => {
+            Logger.error(`[CommentSection] CN→JA pre-translation failed`, err);
+        });
+    }
 }
 
-async function translateParagraphs(reviewIdx: number, paragraphs: string[]): Promise<void> {
+async function translateParagraphs(reviewIdx: number, paragraphs: string[], targetLang?: string): Promise<void> {
     const plainTexts = paragraphs.map(p => htmlToPlainText(p));
     const validTexts = plainTexts.filter(t => t.length > 0);
     if (validTexts.length === 0) return;
 
     try {
-        const results = await TranslationService.translateBatch(validTexts);
+        const results = await TranslationService.translateBatch(validTexts, targetLang);
         let validIdx = 0;
         for (let paraIdx = 0; paraIdx < paragraphs.length; paraIdx++) {
             const plain = plainTexts[paraIdx];
@@ -472,6 +487,15 @@ async function translateParagraphs(reviewIdx: number, paragraphs: string[]): Pro
 
 function getTranslation(reviewIdx: number, paraIdx: number): string | undefined {
     return translations.value[`${reviewIdx}:${paraIdx}`];
+}
+
+/** In CN→JP mode (translateMode off), replace CN paragraph text with JP translation inline */
+function getCnToJpDisplay(para: string, reviewIdx: number, paraIdx: number): string {
+    if (translateMode.value || !cnToJp.value) return para;
+    const plain = htmlToPlainText(para);
+    if (!isChinese(plain)) return para;
+    const translation = getTranslation(reviewIdx, paraIdx);
+    return translation || para;
 }
 
 // ---------------------------------------------------------------------------
@@ -724,13 +748,14 @@ watch(workIdFromRoute, (newId, oldId) => {
     }
 }, { immediate: true });
 
-// Trigger translations when reviews load and translateMode is on
-watch([dlsiteLoaded, translateMode], ([loaded, shouldTranslate]) => {
-    if (loaded && shouldTranslate) {
+// Trigger translations when reviews load and translateMode or cnToJp is on
+watch([dlsiteLoaded, translateMode, cnToJp], ([loaded, shouldTranslate, cnToJpOn]) => {
+    if (loaded && (shouldTranslate || cnToJpOn)) {
+        const cnOnlyMode = !shouldTranslate && cnToJpOn;
         validDlsiteReviews.value.forEach((review, idx) => {
             const paragraphs = getReviewParagraphs(review);
             if (paragraphs.length > 0) {
-                translateParagraphs(idx, paragraphs);
+                translateParagraphs(idx, paragraphs, cnOnlyMode ? 'ja' : undefined);
             }
         });
     }
@@ -782,13 +807,15 @@ const saveStatusClass = computed(() => {
 <template>
     <div class="asmr-comments-section q-mb-md" data-asmr-comments="1">
         <!-- Header (always visible, clickable to expand) -->
-        <div class="asmr-comments-header" @click="toggleExpand">
+        <button class="asmr-comments-header" @click="toggleExpand"
+                :aria-expanded="isExpanded"
+                :aria-label="t('commentsHeader')">
             <i class="material-icons asmr-comments-header-icon">forum</i>
             <span class="asmr-comments-header-label">{{ t('commentsHeader') }}</span>
             <span v-if="reviewCount > 0" class="asmr-comments-badge">{{ reviewCount }}</span>
             <i class="material-icons asmr-comments-chevron"
                :class="{ 'asmr-comments-chevron--expanded': isExpanded }">expand_more</i>
-        </div>
+        </button>
 
         <!-- Body (collapsible) -->
         <div class="asmr-comments-body"
@@ -841,13 +868,14 @@ const saveStatusClass = computed(() => {
                     </div>
 
                     <!-- Fetch error -->
-                    <div v-else-if="isExpanded && dlsiteLoaded && validDlsiteReviews.length === 0 && dlsiteFetchFailed"
-                         class="asmr-comments-fetch-error cursor-pointer"
-                         title="Click to open settings"
-                         @click.stop="onFetchErrorClick">
+                    <button v-else-if="isExpanded && dlsiteLoaded && validDlsiteReviews.length === 0 && dlsiteFetchFailed"
+                            class="asmr-comments-fetch-error cursor-pointer"
+                            title="Click to open settings"
+                            aria-label="Click to open settings"
+                            @click.stop="onFetchErrorClick">
                         <i class="material-icons">cloud_off</i>
                         <span>{{ t('commentsFetchFailed') }}</span>
-                    </div>
+                    </button>
 
                     <!-- DLsite reviews list -->
                     <template v-else-if="isExpanded && dlsiteLoaded && validDlsiteReviews.length > 0">
@@ -883,7 +911,7 @@ const saveStatusClass = computed(() => {
                                          class="asmr-comments-review-row">
                                         <!-- eslint-disable-next-line vue/no-v-html -->
                                         <div class="asmr-comments-review-cell asmr-comments-review-cell--original"
-                                             v-html="para" />
+                                             v-html="getCnToJpDisplay(para, reviewIdx, paraIdx)" />
                                         <div v-if="translateMode"
                                              class="asmr-comments-review-cell asmr-comments-review-cell--translated">
                                             {{ getTranslation(reviewIdx, paraIdx) ?? '...' }}
@@ -921,5 +949,31 @@ const saveStatusClass = computed(() => {
  */
 textarea.asmr-comments-textarea {
     box-sizing: border-box;
+}
+
+/*
+ * Reset button styling for accessible interactive elements
+ * (header toggle and fetch-error action).
+ */
+button.asmr-comments-header {
+    background: none;
+    border: none;
+    width: 100%;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    font: inherit;
+    color: inherit;
+}
+
+button.asmr-comments-fetch-error {
+    background: none;
+    border: none;
+    width: 100%;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    font: inherit;
+    color: inherit;
 }
 </style>

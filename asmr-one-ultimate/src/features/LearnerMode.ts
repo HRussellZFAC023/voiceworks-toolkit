@@ -470,17 +470,23 @@ export class LearnerMode {
         this.lastSecondaryShown = '';
         this.lastWhisperDisplayText = '';
         this.translationToken += 1;
-        // Don't clearDisplay() — leave current text visible to avoid blank flash
-        // The seeked handler and next updateLyrics() will populate the correct text
+        // Immediately update display so subtitles track the scrub position in real-time
+        this.updateLyrics();
     };
 
     private seekedDebounceTimer: number | null = null;
     private handleAudioSeeked = () => {
+        // Final refresh when user releases scrubber — reset dedup for clean state
+        this.lastText = '';
+        this.lastDisplayedText = '';
+        this.lastSecondaryShown = '';
+        this.lastWhisperDisplayText = '';
+        this.translationToken += 1;
         if (this.seekedDebounceTimer) clearTimeout(this.seekedDebounceTimer);
         this.seekedDebounceTimer = window.setTimeout(() => {
             this.seekedDebounceTimer = null;
             this.updateLyrics();
-        }, 50);
+        }, 30);
     };
 
 
@@ -549,6 +555,8 @@ export class LearnerMode {
         if (!this.overflowMenu) {
             this.overflowMenu = document.createElement('div');
             this.overflowMenu.className = 'learner-overflow-menu hidden';
+            this.overflowMenu.setAttribute('role', 'menu');
+            this.overflowMenu.ariaLabel = I18n.t('more') || 'More options';
             document.body.appendChild(this.overflowMenu);
 
             // P4 FIX: Add permanent items (Whisper + Host Proxies)
@@ -874,15 +882,16 @@ export class LearnerMode {
         const div = document.createElement('div');
         div.className = className;
         div.setAttribute('aria-live', 'polite');
-        div.innerHTML = `<div class="learner-jp" role="status"></div><div class="learner-en"></div>`;
-        const en = div.querySelector('.learner-en') as HTMLElement;
+        div.innerHTML = `<div class="learner-jp" role="status"></div><button class="learner-en"></button>`;
+        const en = div.querySelector('.learner-en') as HTMLButtonElement;
         if (this.isBlurEnabled) en.classList.add('blurred');
         if (!Config.get('enablePlayerTranslator')) en.style.display = 'none';
 
         // Accessibility for blur toggle
-        en.setAttribute('role', 'button');
-        en.setAttribute('tabindex', '0');
-        en.ariaLabel = I18n.t('toggleBlur') || 'Toggle Blur';
+        en.ariaLabel = this.isBlurEnabled
+            ? (I18n.t('revealTranslation') || 'Reveal translation')
+            : (I18n.t('hideTranslation') || 'Hide translation');
+        en.setAttribute('aria-pressed', String(!this.isBlurEnabled));
 
         const toggleHandler = (e: Event) => {
             e.preventDefault();
@@ -891,11 +900,6 @@ export class LearnerMode {
         };
 
         en.addEventListener('click', toggleHandler);
-        en.addEventListener('keydown', (e: KeyboardEvent) => {
-            if (e.key === 'Enter' || e.key === ' ') {
-                toggleHandler(e);
-            }
-        });
         return div;
     }
 
@@ -908,6 +912,10 @@ export class LearnerMode {
     private applyBlurState() {
         for (const e of this.getEnEls()) {
             e.classList.toggle('blurred', this.isBlurEnabled);
+            e.ariaLabel = this.isBlurEnabled
+                ? (I18n.t('revealTranslation') || 'Reveal translation')
+                : (I18n.t('hideTranslation') || 'Hide translation');
+            e.setAttribute('aria-pressed', String(!this.isBlurEnabled));
         }
     }
 
@@ -1068,10 +1076,11 @@ export class LearnerMode {
                         primaryForDisplay = fullText;
                         const words = display.activeLine?.words;
                         let indices = { splitIdx: 0, hlStart: 0 };
-                        if (Array.isArray(words) && words.length > 0 && display.now != null) {
-                            indices = this.computeWordKaraokeIndices(fullText, words, display.now);
-                        } else if (display.activeLine && display.now != null) {
-                            indices = this.computeTimeFallbackKaraokeIndices(fullText, display.activeLine, display.now);
+                        const karaokeTime = display.audioTime ?? display.now;
+                        if (Array.isArray(words) && words.length > 0 && karaokeTime != null) {
+                            indices = this.computeWordKaraokeIndices(fullText, words, karaokeTime);
+                        } else if (display.activeLine && karaokeTime != null) {
+                            indices = this.computeTimeFallbackKaraokeIndices(fullText, display.activeLine, karaokeTime);
                         }
                         wSplitIdx = indices.splitIdx;
                         // Segment ON (fill-up): hlStart=0, all spoken text in accent
@@ -1085,24 +1094,19 @@ export class LearnerMode {
                     const ft = display.fullText || display.displayText;
                     const words = display.activeLine?.words;
                     let indices = { splitIdx: 0, hlStart: 0 };
-                    if (Array.isArray(words) && words.length > 0 && display.now != null) {
-                        indices = this.computeWordKaraokeIndices(ft, words, display.now);
-                    } else if (display.activeLine && display.now != null) {
-                        indices = this.computeTimeFallbackKaraokeIndices(ft, display.activeLine, display.now);
+                    const karaokeTime = display.audioTime ?? display.now;
+                    if (Array.isArray(words) && words.length > 0 && karaokeTime != null) {
+                        indices = this.computeWordKaraokeIndices(ft, words, karaokeTime);
+                    } else if (display.activeLine && karaokeTime != null) {
+                        indices = this.computeTimeFallbackKaraokeIndices(ft, display.activeLine, karaokeTime);
                     }
                     const newSplitIdx = indices.splitIdx;
                     const newHlStart = !!Config.get('segmentMode') ? 0 : indices.hlStart;
                     this.updatePrimaryLine(this.lastWhisperDisplayText, newSplitIdx, newHlStart);
                 } else if (!display.displayText) {
-                    // Between segments (gap/silence) — clear stale text.
-                    // Whisper segments have precise endTimes, so gaps are intentional.
-                    if (this.lastWhisperDisplayText) {
-                        this.updatePrimaryLine('');
-                        this.updateSecondaryLine('', false);
-                        this.lastWhisperDisplayText = '';
-                        this.lastDisplayedText = '';
-                        this.lastSecondaryShown = '';
-                    }
+                    // Between segments (gap/silence) — hold previous text visible.
+                    // Clearing causes blank flashes and content shift. The next segment
+                    // will naturally replace the text when it arrives.
                 }
                 this.updateVisibility();
                 return;
@@ -1235,10 +1239,11 @@ export class LearnerMode {
             primaryText = fullText;
             const words = display.activeLine?.words;
             let indices = { splitIdx: 0, hlStart: 0 };
-            if (Array.isArray(words) && words.length > 0 && display.now != null) {
-                indices = this.computeWordKaraokeIndices(fullText, words, display.now);
-            } else if (display.activeLine && display.now != null) {
-                indices = this.computeTimeFallbackKaraokeIndices(fullText, display.activeLine, display.now);
+            const karaokeTime = display.audioTime ?? display.now;
+            if (Array.isArray(words) && words.length > 0 && karaokeTime != null) {
+                indices = this.computeWordKaraokeIndices(fullText, words, karaokeTime);
+            } else if (display.activeLine && karaokeTime != null) {
+                indices = this.computeTimeFallbackKaraokeIndices(fullText, display.activeLine, karaokeTime);
             }
             splitIdx = indices.splitIdx;
             // Segment ON (fill-up): hlStart=0, all spoken text in accent
@@ -1314,6 +1319,89 @@ export class LearnerMode {
         }
     }
 
+    /** Max characters per subtitle display chunk. Whisper segments exceeding this are split at word boundaries. */
+    private static readonly MAX_SUBTITLE_CHARS = 70;
+
+    /**
+     * Split whisper segments that exceed MAX_SUBTITLE_CHARS into shorter display-friendly chunks.
+     * Uses word timestamps for accurate splitting; falls back to linear time interpolation.
+     */
+    private splitLongSegments(
+        lines: { time: number; endTime?: number; text: string; words?: Array<{ start: number; end: number; text: string }> }[]
+    ): typeof lines {
+        const max = LearnerMode.MAX_SUBTITLE_CHARS;
+        const result: typeof lines = [];
+        const punctuation = /[。！？\n]/;
+
+        for (const line of lines) {
+            const text = line.text.trim();
+            if (text.length <= max) { result.push(line); continue; }
+
+            if (line.words?.length) {
+                // Word-timestamp path: accumulate words into chunks
+                let chunkWords: typeof line.words = [];
+                let chunkText = '';
+
+                for (const word of line.words) {
+                    const wt = (word.text || '').trim();
+                    if (!wt) continue;
+                    const candidate = chunkText + wt;
+
+                    if (chunkText.length > 0 && candidate.length > max) {
+                        // Emit current chunk
+                        result.push({
+                            time: chunkWords[0].start,
+                            endTime: chunkWords[chunkWords.length - 1].end,
+                            text: chunkText.trim(),
+                            words: chunkWords,
+                        });
+                        chunkWords = [word];
+                        chunkText = wt;
+                    } else {
+                        chunkWords.push(word);
+                        chunkText = candidate;
+                        // Prefer splitting at sentence-ending punctuation near the limit
+                        if (chunkText.length >= max * 0.6 && punctuation.test(wt.slice(-1))) {
+                            result.push({
+                                time: chunkWords[0].start,
+                                endTime: chunkWords[chunkWords.length - 1].end,
+                                text: chunkText.trim(),
+                                words: chunkWords,
+                            });
+                            chunkWords = [];
+                            chunkText = '';
+                        }
+                    }
+                }
+                // Remaining words
+                if (chunkWords.length > 0) {
+                    result.push({
+                        time: chunkWords[0].start,
+                        endTime: chunkWords[chunkWords.length - 1].end,
+                        text: chunkText.trim(),
+                        words: chunkWords,
+                    });
+                }
+            } else {
+                // No word timestamps: split by characters with linear time interpolation
+                const duration = (line.endTime ?? line.time) - line.time;
+                const chars = Array.from(text);
+                const totalChars = chars.length;
+                for (let offset = 0; offset < totalChars; offset += max) {
+                    const chunk = chars.slice(offset, offset + max).join('');
+                    const startFrac = offset / totalChars;
+                    const endFrac = Math.min(1, (offset + chunk.length) / totalChars);
+                    result.push({
+                        time: line.time + duration * startFrac,
+                        endTime: line.time + duration * endFrac,
+                        text: chunk,
+                    });
+                }
+            }
+        }
+        return result;
+    }
+
     private handleWhisperUpdate(payload: WhisperUpdatePayload): void {
         // P2 FIX: Always accept updates, let updateLyrics decide whether to show them
         if (!payload) return;
@@ -1329,12 +1417,13 @@ export class LearnerMode {
         this.whisperText = payload.text || '';
         this.ensureWhisperTicker(this.whisperLive ? 80 : 200);
         if (Array.isArray(payload.segments) && payload.segments.length > 0) {
-            const newWhisperLines = payload.segments.map((segment) => ({
+            const mapped = payload.segments.map((segment) => ({
                 time: segment.start,
                 endTime: segment.end,
                 text: segment.text,
                 words: segment.words,
             }));
+            const newWhisperLines = this.splitLongSegments(mapped);
 
             // Pre-translate whisper segments in background — but only for cached loads.
             // During live whisper, Whisper.translateNewSegments() handles delta translation
@@ -2231,20 +2320,23 @@ export class LearnerMode {
     ): { time: number; endTime?: number; text: string } | null {
         if (lines.length === 0) return null;
 
-        // Find the last segment that started before or at 'now'
-        let activeLine: { time: number; endTime?: number; text: string } | null = null;
+        let activeIdx = -1;
         for (let i = lines.length - 1; i >= 0; i--) {
-            const line = lines[i];
-            if (line.time <= now) {
-                activeLine = line;
-                break;
-            }
+            if (lines[i].time <= now) { activeIdx = i; break; }
         }
 
-        if (!activeLine) return null;
+        if (activeIdx < 0) return null;
+        const activeLine = lines[activeIdx];
 
         if (activeLine.endTime && now >= activeLine.endTime) {
-            return null; // Segment has ended
+            const nextLine = lines[activeIdx + 1];
+            // No next line — hold the last segment visible (during live transcription
+            // the worker hasn't caught up; at end of transcript it's the final line)
+            if (!nextLine) return activeLine;
+            // Short gap between existing segments — hold to prevent flash
+            if ((nextLine.time - activeLine.endTime) < 2.0) return activeLine;
+            // Long gap between existing segments — genuine silence
+            return null;
         }
 
         return activeLine;
@@ -2307,31 +2399,33 @@ export class LearnerMode {
         return this.getTextFromTimelineFor(this.whisperLines, this.effectiveLead(this.whisperLeadSec), true);
     }
 
-    private getWhisperDisplay(): { displayText: string; fullText: string; activeLine?: any; now?: number } {
+    private getWhisperDisplay(): { displayText: string; fullText: string; activeLine?: any; now?: number; audioTime?: number } {
         const audio = getAudioElement();
         if (!audio || this.whisperLines.length === 0) return { displayText: '', fullText: '' };
-        const now = audio.currentTime + Math.max(0, this.effectiveLead(this.whisperLeadSec));
+        const audioTime = audio.currentTime;
+        const now = audioTime + Math.max(0, this.effectiveLead(this.whisperLeadSec));
         const activeLine = this.findActiveLine(this.whisperLines, now);
         if (!activeLine || !activeLine.text) return { displayText: '', fullText: '' };
         const fullText = activeLine.text.trim();
         const displayText = this.getProgressiveText(activeLine, now);
-        return { displayText, fullText, activeLine, now };
+        return { displayText, fullText, activeLine, now, audioTime };
     }
 
     /**
      * Get progressive subtitle display for regular lyrics (VTT/LRC).
      * Returns both the progressive (word-by-word) text and the full segment text.
      */
-    private getSubtitleDisplay(): { displayText: string; fullText: string; activeLine?: any; now?: number } {
+    private getSubtitleDisplay(): { displayText: string; fullText: string; activeLine?: any; now?: number; audioTime?: number } {
         const audio = getAudioElement();
         if (!audio || this.currentLyrics.length === 0) return { displayText: '', fullText: '' };
-        const now = audio.currentTime + this.effectiveLead(this.subtitleLeadSec);
+        const audioTime = audio.currentTime;
+        const now = audioTime + this.effectiveLead(this.subtitleLeadSec);
         const activeLine = this.findActiveLine(this.currentLyrics, now);
         if (!activeLine || !activeLine.text) return { displayText: '', fullText: '' };
         const fullText = activeLine.text.trim();
         // Always use progressive display for word-by-word reveal
         const displayText = this.getProgressiveText(activeLine, now);
-        return { displayText, fullText, activeLine, now };
+        return { displayText, fullText, activeLine, now, audioTime };
     }
 
     private getProgressiveText(line: { time: number; endTime?: number; text: string }, now: number): string {
@@ -2382,6 +2476,7 @@ export class LearnerMode {
 
         for (const e of this.getJpEls()) {
             const isCollapsed = !!e.closest('.learner-subs-collapsed');
+            const prevText = e.textContent || '';
             if (karaokeEnabled && !isCollapsed && splitIdx >= 0 && hlStart >= 0 && text) {
                 // 3-way: past (primary) | current word (accent) | upcoming (dim or hidden)
                 const chars = Array.from(text);
@@ -2403,6 +2498,12 @@ export class LearnerMode {
                 e.appendChild(upcomingSpan);
             } else {
                 e.textContent = text;
+            }
+            // Smooth fade-in when segment text changes (reduces content shift)
+            if (text && prevText && text !== prevText) {
+                e.classList.remove('segment-fade');
+                void (e as HTMLElement).offsetWidth; // force reflow to restart animation
+                e.classList.add('segment-fade');
             }
         }
     }
@@ -2437,7 +2538,7 @@ export class LearnerMode {
         for (let i = 0; i < words.length; i++) {
             const wText = (words[i].text || '').trim();
             const wChars = Array.from(wText).length;
-            if (words[i].start <= now + 0.01) {
+            if (words[i].end <= now + 0.05) {
                 hlStart = charOffset;
                 splitIdx = charOffset + wChars;
                 foundAny = true;

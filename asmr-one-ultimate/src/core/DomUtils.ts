@@ -20,18 +20,6 @@ export function findButtonByText(labels: string[], root?: Element): HTMLElement 
 }
 
 /**
- * Find a button by icon name
- */
-export function findIconButton(iconName: string, scope?: string): HTMLElement | null {
-    const root = scope ? document.querySelector(scope) : document;
-    if (!root) return null;
-
-    const icons = Array.from(root.querySelectorAll('.q-icon, .material-icons')) as HTMLElement[];
-    const match = icons.find(el => el.textContent?.trim() === iconName);
-    return (match?.closest('.q-btn') as HTMLElement) ?? null;
-}
-
-/**
  * Find all play buttons in a container
  */
 export function findPlayButtons(container?: Element): HTMLElement[] {
@@ -52,15 +40,6 @@ export function findAudioItems(container?: Element): HTMLElement[] {
         const text = el.textContent?.toLowerCase() || '';
         return audioExtensions.some(ext => text.includes(ext));
     });
-}
-
-/**
- * Check if an element contains audio file text
- */
-export function isAudioFileElement(element: Element): boolean {
-    const audioExtensions = ['.wav', '.mp3', '.flac', '.m4a', '.aac', '.ogg', '.opus', '.wma'];
-    const text = element.textContent?.toLowerCase() || '';
-    return audioExtensions.some(ext => text.includes(ext));
 }
 
 // ============================================================================
@@ -150,75 +129,6 @@ export function injectStyles(id: string, css: string): HTMLStyleElement {
 export function removeStyles(id: string): void {
     const style = document.getElementById(id);
     style?.remove();
-}
-
-// ============================================================================
-// Mutation Observer Helpers
-// ============================================================================
-
-/**
- * Create a mutation observer that watches for element additions
- */
-export function observeElementAdditions(
-    callback: (addedNodes: Node[]) => void,
-    options?: {
-        root?: Element;
-        subtree?: boolean;
-    }
-): MutationObserver {
-    const observer = new MutationObserver(mutations => {
-        const addedNodes: Node[] = [];
-        for (const mutation of mutations) {
-            if (mutation.addedNodes.length) {
-                addedNodes.push(...Array.from(mutation.addedNodes));
-            }
-        }
-        if (addedNodes.length) {
-            callback(addedNodes);
-        }
-    });
-
-    observer.observe(options?.root || document.body, {
-        childList: true,
-        subtree: options?.subtree ?? true,
-    });
-
-    return observer;
-}
-
-/**
- * Watch for an element and call callback when it appears
- */
-export function watchForElement(
-    selector: string,
-    callback: (element: Element) => void,
-    options?: { once?: boolean }
-): MutationObserver {
-    // Check if already exists
-    const existing = document.querySelector(selector);
-    if (existing) {
-        callback(existing);
-        if (options?.once) {
-            return new MutationObserver(() => {}); // Return no-op observer
-        }
-    }
-
-    const observer = new MutationObserver(() => {
-        const element = document.querySelector(selector);
-        if (element) {
-            callback(element);
-            if (options?.once) {
-                observer.disconnect();
-            }
-        }
-    });
-
-    observer.observe(document.body, {
-        childList: true,
-        subtree: true,
-    });
-
-    return observer;
 }
 
 // ============================================================================
@@ -314,18 +224,6 @@ export function isDarkMode(): boolean {
         document.body.classList.contains('q-dark');
 }
 
-/**
- * Get appropriate colors based on current theme
- */
-export function getThemeColors(): { bg: string; text: string; accent: string } {
-    const dark = isDarkMode();
-    return {
-        bg: dark ? '#1d1d1d' : '#ffffff',
-        text: dark ? '#ffffff' : '#000000',
-        accent: 'var(--asmr-accent, #f06292)',
-    };
-}
-
 // ============================================================================
 // Scroll Utilities
 // ============================================================================
@@ -341,15 +239,29 @@ export function scrollIntoView(element: Element, options?: ScrollIntoViewOptions
     });
 }
 
+// ============================================================================
+// Text Extraction
+// ============================================================================
+
 /**
- * Check if an element is in the viewport
+ * Get clean text from an element, stripping JPDB furigana annotations.
+ * Checks data-jpdb-original attribute first, then falls back to stripping
+ * <rt>/<rp> elements from ruby annotations.
  */
-export function isInViewport(element: Element): boolean {
-    const rect = element.getBoundingClientRect();
-    return (
-        rect.top >= 0 &&
-        rect.left >= 0 &&
-        rect.bottom <= (window.innerHeight || document.documentElement.clientHeight) &&
-        rect.right <= (window.innerWidth || document.documentElement.clientWidth)
-    );
+export function getCleanText(el: Element): string {
+    const original = el.getAttribute('data-jpdb-original');
+    if (original) return original.trim();
+
+    if (el.querySelector('rt')) {
+        const clone = el.cloneNode(true) as Element;
+        clone.querySelectorAll('rt, rp').forEach(e => e.remove());
+        return clone.textContent?.trim() || '';
+    }
+
+    return el.textContent?.trim() || '';
+}
+
+/** CJK ideographs present but no Japanese kana → likely Chinese */
+export function isChinese(text: string): boolean {
+    return /[\u4e00-\u9fff]/.test(text) && !/[\u3040-\u309f\u30a0-\u30ff]/.test(text);
 }

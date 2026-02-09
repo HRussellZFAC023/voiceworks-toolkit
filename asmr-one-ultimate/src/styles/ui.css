@@ -414,6 +414,7 @@
 /* Active control button - accent color with icon inheritance */
 .learner-control-btn.learner-btn-active {
   color: var(--asmr-accent) !important;
+  background: color-mix(in srgb, var(--asmr-accent) 10%, transparent) !important;
 }
 
 .learner-control-btn.learner-btn-active i {

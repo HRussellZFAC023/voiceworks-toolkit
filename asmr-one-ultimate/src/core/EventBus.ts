@@ -28,14 +28,6 @@ interface ListenerEntry<T> {
 
 class EventBusImpl {
     private listeners = new Map<string, Set<ListenerEntry<unknown>>>();
-    private debugMode = false;
-
-    /**
-     * Enable debug logging for all events
-     */
-    setDebugMode(enabled: boolean): void {
-        this.debugMode = enabled;
-    }
 
     /**
      * Subscribe to an event
@@ -83,10 +75,6 @@ class EventBusImpl {
      * Emit an event to all subscribers
      */
     emit<E extends AppEventName>(event: E, payload: AppEventPayload<E>): void {
-        if (this.debugMode) {
-            Logger.debug(`[EventBus] ${event}`, payload);
-        }
-
         const eventListeners = this.listeners.get(event);
         if (!eventListeners) return;
 
@@ -154,26 +142,6 @@ class EventBusImpl {
             }
         });
     }
-
-
-    /**
-     * Bridge window CustomEvents to EventBus
-     */
-    bridgeWindowEvent<E extends AppEventName>(
-        windowEventName: string,
-        busEvent: E,
-        transform?: (detail: unknown) => AppEventPayload<E>
-    ): () => void {
-        const handler = (e: Event) => {
-            const detail = (e as CustomEvent).detail;
-            const payload = transform ? transform(detail) : (detail as AppEventPayload<E>);
-            this.emit(busEvent, payload);
-        };
-
-        window.addEventListener(windowEventName, handler);
-        return () => window.removeEventListener(windowEventName, handler);
-    }
-
 
 
     // =========================================================================

@@ -596,6 +596,8 @@ const credits = [
                             class="q-btn q-btn-item non-selectable no-outline q-btn--standard q-btn--rectangle q-btn--actionable q-focusable q-hoverable"
                             :class="{ disabled: whisperDownloadDisabled }"
                             :disabled="whisperDownloadDisabled"
+                            :aria-label="t('downloadWhisperModel') || 'Download Whisper model'"
+                            :title="t('downloadWhisperModel') || 'Download Whisper model'"
                             @click="downloadWhisperModel"
                         >
                             <span class="q-focus-helper"></span>
@@ -624,6 +626,8 @@ const credits = [
             <div id="asmr-translation-settings-section" class="asmr-settings-section rounded-borders q-list q-list--bordered q-list--dark bg-black" role="group" aria-labelledby="asmr-translation-settings-section-header">
                 <SettingsToggle config-key="preferLocalTranslation" :label="t('preferLocalTranslation')" :sublabel="t('preferLocalTranslationSub')" icon="offline_bolt" @change="onToggleChange" />
                 <hr class="q-separator q-separator--horizontal q-separator--dark">
+                <SettingsToggle config-key="translateCnToJp" :label="t('translateCnToJp')" :sublabel="t('translateCnToJpSub')" icon="swap_horiz" />
+                <hr class="q-separator q-separator--horizontal q-separator--dark">
 
                 <!-- Download Translation Model -->
                 <div role="listitem" class="q-py-sm q-item q-item-type row no-wrap q-item--dark">
@@ -643,6 +647,8 @@ const credits = [
                             class="q-btn q-btn-item non-selectable no-outline q-btn--standard q-btn--rectangle q-btn--actionable q-focusable q-hoverable"
                             :class="{ disabled: translationDownloadDisabled }"
                             :disabled="translationDownloadDisabled"
+                            :aria-label="t('downloadModel') || 'Download translation model'"
+                            :title="t('downloadModel') || 'Download translation model'"
                             @click="downloadTranslationModel"
                         >
                             <span class="q-focus-helper"></span>
@@ -668,6 +674,8 @@ const credits = [
                             tabindex="0"
                             type="button"
                             class="q-btn q-btn-item non-selectable no-outline q-btn--standard q-btn--rectangle q-btn--actionable q-focusable q-hoverable"
+                            :aria-label="t('clearTranslationCache') || 'Clear translation cache'"
+                            :title="t('clearTranslationCache') || 'Clear translation cache'"
                             @click="clearTranslationCache"
                         >
                             <span class="q-focus-helper"></span>
@@ -756,8 +764,8 @@ const credits = [
                         <div class="q-item__label q-item__label--caption text-caption">{{ t('backupSettingsSub') }}</div>
                     </div>
                     <div class="q-item__section column q-item__section--side justify-center">
-                        <button type="button" class="q-btn q-btn-item non-selectable no-outline q-btn--standard q-btn--rectangle q-btn--actionable q-focusable q-hoverable" @click="backupSettings">
-                            <span class="q-btn__content text-center col items-center row"><i class="q-icon notranslate material-icons">download</i></span>
+                        <button type="button" class="q-btn q-btn-item non-selectable no-outline q-btn--standard q-btn--rectangle q-btn--actionable q-focusable q-hoverable" :aria-label="t('backupSettings') || 'Backup settings'" :title="t('backupSettings') || 'Backup settings'" @click="backupSettings">
+                            <span class="q-btn__content text-center col items-center row"><i class="q-icon notranslate material-icons" aria-hidden="true" role="presentation">download</i></span>
                         </button>
                     </div>
                 </div>
@@ -773,8 +781,8 @@ const credits = [
                         <div class="q-item__label q-item__label--caption text-caption">{{ t('restoreSettingsSub') }}</div>
                     </div>
                     <div class="q-item__section column q-item__section--side justify-center">
-                        <button type="button" class="q-btn q-btn-item non-selectable no-outline q-btn--standard q-btn--rectangle q-btn--actionable q-focusable q-hoverable" @click="restoreSettings">
-                            <span class="q-btn__content text-center col items-center row"><i class="q-icon notranslate material-icons">upload</i></span>
+                        <button type="button" class="q-btn q-btn-item non-selectable no-outline q-btn--standard q-btn--rectangle q-btn--actionable q-focusable q-hoverable" :aria-label="t('restoreSettings') || 'Restore settings'" :title="t('restoreSettings') || 'Restore settings'" @click="restoreSettings">
+                            <span class="q-btn__content text-center col items-center row"><i class="q-icon notranslate material-icons" aria-hidden="true" role="presentation">upload</i></span>
                         </button>
                     </div>
                 </div>
@@ -790,8 +798,8 @@ const credits = [
                         <div class="q-item__label q-item__label--caption text-caption">{{ t('factoryResetSub') }}</div>
                     </div>
                     <div class="q-item__section column q-item__section--side justify-center">
-                        <button type="button" class="q-btn q-btn-item non-selectable no-outline q-btn--standard q-btn--rectangle q-btn--actionable q-focusable q-hoverable asmr-nuke-btn" @click="factoryReset">
-                            <span class="q-btn__content text-center col items-center row"><i class="q-icon notranslate material-icons">warning</i></span>
+                        <button type="button" class="q-btn q-btn-item non-selectable no-outline q-btn--standard q-btn--rectangle q-btn--actionable q-focusable q-hoverable asmr-nuke-btn" :aria-label="t('factoryReset') || 'Factory reset'" :title="t('factoryReset') || 'Factory reset'" @click="factoryReset">
+                            <span class="q-btn__content text-center col items-center row"><i class="q-icon notranslate material-icons" aria-hidden="true" role="presentation">warning</i></span>
                         </button>
                     </div>
                 </div>
@@ -840,7 +848,7 @@ const credits = [
                     <div class="q-item__label q-item__label--caption text-caption">{{ t('readmeDocsSub') }}</div>
                 </div>
                 <div class="q-item__section column q-item__section--side justify-center">
-                    <a :href="GITHUB_URL" target="_blank" rel="noopener noreferrer" class="q-btn q-btn-item non-selectable no-outline q-btn--standard q-btn--rectangle q-btn--actionable q-focusable q-hoverable" style="text-decoration: none">
+                    <a :href="GITHUB_URL" target="_blank" rel="noopener noreferrer" class="q-btn q-btn-item non-selectable no-outline q-btn--standard q-btn--rectangle q-btn--actionable q-focusable q-hoverable" style="text-decoration: none" :aria-label="t('readmeDocs') || 'Documentation & Source'" :title="t('readmeDocs') || 'Documentation & Source'">
                         <span class="q-btn__content text-center col items-center q-anchor--skip justify-center row">
                             <i class="q-icon notranslate material-icons" aria-hidden="true" role="presentation">open_in_new</i>
                         </span>
@@ -857,7 +865,7 @@ const credits = [
                     <div class="q-item__label q-item__label--caption text-caption">{{ t('reportIssueSub') }}</div>
                 </div>
                 <div class="q-item__section column q-item__section--side justify-center">
-                    <a :href="GITHUB_URL + '/issues'" target="_blank" rel="noopener noreferrer" class="q-btn q-btn-item non-selectable no-outline q-btn--standard q-btn--rectangle q-btn--actionable q-focusable q-hoverable" style="text-decoration: none">
+                    <a :href="GITHUB_URL + '/issues'" target="_blank" rel="noopener noreferrer" class="q-btn q-btn-item non-selectable no-outline q-btn--standard q-btn--rectangle q-btn--actionable q-focusable q-hoverable" style="text-decoration: none" :aria-label="t('reportIssue') || 'Report an issue'" :title="t('reportIssue') || 'Report an issue'">
                         <span class="q-btn__content text-center col items-center q-anchor--skip justify-center row">
                             <i class="q-icon notranslate material-icons" aria-hidden="true" role="presentation">open_in_new</i>
                         </span>
@@ -874,7 +882,7 @@ const credits = [
                     <div class="q-item__label q-item__label--caption text-caption">{{ t('discordSub') }}</div>
                 </div>
                 <div class="q-item__section column q-item__section--side justify-center">
-                    <button class="q-btn q-btn-item non-selectable no-outline q-btn--standard q-btn--rectangle q-btn--actionable q-focusable q-hoverable" @click="copyDiscord" :title="t('discordCopy')">
+                    <button class="q-btn q-btn-item non-selectable no-outline q-btn--standard q-btn--rectangle q-btn--actionable q-focusable q-hoverable" @click="copyDiscord" :aria-label="t('discordCopy') || 'Copy username'" :title="t('discordCopy') || 'Copy username'">
                         <span class="q-btn__content text-center col items-center q-anchor--skip justify-center row">
                             <i class="q-icon notranslate material-icons" aria-hidden="true" role="presentation">content_copy</i>
                         </span>
@@ -891,7 +899,7 @@ const credits = [
                     <div class="q-item__label q-item__label--caption text-caption" style="line-height: 1.4">{{ t('donateSub') }}</div>
                 </div>
                 <div class="q-item__section column q-item__section--side justify-center">
-                    <a href="https://paypal.me/HenryRussell163" target="_blank" rel="noopener noreferrer" class="q-btn q-btn-item non-selectable no-outline q-btn--standard q-btn--rectangle q-btn--actionable q-focusable q-hoverable asmr-donate-btn" style="text-decoration: none">
+                    <a href="https://paypal.me/HenryRussell163" target="_blank" rel="noopener noreferrer" class="q-btn q-btn-item non-selectable no-outline q-btn--standard q-btn--rectangle q-btn--actionable q-focusable q-hoverable asmr-donate-btn" style="text-decoration: none" :aria-label="t('donateLabel') || 'Support Development'" :title="t('donateLabel') || 'Support Development'">
                         <span class="q-btn__content text-center col items-center q-anchor--skip justify-center row">
                             <i class="q-icon notranslate material-icons" aria-hidden="true" role="presentation">favorite</i>
                         </span>

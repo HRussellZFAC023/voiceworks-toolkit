@@ -228,16 +228,6 @@ export interface AudioTrack extends TrackItem {
     is_audio?: boolean;
 }
 
-/** Image track */
-export interface ImageTrack extends TrackItem {
-    type: 'image';
-}
-
-/** Text track (subtitles, lyrics) */
-export interface TextTrack extends TrackItem {
-    type: 'text';
-}
-
 /** Folder node in track tree */
 export interface TrackFolder {
     type: 'folder';
@@ -593,26 +583,6 @@ export interface TranslationResult {
 }
 
 // ============================================================================
-// Review Types - /api/review
-// ============================================================================
-
-export interface ReviewUpdateParams {
-    work_id: number;
-    rating?: number;
-    review_text?: string;
-    progress?: 'marked' | 'listening' | 'listened' | 'replay' | 'postponed';
-    starOnly?: boolean;
-    progressOnly?: boolean;
-}
-
-export interface ReviewData {
-    rating: number;
-    review_text: string;
-    progress: string;
-    updated_at: string;
-}
-
-// ============================================================================
 // Playlist Types - /api/playlist/*
 // ============================================================================
 
@@ -626,13 +596,6 @@ export interface Playlist {
     works: string[]; // RJ codes
     created_at: string;
     updated_at: string;
-}
-
-export interface CreatePlaylistParams {
-    name: string;
-    description?: string;
-    privacy?: PlaylistPrivacy;
-    works?: string[];
 }
 
 // ============================================================================

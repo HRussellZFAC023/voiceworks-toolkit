@@ -15,7 +15,11 @@
     margin: 4px 0 8px 0;
     gap: 4px;
     text-align: center;
+    background: var(--asmr-subs-bg, transparent);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
     border-bottom: 1px solid var(--asmr-border-color);
+    border-radius: 8px;
     transition: opacity 0.15s, min-height 0.15s, margin 0.15s;
     position: relative;
     z-index: 100;
@@ -72,7 +76,8 @@
     color: var(--asmr-text-primary);
     text-align: center;
     transition: opacity 0.2s, max-height 0.2s, margin 0.2s;
-    max-height: 200px;
+    max-height: 8em;
+    overflow: hidden;
     max-width: 100%;
     min-height: 1.55em;
     filter: opacity(1);
@@ -97,26 +102,58 @@
 
 .learner-en {
     font-size: 0.8125rem;
-    color: var(--asmr-text-tertiary);
+    color: var(--asmr-text-secondary);
     cursor: pointer;
     text-align: center;
     user-select: text;
     transition: opacity 0.15s, filter 0.15s;
     filter: opacity(1);
-    position: relative;
-    z-index: 101;
     min-height: 1.2em;
+    max-height: 4.5em;  /* ~3 lines */
+    overflow: hidden;
+    margin-top: 2px;
+    padding-top: 4px;
+    border-top: 1px solid var(--asmr-border-color);
+    width: 100%;
+}
+
+/* Reset button styling for blur toggle (now <button> for a11y) */
+button.learner-en {
+    background: none;
+    border: none;
+    border-top: 1px solid var(--asmr-border-color);
+    font: inherit;
+    padding-top: 4px;
+    outline: none;
+}
+button.learner-en:focus-visible {
+    outline: 2px solid var(--asmr-accent);
+    outline-offset: 2px;
+    border-radius: 4px;
 }
 
 .learner-en.blurred {
-    filter: blur(5px);
-    opacity: 0.3;
+    filter: blur(4px);
+    opacity: 0.5;
     user-select: none;
+}
+
+/* Segment transition: subtle fade-in when subtitle text changes */
+@keyframes segmentFadeIn {
+    from { opacity: 0.35; }
+    to { opacity: 1; }
+}
+.learner-jp.segment-fade {
+    animation: segmentFadeIn 0.18s ease-out;
 }
 
 /* Karaoke mode */
 .karaoke-spoken {
     color: var(--asmr-accent, #26a69a);
+    text-decoration: underline;
+    text-decoration-color: var(--asmr-accent, #26a69a);
+    text-decoration-thickness: 2px;
+    text-underline-offset: 3px;
 }
 .karaoke-upcoming {
     color: var(--asmr-text-tertiary, rgba(255, 255, 255, 0.38));
@@ -253,7 +290,7 @@
 /* Mobile base: compact subtitle areas */
 .learner-subs-expanded {
     padding: 8px 10px;
-    gap: 6px;
+    gap: 8px;
 }
 
 .learner-subs-collapsed {
@@ -273,7 +310,7 @@
 @media (min-width: 601px) {
     .learner-subs-expanded {
         padding: 12px 16px;
-        gap: 8px;
+        gap: 10px;
     }
 
     .learner-subs-collapsed {
@@ -437,5 +474,8 @@ body.media-viewer-open .learner-subs-collapsed .learner-en {
     .learner-en,
     .asmr-comments-chevron {
         transition: none;
+    }
+    .learner-jp.segment-fade {
+        animation: none;
     }
 }

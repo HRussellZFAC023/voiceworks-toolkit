@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Installation — Voiceworks Toolkit</title>
-  <meta name="description" content="Step-by-step installation guide for Voiceworks Toolkit. Set up Tampermonkey, build the userscript, and start studying Japanese.">
+  <meta name="description" content="Install Voiceworks Toolkit in one click from Greasyfork. Just add Tampermonkey and start studying Japanese.">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -35,7 +35,7 @@
     <section class="content" style="padding-top: calc(var(--nav-height) + 48px);">
       <div class="container">
         <h1>Installation</h1>
-        <p class="lead">Get up and running in under 5 minutes. Requires a modern browser with Tampermonkey and Node.js for building.</p>
+        <p class="lead">Get up and running in under a minute. Just install Tampermonkey and add the script from Greasyfork.</p>
 
         <h2>Prerequisites</h2>
 
@@ -46,41 +46,18 @@
           </div>
           <div class="feature-item">
             <h3>Tampermonkey</h3>
-            <p>Install the <a href="https://www.tampermonkey.net/" target="_blank" rel="noopener">Tampermonkey</a> browser extension. On Chromium-based browsers, you must also go to the extension details page and enable <strong>Allow access to file URLs</strong> for local script installation.</p>
-          </div>
-          <div class="feature-item">
-            <h3>Node.js</h3>
-            <p>Node.js 18 or later is required for building the userscript. Download from <a href="https://nodejs.org/" target="_blank" rel="noopener">nodejs.org</a>.</p>
+            <p>Install the <a href="https://www.tampermonkey.net/" target="_blank" rel="noopener">Tampermonkey</a> browser extension.</p>
           </div>
         </div>
 
-        <h2>Setup</h2>
+        <h2>Install from Greasyfork (Recommended)</h2>
 
         <div class="steps">
           <div class="step">
-            <h3>Clone the Repository</h3>
-            <p>Clone the project and navigate to the userscript directory:</p>
-            <pre><code>git clone https://github.com/HRussellZFAC023/voiceworks-toolkit.git
-cd voiceworks-toolkit/asmr-one-ultimate</code></pre>
-          </div>
-
-          <div class="step">
-            <h3>Install Dependencies</h3>
-            <p>Install all required packages using npm:</p>
-            <pre><code>npm install</code></pre>
-          </div>
-
-          <div class="step">
-            <h3>Build or Develop</h3>
-            <p>Choose between a production build or development mode with hot module replacement:</p>
-
-            <p><strong>Production build:</strong></p>
-            <pre><code>npm run build</code></pre>
-            <p>This outputs <code>dist/asmr-one-ultimate.user.js</code>. Open this file in your browser and Tampermonkey will prompt you to install it.</p>
-
-            <p><strong>Development mode (HMR):</strong></p>
-            <pre><code>npm run dev</code></pre>
-            <p>Open <code>http://localhost:5173/asmr-one-ultimate.user.js</code> in your browser to install the dev script. Keep the dev server running while browsing &mdash; changes will hot-reload automatically.</p>
+            <h3>Install the Script</h3>
+            <p>Visit the Greasyfork page and click <strong>Install this script</strong>. Tampermonkey will prompt you to confirm the installation.</p>
+            <p style="margin-top: 16px;"><a href="https://greasyfork.org/en/scripts/563283-asmr-one-ultimate-radio-learner" target="_blank" rel="noopener" class="btn btn-primary" style="display: inline-flex; align-items: center; gap: 8px; text-decoration: none;">Install from Greasyfork</a></p>
+            <p style="margin-top: 12px; color: var(--text-secondary);">Greasyfork handles updates automatically. You'll receive new versions as they're published.</p>
           </div>
 
           <div class="step">
@@ -96,10 +73,29 @@ cd voiceworks-toolkit/asmr-one-ultimate</code></pre>
           </div>
         </div>
 
-        <h2>Chromium: Allow User Scripts</h2>
+        <h2>Build from Source (Alternative)</h2>
+
+        <p style="margin-bottom: 24px; color: var(--text-secondary);">Only needed if you want to develop or modify the script yourself. Requires Node.js 18+.</p>
+
+        <div class="steps">
+          <div class="step">
+            <h3>Clone &amp; Build</h3>
+            <pre><code>git clone https://github.com/HRussellZFAC023/voiceworks-toolkit.git
+cd voiceworks-toolkit/asmr-one-ultimate
+npm install
+npm run build</code></pre>
+            <p>Open <code>dist/asmr-one-ultimate.user.js</code> in your browser and Tampermonkey will prompt you to install it.</p>
+          </div>
+
+          <div class="step">
+            <h3>Development Mode (HMR)</h3>
+            <pre><code>npm run dev</code></pre>
+            <p>Open <code>http://localhost:5173/asmr-one-ultimate.user.js</code> in your browser to install the dev script. Keep the dev server running while browsing &mdash; changes will hot-reload automatically.</p>
+          </div>
+        </div>
 
         <div class="callout">
-          <p><strong>Important:</strong> On Chromium-based browsers (Chrome, Edge, Brave), you need to enable user script support. Go to your browser's extension management page, click on Tampermonkey's details, and toggle on <strong>"Allow access to file URLs"</strong>. Without this, locally-built scripts will not load.</p>
+          <p><strong>Chromium note:</strong> If installing a locally-built script, go to your browser's extension management page, click on Tampermonkey's details, and toggle on <strong>"Allow access to file URLs"</strong>. This is not needed when installing from Greasyfork.</p>
         </div>
 
         <h2>AI Model Downloads</h2>
@@ -144,7 +140,9 @@ npm run test:e2e:debug</code></pre>
 
         <h2>Updating</h2>
 
-        <p>To update to the latest version:</p>
+        <p><strong>Greasyfork installs</strong> update automatically &mdash; Tampermonkey checks for new versions periodically and applies them.</p>
+
+        <p><strong>Source builds:</strong> pull the latest changes and rebuild:</p>
 
         <pre><code>cd voiceworks-toolkit
 git pull
@@ -152,7 +150,7 @@ cd asmr-one-ultimate
 npm install
 npm run build</code></pre>
 
-        <p>Open the newly built <code>dist/asmr-one-ultimate.user.js</code> in your browser to update the installed script. Tampermonkey will detect the existing installation and offer to update it.</p>
+        <p>Open the newly built <code>dist/asmr-one-ultimate.user.js</code> in your browser to update the installed script.</p>
 
         <h2>Troubleshooting</h2>
 

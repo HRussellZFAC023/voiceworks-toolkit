@@ -46,6 +46,7 @@ export class SupportButton {
         // Quasar button classes for a flat button with icon and text
         btn.className = 'q-btn q-btn-flat q-btn-dense asmr-support-btn text-white';
         btn.title = 'Support Development';
+        btn.ariaLabel = 'Support Development';
 
         btn.innerHTML = `
             <span class="q-focus-helper"></span>

@@ -153,7 +153,7 @@ test.describe('Player Gallery', () => {
         expect(await injectedPage.locator('.asmr-gallery-counter').count()).toBeGreaterThan(0);
     });
 
-    test('gallery elements are hidden when not in fullscreen', async ({ injectedPage, isScriptLoaded }) => {
+    test('gallery image is visible when images are loaded', async ({ injectedPage, isScriptLoaded }) => {
         await helpers.gotoWork(injectedPage, TEST_WORKS.STANDARD);
         await isScriptLoaded();
 
@@ -170,8 +170,9 @@ test.describe('Player Gallery', () => {
             return;
         }
 
+        // Gallery image should be visible whenever a valid image URL is loaded
         const imgDisplay = await galleryImg.evaluate(el => getComputedStyle(el).display);
-        expect(imgDisplay).toBe('none');
+        expect(imgDisplay).not.toBe('none');
     });
 
     test('gallery loads images from tracks API in fullscreen', async ({ injectedPage, isScriptLoaded }) => {

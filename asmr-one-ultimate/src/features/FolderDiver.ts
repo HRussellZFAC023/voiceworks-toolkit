@@ -488,35 +488,14 @@ export class FolderDiver {
         window.setTimeout(() => attempt(12), 100);
     }
 
-    private syncParentFolder(treeVm: WorkTreeComponent, pathSegments: string[]): void {
-        const tree = treeVm?.tree || treeVm?.$data?.tree || (treeVm as any)?._data?.tree;
-        if (!Array.isArray(tree)) return;
-
-        const nextFolder = this.getNodesAtPath(tree as TracksResponse, pathSegments);
-        const target = Array.isArray(treeVm.$data?.fatherFolder)
-            ? treeVm.$data!.fatherFolder
-            : Array.isArray((treeVm as any)?._data?.fatherFolder)
-                ? (treeVm as any)._data.fatherFolder
-                : treeVm.fatherFolder;
-
-        if (!Array.isArray(target)) return;
-        if (target.length === nextFolder.length && target.every((item: any, idx: number) => {
-            const aKey = item?.hash || item?.title || item?.name || '';
-            const bItem = nextFolder[idx];
-            const bKey = (bItem as any)?.hash || (bItem as any)?.title || (bItem as any)?.name || '';
-            return aKey === bKey;
-        })) {
-            return;
-        }
-
-        const nextItems = [...nextFolder];
-        if (Array.isArray(target)) {
-            target.splice(0, target.length, ...nextItems);
-        } else if (typeof treeVm.$set === 'function') {
-            treeVm.$set(treeVm, 'fatherFolder', nextItems);
-        } else {
-            treeVm.fatherFolder = nextItems as any;
-        }
+    /**
+     * fatherFolder is a COMPUTED property in the host WorkTree component,
+     * derived from tree + path. Do NOT mutate it directly — only update `path`.
+     * The computed will automatically derive the correct fatherFolder.
+     */
+    private syncParentFolder(_treeVm: WorkTreeComponent, _pathSegments: string[]): void {
+        // No-op: fatherFolder is computed from tree+path.
+        // Setting path (done by callers) is sufficient.
     }
 
     // =========================================================================

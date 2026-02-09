@@ -48,9 +48,6 @@ describe('AppStore', () => {
         const module = await import('../../src/store/AppStore');
         AppStore = module.AppStore;
         Config = module.Config;
-
-        // Reset state
-        AppStore.resetState();
     });
 
     describe('Configuration', () => {
@@ -125,30 +122,9 @@ describe('AppStore', () => {
         });
     });
 
-    describe('State Subscriptions', () => {
-        it('should notify subscribers on state change', () => {
-            const listener = vi.fn();
-            AppStore.subscribe(listener);
-            AppStore.setState({ isInitialized: true });
-            expect(listener).toHaveBeenCalledWith(expect.objectContaining({ isInitialized: true }));
-        });
-
-        it('should return unsubscribe function', () => {
-            const listener = vi.fn();
-            const unsubscribe = AppStore.subscribe(listener);
-            unsubscribe();
-            AppStore.setState({ isInitialized: true });
-            expect(listener).not.toHaveBeenCalled();
-        });
-    });
-
     describe('Host Store', () => {
         it('should throw if host not set', () => {
             expect(() => AppStore.host).toThrow('Host store not initialized');
-        });
-
-        it('should return false for hasHost initially', () => {
-            expect(AppStore.hasHost).toBe(false);
         });
 
         it('should set host store', () => {
@@ -159,7 +135,6 @@ describe('AppStore', () => {
                 },
             };
             AppStore.setHostStore(mockStore as any);
-            expect(AppStore.hasHost).toBe(true);
             expect(AppStore.host).toBe(mockStore);
         });
 
@@ -178,7 +153,6 @@ describe('AppStore', () => {
             AppStore.setHostStore(mockStore as any);
             expect(AppStore.player.playing).toBe(true);
             expect(AppStore.currentTrack?.title).toBe('Test');
-            expect(AppStore.isPlaying).toBe(true);
         });
     });
 

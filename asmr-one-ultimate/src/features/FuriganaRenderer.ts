@@ -7,6 +7,7 @@
 
 import { CentralObserver } from '../core/CentralObserver';
 import { Logger } from '../core/Logger';
+import { EventBus } from '../core/EventBus';
 import { AppStore } from '../store/AppStore';
 import { JpdbService } from '../services/JpdbService';
 import type { JPDBToken } from '../types/jpdb';
@@ -60,6 +61,7 @@ export class FuriganaRenderer {
     private observer: IntersectionObserver | null = null;
     private pendingElements = new Set<Element>();
     private processingBatch = false;
+    private pathChangeCleanup: (() => void) | null = null;
 
     enable(): void {
         if (this._enabled) return;
@@ -81,6 +83,30 @@ export class FuriganaRenderer {
         );
 
         CentralObserver.register('FuriganaRenderer', () => this.scan(), 500);
+
+        // Strip furigana from work tree items BEFORE Vue renders on path change.
+        // FuriganaRenderer's innerHTML replacement detaches Vue's tracked text nodes;
+        // restoring original text allows Vue to patch correctly even if _vnode=null fails.
+        this.pathChangeCleanup = EventBus.on('worktree:path-change', () => {
+            const workTree = document.getElementById('work-tree');
+            if (workTree) {
+                const annotated = workTree.querySelectorAll('[data-jpdb]');
+                if (annotated.length > 0) {
+                    CentralObserver.withModification(() => {
+                        for (const el of annotated) {
+                            const original = el.getAttribute('data-jpdb-original');
+                            if (original) {
+                                el.textContent = original;
+                            }
+                            el.removeAttribute('data-jpdb');
+                            el.removeAttribute('data-jpdb-original');
+                        }
+                    });
+                }
+            }
+            this.processedElements = new WeakSet();
+        });
+
         this.scan();
         Logger.debug('[FuriganaRenderer] Enabled');
     }
@@ -88,6 +114,9 @@ export class FuriganaRenderer {
     disable(): void {
         this._enabled = false;
         CentralObserver.unregister('FuriganaRenderer');
+
+        this.pathChangeCleanup?.();
+        this.pathChangeCleanup = null;
 
         this.observer?.disconnect();
         this.observer = null;
@@ -118,6 +147,13 @@ export class FuriganaRenderer {
             if (this.processedElements.has(htmlEl)) continue;
             if (htmlEl.closest(SKIP_SELECTOR)) continue;
             if (htmlEl.hasAttribute('data-jpdb')) continue;
+
+            // Skip work tree items — applyTokensToElement() destructively replaces
+            // innerHTML with <ruby> fragments, detaching Vue 2's tracked text nodes.
+            // fixWorkTreeText() corrects stale text on render, but FuriganaRenderer
+            // re-corrupts ~500ms later via CentralObserver, creating an endless cycle.
+            // Work tree items get translations via TranslatedTags CSS ::after instead.
+            if (htmlEl.closest('#work-tree')) continue;
 
             // Must contain Japanese text with kanji
             const text = htmlEl.textContent?.trim();
@@ -303,7 +339,8 @@ export class FuriganaRenderer {
             );
         }
 
-        // Replace element contents
+        // Replace element contents (store original for clean retrieval)
+        el.setAttribute('data-jpdb-original', originalText);
         el.textContent = '';
         el.appendChild(fragment);
         el.setAttribute('data-jpdb', 'true');
@@ -317,12 +354,19 @@ export class FuriganaRenderer {
         CentralObserver.withModification(() => {
             const annotated = document.querySelectorAll('[data-jpdb]');
             for (const el of annotated) {
-                // Restore original text (strip ruby annotations)
-                const text = el.textContent;
-                if (text) {
-                    el.textContent = text;
+                // Restore original text from stored attribute (excludes furigana)
+                const original = el.getAttribute('data-jpdb-original');
+                if (original) {
+                    el.textContent = original;
+                } else {
+                    // Fallback: strip <rt>/<rp> text from ruby annotations
+                    const clone = el.cloneNode(true) as Element;
+                    clone.querySelectorAll('rt, rp').forEach(e => e.remove());
+                    const text = clone.textContent;
+                    if (text) el.textContent = text;
                 }
                 el.removeAttribute('data-jpdb');
+                el.removeAttribute('data-jpdb-original');
             }
         });
         this.processedElements = new WeakSet();

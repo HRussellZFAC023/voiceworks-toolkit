@@ -51,6 +51,10 @@ const isFallback = ref(false); // true when secondary is the untranslated fallba
 const karaokeSplitIndex = ref(-1); // Character index split for karaoke highlighting (-1 = no karaoke)
 const karaokeHighlightStart = ref(-1); // Char index where current word starts (karaoke-only mode, -1 = inactive)
 
+// Segment transition animation
+const segmentFading = ref(false);
+let prevPrimaryForFade = '';
+
 // JPDB Furigana state
 const jpdbTokens = ref<JPDBToken[] | null>(null);
 let lastJpdbText = '';  // Track which text was parsed to avoid re-parsing
@@ -241,7 +245,7 @@ function computeWordKaraokeIndices(
     for (let i = 0; i < words.length; i++) {
         const wText = (words[i].text || '').trim();
         const wChars = Array.from(wText).length;
-        if (words[i].start <= now + 0.01) {
+        if (words[i].end <= now + 0.05) {
             hlStart = charOffset;
             splitIdx = charOffset + wChars;
             foundAny = true;
@@ -381,22 +385,30 @@ function handleAudioPlay() {
 }
 
 function handleAudioSeeking() {
-    // Reset dedup state so the next updateLyrics() renders fresh content.
-    // But do NOT clearDisplay() — leave the current text visible to avoid
-    // a blank flash. updateLyrics() on the seeked event will overwrite it.
+    // Reset dedup state and immediately update display so subtitles track the
+    // scrub position in real-time. Don't clearDisplay() — show the line at
+    // the new position (or hold the previous line during gaps).
     lastText = '';
     lastDisplayedText = '';
     lastSecondaryShown = '';
     lastWhisperDisplayText = '';
     translationToken += 1;
+    updateLyrics();
 }
 
 function handleAudioSeeked() {
+    // Final refresh after the user releases the scrubber.
+    // Reset dedup again in case seeking handler's update was stale.
+    lastText = '';
+    lastDisplayedText = '';
+    lastSecondaryShown = '';
+    lastWhisperDisplayText = '';
+    translationToken += 1;
     if (seekedDebounceTimer) clearTimeout(seekedDebounceTimer);
     seekedDebounceTimer = window.setTimeout(() => {
         seekedDebounceTimer = null;
         updateLyrics();
-    }, 50);
+    }, 30);
 }
 
 function bindAudioTimeUpdate() {
@@ -445,12 +457,26 @@ function findActiveLine(
     now: number,
 ): { time: number; endTime?: number; text: string } | null {
     if (lines.length === 0) return null;
-    let activeLine: { time: number; endTime?: number; text: string } | null = null;
+    let activeIdx = -1;
     for (let i = lines.length - 1; i >= 0; i--) {
-        if (lines[i].time <= now) { activeLine = lines[i]; break; }
+        if (lines[i].time <= now) { activeIdx = i; break; }
     }
-    if (!activeLine) return null;
-    if (activeLine.endTime && now >= activeLine.endTime) return null;
+    if (activeIdx < 0) return null;
+    const activeLine = lines[activeIdx];
+    // If we're past this line's endTime, check if there's a next line coming soon.
+    // If the gap to the next line is short (< 2s), hold the current line visible
+    // to prevent blank flashes between sentences. For longer gaps, return null
+    // so the display can clear (genuine silence/pause).
+    if (activeLine.endTime && now >= activeLine.endTime) {
+        const nextLine = lines[activeIdx + 1];
+        // No next line — hold the last segment visible (during live transcription
+        // the worker hasn't caught up; at end of transcript it's the final line)
+        if (!nextLine) return activeLine;
+        // Short gap between existing segments — hold to prevent flash
+        if ((nextLine.time - activeLine.endTime) < 2.0) return activeLine;
+        // Long gap between existing segments — genuine silence
+        return null;
+    }
     return activeLine;
 }
 
@@ -515,24 +541,27 @@ interface SubtitleDisplayResult {
     fullText: string;
     activeLine?: { time: number; endTime?: number; text: string; words?: Array<{ start: number; end: number; text: string }> };
     now?: number;
+    audioTime?: number;
 }
 
 function getWhisperDisplay(): SubtitleDisplayResult {
     const audio = getAudioElement();
     if (!audio || whisperLines.length === 0) return { displayText: '', fullText: '' };
-    const now = audio.currentTime + Math.max(0, effectiveLead(whisperLeadSec));
+    const audioTime = audio.currentTime;
+    const now = audioTime + Math.max(0, effectiveLead(whisperLeadSec));
     const activeLine = findActiveLine(whisperLines, now);
     if (!activeLine || !activeLine.text) return { displayText: '', fullText: '' };
-    return { displayText: getProgressiveText(activeLine, now), fullText: activeLine.text.trim(), activeLine, now };
+    return { displayText: getProgressiveText(activeLine, now), fullText: activeLine.text.trim(), activeLine, now, audioTime };
 }
 
 function getSubtitleDisplay(): SubtitleDisplayResult {
     const audio = getAudioElement();
     if (!audio || currentLyrics.length === 0) return { displayText: '', fullText: '' };
-    const now = audio.currentTime + effectiveLead(subtitleLeadSec);
+    const audioTime = audio.currentTime;
+    const now = audioTime + effectiveLead(subtitleLeadSec);
     const activeLine = findActiveLine(currentLyrics, now);
     if (!activeLine || !activeLine.text) return { displayText: '', fullText: '' };
-    return { displayText: getProgressiveText(activeLine, now), fullText: activeLine.text.trim(), activeLine, now };
+    return { displayText: getProgressiveText(activeLine, now), fullText: activeLine.text.trim(), activeLine, now, audioTime };
 }
 
 // ---------------------------------------------------------------------------
@@ -918,10 +947,11 @@ function updateLyrics() {
         primary = fullText;
         const words = display.activeLine?.words;
         let indices = { splitIdx: 0, hlStart: 0 };
-        if (Array.isArray(words) && words.length > 0 && display.now != null) {
-            indices = computeWordKaraokeIndices(fullText, words, display.now);
-        } else if (display.activeLine && display.now != null) {
-            indices = computeTimeFallbackKaraokeIndices(fullText, display.activeLine, display.now);
+        const karaokeTime = display.audioTime ?? display.now;
+        if (Array.isArray(words) && words.length > 0 && karaokeTime != null) {
+            indices = computeWordKaraokeIndices(fullText, words, karaokeTime);
+        } else if (display.activeLine && karaokeTime != null) {
+            indices = computeTimeFallbackKaraokeIndices(fullText, display.activeLine, karaokeTime);
         }
         splitIdx = indices.splitIdx;
         // Segment ON (fill-up): hlStart=0, all spoken text in accent
@@ -1027,10 +1057,11 @@ function _updateWhisperDisplay() {
                 prim = fullText;
                 const words = display.activeLine?.words;
                 let indices = { splitIdx: 0, hlStart: 0 };
-                if (Array.isArray(words) && words.length > 0 && display.now != null) {
-                    indices = computeWordKaraokeIndices(fullText, words, display.now);
-                } else if (display.activeLine && display.now != null) {
-                    indices = computeTimeFallbackKaraokeIndices(fullText, display.activeLine, display.now);
+                const karaokeTime = display.audioTime ?? display.now;
+                if (Array.isArray(words) && words.length > 0 && karaokeTime != null) {
+                    indices = computeWordKaraokeIndices(fullText, words, karaokeTime);
+                } else if (display.activeLine && karaokeTime != null) {
+                    indices = computeTimeFallbackKaraokeIndices(fullText, display.activeLine, karaokeTime);
                 }
                 splitIdx = indices.splitIdx;
                 // Segment ON (fill-up): hlStart=0, all spoken text in accent
@@ -1044,25 +1075,20 @@ function _updateWhisperDisplay() {
             const ft = display.fullText || display.displayText;
             const words = display.activeLine?.words;
             let indices = { splitIdx: karaokeSplitIndex.value, hlStart: karaokeHighlightStart.value };
-            if (Array.isArray(words) && words.length > 0 && display.now != null) {
-                indices = computeWordKaraokeIndices(ft, words, display.now);
-            } else if (display.activeLine && display.now != null) {
-                indices = computeTimeFallbackKaraokeIndices(ft, display.activeLine, display.now);
+            const karaokeTime = display.audioTime ?? display.now;
+            if (Array.isArray(words) && words.length > 0 && karaokeTime != null) {
+                indices = computeWordKaraokeIndices(ft, words, karaokeTime);
+            } else if (display.activeLine && karaokeTime != null) {
+                indices = computeTimeFallbackKaraokeIndices(ft, display.activeLine, karaokeTime);
             }
             const newSplitIdx = indices.splitIdx;
             const newHlStart = segmentMode.value ? 0 : indices.hlStart;
             if (newSplitIdx !== karaokeSplitIndex.value) karaokeSplitIndex.value = newSplitIdx;
             if (newHlStart !== karaokeHighlightStart.value) karaokeHighlightStart.value = newHlStart;
         } else if (!display.displayText) {
-            // Between segments (gap/silence) — clear stale text.
-            // Whisper segments have precise endTimes, so gaps are intentional.
-            if (lastWhisperDisplayText) {
-                updatePrimaryLine('');
-                updateSecondaryLine('', false);
-                lastWhisperDisplayText = '';
-                lastDisplayedText = '';
-                lastSecondaryShown = '';
-            }
+            // Between segments (gap/silence) — hold previous text visible.
+            // Clearing causes blank flashes and content shift. The next segment
+            // will naturally replace the text when it arrives.
         }
         refreshVisibility();
         return;
@@ -1116,6 +1142,57 @@ function _updateWhisperDisplay() {
 // Whisper event handlers
 // ---------------------------------------------------------------------------
 
+/** Max characters per subtitle display chunk. Whisper segments exceeding this are split at word boundaries. */
+const MAX_SUBTITLE_CHARS = 70;
+const SPLIT_PUNCT = /[。！？\n]/;
+
+type WhisperLine = { time: number; endTime?: number; text: string; words?: Array<{ start: number; end: number; text: string }> };
+
+function splitLongSegments(lines: WhisperLine[]): WhisperLine[] {
+    const max = MAX_SUBTITLE_CHARS;
+    const result: WhisperLine[] = [];
+    for (const line of lines) {
+        const text = line.text.trim();
+        if (text.length <= max) { result.push(line); continue; }
+        if (line.words?.length) {
+            let chunkWords: NonNullable<WhisperLine['words']> = [];
+            let chunkText = '';
+            for (const word of line.words) {
+                const wt = (word.text || '').trim();
+                if (!wt) continue;
+                const candidate = chunkText + wt;
+                if (chunkText.length > 0 && candidate.length > max) {
+                    result.push({ time: chunkWords[0].start, endTime: chunkWords[chunkWords.length - 1].end, text: chunkText.trim(), words: chunkWords });
+                    chunkWords = [word];
+                    chunkText = wt;
+                } else {
+                    chunkWords.push(word);
+                    chunkText = candidate;
+                    if (chunkText.length >= max * 0.6 && SPLIT_PUNCT.test(wt.slice(-1))) {
+                        result.push({ time: chunkWords[0].start, endTime: chunkWords[chunkWords.length - 1].end, text: chunkText.trim(), words: chunkWords });
+                        chunkWords = [];
+                        chunkText = '';
+                    }
+                }
+            }
+            if (chunkWords.length > 0) {
+                result.push({ time: chunkWords[0].start, endTime: chunkWords[chunkWords.length - 1].end, text: chunkText.trim(), words: chunkWords });
+            }
+        } else {
+            const duration = (line.endTime ?? line.time) - line.time;
+            const chars = Array.from(text);
+            const totalChars = chars.length;
+            for (let offset = 0; offset < totalChars; offset += max) {
+                const chunk = chars.slice(offset, offset + max).join('');
+                const startFrac = offset / totalChars;
+                const endFrac = Math.min(1, (offset + chunk.length) / totalChars);
+                result.push({ time: line.time + duration * startFrac, endTime: line.time + duration * endFrac, text: chunk });
+            }
+        }
+    }
+    return result;
+}
+
 function handleWhisperUpdate(payload: WhisperUpdatePayload) {
     if (!payload) return;
     whisperActive = true;
@@ -1125,7 +1202,8 @@ function handleWhisperUpdate(payload: WhisperUpdatePayload) {
     whisperText = payload.text || '';
     ensureWhisperTicker(whisperLive ? 80 : 200);
     if (Array.isArray(payload.segments) && payload.segments.length > 0) {
-        const newLines = payload.segments.map(s => ({ time: s.start, endTime: s.end, text: s.text, words: s.words }));
+        const mapped = payload.segments.map(s => ({ time: s.start, endTime: s.end, text: s.text, words: s.words }));
+        const newLines = splitLongSegments(mapped);
         if (!whisperLive && TranslationService.canPrefetch(newLines.length)) preTranslateAll(newLines);
         whisperLines = newLines;
         // Don't reset lastWhisperDisplayText here — let _updateWhisperDisplay()
@@ -1653,7 +1731,11 @@ function syncOverflowItemVisibility(configKey: string, enabled: boolean) {
 function restoreControls() {
     originalParents.forEach((loc, btn) => {
         btn.style.display = '';
-        if (loc.parent?.isConnected) loc.parent.insertBefore(btn, loc.nextSibling);
+        if (loc.parent?.isConnected) {
+            // nextSibling may no longer be a child of parent (Vue rebuilt the DOM)
+            const ref = loc.nextSibling?.parentNode === loc.parent ? loc.nextSibling : null;
+            try { loc.parent.insertBefore(btn, ref); } catch { /* DOM already torn down */ }
+        }
     });
     if (hostMoreBtn) { hostMoreBtn.style.display = ''; hostMoreBtn = null; }
     originalParents.clear();
@@ -1838,6 +1920,14 @@ onUnmounted(() => {
 
 // Watch showJP to sync the psychology button active state
 watch(showJP, () => syncPsychologyBtn());
+
+// Segment transition: fade-in when primary text changes to a new segment
+watch(primaryText, (val) => {
+    if (val && prevPrimaryForFade && val !== prevPrimaryForFade) {
+        segmentFading.value = true;
+    }
+    prevPrimaryForFade = val;
+});
 </script>
 
 <template>
@@ -1848,7 +1938,7 @@ watch(showJP, () => syncPsychologyBtn());
         :class="{ hidden: !showExpanded, 'hide-jp': !showJP }"
         aria-live="polite"
     >
-        <div class="learner-jp" lang="ja" role="status">
+        <div class="learner-jp" :class="{ 'segment-fade': segmentFading }" @animationend="segmentFading = false" lang="ja" role="status">
             <!-- Karaoke with JPDB furigana -->
             <template v-if="karaokeHighlightStart >= 0 && karaokeSplitIndex >= 0 && jpdbEnabled">
                 <span class="karaoke-past"><template v-for="(seg, i) in furiganaPast" :key="'p'+i"><span v-if="seg.vid !== undefined" class="jpdb-word" :class="[seg.stateClass, seg.pitchClass]" :data-vid="seg.vid" :data-sid="seg.sid" data-jpdb="true"><ruby v-if="seg.rt">{{ seg.base }}<rt class="jpdb-furi">{{ seg.rt }}</rt></ruby><template v-else>{{ seg.base }}</template></span><template v-else>{{ seg.base }}</template></template></span><span class="karaoke-spoken"><template v-for="(seg, i) in furiganaCurrent" :key="'c'+i"><span v-if="seg.vid !== undefined" class="jpdb-word" :class="[seg.stateClass, seg.pitchClass]" :data-vid="seg.vid" :data-sid="seg.sid" data-jpdb="true"><ruby v-if="seg.rt">{{ seg.base }}<rt class="jpdb-furi">{{ seg.rt }}</rt></ruby><template v-else>{{ seg.base }}</template></span><template v-else>{{ seg.base }}</template></template></span><span class="karaoke-upcoming" :class="{ 'karaoke-hidden': !segmentMode }"><template v-for="(seg, i) in furiganaUpcoming" :key="'u'+i"><span v-if="seg.vid !== undefined" class="jpdb-word" :class="[seg.stateClass, seg.pitchClass]" :data-vid="seg.vid" :data-sid="seg.sid" data-jpdb="true"><ruby v-if="seg.rt">{{ seg.base }}<rt class="jpdb-furi">{{ seg.rt }}</rt></ruby><template v-else>{{ seg.base }}</template></span><template v-else>{{ seg.base }}</template></template></span>
@@ -1864,12 +1954,14 @@ watch(showJP, () => syncPsychologyBtn());
             <!-- Plain text -->
             <template v-else>{{ primaryText }}</template>
         </div>
-        <div
+        <button
             v-show="enablePlayerTranslator"
             class="learner-en"
             :class="{ blurred: isBlurred && !!secondaryText, 'translation-fallback': isFallback }"
+            :aria-label="isBlurred ? t('revealTranslation') : t('hideTranslation')"
+            :aria-pressed="!isBlurred"
             @click.stop="toggleBlur"
-        >{{ secondaryText }}</div>
+        >{{ secondaryText }}</button>
     </div>
 
     <!-- Collapsed subtitle bar (teleported to body for fixed positioning) -->
@@ -1881,7 +1973,7 @@ watch(showJP, () => syncPsychologyBtn());
             :style="{ display: showCollapsed ? 'flex' : 'none !important' }"
             aria-live="polite"
         >
-            <div class="learner-jp" lang="ja" role="status">
+            <div class="learner-jp" :class="{ 'segment-fade': segmentFading }" @animationend="segmentFading = false" lang="ja" role="status">
                 <!-- Karaoke with JPDB furigana -->
                 <template v-if="karaokeHighlightStart >= 0 && karaokeSplitIndex >= 0 && jpdbEnabled">
                     <span class="karaoke-past"><template v-for="(seg, i) in furiganaPast" :key="'p'+i"><span v-if="seg.vid !== undefined" class="jpdb-word" :class="[seg.stateClass, seg.pitchClass]" :data-vid="seg.vid" :data-sid="seg.sid" data-jpdb="true"><ruby v-if="seg.rt">{{ seg.base }}<rt class="jpdb-furi">{{ seg.rt }}</rt></ruby><template v-else>{{ seg.base }}</template></span><template v-else>{{ seg.base }}</template></template></span><span class="karaoke-spoken"><template v-for="(seg, i) in furiganaCurrent" :key="'c'+i"><span v-if="seg.vid !== undefined" class="jpdb-word" :class="[seg.stateClass, seg.pitchClass]" :data-vid="seg.vid" :data-sid="seg.sid" data-jpdb="true"><ruby v-if="seg.rt">{{ seg.base }}<rt class="jpdb-furi">{{ seg.rt }}</rt></ruby><template v-else>{{ seg.base }}</template></span><template v-else>{{ seg.base }}</template></template></span><span class="karaoke-upcoming" :class="{ 'karaoke-hidden': !segmentMode }"><template v-for="(seg, i) in furiganaUpcoming" :key="'u'+i"><span v-if="seg.vid !== undefined" class="jpdb-word" :class="[seg.stateClass, seg.pitchClass]" :data-vid="seg.vid" :data-sid="seg.sid" data-jpdb="true"><ruby v-if="seg.rt">{{ seg.base }}<rt class="jpdb-furi">{{ seg.rt }}</rt></ruby><template v-else>{{ seg.base }}</template></span><template v-else>{{ seg.base }}</template></template></span>
@@ -1897,12 +1989,14 @@ watch(showJP, () => syncPsychologyBtn());
                 <!-- Plain text -->
                 <template v-else>{{ primaryText }}</template>
             </div>
-            <div
+            <button
                 v-show="enablePlayerTranslator"
                 class="learner-en"
                 :class="{ blurred: isBlurred && !!secondaryText, 'translation-fallback': isFallback }"
+                :aria-label="isBlurred ? t('revealTranslation') : t('hideTranslation')"
+                :aria-pressed="!isBlurred"
                 @click.stop="toggleBlur"
-            >{{ secondaryText }}</div>
+            >{{ secondaryText }}</button>
         </div>
     </Teleport>
 </template>

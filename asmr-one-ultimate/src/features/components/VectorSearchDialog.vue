@@ -568,7 +568,7 @@ async function bulkIndex(opts?: { maxPages?: number; maxWorks?: number; order?: 
         await refreshIndexCount();
         const total = indexCount.value;
         if (!autoIndexExhausted) {
-            const batchDelay = 60;
+            const batchDelay = 5;
             setStatus(format('magicSearchIndexingContinue', { indexed, cursor: bulkIndexCursor, total, delay: batchDelay }), false);
             scheduleNextBatch(batchDelay * 1000);
         } else {
@@ -589,7 +589,7 @@ async function scheduleAutoIndex(): Promise<void> {
     await bulkIndex({ maxPages: 6, maxWorks: 250, order: 'release', sort: 'desc' });
 }
 
-function scheduleNextBatch(delayMs = 60 * 1000): void {
+function scheduleNextBatch(delayMs = 5 * 1000): void {
     if (autoBatchTimer) return;
     autoBatchTimer = window.setTimeout(async () => {
         autoBatchTimer = null;

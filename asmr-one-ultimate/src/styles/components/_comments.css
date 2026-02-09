@@ -16,10 +16,16 @@
     display: flex;
     align-items: center;
     gap: 8px;
+    width: 100%;
     padding: 10px 12px;
     cursor: pointer;
     user-select: none;
     transition: background 0.15s;
+    background: none;
+    border: none;
+    color: inherit;
+    font: inherit;
+    text-align: left;
 }
 
 @media (hover: hover) {
@@ -116,30 +122,34 @@
     gap: 2px;
 }
 
-.asmr-comments-star {
-    font-size: 22px;
+.asmr-comments-star-btn {
     cursor: pointer;
-    transition: color 0.1s, transform 0.1s;
     background: none;
     border: none;
     padding: 0;
     line-height: 1;
+    transition: transform 0.1s;
+}
+
+.asmr-comments-star {
+    font-size: 22px;
+    transition: color 0.1s;
     color: var(--asmr-text-disabled);
 }
 
 @media (hover: hover) {
-    .asmr-comments-star:hover {
+    .asmr-comments-star-btn:hover {
         transform: scale(1.15);
     }
 }
 
 @media (hover: none) {
-    .asmr-comments-star:active {
+    .asmr-comments-star-btn:active {
         transform: scale(1.15);
     }
 }
 
-.asmr-comments-star--active {
+.asmr-comments-star--active .asmr-comments-star {
     color: var(--asmr-star-color);
 }
 
@@ -430,14 +440,6 @@
         animation: none;
         opacity: 0.6;
     }
-}
-
-/* No reviews message */
-.asmr-comments-empty {
-    font-size: 0.8rem;
-    color: var(--asmr-text-disabled);
-    font-style: italic;
-    padding: 4px 0;
 }
 
 /* Fetch error message */

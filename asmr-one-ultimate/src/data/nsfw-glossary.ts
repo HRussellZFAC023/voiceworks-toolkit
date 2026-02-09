@@ -21,7 +21,7 @@
 export type GlossaryMode = 'a' | 'p' | 'e' | 'c';
 export type GlossaryEntry = readonly [ja: string, en: string, zh: string, mode: GlossaryMode];
 
-export const GLOSSARY_DATA: readonly GlossaryEntry[] = [
+const GLOSSARY_DATA: readonly GlossaryEntry[] = [
     // ========================================================================
     // ONOMATOPOEIA — highest priority, MT always fails on these
     // ========================================================================
@@ -710,7 +710,7 @@ export const GLOSSARY_DATA: readonly GlossaryEntry[] = [
 export const glossaryMap = new Map<string, { en: string; zh: string; mode: GlossaryMode }>();
 
 /** Sorted by length desc for longest-match-first substring search */
-export const glossarySorted: { ja: string; en: string; zh: string; mode: GlossaryMode }[] = [];
+const glossarySorted: { ja: string; en: string; zh: string; mode: GlossaryMode }[] = [];
 
 for (const [ja, en, zh, mode] of GLOSSARY_DATA) {
     glossaryMap.set(ja, { en, zh, mode });
@@ -720,10 +720,10 @@ for (const [ja, en, zh, mode] of GLOSSARY_DATA) {
 glossarySorted.sort((a, b) => b.ja.length - a.ja.length);
 
 /** Only 'a' (always) entries, for substring replacement in sentences */
-export const alwaysEntries = glossarySorted.filter(e => e.mode === 'a');
+const alwaysEntries = glossarySorted.filter(e => e.mode === 'a');
 
 /** 'a' + 'p' entries, for short text replacement */
-export const preferEntries = glossarySorted.filter(e => e.mode === 'a' || e.mode === 'p');
+const preferEntries = glossarySorted.filter(e => e.mode === 'a' || e.mode === 'p');
 
 // ========================================================================
 // Compiled regex for fast substring replacement (single-pass O(n) per text)

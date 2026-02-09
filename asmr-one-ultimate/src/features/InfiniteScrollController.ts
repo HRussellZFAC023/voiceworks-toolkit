@@ -44,23 +44,48 @@ export class InfiniteScrollController extends FeatureController {
     protected shouldBeActive(): boolean {
         if (!AppStore.getConfig('enableInfiniteScroll')) return false;
         const path = this.bridge.route?.path || '';
-        // Skip playlist page which has its own infinite scroll
-        if (path === '/playlists') return false;
-        return true;
+        const query = this.bridge.route?.query || {};
+        // Only active on listing pages that support pagination
+        if (path === '/' || path === '/works' || path.startsWith('/works')) return true;
+        if (path === '/search') return true;
+        if (path.startsWith('/circle/') || path.startsWith('/tag/') || path.startsWith('/va/')) return true;
+        if (path === '/playlist' && query.id) return true;
+        // Check query-based routes (asmr.one style)
+        if (query.circleId || query.tagId || query.vaId || query.keyword) return true;
+        return false;
     }
 
     findInjectionPoint(): HTMLElement | null {
-        // Find the works grid container - this is the element we insert after
-        const grid = document.querySelector('.row.q-col-gutter-x-sm.q-col-gutter-y-lg')
-            || document.querySelector('[class*="q-col-gutter"]');
+        const path = this.bridge.route?.path || '';
+        const query = this.bridge.route?.query || {};
 
-        if (!grid) return null;
+        // Playlist detail page: find the works grid directly
+        if (path === '/playlist' && query.id) {
+            return this.findWorksGrid();
+        }
 
-        // Only inject if pagination exists (meaning this is a paginated page)
-        const hasPagination = document.querySelector('.ant-pagination')
-            || document.querySelector('.q-pagination');
-        if (!hasPagination) return null;
+        // For paginated pages, find pagination and inject after it.
+        // This is more reliable than finding the grid, since the grid's
+        // CSS classes vary across asmr.one versions.
+        const pagination = document.querySelector('.q-pagination')
+            || document.querySelector('.ant-pagination');
+        if (!pagination) return null;
 
-        return grid as HTMLElement;
+        return pagination.parentElement || pagination as HTMLElement;
+    }
+
+    private findWorksGrid(): HTMLElement | null {
+        const candidates = document.querySelectorAll('[class*="q-col-gutter"]');
+        for (const el of candidates) {
+            if (el.classList.contains('no-wrap')) continue;
+            if (el.className.includes('q-col-gutter-y-')) return el as HTMLElement;
+        }
+        // Fallback: find parent of work cards
+        const card = document.querySelector('.q-card');
+        if (card?.parentElement?.parentElement) {
+            const grid = card.parentElement.parentElement;
+            if (grid.children.length > 1) return grid as HTMLElement;
+        }
+        return null;
     }
 }

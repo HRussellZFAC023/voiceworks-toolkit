@@ -1,15 +1,11 @@
 import { Logger, I18n } from '../core/Utils';
 import { KikoeruBridge } from '../infrastructure/KikoeruBridge';
-import { CentralObserver } from '../core/CentralObserver';
 import { EventBus } from '../core/EventBus';
 import { getVueItem } from '../core/DomUtils';
 
 export class WorkTreeCopy {
     private bridge: KikoeruBridge;
     private copyBtnTemplate: HTMLButtonElement;
-    private observer: MutationObserver | null = null;
-    private observedContainer: Element | null = null;
-    private isObserving = false;
     private flatObserver: MutationObserver | null = null;
     private cleanups: (() => void)[] = [];
 
@@ -19,7 +15,7 @@ export class WorkTreeCopy {
         // Pre-build the button template
         this.copyBtnTemplate = document.createElement('button');
         this.copyBtnTemplate.style.border = 'none';
-        // q-btn-dense makes it smaller to fit nicely in the list
+        this.copyBtnTemplate.style.alignSelf = 'center';
         this.copyBtnTemplate.classList.add(
             ...'q-btn q-btn-item non-selectable no-outline q-btn--standard q-btn--rectangle bg-cyan shadow-4 q-mx-xs q-px-sm text-white q-btn--actionable q-btn--wrap q-btn--dense'.split(' ')
         );
@@ -36,18 +32,25 @@ export class WorkTreeCopy {
     public enable(): void {
         Logger.log('[WorkTreeCopy] Enabling feature');
 
-        // Watch for route changes to re-initialize observation when entering a work page
+        // Inject on fresh renders via worktree:enhanced (fired by WorkTreeManager after every Vue render)
+        this.cleanups.push(EventBus.on('worktree:enhanced', (data: { workTree: HTMLElement }) => {
+            const listContainer = data.workTree.querySelector('.q-card')?.children?.[0];
+            if (listContainer) this.injectButtons(listContainer as Element);
+        }));
+
+        // Route change: initial injection for when the page first loads
         const app = this.bridge.app;
         if (app && typeof (app as any).$watch === 'function') {
-            (app as any).$watch('$route', () => this.checkRoute());
+            (app as any).$watch('$route', () => {
+                if (this.isWorkPage()) {
+                    setTimeout(() => {
+                        const wt = document.getElementById('work-tree');
+                        const lc = wt?.querySelector('.q-card')?.children?.[0];
+                        if (lc) this.injectButtons(lc as Element);
+                    }, 500);
+                }
+            });
         }
-
-        // Also register with CentralObserver to catch re-renders
-        CentralObserver.register('WorkTreeCopy', () => {
-            if (this.isWorkPage()) {
-                this.initObserver();
-            }
-        }, 1000);
 
         // Listen for flat panel open/close to inject copy buttons there too
         this.cleanups.push(EventBus.on('flatview:toggle', (data: { active: boolean }) => {
@@ -59,52 +62,19 @@ export class WorkTreeCopy {
             }
         }));
 
-        this.checkRoute();
-    }
-
-    private checkRoute(): void {
+        // Initial injection for current page
         if (this.isWorkPage()) {
-            // Give a slight delay for the DOM to settle
-            setTimeout(() => this.initObserver(), 500);
-        } else {
-            this.disconnect();
+            setTimeout(() => {
+                const wt = document.getElementById('work-tree');
+                const lc = wt?.querySelector('.q-card')?.children?.[0];
+                if (lc) this.injectButtons(lc as Element);
+            }, 500);
         }
     }
 
     private isWorkPage(): boolean {
         const route = this.bridge.router?.currentRoute;
         return route?.name === 'work' || route?.path?.startsWith('/work/');
-    }
-
-    private initObserver(): void {
-        // The user snippet targets: document.getElementById('work-tree').getElementsByClassName('q-card')[0].children[0]
-        const workTree = document.getElementById('work-tree');
-        if (!workTree) return;
-
-        const card = workTree.getElementsByClassName('q-card')[0];
-        if (!card) return;
-
-        const listContainer = card.children[0];
-        if (!listContainer) return;
-
-        // Always re-inject buttons (folder navigation replaces DOM nodes)
-        this.injectButtons(listContainer as Element);
-
-        // If already observing the same container, skip re-setup
-        if (this.isObserving && this.observedContainer === listContainer) return;
-
-        Logger.debug('[WorkTreeCopy] Initializing observer on list container');
-
-        // Disconnect existing if any
-        if (this.observer) this.observer.disconnect();
-
-        this.observer = new MutationObserver(() => {
-            this.injectButtons(listContainer as Element);
-        });
-
-        this.observer.observe(listContainer, { childList: true, subtree: true });
-        this.observedContainer = listContainer;
-        this.isObserving = true;
     }
 
     private injectButtons(container: Element, isFlatPanel = false): void {
@@ -216,18 +186,7 @@ export class WorkTreeCopy {
     public disable(): void {
         this.cleanups.forEach(fn => fn());
         this.cleanups = [];
-        CentralObserver.unregister('WorkTreeCopy');
-        this.disconnect();
         this.flatObserver?.disconnect();
         this.flatObserver = null;
-    }
-
-    private disconnect(): void {
-        if (this.observer) {
-            this.observer.disconnect();
-            this.observer = null;
-        }
-        this.observedContainer = null;
-        this.isObserving = false;
     }
 }

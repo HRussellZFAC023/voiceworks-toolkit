@@ -1431,6 +1431,7 @@ onUnmounted(() => {
             <!-- Filter Mode Dropdown -->
             <select
                 class="asmr-playlist-filter-select"
+                :aria-label="t('playlistFilterPlaceholder') || 'Filter playlists'"
                 :value="filterMode"
                 @change="handleFilterChange"
             >
@@ -1444,6 +1445,7 @@ onUnmounted(() => {
             <input
                 type="text"
                 class="asmr-playlist-text-filter"
+                :aria-label="t('playlistFilterPlaceholder') || 'Filter playlists'"
                 :placeholder="t('playlistFilterPlaceholder')"
                 @input="handleTextFilterInput"
             />
@@ -1456,6 +1458,7 @@ onUnmounted(() => {
             <!-- Search Button -->
             <button
                 class="q-btn q-btn-item non-selectable no-outline q-btn--flat q-btn--rectangle q-btn--actionable q-focusable q-hoverable asmr-playlist-action"
+                :aria-label="t('playlistFindMore')"
                 :title="t('playlistFindMore')"
                 :disabled="isSearching"
                 :style="{ opacity: isSearching ? '0.6' : '1' }"
@@ -1470,6 +1473,7 @@ onUnmounted(() => {
             <!-- Randomize Button -->
             <button
                 class="q-btn q-btn-item non-selectable no-outline q-btn--flat q-btn--rectangle q-btn--actionable q-focusable q-hoverable asmr-playlist-action"
+                :aria-label="t('playlistRandomize')"
                 :title="t('playlistRandomize')"
                 @click="handleRandomize"
             >
@@ -1485,6 +1489,8 @@ onUnmounted(() => {
             <!-- Add Playlist Button -->
             <button
                 class="q-btn q-btn-item non-selectable no-outline q-btn--flat q-btn--round q-btn--actionable q-focusable q-hoverable"
+                :aria-label="t('addPlaylist') || 'Add playlist'"
+                :title="t('addPlaylist') || 'Add playlist'"
                 @click="handleAddPlaylist"
             >
                 <span class="q-btn__content text-center col items-center q-anchor--skip justify-center row">

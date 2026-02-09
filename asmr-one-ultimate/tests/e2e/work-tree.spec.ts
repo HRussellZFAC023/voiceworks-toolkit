@@ -237,6 +237,195 @@ test.describe('Folder Navigation', () => {
         // At least 50% of items should match (accounting for translation differences)
         expect(matchRatio).toBeGreaterThanOrEqual(0.5);
     });
+
+    test('click folder then click ROOT breadcrumb restores correct names', async ({ injectedPage, isScriptLoaded, waitForBridge }) => {
+        // This test reproduces the exact user-reported bug:
+        //   1. Click a folder → see files inside
+        //   2. Click ROOT breadcrumb → folder icons appear but NAMES are stale (from subfolder)
+        // Root cause: FuriganaRenderer replaces text nodes with <ruby> HTML,
+        // preventing Vue from patching {{ item.title }} on re-render.
+
+        await helpers.gotoWork(injectedPage, TEST_WORKS.STANDARD);
+        expect(await isScriptLoaded()).toBe(true);
+        await waitForBridge();
+        await injectedPage.waitForTimeout(5000);
+
+        const workTree = helpers.getWorkTree(injectedPage);
+        await expect(workTree).toBeVisible({ timeout: 10000 });
+
+        // Snapshot root-level labels
+        const rootLabels = await injectedPage
+            .locator('#work-tree .q-item__label:not(.q-item__label--caption)')
+            .allTextContents();
+        const rootItems = rootLabels.map(l => l.trim()).filter(l => l.length > 0);
+        console.log('Root items:', rootItems);
+
+        if (rootItems.length === 0) {
+            console.log('Warning: work tree items not rendered (mock env limitation)');
+            test.skip();
+            return;
+        }
+
+        // Count folders at root
+        const rootFolderCount = await helpers.getWorkTreeFolderCount(injectedPage);
+        console.log('Root folder count:', rootFolderCount);
+
+        // Find and click first folder
+        const folderRows = await injectedPage
+            .locator('#work-tree .q-item')
+            .filter({ has: injectedPage.locator('.material-icons:text("folder")') })
+            .all();
+
+        if (folderRows.length === 0) {
+            console.log('No folders found, skipping click navigation test');
+            return;
+        }
+
+        const folderName = await folderRows[0].locator('.q-item__label').first().textContent();
+        console.log('Clicking folder:', folderName?.trim());
+
+        // Click into the folder
+        await folderRows[0].click();
+        await injectedPage.waitForTimeout(3000);
+
+        // Snapshot subfolder labels
+        const subLabels = await injectedPage
+            .locator('#work-tree .q-item__label:not(.q-item__label--caption)')
+            .allTextContents();
+        const subItems = subLabels.map(l => l.trim()).filter(l => l.length > 0);
+        console.log('Subfolder items:', subItems);
+
+        // Content should have changed (subfolder has different files)
+        if (subItems.length > 0 && rootItems.length > 0) {
+            expect(JSON.stringify(subItems)).not.toBe(JSON.stringify(rootItems));
+        }
+
+        // Now click ROOT breadcrumb to go back
+        const breadcrumbs = await helpers.getBreadcrumbTexts(injectedPage);
+        console.log('Breadcrumb texts:', breadcrumbs);
+
+        // Find the ROOT / first breadcrumb and click it
+        const rootBreadcrumb = injectedPage
+            .locator('#work-tree .q-breadcrumbs .q-btn')
+            .first();
+        if (await rootBreadcrumb.count() > 0) {
+            await rootBreadcrumb.click();
+            await injectedPage.waitForTimeout(3000);
+        } else {
+            console.log('No breadcrumb found, attempting URL-based root navigation');
+            const baseUrl = 'https://asmr.one';
+            await injectedPage.goto(`${baseUrl}/work/${TEST_WORKS.STANDARD}?path=%5B%5D#work-tree`, {
+                waitUntil: 'domcontentloaded',
+                timeout: 30000,
+            });
+            await injectedPage.waitForTimeout(3000);
+        }
+
+        // CRITICAL CHECK 1: Labels should match root items, not subfolder items
+        const returnLabels = await injectedPage
+            .locator('#work-tree .q-item__label:not(.q-item__label--caption)')
+            .allTextContents();
+        const returnItems = returnLabels.map(l => l.trim()).filter(l => l.length > 0);
+        console.log('After ROOT click items:', returnItems);
+
+        if (returnItems.length === 0) {
+            console.log('Warning: no items after return (rate limiting?)');
+            test.skip();
+            return;
+        }
+
+        // Folder count should match root level
+        const returnFolderCount = await helpers.getWorkTreeFolderCount(injectedPage);
+        console.log(`Folder count: root=${rootFolderCount}, after return=${returnFolderCount}`);
+        expect(returnFolderCount).toBe(rootFolderCount);
+
+        // Item names should NOT be subfolder content
+        const hasStaleSubfolderContent = returnItems.every(item =>
+            subItems.some(sub => item === sub)
+        );
+        console.log('Has stale subfolder content:', hasStaleSubfolderContent);
+        expect(hasStaleSubfolderContent).toBe(false);
+
+        // CRITICAL CHECK 2: No stale transcript download buttons should remain
+        const staleTranscriptBtns = await injectedPage
+            .locator('#work-tree [data-asmr-transcript]')
+            .count();
+        console.log('Stale transcript buttons:', staleTranscriptBtns);
+        // Transcript buttons at root level should be 0 (root has folders and images, not audio)
+        // Even if some persist, they should match current items, not stale ones
+
+        // CRITICAL CHECK 3: No stale copy buttons should remain
+        const staleCopyBtns = await injectedPage
+            .locator('#work-tree [data-xxcopy]')
+            .count();
+        console.log('Stale copy buttons:', staleCopyBtns);
+    });
+
+    test('repeated folder enter/exit preserves correct item names', async ({ injectedPage, isScriptLoaded, waitForBridge }) => {
+        // Stress test: navigate in/out of folders multiple times
+        // to ensure cleanWorkTreeDOM properly resets state each time
+
+        await helpers.gotoWork(injectedPage, TEST_WORKS.STANDARD);
+        expect(await isScriptLoaded()).toBe(true);
+        await waitForBridge();
+        await injectedPage.waitForTimeout(5000);
+
+        const workTree = helpers.getWorkTree(injectedPage);
+        await expect(workTree).toBeVisible({ timeout: 10000 });
+
+        // Take initial root snapshot
+        const initialLabels = await injectedPage
+            .locator('#work-tree .q-item__label:not(.q-item__label--caption)')
+            .allTextContents();
+        const initialItems = initialLabels.map(l => l.trim()).filter(l => l.length > 0);
+
+        if (initialItems.length === 0) {
+            console.log('No initial items, skipping');
+            return;
+        }
+
+        // Perform 2 rounds of enter/exit
+        for (let round = 0; round < 2; round++) {
+            console.log(`--- Round ${round + 1} ---`);
+
+            // Find a folder
+            const folders = await injectedPage
+                .locator('#work-tree .q-item')
+                .filter({ has: injectedPage.locator('.material-icons:text("folder")') })
+                .all();
+
+            if (folders.length === 0) {
+                console.log('No folders found, stopping');
+                break;
+            }
+
+            // Click into folder
+            await folders[0].click();
+            await injectedPage.waitForTimeout(2000);
+
+            const insideLabels = await injectedPage
+                .locator('#work-tree .q-item__label:not(.q-item__label--caption)')
+                .allTextContents();
+            console.log(`  Inside folder: ${insideLabels.map(l => l.trim()).filter(l => l).join(', ')}`);
+
+            // Navigate back to root via breadcrumb
+            const rootBtn = injectedPage.locator('#work-tree .q-breadcrumbs .q-btn').first();
+            if (await rootBtn.count() > 0) {
+                await rootBtn.click();
+                await injectedPage.waitForTimeout(2000);
+            }
+
+            // Verify root items restored
+            const afterLabels = await injectedPage
+                .locator('#work-tree .q-item__label:not(.q-item__label--caption)')
+                .allTextContents();
+            const afterItems = afterLabels.map(l => l.trim()).filter(l => l.length > 0);
+            console.log(`  After return: ${afterItems.join(', ')}`);
+
+            // Items should have same count as initial
+            expect(afterItems.length).toBe(initialItems.length);
+        }
+    });
 });
 
 test.describe('Folder Diving', () => {

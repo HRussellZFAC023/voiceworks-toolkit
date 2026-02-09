@@ -186,13 +186,6 @@ class GpuSchedulerImpl {
             this.onGpuFailure(worker);
         });
 
-        // Listen for GPU recovery signals
-        EventBus.on('gpu:recovered', () => {
-            this.health.gpuHealthy = true;
-            this.health.consecutiveFailures = 0;
-            Logger.log('[GpuScheduler] GPU recovered');
-        });
-
         Logger.debug('[GpuScheduler] Initialized');
     }
 

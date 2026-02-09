@@ -6,6 +6,7 @@ import { CentralObserver } from '../core/CentralObserver';
 import { I18n } from '../core/Config';
 import { TranslationService } from '../services/TranslationService';
 import { AppStore } from '../store/AppStore';
+import { isChinese } from '../core/DomUtils';
 import type { DLsiteUserReview } from '../types/dlsite';
 
 function escapeHtml(s: string): string {
@@ -181,8 +182,11 @@ export class CommentSection {
     }
 
     private renderHeader(): HTMLElement {
-        const header = document.createElement('div');
+        const header = document.createElement('button');
         header.className = 'asmr-comments-header';
+        header.type = 'button';
+        header.ariaExpanded = String(this.isExpanded);
+        header.ariaLabel = I18n.t('commentsHeader');
 
         const icon = document.createElement('i');
         icon.className = 'material-icons asmr-comments-header-icon';
@@ -211,6 +215,7 @@ export class CommentSection {
 
         header.addEventListener('click', () => {
             this.isExpanded = !this.isExpanded;
+            header.ariaExpanded = String(this.isExpanded);
             const body = this.sectionEl?.querySelector('.asmr-comments-body');
             const chev = this.sectionEl?.querySelector('.asmr-comments-chevron');
             if (body) body.classList.toggle('asmr-comments-body--expanded', this.isExpanded);
@@ -266,8 +271,10 @@ export class CommentSection {
 
         if (this.currentRating > 0 || this.currentText) {
             const deleteBtn = document.createElement('button');
+            deleteBtn.type = 'button';
             deleteBtn.className = 'asmr-comments-delete-btn';
-            deleteBtn.innerHTML = `<i class="material-icons" style="font-size:14px">delete</i> ${escapeHtml(I18n.t('commentsDelete'))}`;
+            deleteBtn.ariaLabel = I18n.t('commentsDelete');
+            deleteBtn.innerHTML = `<i class="material-icons" style="font-size:14px" aria-hidden="true">delete</i> ${escapeHtml(I18n.t('commentsDelete'))}`;
             deleteBtn.addEventListener('click', () => this.handleDelete());
             actions.appendChild(deleteBtn);
         }
@@ -282,9 +289,15 @@ export class CommentSection {
         container.className = 'asmr-comments-stars';
 
         for (let i = 1; i <= 5; i++) {
-            const star = document.createElement('i');
-            star.className = `material-icons asmr-comments-star${i <= this.currentRating ? ' asmr-comments-star--active' : ''}`;
-            star.textContent = i <= this.currentRating ? 'star' : 'star_border';
+            const star = document.createElement('button');
+            star.type = 'button';
+            star.className = `asmr-comments-star-btn${i <= this.currentRating ? ' asmr-comments-star--active' : ''}`;
+            star.ariaLabel = I18n.format('commentsStarRating', { rating: i }) || `${i} star${i > 1 ? 's' : ''}`;
+            const icon = document.createElement('i');
+            icon.className = 'material-icons asmr-comments-star';
+            icon.textContent = i <= this.currentRating ? 'star' : 'star_border';
+            icon.setAttribute('aria-hidden', 'true');
+            star.appendChild(icon);
             star.addEventListener('click', () => {
                 this.currentRating = i;
                 this.updateStarsUI(container);
@@ -298,11 +311,12 @@ export class CommentSection {
     }
 
     private updateStarsUI(container: HTMLElement) {
-        const stars = container.querySelectorAll('.asmr-comments-star');
-        stars.forEach((star, idx) => {
+        const starBtns = container.querySelectorAll('.asmr-comments-star-btn');
+        starBtns.forEach((btn, idx) => {
             const active = idx < this.currentRating;
-            star.classList.toggle('asmr-comments-star--active', active);
-            star.textContent = active ? 'star' : 'star_border';
+            btn.classList.toggle('asmr-comments-star--active', active);
+            const icon = btn.querySelector('.asmr-comments-star');
+            if (icon) icon.textContent = active ? 'star' : 'star_border';
         });
     }
 
@@ -713,7 +727,10 @@ export class CommentSection {
             grid.className = 'asmr-comments-review-grid';
 
             const shouldTranslate = AppStore.getConfig('translateMode');
+            const cnToJp = AppStore.getConfig('translateCnToJp');
+            const cnOnlyMode = !shouldTranslate && cnToJp;
             const transCells: { el: HTMLElement, text: string }[] = [];
+            const cnReplaceCells: { el: HTMLElement, text: string }[] = [];
 
             paragraphs.forEach(para => {
                 const row = document.createElement('div');
@@ -724,16 +741,22 @@ export class CommentSection {
                 origCell.innerHTML = para.replace(/\n/g, '<br>');
                 row.appendChild(origCell);
 
+                const plainText = origCell.textContent || '';
+
                 if (shouldTranslate) {
                     const transCell = document.createElement('div');
                     transCell.className = 'asmr-comments-review-cell asmr-comments-review-cell--translated';
                     transCell.textContent = '...';
                     row.appendChild(transCell);
 
-                    const plainText = origCell.textContent || '';
                     if (plainText.length > 0) {
                         transCells.push({ el: transCell, text: plainText });
                     }
+                }
+
+                // CN→JP: collect CN paragraphs for inline replacement
+                if (cnToJp && plainText.length > 0 && isChinese(plainText)) {
+                    cnReplaceCells.push({ el: origCell, text: plainText });
                 }
 
                 grid.appendChild(row);
@@ -753,6 +776,18 @@ export class CommentSection {
                 }).catch(() => {
                     transCells.forEach(c => c.el.textContent = '');
                 });
+            }
+
+            // CN→JP: translate Chinese paragraphs to Japanese and replace inline
+            if (cnReplaceCells.length > 0) {
+                TranslationService.translateBatch(cnReplaceCells.map(c => c.text), 'ja').then(results => {
+                    results.forEach((translated, i) => {
+                        const cell = cnReplaceCells[i];
+                        if (translated && translated !== cell.text) {
+                            cell.el.textContent = translated;
+                        }
+                    });
+                }).catch(() => { /* silent */ });
             }
 
             card.appendChild(grid);
@@ -877,8 +912,12 @@ export class CommentSection {
      * Only fires requests for texts that actually need translation.
      */
     private preTranslateReviews(reviews: DLsiteUserReview[]): void {
-        if (!AppStore.getConfig('translateMode')) return;
+        const translateMode = !!AppStore.getConfig('translateMode');
+        const cnToJp = !!AppStore.getConfig('translateCnToJp');
+        if (!translateMode && !cnToJp) return;
+        const cnOnlyMode = !translateMode && cnToJp;
         const texts: string[] = [];
+        const cnTexts: string[] = [];
         for (const review of reviews) {
             if (!review.text) continue;
             const sanitized = this.sanitizeReviewText(review.text);
@@ -889,18 +928,29 @@ export class CommentSection {
                 const tmp = document.createElement('div');
                 tmp.innerHTML = para.replace(/\n/g, '<br>');
                 const plain = tmp.textContent || '';
-                if (plain.length > 0 && !TranslationService.isUserLang(plain)) {
-                    texts.push(plain);
+                if (plain.length === 0) continue;
+                if (cnOnlyMode) {
+                    if (isChinese(plain)) cnTexts.push(plain);
+                } else {
+                    if (!TranslationService.isUserLang(plain)) texts.push(plain);
+                    if (cnToJp && isChinese(plain)) cnTexts.push(plain);
                 }
             }
         }
-        if (texts.length === 0) return;
-        Logger.log(`[CommentSection] Pre-translating ${texts.length} paragraphs in bulk`);
-        TranslationService.translateBatch(texts).then(() => {
-            Logger.log(`[CommentSection] Pre-translation complete`);
-        }).catch(err => {
-            Logger.error(`[CommentSection] Pre-translation failed`, err);
-        });
+        if (texts.length > 0) {
+            Logger.log(`[CommentSection] Pre-translating ${texts.length} paragraphs in bulk`);
+            TranslationService.translateBatch(texts).then(() => {
+                Logger.log(`[CommentSection] Pre-translation complete`);
+            }).catch(err => {
+                Logger.error(`[CommentSection] Pre-translation failed`, err);
+            });
+        }
+        if (cnTexts.length > 0) {
+            Logger.log(`[CommentSection] Pre-translating ${cnTexts.length} CN→JA paragraphs`);
+            TranslationService.translateBatch(cnTexts, 'ja').catch(err => {
+                Logger.error(`[CommentSection] CN→JA pre-translation failed`, err);
+            });
+        }
     }
 
     // =========================================================================

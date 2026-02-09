@@ -21,6 +21,7 @@ import './styles/components/_joi_tool.css';
 import './styles/components/_visualizer.css';
 import './styles/components/_visit_counter.css';
 import './styles/components/_jpdb.css';
+import './styles/components/_cards.css';
 
 import { KikoeruBridge } from './infrastructure/KikoeruBridge';
 import { getAudioElement, hasPlayerBar } from './core/DomUtils';
@@ -434,14 +435,13 @@ function initializeQOLFeatures(): void {
     registerFeature('enablePageTitleManager', new PageTitleManager());
     registerFeature('enableRouteStateSync', new RouteStateSync());
     registerFeature('enableKeyboardManager', KeyboardManager.getInstance());
+    registerFeature('enableVectorSearch', new VectorSearchController());
 
     Logger.debug('[Init] All QOL features initialized');
 }
 
 async function initializeAIFeatures(): Promise<void> {
     Logger.debug('[Init] Initializing AI features...');
-
-    registerFeature('enableVectorSearch', new VectorSearchController());
 
     // Whisper + TranscriptFileInjector are paired — wrap as a single toggleable unit
     const whisperInstance = Whisper.getInstance();

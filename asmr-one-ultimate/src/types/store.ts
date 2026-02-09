@@ -184,6 +184,7 @@ export interface PluginConfig {
 
     // Translation
     preferLocalTranslation: boolean;
+    translateCnToJp: boolean;
 
     // UI
     autoProgress: boolean;
@@ -309,8 +310,6 @@ export interface RadioModeState {
 
 export interface LearnerModeState {
     isActive: boolean;
-    currentSegment: { jp: string; translated: string } | null;
-    showJapanese: boolean;
     segments: Array<{ start: number; end: number; text: string; translated?: string }>;
 }
 
@@ -354,13 +353,11 @@ export interface AppEvents {
     'work:change': { workId: string; work: WorkDetail };
     'radio:toggle': { isActive: boolean };
     'radio:skip': { fromWorkId: string; toWorkId: string };
-    'whisper:start': { trackSrc: string };
     'whisper:toggle': void;
     'whisper:progress': { percent: number; message: string; stage: string };
     'whisper:update': { text: string; segments: Array<{ start: number; end: number; text: string; words?: Array<{ start: number; end: number; text: string }> }>; final: boolean; chunkIndex?: number };
     'whisper:complete': { text: string };
     'whisper:error': { message: string; isHlsWarning?: boolean };
-    'whisper:hls-warning': { message: string };
     'whisper:clear': void;
     'cache:evicted': { count: number; freedBytes: number };
     'cache:cleared': { count: number; freedBytes: number };
@@ -376,10 +373,6 @@ export interface AppEvents {
     'progress:update': { workId: string; progress: string; oldProgress: string | null };
     'flatview:toggle': { active: boolean };
     'lang:change': { lang: string };
-    // Homepage caching events
-    'homepage:cached-data-injected': { sections: string[] };
-    'homepage:section-ready': { sectionKey: string; works: any[] };
-    'homepage:section-refresh': { sectionKey: string };
     // Toggle events from overflow menu
     'joi:toggle': void;
     'joi:trigger': { state: string; keyword: string; source: string };
@@ -396,6 +389,7 @@ export interface AppEvents {
     'fullscreen:exit': void;
     // Work tree navigation
     'worktree:path-change': { path: string };
+    'worktree:enhanced': { workTree: HTMLElement };
     // Gallery navigation
     'gallery:nav': { direction: -1 | 1 };
     'gallery:exclude': {};
@@ -406,7 +400,6 @@ export interface AppEvents {
     'webgpu:failed': { source: string };
     'gpu:device-lost': { worker: 'translation' | 'embedding' | 'whisper' };
     'gpu:device-lost-broadcast': { source: 'translation' | 'embedding' | 'whisper' };
-    'gpu:recovered': void;
     'whisper:transcribing': { active: boolean };
     'embedding:dead': {};
     'embedding:gpu-failed': {};
