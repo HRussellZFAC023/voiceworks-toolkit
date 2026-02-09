@@ -345,8 +345,7 @@ export class Visualizer {
     private updatePosition(): void {
         if (!this.barEl?.isConnected) return;
 
-        const isPlayerMinimized = !!AppStore.state?.player?.hide ||
-            !!AppStore.player?.hide;
+        const isPlayerMinimized = !!AppStore.player?.hide;
 
         if (isPlayerMinimized) {
             this.barEl.style.display = '';

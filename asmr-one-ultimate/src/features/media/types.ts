@@ -1,4 +1,4 @@
-import type { KikoeruApp } from '../../types';
+import type { WorkTreeComponent as HostWorkTreeComponent } from '../../types';
 
 export interface MediaFile {
     hash: string;
@@ -23,9 +23,9 @@ export interface DragState {
     scrollTop: number;
 }
 
-export interface WorkTreeComponent extends KikoeruApp {
+export interface WorkTreeComponent extends HostWorkTreeComponent {
     onClickItem: (item: MediaFile) => void;
     fatherFolder?: MediaFile[];
-    path?: MediaFile[];
+    path: string[];
     $nextTick?: (callback: () => void) => void;
 }

@@ -171,7 +171,7 @@ describe('WorkService', () => {
         it('should return default when baseURL is not http', () => {
             mockGetInstance.mockReturnValueOnce({
                 axios: { defaults: { baseURL: undefined } },
-            });
+            } as any);
             const url = (svc as any).getApiBaseUrl();
             expect(url).toBe('https://api.asmr-200.com');
         });

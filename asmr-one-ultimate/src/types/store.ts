@@ -31,6 +31,7 @@ export interface AudioPlayerState {
     work?: WorkDetail;
     lrcLines?: Array<{ time: number; text: string }>;
     src?: string;
+    source?: string;
     currentSrc?: string;
 }
 
@@ -75,8 +76,8 @@ export interface KikoeruStore {
 // ============================================================================
 
 export interface VueRouter {
-    push(location: string | { path?: string; query?: Record<string, string> }): Promise<void>;
-    replace(location: string | { path?: string; query?: Record<string, string> }): Promise<void>;
+    push(location: string | { path?: string; query?: Record<string, string | string[] | undefined> }): Promise<void>;
+    replace(location: string | { path?: string; query?: Record<string, string | string[] | undefined> }): Promise<void>;
     go(n: number): void;
     back(): void;
     forward(): void;
@@ -86,8 +87,8 @@ export interface VueRouter {
 
 export interface VueRoute {
     path: string;
-    params: Record<string, string>;
-    query: Record<string, string>;
+    params: Record<string, string | undefined>;
+    query: Record<string, string | string[] | undefined>;
     hash: string;
     fullPath: string;
     matched: unknown[];
@@ -99,10 +100,15 @@ export interface AxiosInstance {
     defaults: {
         baseURL?: string;
     };
-    get<T = unknown>(url: string, config?: { params?: Record<string, unknown> }): Promise<{ data: T; status: number }>;
-    post<T = unknown>(url: string, data?: unknown, config?: Record<string, unknown>): Promise<{ data: T; status: number }>;
-    put<T = unknown>(url: string, data?: unknown, config?: Record<string, unknown>): Promise<{ data: T; status: number }>;
-    delete<T = unknown>(url: string, config?: Record<string, unknown>): Promise<{ data: T; status: number }>;
+    get<T = unknown>(url: string, config?: {
+        params?: Record<string, unknown>;
+        responseType?: 'blob' | 'json' | 'text' | 'arraybuffer';
+        headers?: Record<string, string>;
+        [key: string]: unknown;
+    }): Promise<{ data: T; status?: number }>;
+    post<T = unknown>(url: string, data?: unknown, config?: Record<string, unknown>): Promise<{ data: T; status?: number }>;
+    put<T = unknown>(url: string, data?: unknown, config?: Record<string, unknown>): Promise<{ data: T; status?: number }>;
+    delete<T = unknown>(url: string, config?: Record<string, unknown>): Promise<{ data: T; status?: number }>;
 }
 
 export interface KikoeruApp {
@@ -132,6 +138,18 @@ export interface KikoeruApp {
         constructor: any;
     };
     [key: string]: unknown;
+}
+
+export interface WorkTreeComponent extends KikoeruApp {
+    path: string[];
+    tree?: unknown[];
+    fatherFolder?: unknown;
+    _vnode?: unknown;
+    _isDestroyed?: boolean;
+    _isBeingDestroyed?: boolean;
+    $set?: (target: unknown, key: string, value: unknown) => void;
+    $forceUpdate?: () => void;
+    $nextTick?: (callback: () => void) => void;
 }
 
 // ============================================================================
@@ -346,6 +364,7 @@ export interface AppState {
     whisper: WhisperState;
     playlist: PlaylistModeState;
     search: SearchState;
+    player?: AudioPlayerState;
     isInitialized: boolean;
 }
 
@@ -361,7 +380,15 @@ export interface AppEvents {
     'radio:skip': { fromWorkId: string; toWorkId: string };
     'whisper:toggle': void;
     'whisper:progress': { percent: number; message: string; stage: string };
-    'whisper:update': { text: string; segments: Array<{ start: number; end: number; text: string; words?: Array<{ start: number; end: number; text: string }> }>; final: boolean; chunkIndex?: number };
+    'whisper:update': {
+        text: string;
+        segments: Array<{ start: number; end: number; text: string; words?: Array<{ start: number; end: number; text: string }> }>;
+        final: boolean;
+        chunkIndex?: number;
+        fromCache?: boolean;
+        live?: boolean;
+        source?: string;
+    };
     'whisper:complete': { text: string };
     'whisper:error': { message: string; isHlsWarning?: boolean };
     'whisper:clear': void;
@@ -378,7 +405,7 @@ export interface AppEvents {
     'player:nav-next': {};
     'progress:update': { workId: string; progress: string; oldProgress: string | null };
     'flatview:toggle': { active: boolean };
-    'lang:change': { lang: string };
+    'lang:change': { lang: 'en' | 'zh' | 'ja' | string };
     // Toggle events from overflow menu
     'joi:toggle': void;
     'joi:trigger': { state: string; keyword: string; source: string };
@@ -394,7 +421,7 @@ export interface AppEvents {
     'fullscreen:enter': void;
     'fullscreen:exit': void;
     // Work tree navigation
-    'worktree:path-change': { path: string };
+    'worktree:path-change': { path: string[] };
     'worktree:enhanced': { workTree: HTMLElement };
     // Gallery navigation
     'gallery:nav': { direction: -1 | 1 };

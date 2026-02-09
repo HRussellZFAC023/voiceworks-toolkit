@@ -42,8 +42,10 @@ export function initReactiveConfig(): PluginConfig {
 
     // Sync: when config changes via setConfig, update the reactive object
     EventBus.on('config:change', ({ key, value }) => {
-        if (reactiveConfig && key in reactiveConfig) {
-            (reactiveConfig as Record<string, unknown>)[key] = value;
+        const typedKey = key as ConfigKey;
+        if (reactiveConfig && typedKey in reactiveConfig) {
+            (reactiveConfig as unknown as Record<ConfigKey, PluginConfig[ConfigKey]>)[typedKey] =
+                value as PluginConfig[typeof typedKey];
         }
 
         // Sync SFW mode body class

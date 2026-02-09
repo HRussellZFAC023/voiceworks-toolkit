@@ -3,6 +3,7 @@ import { AppStore } from '../store/AppStore';
 import { TranslationService } from '../services/TranslationService';
 import { EventBus } from '../core/EventBus';
 import type { WhisperUpdatePayload } from '../types';
+import { splitSubtitleSegments } from './subtitleSegmentSplitter';
 
 import { KikoeruBridge } from '../infrastructure/KikoeruBridge';
 import { getAudioElement, getPlayerBar } from '../core/DomUtils';
@@ -55,8 +56,8 @@ export class LearnerMode {
     private playerObserver: MutationObserver | null = null;
 
     // Cached DOM element references (avoid querySelectorAll in hot paths)
-    private cachedJpEls: Element[] = [];
-    private cachedEnEls: Element[] = [];
+    private cachedJpEls: HTMLElement[] = [];
+    private cachedEnEls: HTMLElement[] = [];
     private cachedElsDirty = true;
 
     constructor() {
@@ -1319,89 +1320,6 @@ export class LearnerMode {
         }
     }
 
-    /** Max characters per subtitle display chunk. Whisper segments exceeding this are split at word boundaries. */
-    private static readonly MAX_SUBTITLE_CHARS = 70;
-
-    /**
-     * Split whisper segments that exceed MAX_SUBTITLE_CHARS into shorter display-friendly chunks.
-     * Uses word timestamps for accurate splitting; falls back to linear time interpolation.
-     */
-    private splitLongSegments(
-        lines: { time: number; endTime?: number; text: string; words?: Array<{ start: number; end: number; text: string }> }[]
-    ): typeof lines {
-        const max = LearnerMode.MAX_SUBTITLE_CHARS;
-        const result: typeof lines = [];
-        const punctuation = /[。！？\n]/;
-
-        for (const line of lines) {
-            const text = line.text.trim();
-            if (text.length <= max) { result.push(line); continue; }
-
-            if (line.words?.length) {
-                // Word-timestamp path: accumulate words into chunks
-                let chunkWords: typeof line.words = [];
-                let chunkText = '';
-
-                for (const word of line.words) {
-                    const wt = (word.text || '').trim();
-                    if (!wt) continue;
-                    const candidate = chunkText + wt;
-
-                    if (chunkText.length > 0 && candidate.length > max) {
-                        // Emit current chunk
-                        result.push({
-                            time: chunkWords[0].start,
-                            endTime: chunkWords[chunkWords.length - 1].end,
-                            text: chunkText.trim(),
-                            words: chunkWords,
-                        });
-                        chunkWords = [word];
-                        chunkText = wt;
-                    } else {
-                        chunkWords.push(word);
-                        chunkText = candidate;
-                        // Prefer splitting at sentence-ending punctuation near the limit
-                        if (chunkText.length >= max * 0.6 && punctuation.test(wt.slice(-1))) {
-                            result.push({
-                                time: chunkWords[0].start,
-                                endTime: chunkWords[chunkWords.length - 1].end,
-                                text: chunkText.trim(),
-                                words: chunkWords,
-                            });
-                            chunkWords = [];
-                            chunkText = '';
-                        }
-                    }
-                }
-                // Remaining words
-                if (chunkWords.length > 0) {
-                    result.push({
-                        time: chunkWords[0].start,
-                        endTime: chunkWords[chunkWords.length - 1].end,
-                        text: chunkText.trim(),
-                        words: chunkWords,
-                    });
-                }
-            } else {
-                // No word timestamps: split by characters with linear time interpolation
-                const duration = (line.endTime ?? line.time) - line.time;
-                const chars = Array.from(text);
-                const totalChars = chars.length;
-                for (let offset = 0; offset < totalChars; offset += max) {
-                    const chunk = chars.slice(offset, offset + max).join('');
-                    const startFrac = offset / totalChars;
-                    const endFrac = Math.min(1, (offset + chunk.length) / totalChars);
-                    result.push({
-                        time: line.time + duration * startFrac,
-                        endTime: line.time + duration * endFrac,
-                        text: chunk,
-                    });
-                }
-            }
-        }
-        return result;
-    }
-
     private handleWhisperUpdate(payload: WhisperUpdatePayload): void {
         // P2 FIX: Always accept updates, let updateLyrics decide whether to show them
         if (!payload) return;
@@ -1423,7 +1341,7 @@ export class LearnerMode {
                 text: segment.text,
                 words: segment.words,
             }));
-            const newWhisperLines = this.splitLongSegments(mapped);
+            const newWhisperLines = splitSubtitleSegments(mapped);
 
             // Pre-translate whisper segments in background — but only for cached loads.
             // During live whisper, Whisper.translateNewSegments() handles delta translation
@@ -2574,17 +2492,17 @@ export class LearnerMode {
 
     /** Lazily refresh cached .learner-jp / .learner-en references */
     private refreshCachedEls(): void {
-        this.cachedJpEls = Array.from(document.querySelectorAll('.learner-jp'));
-        this.cachedEnEls = Array.from(document.querySelectorAll('.learner-en'));
+        this.cachedJpEls = Array.from(document.querySelectorAll<HTMLElement>('.learner-jp'));
+        this.cachedEnEls = Array.from(document.querySelectorAll<HTMLElement>('.learner-en'));
         this.cachedElsDirty = false;
     }
 
-    private getJpEls(): Element[] {
+    private getJpEls(): HTMLElement[] {
         if (this.cachedElsDirty) this.refreshCachedEls();
         return this.cachedJpEls;
     }
 
-    private getEnEls(): Element[] {
+    private getEnEls(): HTMLElement[] {
         if (this.cachedElsDirty) this.refreshCachedEls();
         return this.cachedEnEls;
     }

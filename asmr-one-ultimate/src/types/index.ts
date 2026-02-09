@@ -78,6 +78,7 @@ export type {
     VueRoute,
     AxiosInstance,
     KikoeruApp,
+    WorkTreeComponent,
     PluginConfig,
     ConfigKey,
     RadioState,

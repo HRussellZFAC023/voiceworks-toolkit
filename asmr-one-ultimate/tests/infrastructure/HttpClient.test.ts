@@ -216,7 +216,7 @@ describe('gmRequest', () => {
 });
 
 describe('KikoeruApiClient', () => {
-    let mockAxios: { get: ReturnType<typeof vi.fn> };
+    let mockAxios: any;
     let client: KikoeruApiClient;
 
     beforeEach(() => {

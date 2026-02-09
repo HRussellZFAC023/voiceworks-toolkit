@@ -1,6 +1,7 @@
 import { type Component } from 'vue';
 import { FeatureController } from './FeatureController';
 import HVDBLink from './components/HVDBLink.vue';
+import { extractRjCode } from './hvdbLinkUtils';
 
 export class HVDBLinkController extends FeatureController {
     constructor() {
@@ -25,10 +26,11 @@ export class HVDBLinkController extends FeatureController {
     }
 
     findInjectionPoint(): HTMLElement | null {
-        const links = Array.from(document.querySelectorAll('a'));
-        const dlsiteLink = links.find(a =>
-            a.href?.includes('dlsite.com') && a.closest('.col-auto')
-        );
+        const workId = this.bridge.currentWorkId;
+        const rjCode = extractRjCode(this.bridge.currentWork as any, workId);
+        if (!rjCode) return null;
+
+        const dlsiteLink = document.querySelector('a[href*="dlsite.com"]');
         if (!dlsiteLink) return null;
         return dlsiteLink.closest('.row.items-center.q-gutter-xs') as HTMLElement | null;
     }

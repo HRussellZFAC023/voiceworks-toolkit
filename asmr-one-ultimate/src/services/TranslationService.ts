@@ -20,6 +20,7 @@ type TranslationSource = 'local' | 'remote';
 // ============================================================================
 
 const CACHE_TTL_MS = 1000 * 60 * 60 * 24 * 30; // 30 days
+const TRANSLATION_CACHE_SCHEMA_VERSION = 'v2';
 const PREFETCH_MAX_LINES = 1000;
 
 // Timeouts: greedy decoding is 3-4x faster than beam search
@@ -246,11 +247,12 @@ function splitForModel(text: string): string[] | null {
 // ============================================================================
 
 // lang parameter must already be normalized via normalizeTargetLang()
+const cacheInput = (text: string): string => `${TRANSLATION_CACHE_SCHEMA_VERSION}:${text}`;
 const cacheKey = (text: string, lang: string, source: TranslationSource): string =>
-    CacheKeys.translation(text, lang, source);
+    CacheKeys.translation(cacheInput(text), lang, source);
 
 function getCached(text: string, lang: string): string | null {
-    const h = hashString(text);
+    const h = hashString(cacheInput(text));
     return SharedCache.get<string>(`asmr-ult:trans:local:${lang}:${h}`)
         || SharedCache.get<string>(`asmr-ult:trans:remote:${lang}:${h}`)
         || null;
@@ -1073,4 +1075,4 @@ export const TranslationService = {
 };
 
 // Exported for unit testing — not part of the public API
-export const _testExports = { normalizeForModel, splitForModel, isLikelyGarbage };
+export const _testExports = { normalizeForModel, splitForModel, isLikelyGarbage, glossaryPreProcess };

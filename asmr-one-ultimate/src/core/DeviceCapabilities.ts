@@ -26,6 +26,11 @@ export interface DeviceProfile {
 
 let cached: DeviceProfile | null = null;
 
+type NavigatorWithCapabilities = Navigator & {
+    deviceMemory?: number;
+    gpu?: unknown;
+};
+
 const globalWindow = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window) as Window & {
     __ASMR_DEVICE_TIER__?: DeviceTier;
     __ASMR_DEVICE_PROFILE__?: DeviceProfile;
@@ -110,7 +115,7 @@ export const DeviceCapabilities = {
     detect(): DeviceProfile {
         if (cached) return cached;
 
-        const nav = navigator as Navigator & { deviceMemory?: number };
+        const nav = navigator as NavigatorWithCapabilities;
 
         const hasGpu = typeof nav.gpu !== 'undefined' && !!nav.gpu;
         const memory = typeof nav.deviceMemory === 'number' ? nav.deviceMemory : -1;

@@ -1,29 +1,16 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import { useBridge } from '../../composables/useBridge';
+import { extractRjCode, buildHvdbUrl, buildChobitUrl } from '../hvdbLinkUtils';
 
 const bridge = useBridge();
 
 const rjCode = computed(() => {
-    const work = bridge.currentWork;
-    const workId = bridge.currentWorkId;
-    const sourceId = String(work?.source_id || work?.sourceId || '').trim();
-
-    if (sourceId) {
-        if (/^RJ\d{6,8}$/i.test(sourceId)) return sourceId.toUpperCase();
-        if (/^\d{6,8}$/.test(sourceId)) return 'RJ' + sourceId;
-    }
-
-    const cleanId = String(workId || '').trim();
-    if (/^RJ\d{6,8}$/i.test(cleanId)) return cleanId.toUpperCase();
-    if (/^\d{6,8}$/.test(cleanId)) return 'RJ' + cleanId;
-
-    return '';
+    return extractRjCode(bridge.currentWork, bridge.currentWorkId);
 });
 
-const hvdbId = computed(() => rjCode.value.replace(/^RJ/i, ''));
-const hvdbUrl = computed(() => hvdbId.value ? `https://hvdb.me/Dashboard/Add?id=${hvdbId.value}` : '');
-const chobitUrl = computed(() => rjCode.value ? `https://chobit.cc/s/?f_category=all&q_keyword=${rjCode.value}` : '');
+const hvdbUrl = computed(() => buildHvdbUrl(rjCode.value));
+const chobitUrl = computed(() => buildChobitUrl(rjCode.value));
 </script>
 
 <template>

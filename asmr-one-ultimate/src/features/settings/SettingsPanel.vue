@@ -19,19 +19,6 @@ import PROXY_WORKER_CODE from '../../../dlsite-proxy-worker.js?raw';
 const { t, format } = useI18n();
 const { on } = useEventBus();
 
-// ============================================================================
-// Feature toggle visibility mapping
-// ============================================================================
-
-const featureSectionMap: Record<string, string> = {
-    enableVectorSearch: 'magic',
-    enableWhisper: 'whisper',
-    enablePlayerTranslator: 'translation',
-    enableJpdb: 'jpdb',
-    autoProgress: 'autoprogress',
-    enableStoreBackup: 'storage',
-};
-
 // Reactive config values for controlling section visibility
 const enableVectorSearch = useConfig('enableVectorSearch');
 const enableWhisper = useConfig('enableWhisper');
@@ -200,13 +187,7 @@ const translationDownloadIcon = computed(() => {
 const translationDownloadDisabled = computed(() => translationIsLoading.value);
 
 function downloadTranslationModel() {
-    modelProgressMap.set('auto', { isLoading: true, progress: 0, message: t('downloadModelSub') });
-    TranslationService.warmupLocalModel().then(() => {
-        modelProgressMap.delete('auto');
-    }).catch((e) => {
-        Logger.warn('[SettingsPanel] Failed to warmup translation model:', e);
-        modelProgressMap.set('auto', { isLoading: false, progress: 0, message: e.message || 'Error' });
-    });
+    void ensureLocalTranslationModelsReady('downloadModelFailed');
 }
 
 function clearTranslationCache() {
@@ -239,12 +220,7 @@ async function factoryReset() {
 
 function onToggleChange(key: ConfigKey, newVal: boolean) {
     if (key === 'preferLocalTranslation' && newVal) {
-        if (!TranslationService.hasLocalTranslator()) {
-            modelProgressMap.set('auto', { isLoading: true, progress: 0, message: t('downloadModelSub') });
-            TranslationService.ensureLocalModelReady().catch((e) => {
-                Logger.warn('[SettingsPanel] Failed to ensure translation model ready:', e);
-            });
-        }
+        void ensureLocalTranslationModelsReady('downloadModelFailed');
     } else if (key === 'preferLocalTranslation' && !newVal) {
         TranslationService.disableLocalTranslation('user-disabled');
         modelProgressMap.clear();
@@ -329,15 +305,7 @@ onMounted(() => {
 
     // Auto-load translation models if local translation is enabled
     if (preferLocalTranslation.value !== false) {
-        if (!TranslationService.hasLocalTranslator()) {
-            modelProgressMap.set('auto', { isLoading: true, progress: 0, message: t('downloadModelSub') });
-            TranslationService.ensureLocalModelReady().then(() => {
-                modelProgressMap.delete('auto');
-            }).catch((e) => {
-                Logger.warn('[SettingsPanel] Failed to auto-load translation models:', e);
-                modelProgressMap.set('auto', { isLoading: false, progress: 0, message: e.message || 'Failed' });
-            });
-        }
+        void ensureLocalTranslationModelsReady('downloadModelFailed');
     }
 });
 
@@ -349,18 +317,75 @@ const proxyWorkerCode = PROXY_WORKER_CODE.trim();
 const proxyCopied = ref(false);
 let proxyCopyTimer: ReturnType<typeof setTimeout> | null = null;
 
-function copyProxyCode() {
-    navigator.clipboard.writeText(proxyWorkerCode).then(() => {
-        proxyCopied.value = true;
-        if (proxyCopyTimer) clearTimeout(proxyCopyTimer);
-        proxyCopyTimer = setTimeout(() => { proxyCopied.value = false; }, 2000);
-    });
+async function copyProxyCode() {
+    const copied = await copyText(proxyWorkerCode);
+    if (!copied) return;
+
+    proxyCopied.value = true;
+    if (proxyCopyTimer) clearTimeout(proxyCopyTimer);
+    proxyCopyTimer = setTimeout(() => { proxyCopied.value = false; }, 2000);
 }
 
 const DISCORD_USERNAME = 'henry281199';
 
-function copyDiscord() {
-    navigator.clipboard.writeText(DISCORD_USERNAME);
+async function copyDiscord() {
+    await copyText(DISCORD_USERNAME);
+}
+
+onUnmounted(() => {
+    if (proxyCopyTimer) {
+        clearTimeout(proxyCopyTimer);
+        proxyCopyTimer = null;
+    }
+});
+
+async function ensureLocalTranslationModelsReady(errorI18nKey: string): Promise<void> {
+    if (TranslationService.hasLocalTranslator()) {
+        modelProgressMap.delete('auto');
+        return;
+    }
+
+    modelProgressMap.set('auto', { isLoading: true, progress: 0, message: t('downloadModelSub') });
+
+    try {
+        await TranslationService.ensureLocalModelReady();
+        modelProgressMap.delete('auto');
+    } catch (e) {
+        Logger.warn('[SettingsPanel] Failed to ensure translation model ready:', e);
+        const message = (e as Error)?.message || t('whisperUnknownError');
+        modelProgressMap.set('auto', {
+            isLoading: false,
+            progress: 0,
+            message: format(errorI18nKey, { message }),
+        });
+    }
+}
+
+async function copyText(text: string): Promise<boolean> {
+    try {
+        if (navigator.clipboard?.writeText) {
+            await navigator.clipboard.writeText(text);
+            return true;
+        }
+    } catch (e) {
+        Logger.warn('[SettingsPanel] Clipboard write failed, falling back to textarea copy:', e);
+    }
+
+    try {
+        const textarea = document.createElement('textarea');
+        textarea.value = text;
+        textarea.setAttribute('readonly', '');
+        textarea.style.position = 'fixed';
+        textarea.style.top = '-1000px';
+        document.body.appendChild(textarea);
+        textarea.select();
+        const ok = document.execCommand('copy');
+        textarea.remove();
+        return ok;
+    } catch (e) {
+        Logger.warn('[SettingsPanel] Clipboard fallback failed:', e);
+        return false;
+    }
 }
 
 // ============================================================================

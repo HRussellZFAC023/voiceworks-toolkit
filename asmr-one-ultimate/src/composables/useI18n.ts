@@ -9,10 +9,10 @@ export function useI18n() {
     const i18n = inject<I18nType>(INJECT_KEYS.i18n) ?? I18nSingleton;
 
     // Reactive lang ref that updates on lang:change events
-    const lang = ref(i18n.lang);
+    const lang = ref<string>(i18n.lang as string);
 
     const unsub = EventBus.on('lang:change', ({ lang: newLang }) => {
-        lang.value = newLang;
+        lang.value = String(newLang);
     });
 
     onUnmounted(unsub);

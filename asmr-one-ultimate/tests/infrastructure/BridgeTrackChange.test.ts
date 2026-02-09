@@ -143,8 +143,7 @@ describe('Whisper auto-transcribe watcher', () => {
 
     it('tryAutoStartForCurrentTrack returns false when no track', () => {
         const transcribing = false;
-        const track = null;
-        const src = track?.hash || track?.mediaStreamUrl || track?.src;
+        const src = '';
         const audio = { paused: false } as HTMLAudioElement;
 
         const canStart = !transcribing && !!src && !!audio && !audio.paused;

@@ -22,6 +22,9 @@ export interface PlaylistEntry {
     description?: string;
     privacy: number;
     works: string[];
+    works_count?: number;
+    worksCount?: number;
+    user_name?: string;
     created_at?: string;
     updated_at?: string;
 }

@@ -399,6 +399,17 @@ export class JoiTool {
         Logger.log('[JoiTool] Enabled');
     }
 
+    public disable(): void {
+        this.deactivate();
+        this.persistentCleanups.forEach(fn => fn());
+        this.persistentCleanups = [];
+        this.barEl?.remove();
+        this.expandedBarEl?.remove();
+        this.barEl = null;
+        this.expandedBarEl = null;
+        Logger.log('[JoiTool] Disabled');
+    }
+
     public toggle(): void {
         if (this.isActive) {
             this.deactivate();
@@ -1191,8 +1202,7 @@ export class JoiTool {
     private updatePosition(): void {
         if (!this.barEl?.isConnected) return;
 
-        const isPlayerMinimized = !!AppStore.state?.player?.hide ||
-            !!AppStore.player?.hide;
+        const isPlayerMinimized = !!AppStore.player?.hide;
 
         if (isPlayerMinimized) {
             // Minimized player: collapsed bar above mini player bar (+ subs if visible)

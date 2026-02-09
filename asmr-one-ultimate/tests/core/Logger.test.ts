@@ -1,13 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { AppStore } from '../../src/store/AppStore';
 import { Logger } from '../../src/core/Logger';
-
 describe('Logger', () => {
-    let getConfigSpy: ReturnType<typeof vi.spyOn>;
+    let getConfigSpy: any;
 
     beforeEach(() => {
         // Spy on AppStore.getConfig to enable logging in tests
-        getConfigSpy = vi.spyOn(AppStore, 'getConfig').mockImplementation((key: string) => {
+        getConfigSpy = vi.spyOn(AppStore, 'getConfig').mockImplementation((key: any) => {
             if (key === 'enableLogging') return true as any;
             if (key === 'debug') return true as any;
             return false as any;
@@ -167,7 +166,7 @@ describe('Logger', () => {
         });
 
         it('should not log debug when debug config is false', () => {
-            getConfigSpy.mockImplementation((key: string) => {
+            getConfigSpy.mockImplementation((key: any) => {
                 if (key === 'debug') return false as any;
                 if (key === 'enableLogging') return true as any;
                 return false as any;

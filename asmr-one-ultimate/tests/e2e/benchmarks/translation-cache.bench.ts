@@ -40,7 +40,7 @@ test.describe('Translation Cache', () => {
             return { available: true, latency: avgMs, totalMs: elapsed };
         });
 
-        if (result.available) {
+        if (result.available && typeof result.totalMs === 'number') {
             console.log(`Cache hit latency: ${(result.latency * 1000).toFixed(1)}us avg (${result.totalMs.toFixed(1)}ms / 1000 ops)`);
             test.expect(result.latency).toBeLessThan(5); // < 5ms per hit
         } else {

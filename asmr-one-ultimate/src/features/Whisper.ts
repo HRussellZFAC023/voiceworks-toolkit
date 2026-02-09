@@ -13,7 +13,7 @@ import { EventBus } from '../core/EventBus';
 import { createWhisperWorker } from './WhisperWorkerLoader';
 import { getAudioElement } from '../core/DomUtils';
 import { SharedCache, CacheKeys } from '../core/Cache';
-import type { WhisperSegment } from '../types';
+import type { WhisperSegment, WhisperWord } from '../types';
 import { AppStore } from '../store/AppStore';
 import { TranslationService } from '../services/TranslationService';
 import { AudioCache } from '../infrastructure/AudioCache';

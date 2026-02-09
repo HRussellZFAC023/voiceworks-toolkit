@@ -23,6 +23,7 @@ import { getAudioElement, getPlayerBar } from '../../core/DomUtils';
 import { Logger, Config } from '../../core/Utils';
 import type { WhisperUpdatePayload, JPDBToken } from '../../types';
 import { buildSegments, sliceSegments, type FuriganaSegment } from '../../lib/jpdb-segments';
+import { splitSubtitleSegments } from '../subtitleSegmentSplitter';
 
 // ---------------------------------------------------------------------------
 // Composables
@@ -1155,57 +1156,6 @@ function _updateWhisperDisplay() {
 // Whisper event handlers
 // ---------------------------------------------------------------------------
 
-/** Max characters per subtitle display chunk. Whisper segments exceeding this are split at word boundaries. */
-const MAX_SUBTITLE_CHARS = 70;
-const SPLIT_PUNCT = /[。！？\n]/;
-
-type WhisperLine = { time: number; endTime?: number; text: string; words?: Array<{ start: number; end: number; text: string }> };
-
-function splitLongSegments(lines: WhisperLine[]): WhisperLine[] {
-    const max = MAX_SUBTITLE_CHARS;
-    const result: WhisperLine[] = [];
-    for (const line of lines) {
-        const text = line.text.trim();
-        if (text.length <= max) { result.push(line); continue; }
-        if (line.words?.length) {
-            let chunkWords: NonNullable<WhisperLine['words']> = [];
-            let chunkText = '';
-            for (const word of line.words) {
-                const wt = (word.text || '').trim();
-                if (!wt) continue;
-                const candidate = chunkText + wt;
-                if (chunkText.length > 0 && candidate.length > max) {
-                    result.push({ time: chunkWords[0].start, endTime: chunkWords[chunkWords.length - 1].end, text: chunkText.trim(), words: chunkWords });
-                    chunkWords = [word];
-                    chunkText = wt;
-                } else {
-                    chunkWords.push(word);
-                    chunkText = candidate;
-                    if (chunkText.length >= max * 0.6 && SPLIT_PUNCT.test(wt.slice(-1))) {
-                        result.push({ time: chunkWords[0].start, endTime: chunkWords[chunkWords.length - 1].end, text: chunkText.trim(), words: chunkWords });
-                        chunkWords = [];
-                        chunkText = '';
-                    }
-                }
-            }
-            if (chunkWords.length > 0) {
-                result.push({ time: chunkWords[0].start, endTime: chunkWords[chunkWords.length - 1].end, text: chunkText.trim(), words: chunkWords });
-            }
-        } else {
-            const duration = (line.endTime ?? line.time) - line.time;
-            const chars = Array.from(text);
-            const totalChars = chars.length;
-            for (let offset = 0; offset < totalChars; offset += max) {
-                const chunk = chars.slice(offset, offset + max).join('');
-                const startFrac = offset / totalChars;
-                const endFrac = Math.min(1, (offset + chunk.length) / totalChars);
-                result.push({ time: line.time + duration * startFrac, endTime: line.time + duration * endFrac, text: chunk });
-            }
-        }
-    }
-    return result;
-}
-
 function handleWhisperUpdate(payload: WhisperUpdatePayload) {
     if (!payload) return;
     whisperActive = true;
@@ -1216,7 +1166,7 @@ function handleWhisperUpdate(payload: WhisperUpdatePayload) {
     ensureWhisperTicker(whisperLive ? 80 : 200);
     if (Array.isArray(payload.segments) && payload.segments.length > 0) {
         const mapped = payload.segments.map(s => ({ time: s.start, endTime: s.end, text: s.text, words: s.words }));
-        const newLines = splitLongSegments(mapped);
+        const newLines = splitSubtitleSegments(mapped);
         if (!whisperLive && TranslationService.canPrefetch(newLines.length)) preTranslateAll(newLines);
         whisperLines = newLines;
         // Don't reset lastWhisperDisplayText here — let _updateWhisperDisplay()

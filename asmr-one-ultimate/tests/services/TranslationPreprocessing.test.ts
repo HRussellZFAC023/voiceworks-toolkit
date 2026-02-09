@@ -24,7 +24,7 @@ vi.mock('../../src/core/GpuScheduler', () => ({
 }));
 
 import { _testExports } from '../../src/services/TranslationService';
-const { normalizeForModel, splitForModel, isLikelyGarbage } = _testExports;
+const { normalizeForModel, splitForModel, isLikelyGarbage, glossaryPreProcess } = _testExports;
 
 // ============================================================================
 // normalizeForModel
@@ -113,6 +113,25 @@ describe('normalizeForModel', () => {
 
     it('preserves 。 period', () => {
         expect(normalizeForModel('文A。文B')).toBe('文A。文B');
+    });
+});
+
+// ============================================================================
+// glossaryPreProcess
+// ============================================================================
+describe('glossaryPreProcess', () => {
+    it('replaces トラック in mixed short track titles', () => {
+        const [processed, modified] = glossaryPreProcess('トラック2ヘッドマッサージ・手足湯.mp3', 'en');
+        expect(modified).toBe(true);
+        expect(processed).toContain('track2');
+        expect(processed).not.toContain('トラック');
+    });
+
+    it('keeps non-glossary text unchanged', () => {
+        const input = '静かな雨音ASMR';
+        const [processed, modified] = glossaryPreProcess(input, 'en');
+        expect(modified).toBe(false);
+        expect(processed).toBe(input);
     });
 });
 

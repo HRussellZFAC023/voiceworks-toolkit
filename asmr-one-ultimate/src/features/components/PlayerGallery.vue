@@ -22,6 +22,7 @@ import { WorkService } from '../../services/WorkService';
 import { MediaViewerController } from '../MediaViewerController';
 import { Logger } from '../../core/Utils';
 import type { TrackFolder, TrackItem } from '../../types/api';
+import { normalizeWorkId, parseWorkIdFromCoverUrl } from '../playerGalleryUtils';
 
 const IMG_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg']);
 
@@ -289,17 +290,18 @@ function detectWorkId(): string | null {
     // 1. Vuex store
     try {
         const id = (AppStore.currentWork as any)?.id;
-        if (id) return String(id);
+        const normalized = normalizeWorkId(id);
+        if (normalized) return normalized;
     } catch { /* host store may not be ready */ }
 
-    // 2. Cover URL contains numeric ID
+    // 2. Cover URL (supports numeric and RJ-prefixed IDs)
     const cover = scrapeCoverUrl();
-    const coverMatch = cover.match(/\/cover\/(\d+)/);
-    if (coverMatch) return coverMatch[1];
+    const fromCover = parseWorkIdFromCoverUrl(cover);
+    if (fromCover) return fromCover;
 
     // 3. URL path
     const pathMatch = location.pathname.match(/\/work\/(?:RJ)?(\d+)/i);
-    if (pathMatch) return pathMatch[1];
+    if (pathMatch) return normalizeWorkId(pathMatch[1]);
 
     return null;
 }
@@ -416,9 +418,10 @@ function extractImageUrls(items: any[], add: (url: string) => void): void {
 }
 
 async function loadImages(workId: string): Promise<void> {
-    if (!workId) return;
+    const normalizedWorkId = normalizeWorkId(workId);
+    if (!normalizedWorkId) return;
     const seq = ++loadSeq.value;
-    loadedWorkId.value = workId;
+    loadedWorkId.value = normalizedWorkId;
 
     // Clear previous work's images
     images.value = [];
@@ -461,7 +464,7 @@ async function loadImages(workId: string): Promise<void> {
 
     // Fetch tracks API
     try {
-        const tracks = await WorkService.getTracks(workId);
+        const tracks = await WorkService.getTracks(normalizedWorkId);
         if (seq !== loadSeq.value) return;
         if (Array.isArray(tracks)) {
             extractImageUrls(flattenTracks(tracks), add);
@@ -528,13 +531,38 @@ function onWorkChange(workId: string): void {
     excludedUrls.value.clear();
     disconnectGalleryObserver();
 
-    if (workId && workId !== loadedWorkId.value) {
-        loadImages(workId).then(() => {
+    const normalized = normalizeWorkId(workId);
+    if (normalized && normalized !== loadedWorkId.value) {
+        loadImages(normalized).then(() => {
             // After loading, start slideshow if in fullscreen
             if (isFullscreen.value && images.value.length >= 2) {
                 startSlideshow();
             }
         });
+    }
+}
+
+function refreshGalleryForTrackChange(workIdFromEvent?: string): void {
+    const normalizedEventWorkId = normalizeWorkId(workIdFromEvent);
+    const detectedWorkId = normalizedEventWorkId || detectWorkId();
+
+    if (detectedWorkId && detectedWorkId !== loadedWorkId.value) {
+        void loadImages(detectedWorkId);
+        return;
+    }
+
+    const cover = scrapeCoverUrl();
+    if (!cover) return;
+
+    // Fallback for states where work ID isn't available yet (playlist/miniplayer transitions):
+    // refresh to current cover so stale previous-work image is not shown.
+    if (images.value[0] !== cover) {
+        images.value = [cover];
+        currentIndex.value = 0;
+        imageSeen.value.clear();
+        imageSeen.value.add(cover);
+        syncCoverUrl();
+        syncAlbumart();
     }
 }
 
@@ -573,6 +601,10 @@ onMounted(() => {
     on('fullscreen:enter', () => onEnterFullscreen());
     on('fullscreen:exit', () => onExitFullscreen());
     on('work:change', (p) => onWorkChange(p.workId));
+    on('track:change', (p) => {
+        // Let host UI/store settle first, then refresh by workId/cover fallback.
+        setTimeout(() => refreshGalleryForTrackChange(p.workId), 80);
+    });
 
     // Sync albumart on mount
     nextTick(() => syncAlbumart());

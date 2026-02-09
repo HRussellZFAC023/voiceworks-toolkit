@@ -49,9 +49,9 @@ export interface SchedulerStats {
     averageWaitMs: number;
 }
 
-interface QueueEntry<T = unknown> {
-    task: SchedulerTask<T>;
-    resolve: (value: T) => void;
+interface QueueEntry {
+    task: SchedulerTask<unknown>;
+    resolve: (value: unknown) => void;
     reject: (reason: unknown) => void;
     enqueuedAt: number;
 }
@@ -234,8 +234,8 @@ class GpuSchedulerImpl {
      */
     enqueue<T>(task: SchedulerTask<T>): Promise<T> {
         return new Promise<T>((resolve, reject) => {
-            const entry: QueueEntry<T> = {
-                task,
+            const entry: QueueEntry = {
+                task: task as SchedulerTask<unknown>,
                 resolve: resolve as (value: unknown) => void,
                 reject,
                 enqueuedAt: performance.now(),
@@ -247,7 +247,7 @@ class GpuSchedulerImpl {
                 return;
             }
 
-            this.queue.enqueue(entry as QueueEntry);
+            this.queue.enqueue(entry);
             this._processNext();
         });
     }

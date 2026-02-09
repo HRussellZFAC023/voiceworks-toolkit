@@ -219,7 +219,7 @@ export class WorkMetadata {
                 return;
             }
 
-            const h1 = await SafeUtils.waitForElement('h1.text-h6');
+            const h1 = await SafeUtils.waitForElement('h1.text-h6') as HTMLElement | null;
             if (!h1 || this.currentWorkId !== expectedWorkId || epoch !== this.titleTranslationEpoch) return;
 
             if (cnOnlyMode) {
@@ -462,7 +462,7 @@ export class WorkMetadata {
                         const tagList = TranslatedTags.getInstance().getTagList();
                         const match = tagList.find(t => t.id === tagId || t.ja === text);
                         if (match?.en && match.en !== match.ja) {
-                            labelEl.textContent = TranslationService.formatPair(match.ja, match.en);
+                            labelEl.textContent = TranslationService.formatPair(match.ja || text, match.en);
                             chip.title = text;
                             return;
                         }
@@ -474,7 +474,7 @@ export class WorkMetadata {
 
             if (labelsTranslate.length === 0) return;
 
-            const targetLang = cnOnlyMode ? 'ja' : undefined;
+            const targetLang = cnOnlyMode ? 'ja' : 'en';
             const results = await TranslationService.translateBatch(labelsTranslate.map(l => l.text), targetLang);
             results.forEach((translated, i) => {
                 const item = labelsTranslate[i];

@@ -515,16 +515,18 @@ export class InfiniteScrollManager {
     private buildApiUrl(): string | null {
         const path = this.currentPath;
         const query = this.bridge.route.query || {};
+        const q = (value: string | string[] | undefined, fallback = ''): string =>
+            Array.isArray(value) ? (value[0] || fallback) : (value || fallback);
 
         // Recommendations page
         if (path === '/' || path === '/works' || path.startsWith('/works')) {
             const params = new URLSearchParams();
             params.set('page', String(this.currentPage));
-            params.set('order', query.order || 'release');
-            params.set('sort', query.sort || 'desc');
-            params.set('subtitle', query.subtitle || '0');
-            if (query.keyword) params.set('keyword', query.keyword);
-            if (query.seed) params.set('seed', query.seed);
+            params.set('order', q(query.order, 'release'));
+            params.set('sort', q(query.sort, 'desc'));
+            params.set('subtitle', q(query.subtitle, '0'));
+            if (query.keyword) params.set('keyword', q(query.keyword));
+            if (query.seed) params.set('seed', q(query.seed));
             // Copy other query params
             Object.entries(query).forEach(([key, value]) => {
                 if (!params.has(key) && value) {

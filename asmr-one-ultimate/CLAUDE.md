@@ -1,90 +1,114 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Operational guide for coding agents working on `asmr-one-ultimate`.
 
-## Commands
+## Quick Start
 
 ```bash
-npm run dev          # Vite dev server (port 5173, no HMR — manual page refresh required)
-npm run build        # Build single-file userscript to dist/
-
-npm test             # Vitest unit tests (watch mode)
-npm run test:run     # Unit tests (single run)
-npm test -- --run tests/features/RadioMode.test.ts  # Run single test file
-
-npm run test:e2e          # Playwright E2E (headless, auto-starts dev server)
-npm run test:e2e:headed   # E2E with visible browser
-npm run test:e2e:ui       # Playwright UI mode
-npm run test:e2e:debug    # Step-through debugging
-
-npm run test:coverage     # Unit tests with v8 coverage
+npm install
+npm run dev
+npm run build
+npm run test:run
+npx tsc --noEmit
 ```
 
-## Architecture
+Target output is `dist/asmr-one-ultimate.user.js`.
 
-This is a **parasitic Tampermonkey userscript** that hooks into asmr.one's Vue 2.6 + Quasar app. It runs at `document-idle` and injects features by discovering the host app's internals.
+## Core Principles
 
-### Core Infrastructure
+- Treat this as a parasitic integration with a live Vue 2 + Quasar host app.
+- Prefer host store/router APIs through `KikoeruBridge`; avoid direct fragile DOM coupling unless required.
+- Keep features additive and reversible. If a feature is toggleable, it must support clean disable/cleanup.
+- New user-facing strings must use `I18n.t`/`I18n.format` and be added for `en` and `zh` (and `ja` when practical).
+- Prefer typed event contracts in `src/types/store.ts` over ad-hoc payload shapes.
 
-**KikoeruBridge** (`src/infrastructure/KikoeruBridge.ts`) — Singleton that discovers the host Vue instance via `__vue__` on `#q-app` and exposes `bridge.store` (Vuex), `bridge.router`, `bridge.axios`. All host interactions go through the bridge.
+## Architecture Map
 
-**CentralObserver** (`src/core/CentralObserver.ts`) — Single MutationObserver on `document.body`. Features register debounced callbacks instead of creating their own observers. Uses `beginModification()/endModification()` guards to prevent infinite loops when callbacks modify the DOM.
+- `src/main.ts`: startup orchestration and feature registration.
+- `src/infrastructure/KikoeruBridge.ts`: host Vue/Router/Vuex/axios bridge.
+- `src/store/AppStore.ts`: plugin runtime state + config + host store helpers.
+- `src/core/EventBus.ts`: typed cross-feature communication.
+- `src/core/CentralObserver.ts`: shared mutation observer.
+- `src/features/*`: feature modules/controllers.
+- `src/features/components/*` + `src/ui/components/*`: Vue 3 SFC UI.
+- `src/services/*`: API and ML-related services.
 
-**EventBus** (`src/core/EventBus.ts`) — Type-safe pub/sub (`on`, `once`, `waitFor`, `emit`) for cross-feature communication. Events: `track:change`, `work:change`, `cache:added`, etc. Persisted on `unsafeWindow` to survive script re-injection.
+## Feature Patterns
 
-**AppStore** (`src/store/AppStore.ts`) — Centralized state: plugin config (persisted via GM storage), runtime app state, and host Vuex access. Vue 3 reactivity. Config has 100+ settings.
+Use one of these:
 
-**Disposable** (`src/core/Disposable.ts`) — Base class for resource cleanup. Provides `addDomListener()`, `addBusListener()`, `addInterval()`, `addTimeout()`, `onCleanup()` — all auto-released on `dispose()`.
+1. `FeatureController` subclass (preferred for Vue UI features).
+2. Standalone class with `enable()`/`disable()` and explicit cleanup.
 
-### Feature Patterns
+For DOM-heavy features:
 
-Features follow two patterns:
+- Register with `CentralObserver` instead of creating many observers.
+- Avoid inline handlers in injected HTML.
+- Use event delegation for dynamic host content.
 
-1. **FeatureController** (`src/features/FeatureController.ts`) — For Vue 3 SFC-based features. Subclasses define `component`, `findInjectionPoint()`, `shouldBeActive()`, `insertMode`. Base handles CentralObserver registration, route watching, and mount/unmount lifecycle.
+## Vue Migration Status
 
-2. **Standalone classes** — For non-Vue features (RadioMode, LearnerMode, Whisper). These have `enable()/disable()` methods, register with CentralObserver directly, and extend Disposable for cleanup.
+Migration to Vue-first UI is ongoing and must be incremental to avoid host integration regressions.
 
-Features are organized in `src/features/`, some with subdirectories (`radio/`, `playlist/`, `settings/`, `media/`).
+Features not refactored yet (still mostly imperative DOM code):
 
-### Initialization Order (src/main.ts)
+- `src/features/CommentSection.ts`
+- `src/features/AdvancedSearch.ts`
+- `src/features/FlatView.ts`
+- `src/features/JoiTool.ts`
 
-1. Import all CSS (13 stylesheets)
-2. Duplicate init guard (`__ASMR_ULTIMATE_INITIALIZED__`)
-3. Wait for KikoeruBridge (host Vue discovery)
-4. Start CentralObserver + reactive config
-5. Enable features in order: Radio → Playlist → Learner → Settings → Sidebar → QOL features → AI features → Infrastructure
-6. Warm up translation models (fire-and-forget)
-7. Setup audio recovery handlers
-8. Expose `window.ASMRUlt` global API
+Expectation for migration work:
 
-### Translation System
+1. Pick one feature.
+2. Keep existing behavior/toggles stable.
+3. Move rendering/state to Vue components/controllers.
+4. Add/update tests before touching the next feature.
 
-Two Opus-MT models (`ja→en`, `zh→en`) run in separate Web Workers via `@huggingface/transformers`. Greedy decoding, 16-item batch chunks, 8ms coalescing window, in-flight dedup. WebGPU preferred with WASM fallback. Config in `src/services/TranslationService.ts`.
+## Testing Policy
 
-### Storage
+Before finishing changes:
 
-- **GM storage** (`GM_getValue`/`GM_setValue`): User preferences, config
-- **IndexedDB**: Vector embeddings (`asmr-one-vectors`), audio cache (`asmr-one-audio-cache`), tag translations, transcripts
-- **SharedCache** (`src/core/Cache.ts`): Unified cache layer with TTL, wrapping both backends
+1. Run `npx tsc --noEmit`.
+2. Run `npm run test:run`.
+3. For UI/integration-sensitive changes, run at least one relevant Playwright spec.
 
-### CSS
+Examples:
 
-Styles live in `src/styles/` with component-specific CSS in `src/styles/components/_*.css`. Theme uses CSS custom properties (`--asmr-*`) with dark mode via `.body--dark`/`.q-dark` selectors. All injected elements use `asmr-*` class prefixes to avoid host conflicts.
+```bash
+npm test -- --run tests/features/LearnerMode.test.ts
+npm test -- --run tests/features/WorkTreeManager.test.ts
+npm run test:e2e -- tests/e2e/work-tree.spec.ts
+```
 
-## Testing
+## High-Risk Areas
 
-**Unit tests** (Vitest + jsdom): Located in `tests/` mirroring `src/` structure. Setup (`tests/setup.ts`) mocks GM_* APIs via localStorage, uses `fake-indexeddb`, and resets KikoeruBridge before each test.
+- Work tree/path sync (`WorkTreeManager`, `FolderDiver`, route query `path`).
+- Player lifecycle and minimized/expanded transitions (`LearnerMode`, `Whisper`, `Visualizer`, `JoiTool`).
+- Translation/model loading race conditions (`TranslationService`, `WhisperWorkerLoader`, `GpuScheduler`).
+- Playlist discovery and pagination, where API shapes vary.
 
-**E2E tests** (Playwright, Chromium only): Located in `tests/e2e/`. Auto-injects userscript via `context.addInitScript()` with stubbed GM_* APIs. Mocks API responses from `tests/e2e/mock-data/`. Workers=1 (sequential). WebGPU enabled for Whisper tests. Dev server auto-starts if needed.
+## Safe Change Checklist
 
-## Localization Rules
+- Are feature toggles honored at runtime (enable and disable)?
+- Are all listeners/intervals/observers cleaned up?
+- Are event payloads and shared interfaces updated together?
+- Did you avoid hardcoded UI text?
+- Did you verify both typecheck and tests?
 
-All user-facing strings must use `I18n.t('key')` or `I18n.format('key', { param })`. Both `en` and `zh` translations are required in `src/core/Config.ts` (`i18nData` object). DOM detection must be language-independent — use icons, CSS classes, or structural position, never text matching.
+## Common Commands
 
-## Build Output
+```bash
+npm run dev
+npm run build
+npm run test:run
+npm run test:coverage
+npm run test:e2e
+npx tsc --noEmit
+```
 
-Single unminified userscript in `dist/` (~1.8MB). Bundled with `vite-plugin-monkey`. External imports via SystemJS/CDN. No source maps (unsupported by Tampermonkey). For dev, install the dev server URL once in Tampermonkey, then keep `npm run dev` running.
+## Do Not
 
-## Pre-push Hook
-
-`.husky/pre-push` runs `npm test` before allowing push.
+- Do not match host sections by localized text.
+- Do not mutate host internals when a store action/mutation exists.
+- Do not add new polling loops if an event/watcher path exists.
+- Do not bypass typed event/store contracts.
