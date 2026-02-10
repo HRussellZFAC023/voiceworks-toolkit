@@ -13,6 +13,7 @@ import { useConfig } from '../../composables/useConfig';
 import { useRoute } from '../../composables/useRoute';
 import { useI18n } from '../../composables/useI18n';
 import { Logger } from '../../core/Utils';
+import { buildInfiniteScrollApiUrl } from '../infiniteScrollApiUtils';
 
 // ============================================================================
 // Types
@@ -50,6 +51,15 @@ interface PaginationData {
     page?: number;
     current_page?: number;
     works?: unknown[];
+}
+
+/** Loosely-typed Vue 2 instance for __vue__ DOM access */
+interface Vue2Instance {
+    works?: unknown[];
+    list?: unknown[];
+    $data?: Record<string, unknown>;
+    $parent?: Vue2Instance;
+    [key: string]: unknown;
 }
 
 type SentinelState = 'idle' | 'loading' | 'loading-images' | 'rate-limit' | 'rate-limit-error' | 'end';
@@ -417,68 +427,12 @@ function restorePagination(): void {
 // ============================================================================
 
 function buildApiUrl(pageOverride?: number): string | null {
-    const path = route.value.path;
-    const query = route.value.query || {};
-    const page = pageOverride ?? currentPage.value;
-
-    if (path === '/' || path === '/works' || path.startsWith('/works')) {
-        const params = new URLSearchParams();
-        params.set('page', String(page));
-        params.set('order', query.order || 'release');
-        params.set('sort', query.sort || 'desc');
-        params.set('subtitle', query.subtitle || '0');
-        if (query.keyword) params.set('keyword', query.keyword);
-        if (query.seed) params.set('seed', query.seed);
-        Object.entries(query).forEach(([key, value]) => {
-            if (!params.has(key) && value) {
-                params.set(key, String(value));
-            }
-        });
-        return `/api/works?${params.toString()}`;
-    }
-
-    if (path === '/search') {
-        const params = new URLSearchParams();
-        params.set('page', String(page));
-        Object.entries(query).forEach(([key, value]) => {
-            if (key !== 'page' && value) {
-                params.set(key, String(value));
-            }
-        });
-        return `/api/search?${params.toString()}`;
-    }
-
-    if (path.startsWith('/circle/')) {
-        const circleId = path.split('/')[2];
-        const params = new URLSearchParams();
-        params.set('page', String(page));
-        return `/api/circles/${circleId}/works?${params.toString()}`;
-    }
-
-    if (path.startsWith('/tag/')) {
-        const tagId = path.split('/')[2];
-        const params = new URLSearchParams();
-        params.set('page', String(page));
-        return `/api/tags/${tagId}/works?${params.toString()}`;
-    }
-
-    if (path.startsWith('/va/')) {
-        const vaId = path.split('/')[2];
-        const params = new URLSearchParams();
-        params.set('page', String(page));
-        return `/api/vas/${vaId}/works?${params.toString()}`;
-    }
-
-    // Playlist detail page: /playlist?id=xxx
-    if (path === '/playlist' && query.id) {
-        const params = new URLSearchParams();
-        params.set('id', String(query.id));
-        params.set('page', String(page));
-        params.set('pageSize', String(pageSize.value));
-        return `/api/playlist/get-playlist-works?${params.toString()}`;
-    }
-
-    return null;
+    return buildInfiniteScrollApiUrl({
+        path: route.value.path,
+        query: route.value.query,
+        page: pageOverride ?? currentPage.value,
+        pageSize: pageSize.value,
+    });
 }
 
 // ============================================================================
@@ -492,7 +446,7 @@ function appendWorksViaVue(newWorks: WorkItem[]): boolean {
         const worksArray = state.Works?.list || state.View?.works;
 
         if (worksArray && Array.isArray(worksArray)) {
-            const existingIds = new Set(worksArray.map((w: any) => String(w.id || w.source_id)));
+            const existingIds = new Set(worksArray.map((w: { id?: string | number; source_id?: string }) => String(w.id || w.source_id)));
             const filtered = newWorks.filter(work => {
                 const workId = String(work.id || work.source_id);
                 return !existingIds.has(workId);
@@ -510,11 +464,11 @@ function appendWorksViaVue(newWorks: WorkItem[]): boolean {
         if (grid) {
             let el: HTMLElement | null = grid as HTMLElement;
             while (el) {
-                const vue = (el as any).__vue__;
+                const vue = (el as HTMLElement & { __vue__?: Vue2Instance }).__vue__;
                 if (vue) {
                     const componentWorks = vue.works || vue.$data?.works || vue.list || vue.$data?.list;
                     if (componentWorks && Array.isArray(componentWorks)) {
-                        const existingIds = new Set(componentWorks.map((w: any) => String(w.id || w.source_id)));
+                        const existingIds = new Set(componentWorks.map((w: { id?: string | number; source_id?: string }) => String(w.id || w.source_id)));
                         const filtered = newWorks.filter(work => {
                             const workId = String(work.id || work.source_id);
                             return !existingIds.has(workId);
@@ -529,7 +483,7 @@ function appendWorksViaVue(newWorks: WorkItem[]): boolean {
                     while (parent) {
                         const pWorks = parent.works || parent.$data?.works || parent.list || parent.$data?.list;
                         if (pWorks && Array.isArray(pWorks)) {
-                            const existingIds = new Set(pWorks.map((w: any) => String(w.id || w.source_id)));
+                            const existingIds = new Set(pWorks.map((w: { id?: string | number; source_id?: string }) => String(w.id || w.source_id)));
                             const filtered = newWorks.filter(work => {
                                 const workId = String(work.id || work.source_id);
                                 return !existingIds.has(workId);
@@ -700,7 +654,7 @@ async function prefetchNext(): Promise<void> {
         };
         Logger.debug(`[InfiniteScrollGrid] Prefetched page ${targetPage} (${prefetchedResult.works.length} works)`);
     } catch (error) {
-        const status = (error as any)?.response?.status;
+        const status = (error as { response?: { status?: number } })?.response?.status;
         if (status === 429) {
             Logger.debug('[InfiniteScrollGrid] Prefetch rate limited, skipping');
         }
@@ -816,7 +770,7 @@ async function triggerNextPage(): Promise<void> {
             reachedEnd.value = true;
         }
     } catch (error) {
-        const status = (error as any)?.response?.status || (error as any)?.status;
+        const status = (error as { response?: { status?: number }; status?: number })?.response?.status || (error as { status?: number })?.status;
         if (status === 429) {
             currentPage.value--;
             handleRateLimit();

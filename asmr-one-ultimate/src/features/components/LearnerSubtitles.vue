@@ -21,9 +21,10 @@ import { AppStore } from '../../store/AppStore';
 import { AudioCache } from '../../infrastructure/AudioCache';
 import { getAudioElement, getPlayerBar } from '../../core/DomUtils';
 import { Logger, Config } from '../../core/Utils';
-import type { WhisperUpdatePayload, JPDBToken } from '../../types';
+import type { WhisperUpdatePayload, JPDBToken, AudioPlayerState, KikoeruStoreState, KikoeruApp, VueRoute, PlayerTrack, AvailableLyric } from '../../types';
 import { buildSegments, sliceSegments, type FuriganaSegment } from '../../lib/jpdb-segments';
 import { splitSubtitleSegments } from '../subtitleSegmentSplitter';
+import { findLyricsSource as findLyricsSourceUtil, normalizeLyricLines, parseLrcContent, parseSubtitleContent } from '../learnerLyricsUtils';
 
 // ---------------------------------------------------------------------------
 // Composables
@@ -129,6 +130,11 @@ let drawerResizeObserver: ResizeObserver | null = null;
 let coverImgObserver: MutationObserver | null = null;
 let subsResizeObserver: ResizeObserver | null = null;
 let lastSetCoverMaxH = '';  // Track our last-set value to distinguish from host updates
+
+// rAF coalescing flags — prevent layout thrashing during window resize
+let rafPlayerObserver = 0;
+let rafCoverAdjust = 0;
+let rafDrawerSync = 0;
 
 // Host more button (for overflow proxy)
 let hostMoreBtn: HTMLElement | null = null;
@@ -352,6 +358,20 @@ async function parseForFurigana(text: string): Promise<void> {
     }
 }
 
+/**
+ * Handle JPDB card state change (grading, mining, etc.).
+ * Updates the reactive jpdbTokens so Vue recomputes segment classes.
+ */
+function onJpdbCardGraded(e: Event): void {
+    const { vid, sid, cardState } = (e as CustomEvent).detail;
+    if (!jpdbTokens.value) return;
+    for (const token of jpdbTokens.value) {
+        if (token.card.vid === vid && token.card.sid === sid) {
+            token.card.cardState = cardState;
+        }
+    }
+}
+
 function updateSecondaryLine(text: string, fallback: boolean) {
     secondaryText.value = text;
     isFallback.value = fallback;
@@ -490,7 +510,7 @@ function getProgressiveText(
     // Segment mode: show full text at once, no progressive reveal
     if (segmentMode.value) return text;
 
-    const words = (line as any).words as Array<{ start: number; end: number; text: string }> | undefined;
+    const words = (line as { words?: Array<{ start: number; end: number; text: string }> }).words;
     if (Array.isArray(words) && words.length > 0) {
         const visible = words.filter(w => w.start <= now + 0.01).map(w => (w.text || '').trim()).filter(Boolean);
         if (visible.length === 0) return '';
@@ -569,58 +589,6 @@ function getSubtitleDisplay(): SubtitleDisplayResult {
 // Lyrics source finding
 // ---------------------------------------------------------------------------
 
-function getStoreLyricsSource(): any[] | null {
-    const player = (bridge.store?.state?.AudioPlayer || {}) as any;
-    const candidates: any[] = [
-        player.lyrics, player.lyricLines, player.lrcLines, player.lrc,
-        player.subtitleLines, player.subtitles,
-        player.subtitle?.lines, player.subtitle?.lrcLines, player.subtitle?.lyrics,
-        player.subtitle?.items, player.subtitle?.cues, player.lyric?.lines,
-    ];
-    for (const c of candidates) {
-        if (Array.isArray(c) && c.length > 0) return c;
-    }
-    // One-level deep scan
-    for (const key of Object.keys(player)) {
-        const value = player[key];
-        if (!value || typeof value !== 'object') continue;
-        if (Array.isArray(value) && value.length > 0 && isLyricLineArray(value)) return value;
-        const inner = value.lines || value.items || value.cues;
-        if (Array.isArray(inner) && inner.length > 0 && isLyricLineArray(inner)) return inner;
-    }
-    return null;
-}
-
-function isLyricLineArray(lines: any[]): boolean {
-    const sample = lines.find((l: any) => l);
-    if (!sample) return false;
-    return typeof sample.text === 'string' || typeof sample.content === 'string' || typeof sample.lyric === 'string';
-}
-
-function parseLyricsFromDom(): Array<{ time: number; text: string }> | null {
-    const lyricContent = document.querySelector('.lyric-content');
-    if (!lyricContent) return null;
-    const items = lyricContent.querySelectorAll('.q-item');
-    if (items.length === 0) return null;
-    const lyrics: Array<{ time: number; text: string }> = [];
-    const tsRegex = /\[(\d+):(\d+)\.(\d+)\]/;
-    for (const item of Array.from(items)) {
-        const label = item.querySelector('.q-item__label');
-        if (!label) continue;
-        const caption = item.querySelector('.q-item__label--caption');
-        const captionText = caption?.textContent?.trim() || '';
-        const match = tsRegex.exec(captionText);
-        const labelText = label.textContent?.replace(captionText, '').trim() || '';
-        if (match && labelText) {
-            const mins = parseInt(match[1], 10);
-            const secs = parseInt(match[2], 10);
-            const cs = parseInt(match[3], 10);
-            lyrics.push({ time: (mins * 60 + secs) * 1000 + cs * 10, text: labelText });
-        }
-    }
-    return lyrics.length > 0 ? lyrics : null;
-}
-
 function getTextTracksAsLyrics(): Array<{ time: number; endTime?: number; text: string }> | null {
     const audio = getAudioElement();
     if (!audio?.textTracks) return null;
@@ -639,87 +607,14 @@ function getTextTracksAsLyrics(): Array<{ time: number; endTime?: number; text: 
     return null;
 }
 
-function findLyricsSource(): any[] | null {
-    const storeLyrics = getStoreLyricsSource();
-    if (storeLyrics?.length) return storeLyrics;
-    const selectors = ['#lyric', '.lyric-content', '.q-card__section', '.audio-player', '.q-footer'];
-    for (const selector of selectors) {
-        const el = document.querySelector(selector) as any;
-        if (!el) continue;
-        const vm = el.__vue__;
-        if (vm) {
-            const data = vm.lyrics || vm.lrcLines || vm.lyricLines ||
-                vm.$data?.lyrics || vm.$data?.lrcLines ||
-                vm.$store?.state?.AudioPlayer?.lrcLines;
-            if (Array.isArray(data) && data.length) return data;
-            let parent = vm.$parent;
-            for (let i = 0; i < 5 && parent; i++) {
-                const pd = parent.lyrics || parent.lrcLines || parent.lyricLines ||
-                    parent.$data?.lyrics || parent.$data?.lrcLines;
-                if (Array.isArray(pd) && pd.length) return pd;
-                parent = parent.$parent;
-            }
-        }
-    }
-    const lrcDom = parseLyricsFromDom();
-    if (lrcDom?.length) return lrcDom;
-    return null;
+function findLyricsSource(): Record<string, unknown>[] | null {
+    const source = findLyricsSourceUtil(bridge.store?.state?.AudioPlayer, document);
+    return source as Record<string, unknown>[] | null;
 }
 
 // ---------------------------------------------------------------------------
 // VTT / LRC parsing
 // ---------------------------------------------------------------------------
-
-function parseVttContent(content: string): Array<{ time: number; endTime?: number; text: string }> {
-    const lyrics: Array<{ time: number; endTime?: number; text: string }> = [];
-    const lines = content.split(/\r?\n/);
-    const tsRegex = /^(?:(\d+):)?(\d{2}):(\d{2})\.(\d{3})\s*-->\s*(?:(\d+):)?(\d{2}):(\d{2})\.(\d{3})/;
-    let i = 0;
-    while (i < lines.length && !tsRegex.test(lines[i])) i++;
-    while (i < lines.length) {
-        const match = tsRegex.exec(lines[i]);
-        if (match) {
-            const startTime = (match[1] ? parseInt(match[1], 10) : 0) * 3600 + parseInt(match[2], 10) * 60 + parseInt(match[3], 10) + parseInt(match[4], 10) / 1000;
-            const endTime = (match[5] ? parseInt(match[5], 10) : 0) * 3600 + parseInt(match[6], 10) * 60 + parseInt(match[7], 10) + parseInt(match[8], 10) / 1000;
-            i++;
-            const textLines: string[] = [];
-            while (i < lines.length && lines[i].trim() !== '' && !tsRegex.test(lines[i])) {
-                if (!/^\d+$/.test(lines[i].trim())) textLines.push(lines[i].trim());
-                i++;
-            }
-            const text = textLines.join(' ').trim();
-            if (text) lyrics.push({ time: startTime, endTime, text });
-        } else {
-            i++;
-        }
-    }
-    return lyrics;
-}
-
-function parseLrcContent(content: string): Array<{ time: number; text: string }> {
-    const lyrics: Array<{ time: number; text: string }> = [];
-    const lines = content.split(/\r?\n/);
-    const tsRegex = /\[(\d+):(\d+)(?:\.(\d+))?\]/g;
-    for (const line of lines) {
-        if (!line.trim()) continue;
-        if (/^\[(ti|ar|al|by|offset|re|ve):/i.test(line)) continue;
-        const timestamps: number[] = [];
-        let text = line;
-        let match;
-        while ((match = tsRegex.exec(line)) !== null) {
-            const mins = parseInt(match[1], 10);
-            const secs = parseInt(match[2], 10);
-            const cs = match[3] ? parseInt(match[3].padEnd(2, '0').slice(0, 2), 10) : 0;
-            timestamps.push(mins * 60 + secs + cs / 100);
-            text = text.replace(match[0], '');
-        }
-        text = text.trim();
-        if (!text || timestamps.length === 0) continue;
-        for (const time of timestamps) lyrics.push({ time, text });
-    }
-    lyrics.sort((a, b) => a.time - b.time);
-    return lyrics;
-}
 
 // ---------------------------------------------------------------------------
 // LRC / subtitle fetching
@@ -727,11 +622,10 @@ function parseLrcContent(content: string): Array<{ time: number; text: string }>
 
 async function fetchSubtitleFromUrl(url: string): Promise<boolean> {
     try {
-        const res = await bridge.axios.get<string>(url, { responseType: 'text' as any });
+        const res = await bridge.axios.get<string>(url, { responseType: 'text' });
         const content = typeof res.data === 'string' ? res.data : String(res.data);
         if (!content) return false;
-        let lyrics = parseVttContent(content);
-        if (lyrics.length === 0) lyrics = parseLrcContent(content);
+        const lyrics = parseSubtitleContent(content);
         if (lyrics.length > 0) {
             const tk = getTrackKey();
             if (tk) lastTrackKey = tk;
@@ -748,7 +642,7 @@ async function fetchSubtitleFromUrl(url: string): Promise<boolean> {
 
 async function fetchLrcByHash(hash: string): Promise<boolean> {
     try {
-        const res = await bridge.axios.get<string>(`/api/media/stream/${hash}`, { responseType: 'text' as any });
+        const res = await bridge.axios.get<string>(`/api/media/stream/${hash}`, { responseType: 'text' });
         const content = typeof res.data === 'string' ? res.data : String(res.data);
         if (!content) return false;
         const lyrics = parseLrcContent(content);
@@ -777,13 +671,13 @@ async function fetchLrcForCurrentTrack(): Promise<void> {
     return lrcFetchPromise;
 }
 
-async function _fetchLrcInner(track: any, trackHash: string): Promise<void> {
+async function _fetchLrcInner(track: PlayerTrack, trackHash: string): Promise<void> {
     let fetched = false;
 
     // Priority 1: availableLyrics
     if (track.availableLyrics?.length) {
         const trackTitle = (track.title || '').replace(/\.[^.]+$/, '');
-        const sorted = [...track.availableLyrics].sort((a: any, b: any) => {
+        const sorted = [...track.availableLyrics].sort((a: AvailableLyric, b: AvailableLyric) => {
             const aMatch = trackTitle && (a.title || '').replace(/\.[^.]+$/, '') === trackTitle ? 0 : 1;
             const bMatch = trackTitle && (b.title || '').replace(/\.[^.]+$/, '') === trackTitle ? 0 : 1;
             return aMatch - bMatch;
@@ -800,7 +694,7 @@ async function _fetchLrcInner(track: any, trackHash: string): Promise<void> {
         const workId = bridge.currentWorkId;
         if (workId) {
             const queue = bridge.queue;
-            const trackIndex = queue.findIndex((t: any) => t.hash === track.hash || t.mediaStreamUrl === track.mediaStreamUrl || t.src === track.src);
+            const trackIndex = queue.findIndex((t: PlayerTrack) => t.hash === track.hash || t.mediaStreamUrl === track.mediaStreamUrl || t.src === track.src);
             const candidates = new Set<number>();
             if (trackIndex >= 0) candidates.add(trackIndex);
             const fallback = bridge.queueIndex;
@@ -914,13 +808,7 @@ function updateLyrics() {
             || bridge.store?.state?.AudioPlayer?.lrcLines
             || getTextTracksAsLyrics();
         if (data?.length) {
-            const newLyrics = data.map((l: any) => ({
-                time: typeof l.time === 'number'
-                    ? (l.time > 1000 ? l.time / 1000 : l.time)
-                    : parseFloat(l.time || l.start || l.startTime || 0),
-                endTime: l.end || l.endTime || undefined,
-                text: l.text || l.content || '',
-            }));
+            const newLyrics = normalizeLyricLines(data as Record<string, unknown>[]);
             if (newLyrics.length !== currentLyrics.length ||
                 (newLyrics.length > 0 && newLyrics[0]?.text !== currentLyrics[0]?.text)) {
                 preTranslateAll(newLyrics);
@@ -1159,9 +1047,9 @@ function _updateWhisperDisplay() {
 function handleWhisperUpdate(payload: WhisperUpdatePayload) {
     if (!payload) return;
     whisperActive = true;
-    whisperFromCache = !!(payload as any).fromCache;
-    whisperLive = typeof (payload as any).live === 'boolean' ? !!(payload as any).live : false;
-    whisperLeadSec = typeof (payload as any).leadSec === 'number' ? Math.max(0, (payload as any).leadSec) : whisperLeadSec;
+    whisperFromCache = !!payload.fromCache;
+    whisperLive = typeof payload.live === 'boolean' ? !!payload.live : false;
+    whisperLeadSec = typeof payload.leadSec === 'number' ? Math.max(0, payload.leadSec) : whisperLeadSec;
     whisperText = payload.text || '';
     ensureWhisperTicker(whisperLive ? 80 : 200);
     if (Array.isArray(payload.segments) && payload.segments.length > 0) {
@@ -1365,17 +1253,23 @@ function setupCoverAdjustment() {
     const player = document.querySelector('.audio-player') as HTMLElement;
     if (!player) return;
 
-    // Observe the q-img style for host recalculations (e.g. on resize)
+    // Observe the q-img style for host recalculations (e.g. on resize) — coalesce via rAF
     const qImg = player.querySelector('.albumart .q-img') as HTMLElement;
     if (qImg && !coverImgObserver) {
-        coverImgObserver = new MutationObserver(() => adjustCoverForSubtitles());
+        coverImgObserver = new MutationObserver(() => {
+            if (rafCoverAdjust) return;
+            rafCoverAdjust = requestAnimationFrame(() => { rafCoverAdjust = 0; adjustCoverForSubtitles(); });
+        });
         coverImgObserver.observe(qImg, { attributes: true, attributeFilter: ['style'] });
     }
 
-    // Observe our subtitle container for size changes
+    // Observe our subtitle container for size changes — coalesce via rAF
     const subsRoot = player.querySelector('#asmr-learner-subs-root') as HTMLElement;
     if (subsRoot && !subsResizeObserver && typeof ResizeObserver !== 'undefined') {
-        subsResizeObserver = new ResizeObserver(() => adjustCoverForSubtitles());
+        subsResizeObserver = new ResizeObserver(() => {
+            if (rafCoverAdjust) return;
+            rafCoverAdjust = requestAnimationFrame(() => { rafCoverAdjust = 0; adjustCoverForSubtitles(); });
+        });
         subsResizeObserver.observe(subsRoot);
     }
 
@@ -1418,7 +1312,7 @@ function triggerHostMenuAction(iconName: string) {
 function downloadCurrentTrack() {
     const track = bridge.currentTrack;
     if (!track) return;
-    const url = (track as any).mediaDownloadUrl || (track as any).media_download_url || (track as any).file_url;
+    const url = track.mediaDownloadUrl || track.media_download_url || track.file_url;
     if (!url) return;
     // Use cached blob URL if already in AudioCache (avoids re-downloading)
     const href = AudioCache.objectUrls.get(url) || url;
@@ -1726,22 +1620,26 @@ function setupStoreWatchers() {
 
     const add = (fn: () => void) => storeWatcherCleanups.push(fn);
 
+    // Helper to access AudioPlayer with extra host fields beyond our typed interface
+    type APExtended = AudioPlayerState & Record<string, unknown>;
+    const ap = (state: KikoeruStoreState) => state.AudioPlayer as APExtended;
+
     // Lyrics watchers — debounced so multiple field changes in one tick trigger a single updateLyrics()
-    add(store.watch((state: any) => state.AudioPlayer?.lrcLines, () => scheduleUpdateLyrics(), { immediate: true }));
-    add(store.watch((state: any) => state.AudioPlayer?.lyrics, () => scheduleUpdateLyrics(), { immediate: true }));
-    add(store.watch((state: any) => state.AudioPlayer?.lyricLines, () => scheduleUpdateLyrics(), { immediate: true }));
-    add(store.watch((state: any) => state.AudioPlayer?.subtitleLines, () => scheduleUpdateLyrics(), { immediate: true }));
-    add(store.watch((state: any) => state.AudioPlayer?.subtitles, () => scheduleUpdateLyrics(), { immediate: true }));
-    add(store.watch((state: any) => state.AudioPlayer?.subtitle?.lines, () => scheduleUpdateLyrics(), { immediate: true }));
-    add(store.watch((state: any) => state.AudioPlayer?.currentLyric, (lyric: any) => { if (lyric) scheduleUpdateLyrics(); }));
+    add(store.watch((state: KikoeruStoreState) => ap(state).lrcLines, () => scheduleUpdateLyrics(), { immediate: true }));
+    add(store.watch((state: KikoeruStoreState) => ap(state).lyrics, () => scheduleUpdateLyrics(), { immediate: true }));
+    add(store.watch((state: KikoeruStoreState) => ap(state).lyricLines, () => scheduleUpdateLyrics(), { immediate: true }));
+    add(store.watch((state: KikoeruStoreState) => ap(state).subtitleLines, () => scheduleUpdateLyrics(), { immediate: true }));
+    add(store.watch((state: KikoeruStoreState) => ap(state).subtitles, () => scheduleUpdateLyrics(), { immediate: true }));
+    add(store.watch((state: KikoeruStoreState) => (ap(state).subtitle as Record<string, unknown> | undefined)?.lines, () => scheduleUpdateLyrics(), { immediate: true }));
+    add(store.watch((state: KikoeruStoreState) => ap(state).currentLyric, (lyric: unknown) => { if (lyric) scheduleUpdateLyrics(); }));
 
     // Track change via queue[queueIndex]
-    add(store.watch((state: any) => {
-        const ap = state.AudioPlayer;
-        if (!ap?.queue || typeof ap.queueIndex !== 'number') return null;
-        const track = ap.queue[ap.queueIndex];
+    add(store.watch((state: KikoeruStoreState) => {
+        const player = state.AudioPlayer;
+        if (!player?.queue || typeof player.queueIndex !== 'number') return null;
+        const track = player.queue[player.queueIndex];
         return track?.hash || track?.mediaStreamUrl || null;
-    }, (trackKey: any) => {
+    }, (trackKey: string | null) => {
         setTimeout(() => {
             bindAudioTimeUpdate();
             if (trackKey) fetchLrcForCurrentTrack().catch(err => Logger.error('[LearnerMode] Store watcher LRC fetch failed:', err));
@@ -1749,17 +1647,17 @@ function setupStoreWatchers() {
     }, { immediate: true }));
 
     // Audio source
-    add(store.watch((state: any) => state.AudioPlayer?.source, (src: any) => {
+    add(store.watch((state: KikoeruStoreState) => state.AudioPlayer?.source, (src: string | undefined) => {
         if (src) setTimeout(() => fetchLrcForCurrentTrack().catch(err => Logger.error('[LearnerMode] Source watcher LRC fetch failed:', err)), 200);
     }, { immediate: true }));
 
     // Playing state
-    add(store.watch((state: any) => state.AudioPlayer?.playing, (playing: any) => {
+    add(store.watch((state: KikoeruStoreState) => state.AudioPlayer?.playing, (playing: boolean | undefined) => {
         if (playing && currentLyrics.length === 0) fetchLrcForCurrentTrack().catch(err => Logger.error('[LearnerMode] Playing watcher LRC fetch failed:', err));
     }, { immediate: true }));
 
     // Player minimize/expand
-    add(store.watch((state: any) => state.AudioPlayer?.hide, () => refreshVisibility()));
+    add(store.watch((state: KikoeruStoreState) => state.AudioPlayer?.hide, () => refreshVisibility()));
 }
 
 // ---------------------------------------------------------------------------
@@ -1770,6 +1668,9 @@ onMounted(() => {
     AppStore.setLearnerState({ isActive: true });
 
     boundTimeHandler = () => updateLyrics();
+
+    // JPDB card state change listener (grading / mining updates)
+    document.addEventListener('jpdb:card-graded', onJpdbCardGraded);
 
     // EventBus listeners
     on('whisper:clear', () => handleWhisperClear());
@@ -1795,9 +1696,9 @@ onMounted(() => {
     });
 
     // Vue route watcher
-    const app = bridge.app as any;
+    const app = bridge.app as KikoeruApp | undefined;
     if (app?.$watch) {
-        app.$watch('$route', (to: any) => {
+        app.$watch('$route', (to: VueRoute) => {
             lastText = '';
             currentLyrics = [];
             whisperLines = [];
@@ -1828,17 +1729,24 @@ onMounted(() => {
     injectExpandedControls();
     injectCollapsedControls();
 
-    // Player appearance observer
+    // Player appearance observer — coalesce via rAF to avoid layout thrashing on resize
     playerObserver = new MutationObserver(() => {
-        injectExpandedControls();
-        injectCollapsedControls();
+        if (rafPlayerObserver) return;
+        rafPlayerObserver = requestAnimationFrame(() => {
+            rafPlayerObserver = 0;
+            injectExpandedControls();
+            injectCollapsedControls();
+        });
     });
     playerObserver.observe(document.body, { childList: true, subtree: true });
 
-    // Drawer resize tracking
+    // Drawer resize tracking — coalesce via rAF
     const drawer = document.querySelector('.q-drawer--left') as HTMLElement | null;
     if (drawer && typeof ResizeObserver !== 'undefined') {
-        drawerResizeObserver = new ResizeObserver(() => syncDrawerWidth());
+        drawerResizeObserver = new ResizeObserver(() => {
+            if (rafDrawerSync) return;
+            rafDrawerSync = requestAnimationFrame(() => { rafDrawerSync = 0; syncDrawerWidth(); });
+        });
         drawerResizeObserver.observe(drawer);
     }
     syncDrawerWidth();
@@ -1866,6 +1774,9 @@ onUnmounted(() => {
     clearWhisperTicker();
     unbindAudio();
     if (seekedDebounceTimer) { clearTimeout(seekedDebounceTimer); seekedDebounceTimer = null; }
+    if (rafPlayerObserver) { cancelAnimationFrame(rafPlayerObserver); rafPlayerObserver = 0; }
+    if (rafCoverAdjust) { cancelAnimationFrame(rafCoverAdjust); rafCoverAdjust = 0; }
+    if (rafDrawerSync) { cancelAnimationFrame(rafDrawerSync); rafDrawerSync = 0; }
     playerObserver?.disconnect();
     playerObserver = null;
     drawerResizeObserver?.disconnect();
@@ -1879,6 +1790,7 @@ onUnmounted(() => {
     document.querySelectorAll('.learner-controls, .learner-collapsed-controls').forEach(el => el.remove());
 
     document.removeEventListener('click', closeOverflowOnOutsideClick, true);
+    document.removeEventListener('jpdb:card-graded', onJpdbCardGraded);
 });
 
 // Watch showJP to sync the translate button active state

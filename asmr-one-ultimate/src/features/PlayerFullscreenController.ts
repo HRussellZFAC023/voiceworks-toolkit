@@ -10,9 +10,21 @@
  * via the mounted component's exposed `syncFullscreenClass()` method.
  */
 
-import { type Component } from 'vue';
+import { type App, type Component, type Ref } from 'vue';
 import { FeatureController } from './FeatureController';
 import PlayerFullscreenVue from './components/PlayerFullscreen.vue';
+
+/** Internal Vue 3 app instance shape for accessing exposed component API */
+interface VueAppInternal {
+    _instance?: {
+        exposed?: {
+            syncFullscreenClass?: () => void;
+            isFullscreen?: Ref<boolean>;
+            toggleFullscreen?: () => void;
+            exit?: () => void;
+        };
+    };
+}
 
 export class PlayerFullscreenController extends FeatureController {
     private static instance: PlayerFullscreenController;
@@ -62,7 +74,7 @@ export class PlayerFullscreenController extends FeatureController {
         if (!this.mounted) return;
 
         try {
-            const appInstance = (this.mounted.app as any)._instance;
+            const appInstance = (this.mounted.app as VueAppInternal)._instance;
             const exposed = appInstance?.exposed;
             if (exposed?.syncFullscreenClass) {
                 exposed.syncFullscreenClass();
@@ -78,7 +90,7 @@ export class PlayerFullscreenController extends FeatureController {
     public get active(): boolean {
         if (!this.mounted) return false;
         try {
-            const appInstance = (this.mounted.app as any)._instance;
+            const appInstance = (this.mounted.app as VueAppInternal)._instance;
             return appInstance?.exposed?.isFullscreen?.value === true;
         } catch {
             return false;
@@ -91,7 +103,7 @@ export class PlayerFullscreenController extends FeatureController {
     public toggle(): void {
         if (!this.mounted) return;
         try {
-            const appInstance = (this.mounted.app as any)._instance;
+            const appInstance = (this.mounted.app as VueAppInternal)._instance;
             appInstance?.exposed?.toggleFullscreen?.();
         } catch {
             // Component may not be ready
@@ -104,7 +116,7 @@ export class PlayerFullscreenController extends FeatureController {
     public exit(): void {
         if (!this.mounted) return;
         try {
-            const appInstance = (this.mounted.app as any)._instance;
+            const appInstance = (this.mounted.app as VueAppInternal)._instance;
             appInstance?.exposed?.exit?.();
         } catch {
             // Component may not be ready

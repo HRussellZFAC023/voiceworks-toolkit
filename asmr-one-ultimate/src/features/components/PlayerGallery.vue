@@ -21,7 +21,7 @@ import { AppStore } from '../../store/AppStore';
 import { WorkService } from '../../services/WorkService';
 import { MediaViewerController } from '../MediaViewerController';
 import { Logger } from '../../core/Utils';
-import type { TrackFolder, TrackItem } from '../../types/api';
+import type { AudioTrack, TrackFolder, TrackItem } from '../../types/api';
 import { normalizeWorkId, parseWorkIdFromCoverUrl } from '../playerGalleryUtils';
 
 const IMG_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg']);
@@ -49,6 +49,8 @@ const excludedUrls = ref(new Set<string>());
 let slideshowTimer: ReturnType<typeof setInterval> | null = null;
 // MutationObserver for late-arriving DLsite gallery images
 let galleryObserver: MutationObserver | null = null;
+// Timers used to re-check gallery state across async host renders
+let refreshRetryTimers: Array<ReturnType<typeof setTimeout>> = [];
 
 // -- Computed --
 const imageCount = computed(() => images.value.length);
@@ -289,7 +291,7 @@ function scrapeCoverUrl(): string {
 function detectWorkId(): string | null {
     // 1. Vuex store
     try {
-        const id = (AppStore.currentWork as any)?.id;
+        const id = AppStore.currentWork?.id;
         const normalized = normalizeWorkId(id);
         if (normalized) return normalized;
     } catch { /* host store may not be ready */ }
@@ -370,7 +372,7 @@ function disconnectGalleryObserver(): void {
 
 // -- Image collection --
 
-function isImageItem(item: any): boolean {
+function isImageItem(item: TrackItem | AudioTrack): boolean {
     if (item.type === 'image') return true;
     if (item.title) {
         const name = item.title.replace(/\s*\(.*?\)\s*$/, '');
@@ -380,7 +382,7 @@ function isImageItem(item: any): boolean {
     return false;
 }
 
-function buildUrl(item: any, token: string): string {
+function buildUrl(item: TrackItem | AudioTrack, token: string): string {
     const withToken = (url: string): string => {
         if (url.startsWith('http') || url.startsWith('//')) return url;
         if (url.startsWith('/api/') && token) {
@@ -389,7 +391,7 @@ function buildUrl(item: any, token: string): string {
         return url;
     };
     if (item.mediaStreamUrl) return withToken(item.mediaStreamUrl);
-    if (item.media_stream_url) return withToken(item.media_stream_url);
+    if ('media_stream_url' in item && item.media_stream_url) return withToken(item.media_stream_url);
     if (item.hash) return withToken(`/api/media/stream/${item.hash}`);
     return '';
 }
@@ -407,7 +409,7 @@ function flattenTracks(nodes: (TrackFolder | TrackItem)[]): TrackItem[] {
     return out;
 }
 
-function extractImageUrls(items: any[], add: (url: string) => void): void {
+function extractImageUrls(items: (TrackItem | TrackFolder)[], add: (url: string) => void): void {
     const token = localStorage.getItem('jwt-token') || '';
     for (const item of items) {
         if (item.type === 'folder') continue;
@@ -453,7 +455,7 @@ async function loadImages(workId: string): Promise<void> {
     // Try Vue work tree component
     try {
         if (seq !== loadSeq.value) return;
-        const wt = bridge.findWorkTreeComponent() as any;
+        const wt = bridge.findWorkTreeComponent();
         if (wt) {
             const folder = wt.fatherFolder || wt.$data?.fatherFolder || [];
             if (Array.isArray(folder)) extractImageUrls(folder, add);
@@ -530,6 +532,7 @@ function onWorkChange(workId: string): void {
     slideshowPaused.value = false;
     excludedUrls.value.clear();
     disconnectGalleryObserver();
+    clearRefreshRetryTimers();
 
     const normalized = normalizeWorkId(workId);
     if (normalized && normalized !== loadedWorkId.value) {
@@ -539,6 +542,39 @@ function onWorkChange(workId: string): void {
                 startSlideshow();
             }
         });
+        scheduleRefreshRetries(normalized);
+    }
+}
+
+function clearRefreshRetryTimers(): void {
+    for (const timer of refreshRetryTimers) {
+        clearTimeout(timer);
+    }
+    refreshRetryTimers = [];
+}
+
+function scheduleRefreshRetries(workIdFromEvent?: string): void {
+    clearRefreshRetryTimers();
+    // Host player/work panels re-render asynchronously; retry a few times.
+    for (const delay of [80, 220, 500]) {
+        refreshRetryTimers.push(
+            setTimeout(() => refreshGalleryForTrackChange(workIdFromEvent), delay)
+        );
+    }
+}
+
+function promoteCoverToFront(cover: string): void {
+    const existingIndex = images.value.indexOf(cover);
+    if (existingIndex > 0) {
+        images.value.splice(existingIndex, 1);
+    }
+
+    if (existingIndex !== 0) {
+        images.value.unshift(cover);
+        imageSeen.value.add(cover);
+        currentIndex.value = 0;
+        syncCoverUrl();
+        syncAlbumart();
     }
 }
 
@@ -553,17 +589,11 @@ function refreshGalleryForTrackChange(workIdFromEvent?: string): void {
 
     const cover = scrapeCoverUrl();
     if (!cover) return;
+    if (excludedUrls.value.has(cover)) return;
 
     // Fallback for states where work ID isn't available yet (playlist/miniplayer transitions):
-    // refresh to current cover so stale previous-work image is not shown.
-    if (images.value[0] !== cover) {
-        images.value = [cover];
-        currentIndex.value = 0;
-        imageSeen.value.clear();
-        imageSeen.value.add(cover);
-        syncCoverUrl();
-        syncAlbumart();
-    }
+    // keep the full gallery but ensure the live cover is shown first.
+    promoteCoverToFront(cover);
 }
 
 // -- Watchers --
@@ -602,8 +632,8 @@ onMounted(() => {
     on('fullscreen:exit', () => onExitFullscreen());
     on('work:change', (p) => onWorkChange(p.workId));
     on('track:change', (p) => {
-        // Let host UI/store settle first, then refresh by workId/cover fallback.
-        setTimeout(() => refreshGalleryForTrackChange(p.workId), 80);
+        // Let host UI/store settle across multiple ticks, then refresh.
+        scheduleRefreshRetries(p.workId);
     });
 
     // Sync albumart on mount
@@ -633,6 +663,7 @@ onUnmounted(() => {
     if (albumart) albumart.classList.remove('asmr-gallery-active');
 
     stopSlideshow();
+    clearRefreshRetryTimers();
     disconnectGalleryObserver();
     Logger.log('[PlayerGallery] Unmounted');
 });

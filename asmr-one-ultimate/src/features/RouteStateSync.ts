@@ -3,7 +3,14 @@ import { KikoeruBridge } from '../infrastructure/KikoeruBridge';
 import { Logger, I18n } from '../core/Utils';
 import { WorkOrder, SortOrder } from '../types/api';
 import { AppStore } from '../store/AppStore';
-import type { KikoeruApp } from '../types/store';
+import type { KikoeruApp, AxiosInstance } from '../types/store';
+
+/** Minimal axios request config shape for interceptor typing */
+interface AxiosRequestConfig {
+    url?: string;
+    params?: Record<string, unknown>;
+    [key: string]: unknown;
+}
 
 interface SortOptionItem {
     label: string;
@@ -115,13 +122,15 @@ export class RouteStateSync {
         if (this.interceptorInstalled) return;
 
         try {
-            const axios = this.bridge.axios as any;
+            const axios = this.bridge.axios as AxiosInstance & {
+                interceptors?: { request?: { use: (fn: (config: AxiosRequestConfig) => AxiosRequestConfig) => void } };
+            };
             if (!axios?.interceptors?.request?.use) {
                 Logger.warn('[RouteStateSync] Axios interceptors not available, falling back to component-only sync');
                 return;
             }
 
-            axios.interceptors.request.use((config: any) => {
+            axios.interceptors.request.use((config: AxiosRequestConfig) => {
                 if (!this._enabled) return config;
                 let order = AppStore.state.search.pendingOrder as WorkOrder | undefined;
                 let sort = AppStore.state.search.pendingSort as SortOrder | undefined;
@@ -286,8 +295,9 @@ export class RouteStateSync {
     private translateLabel(label: string): string {
         if (!label) return label;
         try {
-            const translated = (this.bridge as any)?.app?.$t?.(label);
-            if (translated && translated !== label) return translated as string;
+            const app = this.bridge.app as KikoeruApp & { $t?: (key: string) => string };
+            const translated = app?.$t?.(label);
+            if (translated && translated !== label) return translated;
         } catch {
             // Ignore host translation failures
         }
@@ -437,7 +447,7 @@ export class RouteStateSync {
             let current: HTMLElement | null = el as HTMLElement;
             // Walk up 20 levels max to find the component
             for (let i = 0; i < 20 && current; i++) {
-                let vue = (current as any).__vue__ as KikoeruApp | undefined;
+                let vue = (current as HTMLElement & { __vue__?: KikoeruApp }).__vue__;
 
                 // Also walk up the Vue tree from this element's instance
                 for (let v = 0; v < 5 && vue; v++) {

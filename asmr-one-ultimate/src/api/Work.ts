@@ -4,7 +4,7 @@ import { getAxios } from './Client';
 
 export interface WorkDetails extends Work {
     // Legacy support
-    [key: string]: any;
+    [key: string]: unknown;
 }
 
 export const WorkApi = {

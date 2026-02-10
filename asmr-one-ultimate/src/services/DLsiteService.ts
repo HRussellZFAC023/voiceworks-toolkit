@@ -48,6 +48,9 @@ function getProxyBaseUrl(): string {
  * Format: `{proxyBaseUrl}{pathname}{search}`
  * e.g. `https://worker.dev/maniax/api/review?product_id=RJ123`
  *
+ * For non-www hosts (e.g. `img.dlsite.jp`), append `__host` query so the
+ * proxy worker can preserve the upstream hostname.
+ *
  * If no proxy is configured, returns the original URL unchanged.
  */
 function proxyDlsiteUrl(originalUrl: string): string {
@@ -57,7 +60,13 @@ function proxyDlsiteUrl(originalUrl: string): string {
         const u = new URL(originalUrl);
         const host = u.hostname.toLowerCase();
         if (!host.includes('dlsite.com') && !host.includes('dlsite.jp')) return originalUrl;
-        return `${base}${u.pathname}${u.search}`;
+
+        const params = new URLSearchParams(u.search);
+        if (host !== 'www.dlsite.com') {
+            params.set('__host', host);
+        }
+        const query = params.toString();
+        return `${base}${u.pathname}${query ? `?${query}` : ''}`;
     } catch {
         return originalUrl;
     }
@@ -240,6 +249,54 @@ export class DLsiteServiceImpl {
             }
             Logger.warn('[DLsiteService] fetchProductPageBody failed on all domains:', e);
             return null;
+        }
+    }
+
+    /**
+     * Fetch sample image URLs from product HTML.
+     * Prefers stable `modpub/images2/parts/...` gallery images over `_img_smpN` URLs.
+     */
+    public async fetchProductPageSampleImages(rjCode: string): Promise<string[]> {
+        if (!rjCode || !/^(RJ|VJ|BJ)?\d{5,}/i.test(rjCode)) {
+            Logger.warn('[DLsiteService] Invalid RJ code:', rjCode);
+            return [];
+        }
+
+        const tasks = DLsiteServiceImpl.DOMAINS.map(async (domain) => {
+            const url = `https://www.dlsite.com/${domain}/work/=/product_id/${rjCode}.html`;
+            const res = await retryWithBackoff(
+                () => proxiedGmRequest({
+                    url,
+                    headers: {
+                        Accept: 'text/html',
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                        'Accept-Language': 'ja',
+                        Referer: 'https://www.dlsite.com/',
+                        Cookie: 'adultchecked=1',
+                    },
+                    responseType: 'text',
+                }),
+                RETRY_HTML,
+            );
+
+            if (isAgeGatePage(res.responseText)) {
+                throw new Error(`[DLsiteService] ${domain} hit age gate`);
+            }
+
+            const urls = this.extractSampleImageUrls(res.responseText);
+            if (!urls.length) throw new Error(`[DLsiteService] ${domain} no sample images`);
+            return urls;
+        });
+
+        try {
+            return await Promise.any(tasks);
+        } catch (e) {
+            if (e instanceof AggregateError) {
+                Logger.debug('[DLsiteService] Sample image extraction failed on all domains:', e.errors);
+            } else {
+                Logger.debug('[DLsiteService] Sample image extraction failed:', e);
+            }
+            return [];
         }
     }
 
@@ -457,7 +514,7 @@ export class DLsiteServiceImpl {
                 const page1Obj = page1Payload as Record<string, unknown>;
                 Logger.debug(`[DLsiteService] API payload keys: ${Object.keys(page1Obj).join(', ')}`, {
                     is_success: page1Obj.is_success,
-                    review_count: (page1Obj.review_param as any)?.total_count
+                    review_count: (page1Obj.review_param as Record<string, unknown>)?.total_count
                 });
                 if (page1Obj.is_success === false) {
                     Logger.debug(`[DLsiteService] API returned is_success=false for ${domain}`);
@@ -698,7 +755,8 @@ export class DLsiteServiceImpl {
         }
         
         // Check data.review_list
-        const dataList = Array.isArray((obj.data as any)?.review_list) ? (obj.data as any).review_list : null;
+        const dataReviewList = (obj.data as Record<string, unknown>)?.review_list;
+        const dataList = Array.isArray(dataReviewList) ? dataReviewList : null;
         if (dataList && dataList.length) {
             Logger.debug(`[DLsiteService] Found ${dataList.length} items in data.review_list`);
             return dataList;
@@ -823,6 +881,25 @@ export class DLsiteServiceImpl {
         return /\$[tf]\(|function\s*\(|\bvar\s+\w|\.get\(|\.html\(|\{\{.*\}\}|endpoint|swiper|breakpoints|slidesPerView/i.test(text);
     }
 
+    private extractSampleImageUrls(html: string): string[] {
+        const allMatches = Array.from(html.matchAll(/(?:https?:)?\/\/img\.dlsite\.jp\/modpub\/images2\/[^"'`\s>]+?\.(?:jpg|jpeg|png)(?:\?[^"'`\s>]*)?/gi))
+            .map((m) => this.normalizeDlsiteImageUrl(m[0]));
+        if (!allMatches.length) return [];
+
+        const deduped = allMatches.filter((url, idx, arr) => arr.indexOf(url) === idx);
+        const partUrls = deduped.filter(url => url.includes('/modpub/images2/parts/'));
+        if (partUrls.length) return partUrls;
+
+        // Fallback to classic sample naming if no parts URLs are present.
+        return deduped.filter(url => /_img_smp\d+\.(jpg|jpeg|png)(\?|$)/i.test(url));
+    }
+
+    private normalizeDlsiteImageUrl(rawUrl: string): string {
+        if (!rawUrl) return '';
+        if (rawUrl.startsWith('//')) return `https:${rawUrl}`;
+        return rawUrl;
+    }
+
     private async fetchJson<T = Record<string, unknown>>(url: string, label: string): Promise<T> {
         const res = await retryWithBackoff(
             () => proxiedGmRequest({ url, headers: DLSITE_HEADERS, responseType: 'json' }),
@@ -839,17 +916,19 @@ export class DLsiteServiceImpl {
         return JSON.parse(text);
     }
 
-    private extractEntry(payload: any, rjCode: string): DLsiteProductApiResponse | null {
+    private extractEntry(payload: unknown, rjCode: string): DLsiteProductApiResponse | null {
+        if (payload === null || payload === undefined) return null;
+        const obj = payload as Record<string, unknown>;
         const entry = Array.isArray(payload)
             ? payload[0]
-            : payload?.data?.[0]
-            || payload?.data
-            || payload?.product
-            || payload?.work
-            || payload?.works?.[0]
-            || payload?.items?.[0]
-            || payload?.list?.[0]
-            || payload?.[rjCode.toUpperCase()]
+            : (obj.data as unknown[] | undefined)?.[0]
+            || obj.data
+            || obj.product
+            || obj.work
+            || (obj.works as unknown[] | undefined)?.[0]
+            || (obj.items as unknown[] | undefined)?.[0]
+            || (obj.list as unknown[] | undefined)?.[0]
+            || obj[rjCode.toUpperCase()]
             || null;
 
         if (!entry) {

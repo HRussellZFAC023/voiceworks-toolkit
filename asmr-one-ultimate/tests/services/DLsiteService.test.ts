@@ -437,6 +437,44 @@ describe('extractDescriptionBody', () => {
 });
 
 // ==========================================================================
+// extractSampleImageUrls
+// ==========================================================================
+describe('extractSampleImageUrls', () => {
+    it('should prefer parts gallery URLs over legacy _img_smp URLs', () => {
+        const html = `
+            <img src="//img.dlsite.jp/modpub/images2/work/doujin/RJ01511000/RJ01510683_img_smp1.jpg" />
+            <img src="//img.dlsite.jp/modpub/images2/parts/RJ01511000/RJ01510683/7702dafd2ec54bd8c1bceb47ece58080.jpg" />
+            <img src="//img.dlsite.jp/modpub/images2/parts/RJ01511000/RJ01510683/7c8c6cb21018f34451337971b6f6a6d8.jpg" />
+        `;
+        expect(svc.extractSampleImageUrls(html)).toEqual([
+            'https://img.dlsite.jp/modpub/images2/parts/RJ01511000/RJ01510683/7702dafd2ec54bd8c1bceb47ece58080.jpg',
+            'https://img.dlsite.jp/modpub/images2/parts/RJ01511000/RJ01510683/7c8c6cb21018f34451337971b6f6a6d8.jpg',
+        ]);
+    });
+
+    it('should fallback to _img_smp URLs when parts URLs are unavailable', () => {
+        const html = `
+            <img src="//img.dlsite.jp/modpub/images2/work/doujin/RJ01495000/RJ01494216_img_smp1.jpg" />
+            <img src="//img.dlsite.jp/modpub/images2/work/doujin/RJ01495000/RJ01494216_img_smp2.jpg?_r=3" />
+        `;
+        expect(svc.extractSampleImageUrls(html)).toEqual([
+            'https://img.dlsite.jp/modpub/images2/work/doujin/RJ01495000/RJ01494216_img_smp1.jpg',
+            'https://img.dlsite.jp/modpub/images2/work/doujin/RJ01495000/RJ01494216_img_smp2.jpg?_r=3',
+        ]);
+    });
+
+    it('should dedupe duplicate URLs and normalize protocol-relative paths', () => {
+        const html = `
+            <img src="//img.dlsite.jp/modpub/images2/parts/RJ01511000/RJ01510683/f063f209adb1df99c8566eb340b6c7df.jpg" />
+            <a href="//img.dlsite.jp/modpub/images2/parts/RJ01511000/RJ01510683/f063f209adb1df99c8566eb340b6c7df.jpg"></a>
+        `;
+        expect(svc.extractSampleImageUrls(html)).toEqual([
+            'https://img.dlsite.jp/modpub/images2/parts/RJ01511000/RJ01510683/f063f209adb1df99c8566eb340b6c7df.jpg',
+        ]);
+    });
+});
+
+// ==========================================================================
 // fetchProductApi — input validation only
 // ==========================================================================
 describe('fetchProductApi input validation', () => {

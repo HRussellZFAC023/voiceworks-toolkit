@@ -89,6 +89,10 @@ class LRUCache<K, V> {
         return this.map.get(key) !== undefined;
     }
 
+    forEach(fn: (value: V, key: K) => void): void {
+        this.map.forEach(fn);
+    }
+
     clear(): void {
         this.map.clear();
     }
@@ -248,7 +252,28 @@ class JpdbServiceImpl {
         for (const card of cards) {
             this.cardCache.set(`${card.vid}/${card.sid}`, card);
         }
-        return this.cardCache.get(`${vid}/${sid}`);
+        const freshCard = this.cardCache.get(`${vid}/${sid}`);
+        // Update card state in all cached parse results so future reads are fresh
+        if (freshCard) {
+            this.refreshCardInParseCache(vid, sid, freshCard.cardState);
+        }
+        return freshCard;
+    }
+
+    /**
+     * Walk parseCache and update cardState for a specific word in all cached results.
+     * Keeps parseCache consistent after grading without clearing the whole cache.
+     */
+    private refreshCardInParseCache(vid: number, sid: number, newState: JPDBCardState[]): void {
+        this.parseCache.forEach((result) => {
+            for (const paragraph of result.tokens) {
+                for (const token of paragraph) {
+                    if (token.card.vid === vid && token.card.sid === sid) {
+                        token.card.cardState = newState;
+                    }
+                }
+            }
+        });
     }
 
     async addToDeck(deckId: number | string, vid: number, sid: number): Promise<void> {

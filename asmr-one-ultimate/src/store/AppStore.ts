@@ -293,7 +293,8 @@ class AppStoreImpl {
      */
     private migrateSplitModeSettings(): void {
         if (typeof GM_getValue !== 'function' || typeof GM_setValue !== 'function') return;
-        if (typeof (globalThis as any).GM_getValue !== 'function' || typeof (globalThis as any).GM_setValue !== 'function') return;
+        const gt = globalThis as typeof globalThis & { GM_getValue?: typeof GM_getValue; GM_setValue?: typeof GM_setValue };
+        if (typeof gt.GM_getValue !== 'function' || typeof gt.GM_setValue !== 'function') return;
 
         const MIGRATION_KEY = '__asmr_mode_settings_split_v1__';
         let alreadyMigrated = false;

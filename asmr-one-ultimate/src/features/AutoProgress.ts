@@ -8,6 +8,8 @@ import { RadioMode } from './radio';
 import { PlaylistMode } from './playlist';
 import { getAudioElement, getVueItem } from '../core/DomUtils';
 import { GM_getValue, GM_setValue } from '$';
+import type { AudioTrack, TrackItem, WorkDetail, WorkFolder, PlayerTrack } from '../types';
+import type { VueRoute } from '../types';
 
 /**
  * Progress status ordering for no-downgrade rule.
@@ -50,7 +52,7 @@ export class AutoProgress {
     private sentUpdates: Set<string> = new Set();
 
     /** Cached flattened audio tracks for isLastTrackInWork (invalidated on work change) */
-    private cachedFlatTracks: any[] | null = null;
+    private cachedFlatTracks: (AudioTrack | TrackItem)[] | null = null;
     private cachedFlatTracksWorkId: string | null = null;
 
     /** In-memory cache for play counts (avoids JSON.parse from GM storage on every read) */
@@ -192,7 +194,7 @@ export class AutoProgress {
     private setupRouteWatcher(): void {
         const app = this.bridge.app;
         if (app?.$watch) {
-            this._routeUnwatch = app.$watch('$route', (newRoute: any) => {
+            this._routeUnwatch = app.$watch('$route', (newRoute: VueRoute) => {
                 this.handleRouteChange(newRoute);
             });
         }
@@ -222,7 +224,7 @@ export class AutoProgress {
         return Config.get('autoProgress') || Config.get('playlistAutoProgress');
     }
 
-    private handleRouteChange(route: any): void {
+    private handleRouteChange(route: VueRoute): void {
         const path: string = route?.path || '';
         const workIdMatch = path.match(/\/work\/(?:RJ)?(\d+)/i);
         const newWorkId = workIdMatch?.[1] || null;
@@ -514,7 +516,7 @@ export class AutoProgress {
             progressOnly: true,
         }).then(() => {
             Logger.debug(`[AutoProgress] API Success: ${workId} -> ${progress}`);
-        }).catch((err: any) => {
+        }).catch((err: unknown) => {
             Logger.error(`[AutoProgress] API Failed for ${workId}:`, err);
             this.sentUpdates.delete(dedupKey); // Allow retry
             // Rollback optimistic update
@@ -587,7 +589,7 @@ export class AutoProgress {
         return marks[workId] ?? null;
     }
 
-    private resolveWorkId(track: any): string | null {
+    private resolveWorkId(track: PlayerTrack): string | null {
         // Try direct properties first
         const raw = track.workId || track.work_id
             || this.bridge.store.state.AudioPlayer?.work?.id;
@@ -614,7 +616,7 @@ export class AutoProgress {
      * Check if the given track is the last audio track in the entire work tree.
      * Flattens the tree and compares by hash/src.
      */
-    private isLastTrackInWork(track: any): boolean {
+    private isLastTrackInWork(track: PlayerTrack): boolean {
         // Try the work tree first (with caching to avoid O(n) tree walk on every ~4Hz timeupdate)
         const work = this.bridge.store.state.AudioPlayer?.work;
         if (work) {
@@ -646,8 +648,8 @@ export class AutoProgress {
     /**
      * Recursively collect all audio tracks from a work's directory tree.
      */
-    private flattenAudioTracks(node: any): any[] {
-        const tracks: any[] = [];
+    private flattenAudioTracks(node: WorkDetail | WorkFolder): (AudioTrack | TrackItem)[] {
+        const tracks: (AudioTrack | TrackItem)[] = [];
 
         // Collect audio tracks from this node
         if (node.tracks) {
@@ -657,35 +659,35 @@ export class AutoProgress {
         }
 
         // Recurse into children (could be dirs or mixed)
-        const children = node.dirs || node.children || [];
+        const children: WorkFolder[] = node.dirs || node.children || [];
         for (const child of children) {
             if (child.type === 'folder' || child.type === 'directory' || child.dirs || child.children || child.tracks) {
                 tracks.push(...this.flattenAudioTracks(child));
             } else if (this.isAudioTrack(child)) {
-                tracks.push(child);
+                tracks.push(child as unknown as AudioTrack);
             }
         }
 
         return tracks;
     }
 
-    private isAudioTrack(item: any): boolean {
-        if (item.type === 'audio' || item.is_audio) return true;
-        if (item.src || item.mediaStreamUrl || item.media_stream_url) return true;
+    private isAudioTrack(item: TrackItem | WorkFolder | AudioTrack): boolean {
+        if (item.type === 'audio' || ('is_audio' in item && item.is_audio)) return true;
+        if (('src' in item && item.src) || ('mediaStreamUrl' in item && item.mediaStreamUrl) || ('media_stream_url' in item && item.media_stream_url)) return true;
         // Check file extension in title/hash
-        const name = (item.title || item.hash || '').toLowerCase();
+        const name = (item.title || ('hash' in item ? item.hash : '') || '').toLowerCase();
         return /\.(mp3|wav|flac|opus|m4a|aac|ogg|wma)$/.test(name);
     }
 
-    private getTrackKey(track: any): string | null {
-        return track?.src || track?.mediaStreamUrl || track?.hash || track?.title || null;
+    private getTrackKey(track: PlayerTrack | AudioTrack | TrackItem): string | null {
+        return ('src' in track && track.src) || track.mediaStreamUrl || track.hash || track.title || null;
     }
 
     // =========================================================================
     // Visual checkmarks (existing functionality preserved)
     // =========================================================================
 
-    private markTrackLocal(track: any): void {
+    private markTrackLocal(track: PlayerTrack): void {
         Logger.debug('[AutoProgress] Track finished locally:', track.title);
     }
 
@@ -703,32 +705,32 @@ export class AutoProgress {
         });
     }
 
-    private findTrackByItem(item: HTMLElement): any {
+    private findTrackByItem(item: HTMLElement): AudioTrack | TrackItem | null {
         const tracks = this.getCurrentFolderTracks();
 
-        const vueData = getVueItem(item) as Record<string, any> | null;
+        const vueData = getVueItem(item) as Record<string, unknown> | null;
         if (vueData?.hash) {
-            const match = tracks.find((t: any) => t.hash === vueData.hash);
+            const match = tracks.find((t: AudioTrack | TrackItem) => t.hash === vueData.hash);
             if (match) return match;
         }
 
         const dataId = item.getAttribute('data-id') || item.getAttribute('data-key');
         if (dataId) {
-            const match = tracks.find((t: any) =>
-                String(t.id) === dataId || String(t.hash) === dataId
+            const match = tracks.find((t: AudioTrack | TrackItem) =>
+                String(t.hash) === dataId
             );
             if (match) return match;
         }
 
         const label = item.querySelector('.q-item__label, .ellipsis')?.textContent?.trim();
         if (label) {
-            return tracks.find((t: any) => t.title === label || t.name === label);
+            return tracks.find((t: AudioTrack | TrackItem) => t.title === label) || null;
         }
 
         return null;
     }
 
-    private getCurrentFolderTracks(): any[] {
+    private getCurrentFolderTracks(): (AudioTrack | TrackItem)[] {
         const store = this.bridge.store;
         const work = store.state.AudioPlayer?.work;
         if (!work) return [];
@@ -743,21 +745,23 @@ export class AutoProgress {
             Logger.warn('[AutoProgress] Failed to parse folder path from route query', err);
         }
 
-        let currentDir = work;
+        let currentDir: WorkDetail | WorkFolder | undefined = work;
         for (const segment of p) {
             if (!currentDir) break;
-            const searchDirs = currentDir.dirs || currentDir.children || [];
-            currentDir = (searchDirs.find((d: any) => d.title === segment || d.name === segment) as any);
+            const searchDirs: WorkFolder[] = currentDir.dirs || currentDir.children || [];
+            currentDir = searchDirs.find((d: WorkFolder) => d.title === segment || d.name === segment);
         }
 
         if (!currentDir) return [];
 
-        let tracks: any[] = [];
+        let tracks: (AudioTrack | TrackItem)[] = [];
         if (currentDir.tracks) tracks = tracks.concat(currentDir.tracks);
         if (currentDir.children) {
-            tracks = tracks.concat(currentDir.children.filter((c: any) =>
-                c.type === 'audio' || c.is_audio || c.src || c.mediaStreamUrl
-            ));
+            for (const c of currentDir.children) {
+                if (this.isAudioTrack(c)) {
+                    tracks.push(c as unknown as AudioTrack);
+                }
+            }
         }
 
         return tracks;

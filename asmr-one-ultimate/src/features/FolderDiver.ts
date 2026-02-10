@@ -16,16 +16,18 @@ import { calculateFolderScore } from '../core/WorkUtils';
 import { LIMITS, SCORING } from '../core/Constants';
 import type { TrackFolder, TrackItem, TracksResponse, WorkDetail, WorkFolder } from '../types/api';
 import type { WorkTreeComponent } from '../types/store';
-
-declare const unsafeWindow: Window & typeof globalThis;
+import { findFolderBySegment, hasDirectPlayableMedia, resolveNodesAtPath } from './folderDiverTreeUtils';
+import {
+    findBestFolderItem,
+    getActiveBreadcrumbTitle,
+    getActiveFolderItemTitle,
+    getFolderItemLabel,
+    isExactOrPrefixMatch,
+} from './folderDiverDomUtils';
 
 const DOM_CLICK_DELAY = 16;
 const DOM_CLICK_RETRY_DELAY = 16;
 const DOM_CLICK_MAX_ATTEMPTS = 4;
-
-const globalWindow = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window) as Window & {
-    __ASMR_FOLDER_DIVER__?: FolderDiver;
-};
 
 export interface DiveResult {
     success: boolean;
@@ -103,28 +105,11 @@ export class FolderDiver {
      * Resolve the nodes array at a given path.
      */
     getNodesAtPath(tree: TracksResponse, path: string[]): Array<TrackFolder | TrackItem> {
-        let currentNodes: Array<TrackFolder | TrackItem> = tree;
-        for (const segment of path) {
-            const folder = currentNodes.find(
-                n => n.type === 'folder' && (((n as TrackFolder).title || (n as any).name) === segment)
-            ) as TrackFolder | undefined;
-            if (!folder) {
-                return tree;
-            }
-            currentNodes = folder.children;
-        }
-        return currentNodes;
+        return resolveNodesAtPath(tree, path, true);
     }
 
     hasDirectAudio(nodes: Array<TrackFolder | TrackItem>): boolean {
-        const audioExtensions = ['.wav', '.mp3', '.flac', '.m4a', '.aac', '.ogg', '.opus', '.wma'];
-        const videoExtensions = ['.mp4', '.webm', '.mov', '.avi', '.mkv', '.m4v'];
-        return nodes.some(n => {
-            if (n.type === 'audio') return true;
-            const title = (n as any).title?.toLowerCase() || '';
-            return audioExtensions.some(ext => title.endsWith(ext) || title.includes(ext))
-                || videoExtensions.some(ext => title.endsWith(ext));
-        });
+        return hasDirectPlayableMedia(nodes);
     }
 
     /**
@@ -153,9 +138,7 @@ export class FolderDiver {
         // Navigate to the starting point in the tree
         let currentNodes = fullTree;
         for (const segment of startPath) {
-            const folder = currentNodes.find(
-                n => n.type === 'folder' && (((n as TrackFolder).title || (n as any).name) === segment)
-            ) as TrackFolder | undefined;
+            const folder = findFolderBySegment(currentNodes, segment);
             if (!folder) {
                 Logger.warn(`[FolderDiver] Start path segment "${segment}" not found`);
                 return { success: false, path: [], depth: 0, reason: 'no_folders' };
@@ -317,7 +300,7 @@ export class FolderDiver {
         }
 
         // Fallback: reset the Vue path directly
-        const treeVm = this.bridge.findWorkTreeComponent() as any;
+        const treeVm = this.bridge.findWorkTreeComponent() as WorkTreeComponent | null;
         if (treeVm && Array.isArray(treeVm.path)) {
             treeVm.path.splice(0, treeVm.path.length);
             this.syncParentFolder(treeVm, []);
@@ -337,63 +320,25 @@ export class FolderDiver {
         if (!workTree) return false;
 
         // Check if we are already in this folder via breadcrumbs
-        const activeBreadcrumb = workTree.querySelector('.q-breadcrumbs--last .q-breadcrumbs__el');
-        if (activeBreadcrumb) {
-            const breadcrumbText = (activeBreadcrumb.textContent || '').trim();
-            if (breadcrumbText === title || breadcrumbText.startsWith(title)) {
-                Logger.debug(`[FolderDiver] Already in folder (via breadcrumbs): "${title}"`);
-                return true;
-            }
+        const breadcrumbText = getActiveBreadcrumbTitle(workTree);
+        if (isExactOrPrefixMatch(breadcrumbText, title)) {
+            Logger.debug(`[FolderDiver] Already in folder (via breadcrumbs): "${title}"`);
+            return true;
         }
 
-        const items = workTree.querySelectorAll('.q-item');
-        for (const item of items) {
-            // Check this is a folder item
-            const isFolder = !!item.querySelector(
-                '.q-icon.text-amber, i.material-icons.text-amber, .q-icon.material-icons.text-amber'
-            );
-            if (!isFolder) {
-                const icons = item.querySelectorAll('.q-icon, i.material-icons');
-                let hasFolderIcon = false;
-                for (const icon of icons) {
-                    const iconText = (icon.textContent || '').trim();
-                    if (iconText === 'folder' || iconText === 'folder_open') {
-                        hasFolderIcon = true;
-                        break;
-                    }
-                }
-                if (!hasFolderIcon) continue;
-            }
-
-            const label =
-                item.querySelector('.q-item__label:not(.q-item__label--caption)') ||
-                item.querySelector('.q-item__label') ||
-                item.querySelector('.q-item__section--main');
-            if (!label) continue;
-
-            const rawText = (label.textContent || '').replace(/\s+/g, ' ').trim();
-            if (!rawText) continue;
-
-            const lowerText = rawText.toLowerCase();
-            const lowerTitle = title.toLowerCase();
-
-            if (lowerText === lowerTitle || lowerText.startsWith(lowerTitle) || lowerText.includes(lowerTitle)) {
-                (item as HTMLElement).click();
-                Logger.debug(`[FolderDiver] Clicked folder: "${rawText}" (matched title: "${title}")`);
-                return true;
-            }
+        const bestItem = findBestFolderItem(workTree, title);
+        if (bestItem) {
+            bestItem.click();
+            const label = getFolderItemLabel(bestItem);
+            Logger.debug(`[FolderDiver] Clicked folder: "${label || title}" (matched title: "${title}")`);
+            return true;
         }
 
         // Check active class
-        const activeItem = workTree.querySelector('.q-item.q-item--active');
-        if (activeItem) {
-            const label = activeItem.querySelector('.q-item__label') || activeItem.querySelector('.q-item__section--main');
-            const activeText = (label?.textContent || '').trim().toLowerCase();
-            const lowerTitle = title.toLowerCase();
-            if (activeText === lowerTitle || activeText.startsWith(lowerTitle)) {
-                Logger.debug(`[FolderDiver] Folder already active: "${title}"`);
-                return true;
-            }
+        const activeText = getActiveFolderItemTitle(workTree);
+        if (isExactOrPrefixMatch(activeText, title)) {
+            Logger.debug(`[FolderDiver] Folder already active: "${title}"`);
+            return true;
         }
 
         return false;
@@ -413,9 +358,8 @@ export class FolderDiver {
                     const workTree = document.getElementById('work-tree');
                     if (!workTree) continue;
 
-                    const activeBreadcrumb = workTree.querySelector('.q-breadcrumbs--last .q-breadcrumbs__el');
-                    const breadcrumbText = (activeBreadcrumb?.textContent || '').trim();
-                    if (breadcrumbText === title || breadcrumbText.startsWith(title)) {
+                    const breadcrumbText = getActiveBreadcrumbTitle(workTree);
+                    if (isExactOrPrefixMatch(breadcrumbText, title)) {
                         return true;
                     }
                 }

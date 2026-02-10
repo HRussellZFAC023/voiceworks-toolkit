@@ -97,11 +97,16 @@ export class Visualizer {
         this.isPaused = false;
 
         this.ensureUI();
-        this.showBar();
-        this.startPositionPolling();
-        this.syncPauseState();
         this.connectAudioAnalyser();
-        this.startRendering();
+
+        // Only show bars when audio is actually available — avoids an empty
+        // visible canvas when "always show" is on but nothing is loaded yet.
+        if (getAudioElement()) {
+            this.showBar();
+            this.startPositionPolling();
+            this.syncPauseState();
+            this.startRendering();
+        }
 
         this.syncOverflowButton(true);
         Logger.log('[Visualizer] Activated');
@@ -124,10 +129,16 @@ export class Visualizer {
     // ------------------------------------------------------------------------
 
     private setupEventListeners(): void {
-        // Reset on track change — re-activate if "always show" is on
+        // Reset on track change — show bars if hidden (audio just appeared) or
+        // re-activate if "always show" is on
         this.eventCleanups.push(EventBus.on('track:change', () => {
             if (this.isActive) {
                 this.connectAudioAnalyser();
+                // Bars may still be hidden if activate() was called before audio existed
+                this.showBar();
+                this.startPositionPolling();
+                this.syncPauseState();
+                this.startRendering();
             } else if (AppStore.getConfig('alwaysShowVisualizer')) {
                 this.activate();
             }

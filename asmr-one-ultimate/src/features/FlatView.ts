@@ -666,15 +666,33 @@ export class FlatView {
      *  The flat panel always sits at the far right edge.
      *  When an expanded miniplayer is present, it gets pushed left by the panel width. */
     private syncBottomOffset(): void {
-        const playerBar = document.querySelector('.player-bar') as HTMLElement | null;
+        const playerBar = document.querySelector('.q-footer, .player-bar-container') as HTMLElement | null;
         const expandedPlayer = document.querySelector('.audio-player.fixed-bottom-right') as HTMLElement | null;
 
         // Player bar at the bottom — always respect its height
-        const barHeight = playerBar ? playerBar.offsetHeight : 0;
+        let bottomOffset = playerBar ? playerBar.offsetHeight : 0;
+
+        // Stack above collapsed subs bar if visible
+        const subsBar = document.querySelector('body > .learner-subs-collapsed') as HTMLElement | null;
+        if (subsBar && subsBar.style.display !== 'none' && !subsBar.classList.contains('hidden') && subsBar.offsetHeight > 0) {
+            bottomOffset += subsBar.offsetHeight;
+        }
+
+        // Stack above JOI bar if visible
+        const joiBar = document.querySelector('body > .asmr-joi-bar-collapsed') as HTMLElement | null;
+        if (joiBar && joiBar.style.display !== 'none' && !joiBar.classList.contains('hidden') && joiBar.offsetHeight > 0) {
+            bottomOffset += joiBar.offsetHeight;
+        }
+
+        // Stack above visualizer bar if visible
+        const vizBar = document.querySelector('body > .asmr-viz-bar') as HTMLElement | null;
+        if (vizBar && !vizBar.classList.contains('hidden') && vizBar.offsetHeight > 0) {
+            bottomOffset += vizBar.offsetHeight;
+        }
 
         // Flat panel always stays at the right edge
         document.documentElement.style.setProperty('--asmr-flat-panel-right', '0px');
-        document.documentElement.style.setProperty('--asmr-flat-panel-bottom', `${barHeight}px`);
+        document.documentElement.style.setProperty('--asmr-flat-panel-bottom', `${bottomOffset}px`);
 
         // Push the expanded miniplayer left by the flat panel width when both are open
         if (expandedPlayer && this.isActive && this.panelEl) {

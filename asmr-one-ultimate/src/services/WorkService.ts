@@ -68,7 +68,7 @@ export class WorkServiceImpl {
             // Access KikoeruBridge
             const bridge = KikoeruBridge.getInstance();
             const axios = bridge.axios;
-            const baseURL = (axios as any)?.defaults?.baseURL as string | undefined;
+            const baseURL = axios?.defaults?.baseURL;
             if (baseURL && baseURL.startsWith('http')) {
                 return baseURL.replace(/\/$/, '');
             }

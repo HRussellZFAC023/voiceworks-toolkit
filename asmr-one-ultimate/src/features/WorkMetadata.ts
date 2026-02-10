@@ -11,6 +11,7 @@ import { MediaViewer } from './MediaViewer';
 import { EventBus } from '../core/EventBus';
 import { AppStore } from '../store/AppStore';
 import { isChinese } from '../core/DomUtils';
+import { extractEmbeddedRjCode, extractPrimaryRjCode } from './rjCodeUtils';
 
 /** Escape HTML special characters to prevent XSS */
 function escapeHtml(s: string): string {
@@ -87,40 +88,11 @@ export class WorkMetadata {
             return;
         }
 
-        // Extract RJ code from source_id, which can be:
-        // - Full format: "RJ114717" or "RJ01497193"  
-        // - Numeric only: "114717" or "01497193"
-        let rjCode = '';
-        const sourceId = (work.source_id || work.sourceId || '').toString();
-        if (sourceId) {
-            const rjMatch = sourceId.match(/RJ\d{6,8}/i);
-            if (rjMatch) {
-                rjCode = rjMatch[0].toUpperCase();
-            } else {
-                // source_id might be just the numeric part - add RJ prefix
-                const numericMatch = sourceId.match(/\d{6,8}/);
-                if (numericMatch) {
-                    rjCode = 'RJ' + numericMatch[0];
-                }
-            }
-        }
-        if (!rjCode) {
-            // Try to extract from workId
-            const idMatch = String(workId).match(/RJ\d{6,8}/i);
-            if (idMatch) {
-                rjCode = idMatch[0].toUpperCase();
-            } else {
-                // workId might be numeric only
-                const numericMatch = String(workId).match(/\d{6,8}/);
-                if (numericMatch) {
-                    rjCode = 'RJ' + numericMatch[0];
-                }
-            }
-        }
-        if (!rjCode) {
-            const titleMatch = work.title?.match(/RJ\d{6,8}/i);
-            if (titleMatch) rjCode = titleMatch[0].toUpperCase();
-        }
+        const rjCode = extractPrimaryRjCode({
+            sourceId: work.source_id || work.sourceId,
+            workId,
+            title: work.title,
+        }) ?? '';
 
         if (!rjCode) {
             Logger.log('[WorkMetadata] No RJ code found for work', workId);
@@ -137,7 +109,7 @@ export class WorkMetadata {
         const fallback = this.buildFallbackMeta(work, rjCode);
 
         // Start title translation early (in parallel with DLsite scrape) — fire-and-forget
-        const titleToTranslate = work.title || fallback?.title || '';
+        const titleToTranslate = (work.title as string) || fallback?.title || '';
         if (titleToTranslate) this.translateTitle(titleToTranslate, workId);
 
         // Phase 0: Render fallback immediately for fast first paint
@@ -264,18 +236,18 @@ export class WorkMetadata {
         const h1 = document.querySelector('h1.text-h6') as HTMLElement | null;
         if (h1) h1.style.display = '';
     }
-    private async getPageWorkDetails(id: string): Promise<any> {
+    private async getPageWorkDetails(id: string): Promise<Record<string, unknown> | null> {
         // Check Vuex store first (AudioPlayer work, then Works state)
         const storeWork = this.bridge.store?.state?.AudioPlayer?.work;
-        if (storeWork && String(storeWork.id) === String(id)) return storeWork;
+        if (storeWork && String(storeWork.id) === String(id)) return storeWork as unknown as Record<string, unknown>;
 
-        const worksState = (this.bridge.store?.state as any)?.Works;
-        const cachedWork = worksState?.work || worksState?.currentWork || worksState?.detail;
+        const worksState = this.bridge.store?.state?.Works as (Record<string, unknown> | undefined);
+        const cachedWork = (worksState?.work || worksState?.currentWork || worksState?.detail) as Record<string, unknown> | undefined;
         if (cachedWork && String(cachedWork.id) === String(id)) return cachedWork;
 
         // Fall back to host app's axios (same approach as CommentSection)
         try {
-            const res = await this.bridge.axios.get(`/api/work/${id}`);
+            const res = await this.bridge.axios.get<Record<string, unknown>>(`/api/work/${id}`);
             return res.data;
         } catch (e) {
             Logger.error('[WorkMetadata] API fetch failed for work', id, e);
@@ -387,7 +359,7 @@ export class WorkMetadata {
 
             // Also invalidate reviews cache just in case
             const reviewKey = CacheKeys.dlsiteReviews(scrapeCode.toUpperCase());
-            SharedCache.set(reviewKey, null as unknown as any, 0);
+            SharedCache.set(reviewKey, null as unknown as Record<string, unknown>, 0);
 
             // Invalidate translations for visible metadata
             const textsToInvalidate = [
@@ -398,7 +370,7 @@ export class WorkMetadata {
                 ...(meta.cvs || []).map(c => c.name)
             ];
             textsToInvalidate.forEach(text => {
-                if (text) SharedCache.set(CacheKeys.translation(text, 'en'), null as any, 0);
+                if (text) SharedCache.set(CacheKeys.translation(text, 'en'), null as unknown as string, 0);
             });
 
             this.processedWorkIds.delete(this.currentWorkId);
@@ -825,48 +797,51 @@ export class WorkMetadata {
      * Resolve the JP original RJ code from API work data.
      * CN/translated editions lack images and body — the JP original has them.
      */
-    private resolveJpRjCode(work: any, currentCode: string): string | null {
+    private resolveJpRjCode(work: Record<string, unknown>, currentCode: string): string | null {
         // 1. Direct original_workno field
         const origWorkno = work.original_workno;
         if (origWorkno && typeof origWorkno === 'string') {
-            const m = origWorkno.match(/RJ\d{6,8}/i);
-            if (m) return m[0].toUpperCase();
+            const code = extractEmbeddedRjCode(origWorkno);
+            if (code) return code;
         }
 
         // 2. translation_info.original_workno or parent_workno
-        const ti = work.translation_info;
+        const ti = work.translation_info as Record<string, unknown> | undefined;
         if (ti) {
-            const orig = ti.original_workno || ti.parent_workno;
+            const orig = (ti.original_workno || ti.parent_workno) as string | undefined;
             if (orig && typeof orig === 'string') {
-                const m = orig.match(/RJ\d{6,8}/i);
-                if (m) return m[0].toUpperCase();
+                const code = extractEmbeddedRjCode(orig);
+                if (code) return code;
             }
         }
 
         // 3. language_editions — find the JPN edition
         const editions = work.language_editions;
         if (Array.isArray(editions)) {
-            const jpn = (editions as any[]).find((e: any) => e.lang === 'JPN' || e.lang === 'jpn');
+            const jpn = (editions as Array<Record<string, unknown>>).find((e) => e.lang === 'JPN' || e.lang === 'jpn');
             if (jpn?.workno) {
-                const m = String(jpn.workno).match(/RJ\d{6,8}/i);
-                if (m && m[0].toUpperCase() !== currentCode) return m[0].toUpperCase();
+                const code = extractEmbeddedRjCode(jpn.workno);
+                if (code && code !== currentCode) return code;
             }
         }
 
         return null;
     }
 
-    private buildFallbackMeta(work: any, rjCode: string): DLsiteMetadata | null {
+    private buildFallbackMeta(work: Record<string, unknown>, rjCode: string): DLsiteMetadata | null {
         if (!work) return null;
-        const circleName = work.circle?.name || work.circle_name || work.maker_name || work.circleName || '';
-        const circleId = Number(work.circle?.id || work.circle_id || work.maker_id || 0) || 0;
-        const tags = ((work.tags || work.genres || work.tags_replaced || []) as any[]).map((t: any) => ({
+        const circle = work.circle as Record<string, unknown> | undefined;
+        const circleName = (circle?.name || work.circle_name || work.maker_name || work.circleName || '') as string;
+        const circleId = Number(circle?.id || work.circle_id || work.maker_id || 0) || 0;
+        const rawTags = (work.tags || work.genres || work.tags_replaced || []) as Array<Record<string, unknown>>;
+        const tags = rawTags.map((t) => ({
             id: Number(t.id || t.tag_id || 0) || 0,
-            name: t.name || t.title || ''
-        })).filter((t: any) => t.name);
-        const cvs = ((work.vas || work.voice_actors || work.voiceActors || work.cvs || []) as any[]).map((c: any) => ({
-            name: c.name || c.title || ''
-        })).filter((c: any) => c.name);
+            name: (t.name || t.title || '') as string
+        })).filter((t) => t.name);
+        const rawCvs = (work.vas || work.voice_actors || work.voiceActors || work.cvs || []) as Array<Record<string, unknown>>;
+        const cvs = rawCvs.map((c) => ({
+            name: (c.name || c.title || '') as string
+        })).filter((c) => c.name);
 
         const age = Number(work.age_category || work.age || 0) || 0;
         const ageString = age >= 3 ? 'R18' : age === 2 ? 'R15' : 'ALL';
@@ -876,7 +851,7 @@ export class WorkMetadata {
 
         return {
             rjcode: rjCode,
-            title: work.title || work.name || rjCode,
+            title: (work.title as string) || (work.name as string) || rjCode,
             nsfw: age >= 2 || !!work.nsfw,
             release,
             tags,

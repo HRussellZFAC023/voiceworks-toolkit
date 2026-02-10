@@ -5,7 +5,13 @@ import { Config, I18n } from '../core/Config';
 import { CentralObserver } from '../core/CentralObserver';
 import { EventBus } from '../core/EventBus';
 import { isChinese } from '../core/DomUtils';
-import type { TagEntry } from '../types/api';
+import type { TagEntry, TagI18n } from '../types/api';
+
+/** Raw tag from the /api/tags endpoint — superset of TagEntry with i18n info */
+interface RawTag extends TagEntry {
+    name_en?: string;
+    i18n?: TagI18n;
+}
 
 declare const unsafeWindow: Window & typeof globalThis;
 
@@ -31,7 +37,7 @@ export class TranslatedTags {
     private processedElements = new WeakSet<HTMLElement>();
     private modifyingDOMCount = 0;
 
-    private tags: any[] = [];
+    private tags: RawTag[] = [];
     private boundInputHandler: (e: Event) => void;
     private boundKeyHandler: (e: KeyboardEvent) => void;
     private configCleanup?: () => void;
@@ -50,7 +56,7 @@ export class TranslatedTags {
             return existing;
         }
 
-        if (existing && typeof (existing as any).disable === 'function') {
+        if (existing && typeof existing.disable === 'function') {
             Logger.warn('[TranslatedTags] Replacing stale instance');
             try {
                 existing.disable();
@@ -60,7 +66,7 @@ export class TranslatedTags {
         }
 
         const next = new TranslatedTags();
-        (next as any).__asmrTranslatedTagsVersion = TRANSLATED_TAGS_VERSION;
+        (next as TranslatedTags & { __asmrTranslatedTagsVersion?: string }).__asmrTranslatedTagsVersion = TRANSLATED_TAGS_VERSION;
         globalWindow.__ASMR_TRANSLATED_TAGS__ = next;
         globalWindow.__ASMR_TRANSLATED_TAGS_VERSION__ = TRANSLATED_TAGS_VERSION;
         TranslatedTags.instance = next;
@@ -68,10 +74,10 @@ export class TranslatedTags {
     }
 
     public getTagList(): TagEntry[] {
-        return (this.tags || []).map((tag: any) => {
+        return (this.tags || []).map((tag) => {
             const id = typeof tag.id === 'string' ? parseInt(tag.id, 10) : tag.id;
             const ja = tag.ja || tag.name || '';
-            const en = tag.en || tag.name_en || tag.i18n?.en || '';
+            const en = tag.en || tag.name_en || tag.i18n?.['en-us']?.name || '';
             return {
                 id,
                 name: tag.name || ja || en || '',
@@ -91,7 +97,7 @@ export class TranslatedTags {
         // Initialize tags cache
         try {
             const res = await this.bridge.api.getTags();
-            this.tags = res.data || [];
+            this.tags = (res.data || []) as RawTag[];
         } catch (e) {
             Logger.warn('[TranslatedTags] Failed to load tags cache', e);
         }
@@ -274,14 +280,16 @@ export class TranslatedTags {
                 if (this.processedElements.has(chip) && this.shouldSkipTranslation(chip, text)) continue;
 
                 // Try to match with known tags first (fastest — no async needed)
-                const vueTag = (chip as any).__vue__?.$attrs?.tag || (chip as any).__vue__?.tag;
+                const vueTag = (chip as HTMLElement & { __vue__?: Record<string, unknown> & { $attrs?: Record<string, unknown> } }).__vue__?.$attrs?.tag as TagEntry | undefined || ((chip as HTMLElement & { __vue__?: Record<string, unknown> }).__vue__?.tag as TagEntry | undefined);
                 const dataId = vueTag?.id || chip.getAttribute('data-tag-id') || chip.getAttribute('data-id');
                 const match = dataId
                     ? this.tags.find(tag => String(tag.id) === String(dataId))
                     : this.tags.find(tag => tag.ja === text || tag.en === text);
 
                 if (!cnOnlyMode && match?.en && match.ja !== match.en) {
-                    const formatted = TranslationService.formatPair(match.ja, match.en);
+                    const original = match.ja || match.name || text;
+                    const translated = match.en;
+                    const formatted = TranslationService.formatPair(original, translated);
                     this.processedElements.add(chip);
                     chip.dataset.asmrtag = text;
                     chip.dataset.asmrtagState = 'done';

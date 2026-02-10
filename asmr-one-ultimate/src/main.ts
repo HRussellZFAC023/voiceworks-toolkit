@@ -24,7 +24,7 @@ import './styles/components/_jpdb.css';
 import './styles/components/_cards.css';
 
 import { KikoeruBridge } from './infrastructure/KikoeruBridge';
-import { getAudioElement, hasPlayerBar } from './core/DomUtils';
+import { getAudioElement, hasPlayerBar, startStackedBottomHeightWatch } from './core/DomUtils';
 import { AudioCache } from './infrastructure/AudioCache';
 import { StorageManager } from './infrastructure/StorageManager';
 import { WorkTreeCopy } from './features/WorkTreeCopy';
@@ -39,7 +39,7 @@ import { TranslationService } from './services/TranslationService';
 import { EmbeddingService } from './services/EmbeddingService';
 import { CentralObserver } from './core/CentralObserver';
 import { EventBus } from './core/EventBus';
-import type { ConfigKey } from './types';
+import type { ConfigKey, PlayerTrack } from './types';
 
 // Features
 import { RadioMode } from './features/radio';
@@ -155,6 +155,9 @@ async function initialize(): Promise<void> {
 
         // Start the central observer for all DOM watchers
         CentralObserver.start();
+
+        // Keep page padding in sync with stacked bottom bars (viz, subs, JOI)
+        startStackedBottomHeightWatch();
 
         DialogStyles.injectSizing();
 
@@ -508,7 +511,7 @@ function initializeInfrastructure(bridge: KikoeruBridge): void {
             const actionPayload = typeof typeOrAction === 'string' ? payload : typeOrAction;
             Logger.debug(`[Dispatch] ${actionType}`, actionPayload);
             if (actionType === 'AudioPlayer/playTrack') {
-                await audioCache.interceptPlay(actionPayload);
+                await audioCache.interceptPlay(actionPayload as PlayerTrack | null);
             }
             return originalDispatch(typeOrAction as string, payload, options);
         };

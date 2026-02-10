@@ -1,5 +1,6 @@
 import { KikoeruBridge } from '../infrastructure/KikoeruBridge';
 import { Config, Logger } from '../core/Utils';
+import type { KikoeruStoreState, AudioPlayerState, PlayerTrack, PlayMode, PlayModeObject } from '../types';
 
 export class ShuffleFeature {
     private bridge: KikoeruBridge;
@@ -10,14 +11,15 @@ export class ShuffleFeature {
     }
 
     public enable(): void {
-        const api = (window as any).ASMRUlt || ((window as any).ASMRUlt = {});
+        const w = window as Window & { ASMRUlt?: Record<string, unknown> };
+        const api = w.ASMRUlt || (w.ASMRUlt = {});
         api.toggleShuffle = () => this.toggle();
 
         const store = this.bridge.store;
         if (store.watch) {
             this._unwatch = store.watch(
-                (state: any) => state.AudioPlayer?.playMode,
-                (mode: any) => {
+                (state: KikoeruStoreState) => state.AudioPlayer?.playMode,
+                (mode) => {
                     const isShuffle = this.getMode(mode) === 'shuffle';
                     Config.set('shuffle', isShuffle);
                 }
@@ -40,7 +42,7 @@ export class ShuffleFeature {
         }
     }
 
-    private getMode(mode: any): string {
+    private getMode(mode: PlayMode | PlayModeObject | undefined): string {
         if (!mode) return 'order';
         if (typeof mode === 'string') return mode;
         if (typeof mode.name === 'string') return mode.name;
@@ -87,20 +89,19 @@ export class ShuffleFeature {
         Logger.debug('[ShuffleFeature] Hard shuffle applied to', shuffled.length, 'tracks.');
     }
 
-    private getPlaylist(player: any): any[] {
+    private getPlaylist(player: AudioPlayerState): PlayerTrack[] {
         if (Array.isArray(player.queue)) return player.queue;
         if (Array.isArray(player.playlist)) return player.playlist;
-        if (Array.isArray(player.tracks)) return player.tracks;
         return [];
     }
 
-    private getCurrentTrack(player: any): any | null {
+    private getCurrentTrack(player: AudioPlayerState): PlayerTrack | null {
         if (player.currentTrack) return player.currentTrack;
         if (player.currentPlayingFile) return player.currentPlayingFile;
         return null;
     }
 
-    private setPlaylist(tracks: any[]): void {
+    private setPlaylist(tracks: PlayerTrack[]): void {
         const store = this.bridge.store;
         if (store.dispatch && store._actions?.['AudioPlayer/setPlaylist']) {
             store.dispatch('AudioPlayer/setPlaylist', tracks);
@@ -111,7 +112,7 @@ export class ShuffleFeature {
         }
     }
 
-    private shuffleArray(array: any[]): void {
+    private shuffleArray<T>(array: T[]): void {
         for (let i = array.length - 1; i > 0; i--) {
             const j = Math.floor(Math.random() * (i + 1));
             [array[i], array[j]] = [array[j], array[i]];

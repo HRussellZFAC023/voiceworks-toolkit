@@ -538,7 +538,7 @@ export class KikoeruBridge {
      */
     public get workTreeVm(): KikoeruApp | null {
         if (this._cachedWorkTreeVm) {
-            const vm = this._cachedWorkTreeVm as any;
+            const vm = this._cachedWorkTreeVm as KikoeruApp & { _isDestroyed?: boolean; _isBeingDestroyed?: boolean; $el?: HTMLElement };
             // Validate it's still alive and mounted
             if (!vm._isDestroyed && !vm._isBeingDestroyed && vm.$el?.parentNode) {
                 return this._cachedWorkTreeVm;
@@ -565,14 +565,14 @@ export class KikoeruBridge {
      * silently ignores $forceUpdate during the same flush cycle.
      */
     public forceWorkTreeRerender(): Promise<void> {
-        const vm = this.workTreeVm as any;
+        const vm = this.workTreeVm as (KikoeruApp & { _vnode?: unknown; $forceUpdate?: () => void; $nextTick?: (cb: () => void) => void }) | null;
         if (!vm?.$forceUpdate) return Promise.resolve();
 
         return new Promise((resolve) => {
             setTimeout(() => {
                 try {
                     vm._vnode = null;
-                    vm.$forceUpdate();
+                    vm.$forceUpdate!();
                     Logger.debug('[KikoeruBridge] Forced WorkTree full re-render');
                 } catch (e) {
                     Logger.warn('[KikoeruBridge] forceWorkTreeRerender failed:', e);
@@ -591,7 +591,7 @@ export class KikoeruBridge {
      */
     public notify(message: string, type: 'positive' | 'negative' | 'warning' | 'info' = 'info', timeout = 3000): void {
         const app = this._app;
-        const q = app?.$q || (window as any).Quasar;
+        const q = app?.$q || (window as Window & { Quasar?: KikoeruApp['$q'] }).Quasar;
 
         if (q?.notify) {
             q.notify({

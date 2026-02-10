@@ -1,5 +1,5 @@
 import { getAxios } from './Client';
-import type { ReviewListParams, ReviewListResponse } from '../types/api';
+import type { ReviewListParams, ReviewListResponse, Work } from '../types/api';
 
 export interface ReviewUpdateParams {
     work_id: number;
@@ -23,8 +23,8 @@ export const ReviewApi = {
         const body = { work_id, ...rest };
         try {
             await getAxios().post('/api/review', body);
-        } catch (err: any) {
-            const status = err?.response?.status;
+        } catch (err: unknown) {
+            const status = (err as { response?: { status?: number } })?.response?.status;
             if (status === 404 || status === 405) {
                 await getAxios().put('/api/review', body);
             } else {
@@ -35,7 +35,7 @@ export const ReviewApi = {
 
     async getWorkReview(workId: number): Promise<ReviewData | null> {
         const response = await getAxios().get(`/api/work/${workId}`);
-        const work = response.data as Record<string, any>;
+        const work = response.data as Work;
         if (work?.userRating || work?.review_text) {
             return {
                 rating: work.userRating || 0,

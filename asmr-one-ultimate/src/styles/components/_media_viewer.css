@@ -450,10 +450,13 @@
     line-height: 1.5;
     white-space: pre-wrap;
     word-break: break-word;
+    overflow-wrap: anywhere;
     color: var(--asmr-text-primary);
     background: var(--asmr-bg-primary);
     border-bottom: 1px solid rgba(255, 255, 255, 0.03);
     min-height: 1.5em;
+    min-width: 0;
+    overflow: visible;
 }
 
 .media-viewer-text-line--translated {

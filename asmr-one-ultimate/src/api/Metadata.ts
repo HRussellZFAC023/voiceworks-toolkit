@@ -34,7 +34,8 @@ export const MetadataApi = {
             const res = await getAxios().get(`/api/${field}`);
             // Ensure we always return an array
             const data = Array.isArray(res.data) ? res.data as T[] : [];
-            labelCache[field] = data as any;
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any -- generic T can't narrow indexed field
+            (labelCache as Record<string, unknown>)[field] = data;
             labelCache.timestamps[field] = now;
             return data;
         } catch (error) {

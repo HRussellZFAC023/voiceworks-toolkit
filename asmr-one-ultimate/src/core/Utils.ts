@@ -47,6 +47,7 @@ export const SafeUtils = {
         return found ? document.querySelector(selector) : null;
     },
 
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- any[] required for generic function constraint with Parameters<T>
     debounce<T extends (...args: any[]) => void>(fn: T, delayMs: number): (...args: Parameters<T>) => void {
         let timeout: number | null = null;
         return (...args: Parameters<T>) => {

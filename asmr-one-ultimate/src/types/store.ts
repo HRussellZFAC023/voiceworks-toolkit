@@ -119,10 +119,12 @@ export interface KikoeruApp {
     $watch: <T>(
         expression: string | (() => T),
         callback: (newValue: T, oldValue: T) => void,
-        options?: { immediate?: boolean; deep?: boolean }
+        options?: { immediate?: boolean; deep?: boolean; sync?: boolean }
     ) => () => void;
+    $on?: (event: string, callback: (...args: unknown[]) => void) => void;
     $children?: KikoeruApp[];
     $options?: Record<string, unknown>;
+    $data?: Record<string, unknown>;
     $q?: {
         notify: (options: {
             message: string;
@@ -135,16 +137,24 @@ export interface KikoeruApp {
     $root?: KikoeruApp;
     $parent?: KikoeruApp;
     __proto__?: {
-        constructor: any;
+        constructor: new (...args: unknown[]) => unknown;
     };
+    [key: string]: unknown;
+}
+
+/** Item in the WorkTree fatherFolder computed array */
+export interface FatherFolderItem {
+    title: string;
+    type?: string;
     [key: string]: unknown;
 }
 
 export interface WorkTreeComponent extends KikoeruApp {
     path: string[];
     tree?: unknown[];
-    fatherFolder?: unknown;
+    fatherFolder?: FatherFolderItem[];
     _vnode?: unknown;
+    _data?: Record<string, unknown>;
     _isDestroyed?: boolean;
     _isBeingDestroyed?: boolean;
     $set?: (target: unknown, key: string, value: unknown) => void;
@@ -388,6 +398,7 @@ export interface AppEvents {
         fromCache?: boolean;
         live?: boolean;
         source?: string;
+        leadSec?: number;
     };
     'whisper:complete': { text: string };
     'whisper:error': { message: string; isHlsWarning?: boolean };

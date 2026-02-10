@@ -7,6 +7,7 @@ const { mockDLsiteService } = vi.hoisted(() => ({
         fetchProductApi: vi.fn(),
         fetchDynamicApi: vi.fn(),
         fetchProductPageBody: vi.fn(),
+        fetchProductPageSampleImages: vi.fn(),
         fetchProductPageReviews: vi.fn(),
     }
 }));
@@ -24,6 +25,7 @@ describe('DLsiteScraper', () => {
         mockDLsiteService.fetchProductApi.mockReset();
         mockDLsiteService.fetchDynamicApi.mockReset();
         mockDLsiteService.fetchProductPageBody.mockReset();
+        mockDLsiteService.fetchProductPageSampleImages.mockReset();
         mockDLsiteService.fetchProductPageReviews.mockReset();
         scraper = DLsiteScraper.getInstance();
     });
@@ -513,6 +515,34 @@ describe('DLsiteScraper', () => {
             const meta = await scraper.scrape('RJ10000014');
             expect(meta.image_main).toBe('https://img.dlsite.jp/main.jpg');
         });
+
+        it('should prefer page-extracted parts sample URLs when available', async () => {
+            mockDLsiteService.fetchProductApi.mockResolvedValue({
+                work_name: 'Parts Samples',
+                age_category: 3,
+                regist_date: '2025-01-01',
+                genres: [],
+                price: 0,
+                image_samples: [
+                    { url: '//img.dlsite.jp/modpub/images2/work/doujin/RJ01511000/RJ01510683_img_smp1.jpg' },
+                    { url: '//img.dlsite.jp/modpub/images2/work/doujin/RJ01511000/RJ01510683_img_smp2.jpg' },
+                ],
+            });
+            mockDLsiteService.fetchDynamicApi.mockResolvedValue(null);
+            mockDLsiteService.fetchProductPageBody.mockResolvedValue(null);
+            mockDLsiteService.fetchProductPageSampleImages.mockResolvedValue([
+                'https://img.dlsite.jp/modpub/images2/parts/RJ01511000/RJ01510683/7702dafd2ec54bd8c1bceb47ece58080.jpg',
+                'https://img.dlsite.jp/modpub/images2/parts/RJ01511000/RJ01510683/7c8c6cb21018f34451337971b6f6a6d8.jpg',
+            ]);
+
+            const meta = await scraper.scrape('RJ10000022');
+            expect(meta.image_samples).toEqual([
+                'https://img.dlsite.jp/modpub/images2/parts/RJ01511000/RJ01510683/7702dafd2ec54bd8c1bceb47ece58080.jpg',
+                'https://img.dlsite.jp/modpub/images2/parts/RJ01511000/RJ01510683/7c8c6cb21018f34451337971b6f6a6d8.jpg',
+                'https://img.dlsite.jp/modpub/images2/work/doujin/RJ01511000/RJ01510683_img_smp1.jpg',
+                'https://img.dlsite.jp/modpub/images2/work/doujin/RJ01511000/RJ01510683_img_smp2.jpg',
+            ]);
+        });
     });
 
     // =========================================================================
@@ -666,6 +696,84 @@ describe('DLsiteScraper', () => {
             expect(result.title).toBe('Cached Progressive');
             expect(onProgress).not.toHaveBeenCalled(); // cached, no progressive phases
             expect(mockDLsiteService.fetchProductApi).not.toHaveBeenCalled();
+        });
+
+        it('should upgrade cached legacy _img_smp URLs to parts URLs', async () => {
+            const normalized = 'RJ20000004';
+            const cacheKey = `asmr-ult:dlsite:${normalized}`;
+            SharedCache.set(cacheKey, {
+                rjcode: normalized,
+                title: 'Cached Legacy Samples',
+                nsfw: true,
+                release: '2025-01-01',
+                tags: [],
+                cvs: [],
+                rating_average: 0,
+                price: 0,
+                age_category_string: 'R18',
+                image_samples: [
+                    'https://img.dlsite.jp/modpub/images2/work/doujin/RJ01511000/RJ01510683_img_smp1.jpg',
+                    'https://img.dlsite.jp/modpub/images2/work/doujin/RJ01511000/RJ01510683_img_smp2.jpg',
+                ],
+            }, 60_000);
+
+            mockDLsiteService.fetchProductPageSampleImages.mockResolvedValue([
+                'https://img.dlsite.jp/modpub/images2/parts/RJ01511000/RJ01510683/7702dafd2ec54bd8c1bceb47ece58080.jpg',
+                'https://img.dlsite.jp/modpub/images2/parts/RJ01511000/RJ01510683/7c8c6cb21018f34451337971b6f6a6d8.jpg',
+            ]);
+
+            const onProgress = vi.fn();
+            const result = await scraper.scrapeProgressive(normalized, onProgress);
+
+            expect(mockDLsiteService.fetchProductPageSampleImages).toHaveBeenCalledWith(normalized);
+            expect(result.image_samples).toEqual([
+                'https://img.dlsite.jp/modpub/images2/parts/RJ01511000/RJ01510683/7702dafd2ec54bd8c1bceb47ece58080.jpg',
+                'https://img.dlsite.jp/modpub/images2/parts/RJ01511000/RJ01510683/7c8c6cb21018f34451337971b6f6a6d8.jpg',
+                'https://img.dlsite.jp/modpub/images2/work/doujin/RJ01511000/RJ01510683_img_smp1.jpg',
+                'https://img.dlsite.jp/modpub/images2/work/doujin/RJ01511000/RJ01510683_img_smp2.jpg',
+            ]);
+            expect(onProgress).not.toHaveBeenCalled();
+            expect(mockDLsiteService.fetchProductApi).not.toHaveBeenCalled();
+        });
+
+        it('should backfill legacy _img_smp URLs for cached parts-only entries', async () => {
+            const normalized = 'RJ20000005';
+            const cacheKey = `asmr-ult:dlsite:${normalized}`;
+            SharedCache.set(cacheKey, {
+                rjcode: normalized,
+                title: 'Cached Parts Samples',
+                nsfw: true,
+                release: '2025-01-01',
+                tags: [],
+                cvs: [],
+                rating_average: 0,
+                price: 0,
+                age_category_string: 'R18',
+                image_samples: [
+                    'https://img.dlsite.jp/modpub/images2/parts/RJ01511000/RJ01510683/7702dafd2ec54bd8c1bceb47ece58080.jpg',
+                    'https://img.dlsite.jp/modpub/images2/parts/RJ01511000/RJ01510683/7c8c6cb21018f34451337971b6f6a6d8.jpg',
+                ],
+            }, 60_000);
+
+            mockDLsiteService.fetchProductApi.mockResolvedValue({
+                work_name: 'Backfill Legacy',
+                image_samples: [
+                    { url: '//img.dlsite.jp/modpub/images2/work/doujin/RJ01511000/RJ01510683_img_smp1.jpg' },
+                    { url: '//img.dlsite.jp/modpub/images2/work/doujin/RJ01511000/RJ01510683_img_smp2.jpg' },
+                ],
+            });
+
+            const onProgress = vi.fn();
+            const result = await scraper.scrapeProgressive(normalized, onProgress);
+
+            expect(mockDLsiteService.fetchProductApi).toHaveBeenCalledWith(normalized);
+            expect(result.image_samples).toEqual([
+                'https://img.dlsite.jp/modpub/images2/parts/RJ01511000/RJ01510683/7702dafd2ec54bd8c1bceb47ece58080.jpg',
+                'https://img.dlsite.jp/modpub/images2/parts/RJ01511000/RJ01510683/7c8c6cb21018f34451337971b6f6a6d8.jpg',
+                'https://img.dlsite.jp/modpub/images2/work/doujin/RJ01511000/RJ01510683_img_smp1.jpg',
+                'https://img.dlsite.jp/modpub/images2/work/doujin/RJ01511000/RJ01510683_img_smp2.jpg',
+            ]);
+            expect(onProgress).not.toHaveBeenCalled();
         });
 
         it('should call onProgress with phase 1 data', async () => {

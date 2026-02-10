@@ -6,6 +6,7 @@ export interface MediaFile {
     type?: string;
     mediaStreamUrl?: string;
     media_stream_url?: string;
+    [key: string]: unknown;
 }
 
 export interface TouchState {

@@ -1,9 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import { flattenTree } from '../../src/features/flatViewUtils';
+import type { TracksResponse } from '../../src/types/api';
 
 describe('FlatView', () => {
     it('flattenTree produces correct output from tree data', () => {
-        const tree = [
+        const tree: TracksResponse = [
             {
                 type: 'folder' as const,
                 title: 'CD1',
@@ -28,7 +29,7 @@ describe('FlatView', () => {
             { type: 'text' as const, hash: '1/3', title: 'readme.txt' },
         ];
 
-        const items = flattenTree(tree as any);
+        const items = flattenTree(tree);
 
         expect(items.length).toBe(4);
         expect(items[0].title).toBe('track1.mp3');
@@ -47,13 +48,30 @@ describe('FlatView', () => {
     });
 
     it('flattenTree handles root-level items without folders', () => {
-        const tree = [
+        const tree: TracksResponse = [
             { type: 'audio' as const, hash: 'a', title: 'track.mp3' },
             { type: 'image' as const, hash: 'b', title: 'cover.jpg' },
         ];
-        const items = flattenTree(tree as any);
+        const items = flattenTree(tree);
         expect(items.length).toBe(2);
         expect(items[0].folderPath).toBe('');
         expect(items[1].folderPath).toBe('');
+    });
+
+    it('keeps duration and raw references for media actions', () => {
+        const tree: TracksResponse = [
+            {
+                type: 'audio',
+                hash: 'd1',
+                title: 'voice.mp3',
+                duration: 123,
+                mediaStreamUrl: '/api/media/stream/d1',
+            },
+        ];
+
+        const items = flattenTree(tree);
+        expect(items[0].duration).toBe(123);
+        expect(items[0].raw.hash).toBe('d1');
+        expect(items[0].mediaStreamUrl).toBe('/api/media/stream/d1');
     });
 });

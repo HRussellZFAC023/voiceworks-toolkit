@@ -366,3 +366,150 @@ body.asmr-fullscreen-active .player-bar-container {
     font-size: 1.15rem !important;
     color: rgba(255, 255, 255, 0.7) !important;
 }
+
+/* ========================================
+   Auto-hide Controls on Touch Devices
+   ======================================== */
+
+/* Transition base for control rows */
+.audio-player.asmr-player-fullscreen .text-center.q-mb-sm.column,
+.audio-player.asmr-player-fullscreen .row.items-center.q-mx-lg,
+.audio-player.asmr-player-fullscreen .row.q-py-md.self-center,
+.audio-player.asmr-player-fullscreen .row.items-center.q-mx-lg.q-pt-sm,
+.audio-player.asmr-player-fullscreen .row.self-center,
+.audio-player.asmr-player-fullscreen .albumart .asmr-gallery-nav,
+.audio-player.asmr-player-fullscreen .albumart .asmr-gallery-counter,
+.audio-player.asmr-player-fullscreen .albumart .asmr-gallery-slideshow-toggle,
+.audio-player.asmr-player-fullscreen .albumart .asmr-gallery-exclude {
+    transition: opacity 0.4s ease !important;
+}
+
+/* Idle state — fade out controls (touch devices only) */
+@media (hover: none) {
+    .audio-player.asmr-player-fullscreen.asmr-controls-idle .text-center.q-mb-sm.column,
+    .audio-player.asmr-player-fullscreen.asmr-controls-idle .row.items-center.q-mx-lg,
+    .audio-player.asmr-player-fullscreen.asmr-controls-idle .row.q-py-md.self-center,
+    .audio-player.asmr-player-fullscreen.asmr-controls-idle .row.items-center.q-mx-lg.q-pt-sm,
+    .audio-player.asmr-player-fullscreen.asmr-controls-idle .row.self-center,
+    .audio-player.asmr-player-fullscreen.asmr-controls-idle .albumart .asmr-gallery-nav,
+    .audio-player.asmr-player-fullscreen.asmr-controls-idle .albumart .asmr-gallery-counter,
+    .audio-player.asmr-player-fullscreen.asmr-controls-idle .albumart .asmr-gallery-slideshow-toggle,
+    .audio-player.asmr-player-fullscreen.asmr-controls-idle .albumart .asmr-gallery-exclude {
+        opacity: 0 !important;
+        pointer-events: none !important;
+    }
+}
+
+/* ========================================
+   Mobile Compact Layout
+   ======================================== */
+
+@media (max-width: 600px) {
+    /* Minimal padding — maximize image space on small screens */
+    .audio-player.asmr-player-fullscreen .albumart {
+        padding: 8px 4px !important;
+    }
+
+    /* Smaller, subtler gallery nav arrows pushed flush to edges */
+    .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-nav {
+        width: 32px !important;
+        height: 32px !important;
+        opacity: 0.4;
+        background: rgba(0, 0, 0, 0.25) !important;
+    }
+
+    .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-nav .material-icons {
+        font-size: 22px !important;
+    }
+
+    .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-prev {
+        left: 2px !important;
+    }
+
+    .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-next {
+        right: 2px !important;
+    }
+
+    /* Compact metadata */
+    .audio-player.asmr-player-fullscreen .text-bold {
+        font-size: 1.1rem !important;
+    }
+
+    .audio-player.asmr-player-fullscreen .text-caption {
+        font-size: 0.8rem !important;
+    }
+
+    /* Reduce control row spacing */
+    .audio-player.asmr-player-fullscreen .text-center.q-mb-sm.column {
+        margin-top: 12px !important;
+        margin-bottom: 16px !important;
+    }
+
+    .audio-player.asmr-player-fullscreen .row.items-center.q-mx-lg {
+        margin-bottom: 12px !important;
+    }
+
+    .audio-player.asmr-player-fullscreen .row.q-py-md.self-center {
+        padding: 4px 0 12px !important;
+        margin: 4px 0 !important;
+    }
+
+    /* Safe-area-aware bottom padding */
+    .audio-player.asmr-player-fullscreen .row.self-center:last-of-type {
+        padding-bottom: max(24px, env(safe-area-inset-bottom)) !important;
+    }
+
+    /* Reduce control side padding */
+    .audio-player.asmr-player-fullscreen .text-center.q-mb-sm.column,
+    .audio-player.asmr-player-fullscreen .row.items-center.q-mx-lg,
+    .audio-player.asmr-player-fullscreen .row.q-py-md.self-center,
+    .audio-player.asmr-player-fullscreen .row.items-center.q-mx-lg.q-pt-sm,
+    .audio-player.asmr-player-fullscreen .row.self-center {
+        padding-left: 16px !important;
+        padding-right: 16px !important;
+    }
+
+    /* Compact learner subtitles */
+    .audio-player.asmr-player-fullscreen .learner-subs-expanded {
+        padding: 12px 16px !important;
+        gap: 8px !important;
+        min-height: 60px !important;
+    }
+
+    .audio-player.asmr-player-fullscreen .learner-jp {
+        font-size: 1.6rem !important;
+    }
+
+    .audio-player.asmr-player-fullscreen .learner-en {
+        font-size: 0.85rem !important;
+    }
+
+    /* Gallery counter — small pill that doesn't obscure image */
+    .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-counter {
+        bottom: 4px !important;
+        padding: 2px 8px !important;
+        font-size: 0.75rem !important;
+        opacity: 0.7 !important;
+    }
+
+    /* Top toolbar icons — smaller on mobile so they don't crowd the exit button */
+    .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-slideshow-toggle,
+    .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-exclude {
+        width: 22px !important;
+        height: 22px !important;
+    }
+
+    .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-slideshow-toggle .material-icons,
+    .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-exclude .material-icons {
+        font-size: 14px !important;
+    }
+
+    .audio-player .asmr-fullscreen-btn {
+        width: 22px !important;
+        height: 22px !important;
+    }
+
+    .audio-player .asmr-fullscreen-btn .material-icons {
+        font-size: 14px !important;
+    }
+}

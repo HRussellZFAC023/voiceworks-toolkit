@@ -279,6 +279,7 @@ export class JpdbController {
                             .then(refreshed => {
                                 if (refreshed) {
                                     this.updateWordElements(vid, sid, refreshed.cardState[0] || 'not-in-deck');
+                                    this.dispatchCardGraded(vid, sid, refreshed.cardState as string[]);
                                 }
                             })
                             .catch(err => Logger.error('[JPDB] Grade failed:', err));
@@ -287,18 +288,21 @@ export class JpdbController {
                     if (action === 'add') {
                         await this.handleAddToDeck(vid, sid);
                         this.updateWordElements(vid, sid, 'learning');
+                        this.dispatchCardGraded(vid, sid, ['learning']);
                     } else if (action === 'neverforget') {
                         await this.handleToggleDeck(vid, sid, card!, 'never-forget',
                             AppStore.getConfig('jpdbNeverForgetDeck') || 'never-forget');
                         const updatedCard = JpdbService.getCard(vid, sid);
-                        const newPrimary = updatedCard?.cardState[0] || 'not-in-deck';
-                        this.updateWordElements(vid, sid, newPrimary);
+                        const newState = updatedCard?.cardState || ['not-in-deck'];
+                        this.updateWordElements(vid, sid, newState[0] || 'not-in-deck');
+                        this.dispatchCardGraded(vid, sid, newState);
                     } else if (action === 'blacklist') {
                         await this.handleToggleDeck(vid, sid, card!, 'blacklisted',
                             AppStore.getConfig('jpdbBlacklistDeck') || 'blacklist');
                         const updatedCard = JpdbService.getCard(vid, sid);
-                        const newPrimary = updatedCard?.cardState[0] || 'not-in-deck';
-                        this.updateWordElements(vid, sid, newPrimary);
+                        const newState = updatedCard?.cardState || ['not-in-deck'];
+                        this.updateWordElements(vid, sid, newState[0] || 'not-in-deck');
+                        this.dispatchCardGraded(vid, sid, newState);
                     }
                     this.dismissPopover();
                 }
@@ -313,6 +317,61 @@ export class JpdbController {
         backdrop.className = 'jpdb-popover-backdrop';
         backdrop.setAttribute('aria-hidden', 'true');
         backdrop.addEventListener('click', () => this.dismissPopover());
+
+        // Drag handle for mobile bottom sheet (click to dismiss + swipe down)
+        if (isMobile) {
+            const handle = document.createElement('div');
+            handle.className = 'jpdb-popover-handle';
+            popover.prepend(handle);
+
+            handle.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this.dismissPopover();
+            });
+
+            // Swipe-down-to-dismiss on the whole popover
+            let startY = 0;
+            let currentY = 0;
+            let dragging = false;
+
+            popover.addEventListener('touchstart', (e) => {
+                // Only initiate drag from handle area or top of popover when scrolled to top
+                const touch = e.touches[0];
+                const handleRect = handle.getBoundingClientRect();
+                const inHandle = touch.clientY <= handleRect.bottom + 20;
+                if (!inHandle && popover.scrollTop > 0) return;
+                startY = touch.clientY;
+                currentY = startY;
+                dragging = true;
+                popover.style.transition = 'none';
+            }, { passive: true });
+
+            popover.addEventListener('touchmove', (e) => {
+                if (!dragging) return;
+                currentY = e.touches[0].clientY;
+                const dy = currentY - startY;
+                if (dy > 0) {
+                    popover.style.transform = `translateY(${dy}px)`;
+                    e.preventDefault();
+                }
+            }, { passive: false });
+
+            popover.addEventListener('touchend', () => {
+                if (!dragging) return;
+                dragging = false;
+                const dy = currentY - startY;
+                if (dy > 80) {
+                    // Swipe far enough — dismiss with animation
+                    popover.style.transition = 'transform 0.2s ease-out';
+                    popover.style.transform = 'translateY(100%)';
+                    popover.addEventListener('transitionend', () => this.dismissPopover(), { once: true });
+                } else {
+                    // Snap back
+                    popover.style.transition = 'transform 0.2s ease-out';
+                    popover.style.transform = 'translateY(0)';
+                }
+            }, { passive: true });
+        }
 
         document.body.appendChild(backdrop);
         document.body.appendChild(popover);
@@ -364,6 +423,13 @@ export class JpdbController {
             el.classList.remove(...JpdbController.STATE_CLASSES);
             el.classList.add(`jpdb-${newState}`);
         }
+    }
+
+    /** Notify Vue components that a card's state changed so they can update reactively. */
+    private dispatchCardGraded(vid: number, sid: number, cardState: string[]): void {
+        document.dispatchEvent(new CustomEvent('jpdb:card-graded', {
+            detail: { vid, sid, cardState },
+        }));
     }
 
     // =========================================================================

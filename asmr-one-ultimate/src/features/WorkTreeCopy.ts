@@ -1,13 +1,22 @@
 import { Logger, I18n } from '../core/Utils';
 import { KikoeruBridge } from '../infrastructure/KikoeruBridge';
 import { EventBus } from '../core/EventBus';
-import { getVueItem } from '../core/DomUtils';
+import { getCleanText, getVueItem } from '../core/DomUtils';
+import {
+    applyCopyButtonPresentation,
+    sanitizeCopyText,
+    shouldSkipRootFolderItem,
+    getCopyTargetItems,
+    removeInjectedCopyButtons,
+} from './workTreeCopyUtils';
 
 export class WorkTreeCopy {
     private bridge: KikoeruBridge;
     private copyBtnTemplate: HTMLButtonElement;
     private flatObserver: MutationObserver | null = null;
     private cleanups: (() => void)[] = [];
+    private timeoutIds = new Set<number>();
+    private enabled = false;
 
     constructor() {
         this.bridge = KikoeruBridge.getInstance();
@@ -22,14 +31,15 @@ export class WorkTreeCopy {
 
         const contentSpan = document.createElement('span');
         contentSpan.className = 'q-btn__content text-center col items-center q-anchor--skip justify-center row';
-        contentSpan.textContent = I18n.t('copyBtn');
         this.copyBtnTemplate.appendChild(contentSpan);
-        this.copyBtnTemplate.ariaLabel = I18n.t('copyBtn');
 
         this.copyBtnTemplate.setAttribute('data-xxcopy', 'true');
+        this.refreshCopyTemplateLabel();
     }
 
     public enable(): void {
+        if (this.enabled) return;
+        this.enabled = true;
         Logger.log('[WorkTreeCopy] Enabling feature');
 
         // Inject on fresh renders via worktree:enhanced (fired by WorkTreeManager after every Vue render)
@@ -38,24 +48,30 @@ export class WorkTreeCopy {
             if (listContainer) this.injectButtons(listContainer as Element);
         }));
 
+        this.cleanups.push(EventBus.on('lang:change', () => {
+            this.refreshCopyTemplateLabel();
+            this.refreshInjectedButtonLabels();
+        }));
+
         // Route change: initial injection for when the page first loads
         const app = this.bridge.app;
-        if (app && typeof (app as any).$watch === 'function') {
-            (app as any).$watch('$route', () => {
+        if (app && typeof app.$watch === 'function') {
+            const unwatch = app.$watch('$route', () => {
                 if (this.isWorkPage()) {
-                    setTimeout(() => {
+                    this.schedule(500, () => {
                         const wt = document.getElementById('work-tree');
                         const lc = wt?.querySelector('.q-card')?.children?.[0];
                         if (lc) this.injectButtons(lc as Element);
-                    }, 500);
+                    });
                 }
             });
+            this.cleanups.push(unwatch);
         }
 
         // Listen for flat panel open/close to inject copy buttons there too
         this.cleanups.push(EventBus.on('flatview:toggle', (data: { active: boolean }) => {
             if (data.active) {
-                setTimeout(() => this.observeFlatPanel(), 500);
+                this.schedule(500, () => this.observeFlatPanel());
             } else {
                 this.flatObserver?.disconnect();
                 this.flatObserver = null;
@@ -64,11 +80,11 @@ export class WorkTreeCopy {
 
         // Initial injection for current page
         if (this.isWorkPage()) {
-            setTimeout(() => {
+            this.schedule(500, () => {
                 const wt = document.getElementById('work-tree');
                 const lc = wt?.querySelector('.q-card')?.children?.[0];
                 if (lc) this.injectButtons(lc as Element);
-            }, 500);
+            });
         }
     }
 
@@ -78,46 +94,65 @@ export class WorkTreeCopy {
     }
 
     private injectButtons(container: Element, isFlatPanel = false): void {
-        const items = container.querySelectorAll('[role="listitem"]');
+        // Pause the flat-panel MutationObserver while we modify the DOM.
+        // applyCopyButtonPresentation sets textContent which is a childList
+        // mutation — without pausing, the observer re-fires injectButtons
+        // in an infinite loop.
+        const obs = this.flatObserver;
+        if (obs) obs.disconnect();
 
-        items.forEach((li, index) => {
-            // Check if we already injected
-            if (li.querySelector('[data-xxcopy]')) return;
+        try {
+            const items = getCopyTargetItems(container);
+            const copyLabel = I18n.t('copyBtn');
+            const allFilesLabel = I18n.t('fileListHeader');
 
-            if (!isFlatPanel) {
-                // Skip "All files" root item: detect by Vue data or first-item heuristic
+            items.forEach((li, index) => {
+                const existingButton = li.querySelector<HTMLElement>('[data-xxcopy]');
+
                 const vueData = getVueItem(li) as Record<string, unknown> | null;
-                if (vueData?.type === 'folder' && index === 0 && !vueData?.hash) {
+                const itemType = (vueData?.type as string | undefined) || li.dataset.itemType;
+                const hash = (vueData?.hash as string | undefined) || li.dataset.asmrHash;
+                const labelText = getCleanText(li.querySelector('.q-item__label') || li);
+
+                if (shouldSkipRootFolderItem(isFlatPanel, index, itemType, !!hash, labelText, allFilesLabel)) {
+                    existingButton?.remove();
                     return;
                 }
-                // Fallback: check label text for any language variant
-                const label = li.querySelector('.q-item__label');
-                if (index === 0 && label && /^All files$/i.test(label.textContent?.trim() || '')) {
-                    return;
-                }
-            }
 
-            const btnEle = this.copyBtnTemplate.cloneNode(true) as HTMLElement;
+                const itemTitle = this.getItemTitle(li, isFlatPanel);
+                const button = existingButton || (this.copyBtnTemplate.cloneNode(true) as HTMLElement);
+                applyCopyButtonPresentation(button, copyLabel, itemTitle);
+                this.bindCopyHandler(button, li, isFlatPanel);
 
-            // Set specific aria-label if we can determine the title
-            const itemTitle = this.getItemTitle(li, isFlatPanel);
-            if (itemTitle) {
-                btnEle.ariaLabel = `${I18n.t('copyBtn')} ${itemTitle}`;
-            }
-
-            li.appendChild(btnEle);
-
-            btnEle.addEventListener('click', (ev) => {
-                ev.stopPropagation();
-                ev.preventDefault();
-
-                let textToCopy = this.getItemTitle(li, isFlatPanel);
-
-                if (textToCopy) {
-                    textToCopy = textToCopy.replace(I18n.t('copyBtn'), '').trim();
-                    void this.copyToClipboard(textToCopy);
+                if (!existingButton) {
+                    li.appendChild(button);
                 }
             });
+        } finally {
+            // Re-observe after our DOM mutations are done
+            if (obs) {
+                const body = document.querySelector('.asmr-flat-panel__body');
+                if (body) obs.observe(body, { childList: true, subtree: true });
+            }
+        }
+    }
+
+    private bindCopyHandler(button: HTMLElement, li: HTMLElement, isFlatPanel: boolean): void {
+        if (button.dataset.copyBound === '1') return;
+        button.dataset.copyBound = '1';
+
+        button.addEventListener('click', (ev) => {
+            ev.stopPropagation();
+            ev.preventDefault();
+
+            const copyLabel = I18n.t('copyBtn');
+            const storedTitle = button.dataset.copyTitle;
+            let textToCopy = storedTitle || this.getItemTitle(li, isFlatPanel);
+
+            if (textToCopy) {
+                textToCopy = sanitizeCopyText(textToCopy, copyLabel);
+                void this.copyToClipboard(textToCopy);
+            }
         });
     }
 
@@ -125,15 +160,15 @@ export class WorkTreeCopy {
     private getItemTitle(li: Element, isFlatPanel: boolean): string {
         if (!isFlatPanel) {
             // Prefer Vue component data for native tree items
-            const itemData = getVueItem(li) as Record<string, any> | null;
+            const itemData = getVueItem(li) as Record<string, unknown> | null;
             const title = (itemData?.title || itemData?.name || '') as string;
             if (title) return title;
         }
 
         // DOM fallback (always used for flat panel items)
         const mainLabel = li.querySelector('.q-item__label');
-        const mainSection = mainLabel || li.querySelector('.q-item__section--main');
-        return mainSection?.textContent?.trim() || '';
+        const mainSection = mainLabel || li.querySelector('.q-item__section--main') || li;
+        return getCleanText(mainSection);
     }
 
     private observeFlatPanel(): void {
@@ -184,9 +219,41 @@ export class WorkTreeCopy {
     }
 
     public disable(): void {
+        if (!this.enabled) return;
+        this.enabled = false;
         this.cleanups.forEach(fn => fn());
         this.cleanups = [];
+        this.clearScheduledTasks();
         this.flatObserver?.disconnect();
         this.flatObserver = null;
+        removeInjectedCopyButtons(document);
+    }
+
+    private schedule(ms: number, fn: () => void): void {
+        const timeoutId = window.setTimeout(() => {
+            this.timeoutIds.delete(timeoutId);
+            fn();
+        }, ms);
+        this.timeoutIds.add(timeoutId);
+    }
+
+    private clearScheduledTasks(): void {
+        for (const timeoutId of this.timeoutIds) {
+            clearTimeout(timeoutId);
+        }
+        this.timeoutIds.clear();
+    }
+
+    private refreshCopyTemplateLabel(): void {
+        const copyLabel = I18n.t('copyBtn');
+        applyCopyButtonPresentation(this.copyBtnTemplate, copyLabel);
+    }
+
+    private refreshInjectedButtonLabels(): void {
+        const copyLabel = I18n.t('copyBtn');
+        document.querySelectorAll<HTMLElement>('[data-xxcopy]').forEach((button) => {
+            const itemTitle = button.dataset.copyTitle;
+            applyCopyButtonPresentation(button, copyLabel, itemTitle);
+        });
     }
 }

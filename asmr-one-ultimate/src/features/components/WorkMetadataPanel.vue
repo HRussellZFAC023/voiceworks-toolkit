@@ -7,12 +7,15 @@ import { useEventBus } from '../../composables/useEventBus';
 import { useRoute } from '../../composables/useRoute';
 import { DLsiteScraper } from '../DLsiteScraper';
 import type { DLsiteMetadata } from '../../types/dlsite';
+import type { Work, WorkDetail } from '../../types/api';
 import { CacheKeys, SharedCache } from '../../core/Cache';
 import { TranslationService } from '../../services/TranslationService';
 import { TranslatedTags } from '../TranslatedTags';
 import { MediaViewerController } from '../MediaViewerController';
+import { extractEmbeddedRjCode, extractPrimaryRjCode } from '../rjCodeUtils';
 import { Logger, SafeUtils } from '../../core/Utils';
 import { isChinese } from '../../core/DomUtils';
+import { HttpClient } from '../../infrastructure/HttpClient';
 
 // ============================================================================
 // Composables
@@ -24,6 +27,7 @@ const { emit } = useEventBus();
 const route = useRoute();
 const translateMode = useConfig('translateMode');
 const cnToJpConfig = useConfig('translateCnToJp');
+const dlsiteProxyUrl = useConfig('dlsiteProxyUrl');
 
 // ============================================================================
 // State
@@ -44,6 +48,10 @@ let titleTranslationRequestVersion = 0;
 /** Image retry counters keyed by URL */
 const imageRetries = ref<Map<string, number>>(new Map());
 const imageSrcs = ref<Map<string, string>>(new Map());
+const imageBlobAttempts = ref<Set<string>>(new Set());
+const imageBlobUrls = ref<Map<string, string>>(new Map());
+const hiddenImageUrls = ref<Set<string>>(new Set());
+const loadedImageUrls = ref<Set<string>>(new Set());
 
 // ============================================================================
 // Computed
@@ -105,6 +113,7 @@ const chips = computed(() => {
 });
 
 const imageSamples = computed(() => meta.value?.image_samples || []);
+const visibleImageSamples = computed(() => imageSamples.value.filter(url => !hiddenImageUrls.value.has(url)));
 
 const bodyParagraphs = computed(() => {
     if (!meta.value) return [];
@@ -149,23 +158,178 @@ function chipTitle(chip: { label: string; key: string }): string {
 // Helper: get image src with retry support
 // ============================================================================
 
+function getProxyBaseUrl(): string {
+    let raw = String(dlsiteProxyUrl.value || '').trim().replace(/\/+$/, '');
+    if (!raw) return '';
+    if (!/^https?:\/\//i.test(raw)) raw = `https://${raw}`;
+    try {
+        const parsed = new URL(raw);
+        if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return '';
+    } catch {
+        return '';
+    }
+    return raw;
+}
+
+function toAbsoluteUrl(url: string): string {
+    if (!url) return '';
+    if (url.startsWith('//')) return `https:${url}`;
+    return url;
+}
+
+function isDlsiteImageUrl(url: string): boolean {
+    try {
+        const host = new URL(url).hostname.toLowerCase();
+        return host.includes('dlsite.com') || host.includes('dlsite.jp');
+    } catch {
+        return false;
+    }
+}
+
+function proxyImageUrl(originalUrl: string, preserveHost = true): string {
+    const normalizedUrl = toAbsoluteUrl(originalUrl);
+    const base = getProxyBaseUrl();
+    if (!base) return normalizedUrl;
+
+    try {
+        const parsed = new URL(normalizedUrl);
+        const host = parsed.hostname.toLowerCase();
+        if (!host.includes('dlsite.com') && !host.includes('dlsite.jp')) return normalizedUrl;
+        const params = new URLSearchParams(parsed.search);
+        if (preserveHost && host !== 'www.dlsite.com') {
+            params.set('__host', host);
+        }
+        const query = params.toString();
+        return `${base}${parsed.pathname}${query ? `?${query}` : ''}`;
+    } catch {
+        return normalizedUrl;
+    }
+}
+
+function getDisplayBaseUrl(url: string): string {
+    return toAbsoluteUrl(url);
+}
+
+function getResolvedImageUrl(url: string): string {
+    return imageSrcs.value.get(url) || getDisplayBaseUrl(url);
+}
+
 function getImageSrc(url: string): string {
-    return imageSrcs.value.get(url) || url;
+    return getResolvedImageUrl(url);
+}
+
+function isImageLoaded(url: string): boolean {
+    return loadedImageUrls.value.has(url);
+}
+
+async function tryBlobFallback(url: string): Promise<boolean> {
+    if (imageBlobAttempts.value.has(url) || imageBlobUrls.value.has(url)) return;
+    imageBlobAttempts.value.add(url);
+    let loadedFromBlob = false;
+
+    const directUrl = toAbsoluteUrl(url);
+    const hostAwareProxyUrl = proxyImageUrl(url, true);
+    const legacyProxyUrl = proxyImageUrl(url, false);
+    const orderedCandidates = [directUrl, hostAwareProxyUrl, legacyProxyUrl];
+    const candidates = orderedCandidates
+        .filter((candidate, idx, arr) => !!candidate && arr.indexOf(candidate) === idx);
+
+    for (const candidate of candidates) {
+        if (!candidate) continue;
+        Logger.debug(`[WorkMetadataPanel] Image failed, trying blob fetch: ${candidate}`);
+        try {
+            const blob = await HttpClient.getBlob(candidate, {
+                retry: { attempts: 2, backoffMs: 600, multiplier: 2 },
+            });
+            if (!blob) continue;
+
+            const blobUrl = URL.createObjectURL(blob);
+            const previousBlob = imageBlobUrls.value.get(url);
+            if (previousBlob) URL.revokeObjectURL(previousBlob);
+
+            imageBlobUrls.value.set(url, blobUrl);
+            imageSrcs.value.set(url, blobUrl);
+            hiddenImageUrls.value.delete(url);
+            loadedFromBlob = true;
+            return true;
+        } catch (e) {
+            Logger.debug(`[WorkMetadataPanel] Blob fallback failed for sample image: ${candidate}`, e);
+        }
+    }
+
+    // Allow later retries if this fallback cycle failed for every candidate.
+    if (!loadedFromBlob) {
+        imageBlobAttempts.value.delete(url);
+    }
+    return loadedFromBlob;
 }
 
 function onImageError(url: string): void {
+    const baseUrl = toAbsoluteUrl(url);
+    const isDlsite = isDlsiteImageUrl(baseUrl);
+
+    void tryBlobFallback(url).then((ok) => {
+        if (isDlsite && !ok && !imageBlobUrls.value.has(url)) {
+            hiddenImageUrls.value.add(url);
+        }
+    });
+
+    // DLsite image endpoints frequently hard-403 for unavailable samples.
+    // Don't waste time with cache-buster retries; fallback/hide handles it.
+    if (isDlsite) return;
+
     const count = (imageRetries.value.get(url) || 0) + 1;
     const maxRetries = 3;
-    if (count > maxRetries) return;
+    if (count > maxRetries) {
+        if (!imageBlobUrls.value.has(url)) {
+            hiddenImageUrls.value.add(url);
+        }
+        return;
+    }
 
     imageRetries.value.set(url, count);
     const delay = Math.pow(2, count - 1) * 1000;
     Logger.debug(`[WorkMetadataPanel] Sample image retry ${count}/${maxRetries} in ${delay}ms`);
 
     setTimeout(() => {
-        const separator = url.includes('?') ? '&' : '?';
-        imageSrcs.value.set(url, `${url}${separator}_r=${count}`);
+        if (imageBlobUrls.value.has(url)) return;
+        const retryBaseUrl = toAbsoluteUrl(url);
+        if (!retryBaseUrl || retryBaseUrl.startsWith('blob:')) {
+            if (count >= maxRetries && !imageBlobUrls.value.has(url)) {
+                hiddenImageUrls.value.add(url);
+            }
+            return;
+        }
+        if (isDlsiteImageUrl(retryBaseUrl) || retryBaseUrl.includes('__host=')) {
+            if (count >= maxRetries && !imageBlobUrls.value.has(url)) {
+                hiddenImageUrls.value.add(url);
+            }
+            return;
+        }
+        const separator = retryBaseUrl.includes('?') ? '&' : '?';
+        imageSrcs.value.set(url, `${retryBaseUrl}${separator}_r=${count}`);
     }, delay);
+}
+
+function onImageLoad(url: string): void {
+    loadedImageUrls.value.add(url);
+    hiddenImageUrls.value.delete(url);
+}
+
+function resetImageState(): void {
+    imageBlobUrls.value.forEach((blobUrl) => {
+        try {
+            URL.revokeObjectURL(blobUrl);
+        } catch {
+            // Ignore invalid/revoked object URLs
+        }
+    });
+    imageRetries.value = new Map();
+    imageSrcs.value = new Map();
+    imageBlobAttempts.value = new Set();
+    imageBlobUrls.value = new Map();
+    hiddenImageUrls.value = new Set();
+    loadedImageUrls.value = new Set();
 }
 
 function resetInjectedTitleElements(): void {
@@ -184,11 +348,12 @@ function openDlsiteSearch(keyword: string): void {
 }
 
 function openImageViewer(urls: string[], index: number): void {
+    const resolvedUrls = urls.map((url) => imageBlobUrls.value.get(url) || toAbsoluteUrl(url));
     try {
-        MediaViewerController.getInstance().showExternalImages(urls, index);
+        MediaViewerController.getInstance().showExternalImages(resolvedUrls, index);
     } catch (e) {
         Logger.warn('[WorkMetadataPanel] MediaViewer failed, opening in new tab:', e);
-        window.open(urls[index], '_blank');
+        window.open(resolvedUrls[index], '_blank');
     }
 }
 
@@ -200,7 +365,7 @@ async function handleRefresh(): Promise<void> {
     SharedCache.set(key, null as unknown as DLsiteMetadata, 0);
 
     const reviewKey = CacheKeys.dlsiteReviews(scrapeCode.value.toUpperCase());
-    SharedCache.set(reviewKey, null as unknown as any, 0);
+    SharedCache.set(reviewKey, null, 0);
 
     // Invalidate translations for visible metadata
     const textsToInvalidate = [
@@ -212,8 +377,8 @@ async function handleRefresh(): Promise<void> {
     ];
     textsToInvalidate.forEach(text => {
         if (!text) return;
-        SharedCache.set(CacheKeys.translation(text, 'en', 'local'), null as any, 0);
-        SharedCache.set(CacheKeys.translation(text, 'en', 'remote'), null as any, 0);
+        SharedCache.set(CacheKeys.translation(text, 'en', 'local'), null, 0);
+        SharedCache.set(CacheKeys.translation(text, 'en', 'remote'), null, 0);
     });
 
     titleTranslationRequestVersion++;
@@ -225,8 +390,7 @@ async function handleRefresh(): Promise<void> {
     bodyTranslations.value = new Map();
     chipTranslations.value = new Map();
     detailsExpanded.value = false;
-    imageRetries.value = new Map();
-    imageSrcs.value = new Map();
+    resetImageState();
 
     await loadMetadata(currentWorkId.value);
 }
@@ -235,66 +399,55 @@ async function handleRefresh(): Promise<void> {
 // RJ Code Resolution
 // ============================================================================
 
-function extractRjCode(work: any, id: string): string {
-    const sourceId = (work.source_id || work.sourceId || '').toString();
-    if (sourceId) {
-        const rjMatch = sourceId.match(/RJ\d{6,8}/i);
-        if (rjMatch) return rjMatch[0].toUpperCase();
-        const numericMatch = sourceId.match(/\d{6,8}/);
-        if (numericMatch) return 'RJ' + numericMatch[0];
-    }
-
-    const idStr = String(id);
-    const idMatch = idStr.match(/RJ\d{6,8}/i);
-    if (idMatch) return idMatch[0].toUpperCase();
-    const numericIdMatch = idStr.match(/\d{6,8}/);
-    if (numericIdMatch) return 'RJ' + numericIdMatch[0];
-
-    const titleMatch = work.title?.match(/RJ\d{6,8}/i);
-    if (titleMatch) return titleMatch[0].toUpperCase();
-
-    return '';
+function extractRjCode(work: Work | WorkDetail, id: string): string {
+    return extractPrimaryRjCode({
+        sourceId: work.source_id || work.sourceId,
+        workId: id,
+        title: work.title,
+    }) ?? '';
 }
 
-function resolveJpRjCode(work: any, currentCode: string): string | null {
+function resolveJpRjCode(work: Work | WorkDetail, currentCode: string): string | null {
     const origWorkno = work.original_workno;
     if (origWorkno && typeof origWorkno === 'string') {
-        const m = origWorkno.match(/RJ\d{6,8}/i);
-        if (m) return m[0].toUpperCase();
+        const code = extractEmbeddedRjCode(origWorkno);
+        if (code) return code;
     }
 
     const ti = work.translation_info;
     if (ti) {
         const orig = ti.original_workno || ti.parent_workno;
         if (orig && typeof orig === 'string') {
-            const m = orig.match(/RJ\d{6,8}/i);
-            if (m) return m[0].toUpperCase();
+            const code = extractEmbeddedRjCode(orig);
+            if (code) return code;
         }
     }
 
     const editions = work.language_editions;
     if (Array.isArray(editions)) {
-        const jpn = (editions as any[]).find((e: any) => e.lang === 'JPN' || e.lang === 'jpn');
+        const jpn = editions.find((e) => e.lang === 'JPN' || e.lang === 'jpn');
         if (jpn?.workno) {
-            const m = String(jpn.workno).match(/RJ\d{6,8}/i);
-            if (m && m[0].toUpperCase() !== currentCode) return m[0].toUpperCase();
+            const code = extractEmbeddedRjCode(jpn.workno);
+            if (code && code !== currentCode) return code;
         }
     }
 
     return null;
 }
 
-function buildFallbackMeta(work: any, rjCodeStr: string): DLsiteMetadata | null {
+function buildFallbackMeta(work: (Work | WorkDetail) & Record<string, unknown>, rjCodeStr: string): DLsiteMetadata | null {
     if (!work) return null;
-    const circleName = work.circle?.name || work.circle_name || work.maker_name || work.circleName || '';
+    const circleName = work.circle?.name || String(work.circle_name || work.maker_name || work.circleName || '');
     const circleId = Number(work.circle?.id || work.circle_id || work.maker_id || 0) || 0;
-    const tags = ((work.tags || work.genres || work.tags_replaced || []) as any[]).map((t: any) => ({
+    const rawTags = (work.tags || work.genres || work.tags_replaced || []) as Array<{ id?: number; tag_id?: number; name?: string; title?: string }>;
+    const tags = rawTags.map((t) => ({
         id: Number(t.id || t.tag_id || 0) || 0,
         name: t.name || t.title || '',
-    })).filter((t: any) => t.name);
-    const cvs = ((work.vas || work.voice_actors || work.voiceActors || work.cvs || []) as any[]).map((c: any) => ({
+    })).filter((t) => t.name);
+    const rawCvs = (work.vas || work.voice_actors || work.voiceActors || work.cvs || []) as Array<{ name?: string; title?: string }>;
+    const cvs = rawCvs.map((c) => ({
         name: c.name || c.title || '',
-    })).filter((c: any) => c.name);
+    })).filter((c) => c.name);
 
     const age = Number(work.age_category || work.age || 0) || 0;
     const ageString = age >= 3 ? 'R18' : age === 2 ? 'R15' : 'ALL';
@@ -609,16 +762,16 @@ async function translateBodyParagraphs(expectedLoadVersion: number, expectedWork
 // Data Fetching
 // ============================================================================
 
-async function getPageWorkDetails(id: string): Promise<any> {
+async function getPageWorkDetails(id: string): Promise<(Work | WorkDetail) & Record<string, unknown> | null> {
     const storeWork = bridge.store?.state?.AudioPlayer?.work;
-    if (storeWork && String(storeWork.id) === String(id)) return storeWork;
+    if (storeWork && String(storeWork.id) === String(id)) return storeWork as WorkDetail & Record<string, unknown>;
 
-    const worksState = (bridge.store?.state as any)?.Works;
-    const cachedWork = worksState?.work || worksState?.currentWork || worksState?.detail;
+    const worksState = bridge.store?.state?.Works as Record<string, unknown> | undefined;
+    const cachedWork = (worksState?.work || worksState?.currentWork || worksState?.detail) as (Work & Record<string, unknown>) | undefined;
     if (cachedWork && String(cachedWork.id) === String(id)) return cachedWork;
 
     try {
-        const res = await bridge.axios.get(`/api/work/${id}`);
+        const res = await bridge.axios.get<Work & Record<string, unknown>>(`/api/work/${id}`);
         return res.data;
     } catch (e) {
         Logger.error('[WorkMetadataPanel] API fetch failed for work', id, e);
@@ -721,8 +874,7 @@ watch(workId, (newId, oldId) => {
         bodyTranslations.value = new Map();
         chipTranslations.value = new Map();
         detailsExpanded.value = false;
-        imageRetries.value = new Map();
-        imageSrcs.value = new Map();
+        resetImageState();
         currentWorkId.value = newId;
         loadMetadata(newId);
     }
@@ -738,6 +890,7 @@ onMounted(() => {
 onUnmounted(() => {
     loadRequestVersion++;
     titleTranslationRequestVersion++;
+    resetImageState();
     resetInjectedTitleElements();
 });
 </script>
@@ -819,19 +972,21 @@ onUnmounted(() => {
 
                 <div v-if="detailsExpanded" class="asmr-meta-details">
                     <!-- Sample images gallery -->
-                    <div v-if="imageSamples.length" class="asmr-meta-gallery">
+                    <div v-if="visibleImageSamples.length" class="asmr-meta-gallery">
                         <button
-                            v-for="(url, idx) in imageSamples"
+                            v-for="(url, idx) in visibleImageSamples"
                             :key="url"
                             class="asmr-meta-gallery-item"
                             :aria-label="'Image ' + (idx + 1)"
-                            @click="openImageViewer(imageSamples, idx)"
+                            @click="openImageViewer(visibleImageSamples, idx)"
                         >
                             <img
                                 :src="getImageSrc(url)"
+                                :class="{ 'asmr-meta-gallery-img--loaded': isImageLoaded(url) }"
                                 loading="lazy"
                                 alt="Sample"
-                                referrerpolicy="no-referrer"
+                                referrerpolicy="strict-origin-when-cross-origin"
+                                @load="onImageLoad(url)"
                                 @error="onImageError(url)"
                             >
                         </button>
@@ -1111,11 +1266,12 @@ onUnmounted(() => {
 .asmr-meta-gallery-item {
     flex-shrink: 0;
     width: 140px;
+    aspect-ratio: 4 / 3;
     border-radius: 6px;
     overflow: hidden;
     cursor: pointer;
     transition: box-shadow 0.15s;
-    background: none;
+    background: var(--asmr-hover-bg);
     border: none;
     padding: 0;
 }
@@ -1127,8 +1283,14 @@ onUnmounted(() => {
 .asmr-meta-gallery-item img {
     display: block;
     width: 100%;
-    height: auto;
+    height: 100%;
     object-fit: cover;
+    opacity: 0;
+    transition: opacity 0.15s ease;
+}
+
+.asmr-meta-gallery-item img.asmr-meta-gallery-img--loaded {
+    opacity: 1;
 }
 
 /* === Body Text === */

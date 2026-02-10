@@ -13,12 +13,13 @@ import { EventBus } from '../core/EventBus';
 import { createWhisperWorker } from './WhisperWorkerLoader';
 import { getAudioElement } from '../core/DomUtils';
 import { SharedCache, CacheKeys } from '../core/Cache';
-import type { WhisperSegment, WhisperWord } from '../types';
+import type { WhisperSegment, WhisperWord, KikoeruStoreState } from '../types';
 import { AppStore } from '../store/AppStore';
 import { TranslationService } from '../services/TranslationService';
 import { AudioCache } from '../infrastructure/AudioCache';
 import { gmRequest } from '../infrastructure/HttpClient';
 import { GpuScheduler } from '../core/GpuScheduler';
+import { buildLrcFromSegments, buildVttFromSegments } from './transcriptFileUtils';
 
 // ============================================================================
 // Constants
@@ -230,7 +231,7 @@ export class Whisper {
         if (!this.storeWatcherBound) {
             this.storeWatcherBound = true;
             this.bridge.store.watch?.(
-                (state: any) => state.AudioPlayer?.playing,
+                (state: KikoeruStoreState) => !!state.AudioPlayer?.playing,
                 (playing: boolean) => {
                     if (playing && Config.get('alwaysTranscribe') && !this.transcribing) {
                         this.tryAutoStartForCurrentTrack();
@@ -1656,49 +1657,6 @@ export class Whisper {
         return words;
     }
 
-    private formatLrcTimestamp(seconds: number): string {
-        const safe = Math.max(0, seconds);
-        const minutes = Math.floor(safe / 60);
-        const secs = safe % 60;
-        const mm = String(minutes).padStart(2, '0');
-        const ss = String(Math.floor(secs)).padStart(2, '0');
-        const xx = String(Math.floor((secs - Math.floor(secs)) * 100)).padStart(2, '0');
-        return `${mm}:${ss}.${xx}`;
-    }
-
-    private formatVttTimestamp(seconds: number): string {
-        const safe = Math.max(0, seconds);
-        const hours = Math.floor(safe / 3600);
-        const minutes = Math.floor((safe % 3600) / 60);
-        const secs = safe % 60;
-        const hh = String(hours).padStart(2, '0');
-        const mm = String(minutes).padStart(2, '0');
-        const ss = String(Math.floor(secs)).padStart(2, '0');
-        const mmm = String(Math.floor((secs - Math.floor(secs)) * 1000)).padStart(3, '0');
-        return `${hh}:${mm}:${ss}.${mmm}`;
-    }
-
-    private buildLrc(segments: WhisperSegment[]): string {
-        if (!segments.length) return '';
-        return segments
-            .map((seg) => `[${this.formatLrcTimestamp(seg.start)}]${seg.text}`)
-            .join('\n');
-    }
-
-    private buildVtt(segments: WhisperSegment[]): string {
-        if (!segments.length) return '';
-        const lines: string[] = ['WEBVTT', ''];
-        segments.forEach((seg, idx) => {
-            const start = this.formatVttTimestamp(seg.start);
-            const end = this.formatVttTimestamp(Math.max(seg.start + 0.01, seg.end || seg.start));
-            lines.push(`${idx + 1}`);
-            lines.push(`${start} --> ${end}`);
-            lines.push(seg.text);
-            lines.push('');
-        });
-        return lines.join('\n');
-    }
-
     // ------------------------------------------------------------------------
     // Text cleanup
     // ------------------------------------------------------------------------
@@ -1755,8 +1713,8 @@ export class Whisper {
             subtask: settings.subtask,
             language: settings.language,
             createdAt: Date.now(),
-            lrc: this.buildLrc(this.segments),
-            vtt: this.buildVtt(this.segments),
+            lrc: buildLrcFromSegments(this.segments),
+            vtt: buildVttFromSegments(this.segments),
             complete: complete || existing?.complete,
             translations: existing?.translations,
             sourceIdentity: this.currentCacheIdentity || undefined,
@@ -1824,8 +1782,8 @@ export class Whisper {
             }));
             const translatedPayload = {
                 text: translated.join(' '),
-                lrc: this.buildLrc(translatedSegments),
-                vtt: this.buildVtt(translatedSegments),
+                lrc: buildLrcFromSegments(translatedSegments),
+                vtt: buildVttFromSegments(translatedSegments),
             };
 
             payload.translations = {

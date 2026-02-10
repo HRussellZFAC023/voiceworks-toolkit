@@ -19,6 +19,10 @@ export class DLsiteScraper {
     public async scrape(rjCode: string): Promise<DLsiteMetadata> {
         const normalized = rjCode.toUpperCase();
         const key = CacheKeys.dlsite(normalized);
+        const cached = SharedCache.get<DLsiteMetadata>(key);
+        if (cached) {
+            return this.maybeUpgradeSampleImages(cached, normalized, key);
+        }
         return SharedCache.getOrFetch(key, this.cacheTtlMs, async () => {
             return this.scrapeFresh(normalized);
         });
@@ -39,7 +43,7 @@ export class DLsiteScraper {
 
         // Cache hit — return immediately, no progressive phases needed
         const cached = SharedCache.get<DLsiteMetadata>(key);
-        if (cached) return cached;
+        if (cached) return this.maybeUpgradeSampleImages(cached, normalized, key);
 
         // Deduplicate concurrent requests for the same key
         let base: DLsiteMetadata | null = null;
@@ -62,11 +66,19 @@ export class DLsiteScraper {
             Logger.warn('[DLsiteScraper] Product/Dynamic API failed', e);
         }
 
-        // Phase 2: Fetch the full product page body (HTML scraping)
+        // Phase 2: Fetch enriched data from product HTML (body + stable sample images)
         if (base) {
             try {
-                const body = await DLsiteService.fetchProductPageBody(normalized);
-                if (body) base.body = body;
+                const [bodyResult, samplesResult] = await Promise.allSettled([
+                    DLsiteService.fetchProductPageBody(normalized),
+                    DLsiteService.fetchProductPageSampleImages(normalized),
+                ]);
+                if (bodyResult.status === 'fulfilled' && bodyResult.value) {
+                    base.body = bodyResult.value;
+                }
+                if (samplesResult.status === 'fulfilled' && samplesResult.value.length > 0) {
+                    base.image_samples = this.mergeSampleImageUrls(samplesResult.value, base.image_samples || []);
+                }
             } catch (e) {
                 Logger.warn('[DLsiteScraper] Page body fetch failed', e);
             }
@@ -97,11 +109,19 @@ export class DLsiteScraper {
             Logger.warn('[DLsiteScraper] Product/Dynamic API failed', e);
         }
 
-        // Try to fetch the full product page body (HTML scraping)
+        // Try to fetch enriched data from product HTML (body + stable sample images)
         if (base) {
             try {
-                const body = await DLsiteService.fetchProductPageBody(normalized);
-                if (body) base.body = body;
+                const [bodyResult, samplesResult] = await Promise.allSettled([
+                    DLsiteService.fetchProductPageBody(normalized),
+                    DLsiteService.fetchProductPageSampleImages(normalized),
+                ]);
+                if (bodyResult.status === 'fulfilled' && bodyResult.value) {
+                    base.body = bodyResult.value;
+                }
+                if (samplesResult.status === 'fulfilled' && samplesResult.value.length > 0) {
+                    base.image_samples = this.mergeSampleImageUrls(samplesResult.value, base.image_samples || []);
+                }
             } catch (e) {
                 Logger.warn('[DLsiteScraper] Page body fetch failed', e);
             }
@@ -127,6 +147,83 @@ export class DLsiteScraper {
             base.dl_count = String(dynamic.dl_count);
         }
         return base;
+    }
+
+    private needsSampleUpgrade(meta: DLsiteMetadata): boolean {
+        const samples = meta.image_samples || [];
+        if (samples.length === 0) return false;
+        const hasParts = samples.some(url => this.isPartsSampleUrl(url));
+        const hasLegacy = samples.some(url => this.isLegacySampleUrl(url));
+        // Already resilient when both families are present.
+        if (hasParts && hasLegacy) return false;
+        // Upgrade if only one family is present.
+        return hasParts || hasLegacy;
+    }
+
+    private async maybeUpgradeSampleImages(meta: DLsiteMetadata, normalized: string, key: string): Promise<DLsiteMetadata> {
+        if (!this.needsSampleUpgrade(meta)) return meta;
+        try {
+            const existing = meta.image_samples || [];
+            const hasParts = existing.some(url => this.isPartsSampleUrl(url));
+            const hasLegacy = existing.some(url => this.isLegacySampleUrl(url));
+
+            const pageSamplesPromise = hasParts
+                ? Promise.resolve<string[]>([])
+                : DLsiteService.fetchProductPageSampleImages(normalized).catch(() => []);
+            const legacySamplesPromise = hasLegacy
+                ? Promise.resolve<string[]>([])
+                : DLsiteService.fetchProductApi(normalized)
+                    .then((info) => this.extractApiSampleUrls(info))
+                    .catch(() => []);
+
+            const [pageSamples, legacySamples] = await Promise.all([pageSamplesPromise, legacySamplesPromise]);
+            const upgradedSamples = this.mergeSampleImageUrls(pageSamples, this.mergeSampleImageUrls(existing, legacySamples));
+            if (upgradedSamples.length === existing.length &&
+                upgradedSamples.every((url, idx) => url === existing[idx])) {
+                return meta;
+            }
+
+            const upgraded = { ...meta, image_samples: upgradedSamples };
+            SharedCache.set(key, upgraded, this.cacheTtlMs);
+            return upgraded;
+        } catch (e) {
+            Logger.debug('[DLsiteScraper] Sample URL cache upgrade failed', e);
+            return meta;
+        }
+    }
+
+    private extractApiSampleUrls(info: DLsiteProductApiResponse | null): string[] {
+        if (!info || !Array.isArray(info.image_samples) || info.image_samples.length === 0) return [];
+        return info.image_samples
+            .map((img) => {
+                const url = img?.url || img?.resize_url || '';
+                return this.normalizeSampleUrl(url);
+            })
+            .filter((url): url is string => !!url);
+    }
+
+    private mergeSampleImageUrls(primary: string[], secondary: string[]): string[] {
+        const merged = [...primary, ...secondary]
+            .map((url) => this.normalizeSampleUrl(url))
+            .filter((url): url is string => !!url);
+        const deduped = merged.filter((url, idx, arr) => arr.indexOf(url) === idx);
+        const partUrls = deduped.filter((url) => this.isPartsSampleUrl(url));
+        const otherUrls = deduped.filter((url) => !this.isPartsSampleUrl(url));
+        return [...partUrls, ...otherUrls];
+    }
+
+    private normalizeSampleUrl(url: string): string {
+        if (!url) return '';
+        if (url.startsWith('//')) return `https:${url}`;
+        return url;
+    }
+
+    private isPartsSampleUrl(url: string): boolean {
+        return /\/modpub\/images2\/parts\//i.test(url);
+    }
+
+    private isLegacySampleUrl(url: string): boolean {
+        return /_img_smp\d+\.(jpg|jpeg|png)(\?|$)/i.test(url);
     }
 
     private buildMinimalMeta(rjCode: string, dynamic: DLsiteDynamicEntry | null): DLsiteMetadata {
@@ -277,12 +374,7 @@ export class DLsiteScraper {
             meta.image_main = mainUrl;
         }
         if (Array.isArray(info.image_samples) && info.image_samples.length > 0) {
-            meta.image_samples = info.image_samples
-                .map((img) => {
-                    const url = img?.url || img?.resize_url || '';
-                    return url.startsWith('//') ? `https:${url}` : url;
-                })
-                .filter(Boolean);
+            meta.image_samples = this.extractApiSampleUrls(info);
         }
 
         return meta;

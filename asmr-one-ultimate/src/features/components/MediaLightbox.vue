@@ -34,13 +34,16 @@ import { gmRequest, retryWithBackoff } from '../../infrastructure/HttpClient';
 import { TranslationService } from '../../services/TranslationService';
 import { isChinese } from '../../core/DomUtils';
 import type { MediaFile, TouchState, DragState } from '../media/types';
+import {
+    getFileExtension,
+    isImageExtension as isImage,
+    isPdfExtension as isPdf,
+    isTextExtension as isText,
+    isVideoExtension as isVideo,
+} from '../media/mediaFileUtils';
+import { buildMediaStreamUrl } from '../media/mediaStreamUrlUtils';
 
 // ── Constants ────────────────────────────────────────────────────────────────
-
-const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg'];
-const VIDEO_EXTENSIONS = ['.mp4', '.webm', '.mov', '.avi', '.mkv', '.m4v'];
-const PDF_EXTENSIONS = ['.pdf'];
-const TEXT_EXTENSIONS = ['.txt', '.md', '.log', '.nfo', '.csv', '.json', '.srt', '.ass', '.vtt', '.lrc'];
 
 const ZOOM_MIN = 0.5;
 const ZOOM_MAX = 5;
@@ -51,6 +54,21 @@ const TRANSLATE_TOTAL_MAX_CHARS = 0;
 const PDF_TEXT_MAX_PAGES = Infinity;
 const PDFJS_CDN = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.min.js';
 const PDFJS_WORKER_CDN = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.worker.min.js';
+
+/** Minimal pdf.js library shape */
+interface PdfjsLib {
+    GlobalWorkerOptions: { workerSrc: string };
+    getDocument(params: { data: ArrayBuffer }): { promise: Promise<PdfjsDocument> };
+}
+
+interface PdfjsDocument {
+    numPages: number;
+    getPage(num: number): Promise<PdfjsPage>;
+}
+
+interface PdfjsPage {
+    getTextContent(): Promise<{ items: Array<{ str?: string; hasEOL?: boolean }> }>;
+}
 
 // ── Props & Emits ────────────────────────────────────────────────────────────
 
@@ -72,6 +90,7 @@ const translateMode = useConfig('translateMode');
 const cnToJp = useConfig('translateCnToJp');
 const galleryAutoSlideshow = useConfig('galleryAutoSlideshow');
 const galleryAutoSlideshowInterval = useConfig('galleryAutoSlideshowInterval');
+const dlsiteProxyUrl = useConfig('dlsiteProxyUrl');
 
 // ── Reactive state ───────────────────────────────────────────────────────────
 
@@ -105,6 +124,8 @@ let dragState: DragState = {
     scrollTop: 0,
 };
 let preloadedImages = new Map<string, HTMLImageElement>();
+let externalBlobUrlCache = new Map<string, string>();
+let externalBlobFetchInFlight = new Map<string, Promise<string | null>>();
 let slideshowTimer: ReturnType<typeof setInterval> | null = null;
 let slideshowPaused = false;
 let recoveryTimeout: number | undefined;
@@ -128,57 +149,170 @@ const currentItem = computed(() => currentMediaList.value[currentMediaIndex.valu
 
 // ── File type utilities ──────────────────────────────────────────────────────
 
-function getFileExtension(filename: string): string {
-    const match = filename.match(/\.[^.]+$/);
-    return match ? match[0].toLowerCase() : '';
-}
-
-function isImage(ext: string): boolean {
-    return IMAGE_EXTENSIONS.includes(ext);
-}
-
-function isVideo(ext: string): boolean {
-    return VIDEO_EXTENSIONS.includes(ext);
-}
-
-function isPdf(ext: string): boolean {
-    return PDF_EXTENSIONS.includes(ext);
-}
-
-function isText(ext: string): boolean {
-    return TEXT_EXTENSIONS.includes(ext);
-}
-
 // ── URL utility ──────────────────────────────────────────────────────────────
 
 function getMediaUrl(hash: string, item?: MediaFile): string {
     const token = localStorage.getItem('jwt-token') || '';
-
-    const appendToken = (url: string) => {
-        if (url.startsWith('http') || url.startsWith('//')) return url;
-        if (url.startsWith('/api/')) {
-            const separator = url.includes('?') ? '&' : '?';
-            return `${url}${separator}token=${token}`;
-        }
-        return url;
-    };
-
-    if (item?.mediaStreamUrl) return appendToken(item.mediaStreamUrl);
-    if (item?.media_stream_url) return appendToken(item.media_stream_url);
-
-    if (hash.includes('/')) {
-        if (hash.startsWith('media/stream/') || hash.startsWith('/media/stream/')) {
-            const path = hash.startsWith('/') ? hash : `/${hash}`;
-            return appendToken(path);
-        }
-        return appendToken(`/api/media/stream/${hash}`);
+    const url = buildMediaStreamUrl(hash, item, token);
+    if (url.startsWith('http') || url.startsWith('//') || url.startsWith('blob:')) {
+        return normalizeExternalUrl(url);
     }
+    return url;
+}
 
-    return appendToken(`/api/media/stream/${hash}`);
+function normalizeExternalUrl(url: string): string {
+    if (!url) return '';
+    const withProtocol = url.startsWith('//') ? `https:${url}` : url;
+    try {
+        const parsed = new URL(withProtocol, window.location.href);
+        parsed.searchParams.delete('_r');
+        return parsed.toString();
+    } catch {
+        return withProtocol;
+    }
+}
+
+function isDlsiteUrl(url: string): boolean {
+    try {
+        const host = new URL(url).hostname.toLowerCase();
+        return host.includes('dlsite.com') || host.includes('dlsite.jp');
+    } catch {
+        return false;
+    }
+}
+
+function shouldAvoidRetryQuery(url: string): boolean {
+    return url.startsWith('blob:') || isDlsiteUrl(url) || url.includes('__host=');
+}
+
+function getProxyBaseUrl(): string {
+    let raw = String(dlsiteProxyUrl.value || '').trim().replace(/\/+$/, '');
+    if (!raw) return '';
+    if (!/^https?:\/\//i.test(raw)) raw = `https://${raw}`;
+    try {
+        const parsed = new URL(raw);
+        if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return '';
+    } catch {
+        return '';
+    }
+    return raw;
+}
+
+function proxyDlsiteUrl(url: string, preserveHost = true): string {
+    const base = getProxyBaseUrl();
+    if (!base || !isDlsiteUrl(url)) return url;
+    try {
+        const parsed = new URL(url);
+        const host = parsed.hostname.toLowerCase();
+        const params = new URLSearchParams(parsed.search);
+        if (preserveHost && host !== 'www.dlsite.com') {
+            params.set('__host', host);
+        }
+        const query = params.toString();
+        return `${base}${parsed.pathname}${query ? `?${query}` : ''}`;
+    } catch {
+        return url;
+    }
+}
+
+function getExternalImageCandidates(url: string): string[] {
+    const normalized = normalizeExternalUrl(url);
+    if (!normalized || normalized.startsWith('blob:')) return normalized ? [normalized] : [];
+    const hostAwareProxy = proxyDlsiteUrl(normalized, true);
+    const legacyProxy = proxyDlsiteUrl(normalized, false);
+    return [normalized, hostAwareProxy, legacyProxy]
+        .filter((candidate, idx, arr) => !!candidate && arr.indexOf(candidate) === idx);
+}
+
+function isExternalMediaItem(item: MediaFile, url: string): boolean {
+    if (url.startsWith('http') || url.startsWith('//') || url.startsWith('blob:')) return true;
+    const raw = item.mediaStreamUrl || item.media_stream_url || '';
+    return raw.startsWith('http') || raw.startsWith('//') || raw.startsWith('blob:');
+}
+
+async function fetchExternalBlobUrl(url: string): Promise<string | null> {
+    const normalized = normalizeExternalUrl(url);
+    if (!normalized) return null;
+    if (normalized.startsWith('blob:')) return normalized;
+
+    const cached = externalBlobUrlCache.get(normalized);
+    if (cached) return cached;
+
+    const inFlight = externalBlobFetchInFlight.get(normalized);
+    if (inFlight) return inFlight;
+
+    const task = (async (): Promise<string | null> => {
+        const candidates = getExternalImageCandidates(normalized);
+        for (const candidate of candidates) {
+            try {
+                const res = await retryWithBackoff(
+                    () => gmRequest({
+                        url: candidate,
+                        responseType: 'blob',
+                        headers: {
+                            Accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+                            Referer: 'https://www.dlsite.com/',
+                            Origin: 'https://www.dlsite.com',
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                        },
+                    }),
+                    { attempts: 2, backoffMs: 600, multiplier: 2 },
+                );
+                const blob = res.response as Blob | null;
+                if (!blob || blob.size <= 0) continue;
+
+                const blobUrl = URL.createObjectURL(blob);
+                const prev = externalBlobUrlCache.get(normalized);
+                if (prev) {
+                    try { URL.revokeObjectURL(prev); } catch { /* ignore */ }
+                }
+                externalBlobUrlCache.set(normalized, blobUrl);
+                return blobUrl;
+            } catch {
+                // Try next candidate URL
+            }
+        }
+        return null;
+    })();
+
+    externalBlobFetchInFlight.set(normalized, task);
+    try {
+        return await task;
+    } finally {
+        externalBlobFetchInFlight.delete(normalized);
+    }
 }
 
 function getThumbnailUrl(item: MediaFile): string {
-    return getMediaUrl(item.hash, item);
+    const url = getMediaUrl(item.hash, item);
+    const normalized = normalizeExternalUrl(url);
+    return externalBlobUrlCache.get(normalized) || url;
+}
+
+function onThumbnailError(item: MediaFile, event: Event): void {
+    const target = event.target as HTMLImageElement | null;
+    if (!target) return;
+
+    const url = getMediaUrl(item.hash, item);
+    if (!isExternalMediaItem(item, url)) return;
+
+    void fetchExternalBlobUrl(url).then((blobUrl) => {
+        if (blobUrl && target.isConnected) {
+            target.src = blobUrl;
+        }
+    });
+}
+
+function clearExternalBlobCache(): void {
+    externalBlobUrlCache.forEach((blobUrl) => {
+        try {
+            URL.revokeObjectURL(blobUrl);
+        } catch {
+            // Ignore invalid/revoked object URLs
+        }
+    });
+    externalBlobUrlCache.clear();
+    externalBlobFetchInFlight.clear();
 }
 
 function getThumbnailIcon(type: 'image' | 'video' | 'pdf' | 'text'): string {
@@ -336,6 +470,7 @@ function hideModal(): void {
     // Cancel pending background requests
     activeRequestId++;
     stopRecovery();
+    clearExternalBlobCache();
 
     isActive.value = false;
     isFullscreen.value = false;
@@ -556,11 +691,15 @@ function renderMedia(item: MediaFile, type: 'image' | 'video' | 'pdf' | 'text'):
 }
 
 function renderImage(wrapper: HTMLElement, item: MediaFile, url: string): void {
+    const baseUrl = normalizeExternalUrl(url);
+    const isExternal = isExternalMediaItem(item, baseUrl);
     const img = document.createElement('img');
     img.alt = item.title;
     img.className = 'media-viewer-image';
     img.draggable = false;
-    img.referrerPolicy = 'no-referrer';
+    if (!baseUrl.startsWith('blob:')) {
+        img.referrerPolicy = 'strict-origin-when-cross-origin';
+    }
     img.style.cursor = 'default';
     img.style.width = '';
     img.style.height = '';
@@ -576,27 +715,53 @@ function renderImage(wrapper: HTMLElement, item: MediaFile, url: string): void {
 
         let retryCount = 0;
         const maxRetries = 3;
+        let blobAttempted = false;
+        let handlingError = false;
         img.onerror = () => {
-            retryCount++;
-            if (retryCount <= maxRetries) {
-                const delay = Math.pow(2, retryCount - 1) * 1000;
-                Logger.debug(`[MediaLightbox] Image retry ${retryCount}/${maxRetries} for ${item.title} in ${delay}ms`);
-                setTimeout(() => {
-                    if (img.isConnected) {
-                        const separator = url.includes('?') ? '&' : '?';
-                        img.src = `${url}${separator}_r=${retryCount}`;
+            if (handlingError) return;
+            handlingError = true;
+
+            const processError = async () => {
+                if (isExternal && !blobAttempted) {
+                    blobAttempted = true;
+                    const blobUrl = await fetchExternalBlobUrl(baseUrl);
+                    if (blobUrl && img.isConnected) {
+                        img.src = blobUrl;
+                        return;
                     }
-                }, delay);
-            } else {
-                isLoading.value = false;
-                errorMessage.value = 'Failed to load image';
-                errorIcon.value = 'broken_image';
-                wrapper.innerHTML = '';
-                startAutoRecovery(item, wrapper);
-            }
+                }
+
+                retryCount++;
+                if (retryCount <= maxRetries) {
+                    const delay = Math.pow(2, retryCount - 1) * 1000;
+                    Logger.debug(`[MediaLightbox] Image retry ${retryCount}/${maxRetries} for ${item.title} in ${delay}ms`);
+                    setTimeout(() => {
+                        if (img.isConnected) {
+                            if (shouldAvoidRetryQuery(baseUrl)) {
+                                const candidates = getExternalImageCandidates(baseUrl);
+                                const nextCandidate = candidates[Math.min(retryCount - 1, candidates.length - 1)] || baseUrl;
+                                img.src = nextCandidate;
+                                return;
+                            }
+                            const separator = baseUrl.includes('?') ? '&' : '?';
+                            img.src = `${baseUrl}${separator}_r=${retryCount}`;
+                        }
+                    }, delay);
+                } else {
+                    isLoading.value = false;
+                    errorMessage.value = 'Failed to load image';
+                    errorIcon.value = 'broken_image';
+                    wrapper.innerHTML = '';
+                    startAutoRecovery(item, wrapper);
+                }
+            };
+
+            void processError().finally(() => {
+                handlingError = false;
+            });
         };
 
-        img.src = url;
+        img.src = baseUrl;
     }
 
     img.addEventListener('click', (e) => e.stopPropagation());
@@ -708,7 +873,7 @@ function buildTextLines(text: string): HTMLElement {
     const container = document.createElement('div');
     container.className = 'media-viewer-text';
     for (const line of text.split(/\r?\n/)) {
-        const lineEl = document.createElement('pre');
+        const lineEl = document.createElement('div');
         lineEl.className = 'media-viewer-text-line';
         lineEl.textContent = line || '\u00A0';
         container.appendChild(lineEl);
@@ -880,7 +1045,7 @@ function stopRecovery(): void {
 
 function startAutoRecovery(item: MediaFile, wrapper: HTMLElement): void {
     stopRecovery();
-    const url = getMediaUrl(item.hash, item);
+    const baseUrl = normalizeExternalUrl(getMediaUrl(item.hash, item));
     const RETRY_DELAY = 5000;
 
     recoveryTimeout = window.setTimeout(() => {
@@ -900,7 +1065,12 @@ function startAutoRecovery(item: MediaFile, wrapper: HTMLElement): void {
                 startAutoRecovery(item, wrapper);
             }
         };
-        img.src = `${url}${url.includes('?') ? '&' : '?'}_recover=${Date.now()}`;
+        if (shouldAvoidRetryQuery(baseUrl)) {
+            const candidates = getExternalImageCandidates(baseUrl);
+            img.src = candidates[0] || baseUrl;
+        } else {
+            img.src = `${baseUrl}${baseUrl.includes('?') ? '&' : '?'}_recover=${Date.now()}`;
+        }
     }, RETRY_DELAY);
 }
 
@@ -979,11 +1149,11 @@ function buildTranslationGrid(text: string): { grid: HTMLElement; translatedCell
 
     const translatedCells: HTMLElement[] = [];
     for (const line of lines) {
-        const origCell = document.createElement('pre');
+        const origCell = document.createElement('div');
         origCell.className = 'media-viewer-text-line';
         origCell.textContent = line || '\u00A0';
 
-        const transCell = document.createElement('pre');
+        const transCell = document.createElement('div');
         transCell.className = 'media-viewer-text-line media-viewer-text-line--translated';
         transCell.textContent = line || '\u00A0';
         translatedCells.push(transCell);
@@ -1046,33 +1216,33 @@ async function translateGridCells(
     return anyTranslated;
 }
 
-async function ensurePdfJs(): Promise<unknown> {
-    const anyWindow = globalThis as any;
-    if (anyWindow.pdfjsLib) return anyWindow.pdfjsLib;
+async function ensurePdfJs(): Promise<PdfjsLib | null> {
+    const win = globalThis as typeof globalThis & { pdfjsLib?: PdfjsLib };
+    if (win.pdfjsLib) return win.pdfjsLib;
 
     if (!pdfjsLoadPromise) {
         pdfjsLoadPromise = new Promise((resolve) => {
             const script = document.createElement('script');
             script.src = PDFJS_CDN;
             script.async = true;
-            script.onload = () => resolve((globalThis as any).pdfjsLib || null);
+            script.onload = () => resolve((globalThis as typeof globalThis & { pdfjsLib?: PdfjsLib }).pdfjsLib || null);
             script.onerror = () => resolve(null);
             document.head.appendChild(script);
         });
     }
 
-    const lib = await pdfjsLoadPromise;
+    const lib = await pdfjsLoadPromise as PdfjsLib | null;
     if (!lib) return null;
 
     try {
-        (lib as any).GlobalWorkerOptions.workerSrc = PDFJS_WORKER_CDN;
+        lib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER_CDN;
     } catch { /* ignore */ }
 
     return lib;
 }
 
 async function extractPdfText(url: string): Promise<string | null> {
-    const pdfjs = await ensurePdfJs() as Record<string, any> | null;
+    const pdfjs = await ensurePdfJs();
     if (!pdfjs) return null;
 
     try {
@@ -1091,7 +1261,7 @@ async function extractPdfText(url: string): Promise<string | null> {
             const lines: string[] = [];
             let currentLine = '';
 
-            for (const item of (content.items || []) as Array<{ str?: string; hasEOL?: boolean }>) {
+            for (const item of (content.items || [])) {
                 if (item.str) currentLine += item.str;
                 if (item.hasEOL) {
                     if (currentLine.trim()) lines.push(currentLine.trim());
@@ -1178,13 +1348,28 @@ function showExternalImages(urls: string[], startIndex = 0): void {
     if (!urls.length) return;
 
     activeRequestId++;
+    // External galleries can change order/length across works; clear stale preloads
+    // keyed by prior synthetic hashes to avoid slot-to-image mismatches.
+    preloadedImages.clear();
 
-    const list: MediaFile[] = urls.map((url, i) => ({
-        hash: `__external_${i}`,
-        title: url.split('/').pop() || `image_${i + 1}`,
-        type: 'image',
-        mediaStreamUrl: url,
-    }));
+    const list: MediaFile[] = urls.map((url, i) => {
+        const normalizedUrl = normalizeExternalUrl(url);
+        let title = `image_${i + 1}`;
+        try {
+            const parsed = new URL(normalizedUrl);
+            const filename = parsed.pathname.split('/').pop();
+            title = decodeURIComponent(filename || title);
+        } catch {
+            title = normalizedUrl.split('/').pop() || title;
+        }
+
+        return {
+            hash: `__external_${encodeURIComponent(normalizedUrl)}_${i}`,
+            title,
+            type: 'image',
+            mediaStreamUrl: normalizedUrl,
+        };
+    });
 
     currentMediaList.value = list;
     currentMediaIndex.value = Math.min(startIndex, urls.length - 1);
@@ -1265,6 +1450,7 @@ onUnmounted(() => {
     stopSlideshow();
     stopRecovery();
     preloadedImages.clear();
+    clearExternalBlobCache();
 
     if (isActive.value) {
         document.body.classList.remove('media-viewer-open');
@@ -1467,6 +1653,7 @@ defineExpose({
                             :alt="item.title"
                             loading="lazy"
                             referrerpolicy="no-referrer"
+                            @error="onThumbnailError(item, $event)"
                         >
                         <span v-else class="material-icons">{{ getThumbnailIcon(currentMediaType) }}</span>
                     </button>

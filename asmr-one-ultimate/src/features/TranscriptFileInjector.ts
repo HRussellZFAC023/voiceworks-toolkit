@@ -1,9 +1,13 @@
 import { Logger, Config, I18n } from '../core/Utils';
-import { KikoeruBridge } from '../infrastructure/KikoeruBridge';
 import { EventBus } from '../core/EventBus';
 import { SharedCache, CacheKeys } from '../core/Cache';
-import { getVueItem, getCleanText } from '../core/DomUtils';
-import type { PlayerTrack, WhisperSegment } from '../types';
+import { getCleanText } from '../core/DomUtils';
+import type { WhisperSegment } from '../types';
+import {
+    buildLrcFromSegments,
+    buildTranscriptFileName,
+    buildVttFromSegments,
+} from './transcriptFileUtils';
 
 interface TranscriptIndexEntry {
     cacheKey: string;
@@ -30,252 +34,258 @@ interface CachedTranscript {
     translations?: Record<string, { text: string; lrc: string; vtt?: string }>;
 }
 
-export class TranscriptFileInjector {
-    private bridge: KikoeruBridge;
-    private flatObserver: MutationObserver | null = null;
-    private cleanups: (() => void)[] = [];
+const BADGE_ATTR = 'data-asmr-transcript';
 
-    constructor() {
-        this.bridge = KikoeruBridge.getInstance();
-    }
+export class TranscriptFileInjector {
+    private cleanups: (() => void)[] = [];
+    private refreshTimer: number | null = null;
+    private flatObserver: MutationObserver | null = null;
+    private flatDebounce: number | null = null;
+    private enabled = false;
 
     public enable(): void {
-        // Inject on fresh renders via worktree:enhanced (fired by WorkTreeManager after every Vue render)
+        if (this.enabled) return;
+        this.enabled = true;
+
         this.cleanups.push(EventBus.on('worktree:enhanced', (data: { workTree: HTMLElement }) => {
-            const card = data.workTree.getElementsByClassName('q-card')[0];
-            const listContainer = card?.children?.[0];
-            if (listContainer) this.injectButtons(listContainer as Element, false);
+            this.injectBadges(data.workTree);
         }));
 
-        // Re-inject when whisper cache updates or transcription completes
-        this.cleanups.push(EventBus.on('work:change', () => this.injectWorkTreeDirect()));
-        this.cleanups.push(EventBus.on('whisper:cache-updated', () => this.injectWorkTreeDirect()));
-        this.cleanups.push(EventBus.on('whisper:complete', () => this.injectWorkTreeDirect()));
-
-        // Flat panel
         this.cleanups.push(EventBus.on('flatview:toggle', (data: { active: boolean }) => {
             if (data.active) {
-                setTimeout(() => this.injectFlatPanel(), 400);
+                setTimeout(() => this.attachFlatPanel(), 200);
             } else {
-                this.flatObserver?.disconnect();
-                this.flatObserver = null;
+                this.detachFlatPanel();
             }
         }));
 
-        this.injectWorkTreeDirect();
+        this.cleanups.push(EventBus.on('whisper:complete', () => this.scheduleRefresh()));
+        this.cleanups.push(EventBus.on('work:change', () => this.scheduleRefresh()));
+        this.cleanups.push(EventBus.on('lang:change', () => this.scheduleRefresh()));
+        this.cleanups.push(EventBus.on('config:change', ({ key }: { key: string }) => {
+            if (key === 'subtitleLang') this.scheduleRefresh();
+        }));
+
+        this.refresh();
     }
 
     public disable(): void {
+        if (!this.enabled) return;
+        this.enabled = false;
         this.cleanups.forEach(fn => fn());
         this.cleanups = [];
-        this.flatObserver?.disconnect();
-        this.flatObserver = null;
-    }
-
-    private getTranscriptIndex(): Record<string, TranscriptIndexEntry[]> {
-        return SharedCache.get<Record<string, TranscriptIndexEntry[]>>(CacheKeys.whisperIndex()) || {};
-    }
-
-    private getLatestEntry(trackKey: string): TranscriptIndexEntry | null {
-        const index = this.getTranscriptIndex();
-        const list = index[trackKey];
-        if (!list || list.length === 0) return null;
-        return [...list].sort((a, b) => b.updatedAt - a.updatedAt)[0] || null;
-    }
-
-    private getTrackFromElement(el: Element, isFlatPanel: boolean): PlayerTrack | null {
-        if (!isFlatPanel) {
-            // Try Vue data binding first (works if item is passed as prop/attr)
-            const data = getVueItem(el) as Record<string, unknown> | null;
-            if (data?.type === 'audio') return data as unknown as PlayerTrack;
-
-            // Fallback: look up item from host's fatherFolder by matching DOM index/title.
-            return this.getTrackFromFatherFolder(el);
+        if (this.refreshTimer !== null) {
+            clearTimeout(this.refreshTimer);
+            this.refreshTimer = null;
         }
-
-        const hash = (el as HTMLElement).dataset.asmrFlatHash;
-        if (!hash) return null;
-        const store = this.bridge.store;
-        const queue = store?.state?.AudioPlayer?.queue || store?.state?.AudioPlayer?.playlist || [];
-        const track = queue.find((t: PlayerTrack) => t.hash === hash);
-        if (track) return track;
-        const labelEl = el.querySelector('.q-item__label');
-        const title = labelEl ? getCleanText(labelEl) : '';
-        return { hash, title } as PlayerTrack;
+        this.detachFlatPanel();
+        document.querySelectorAll(`[${BADGE_ATTR}]`).forEach(el => el.remove());
     }
 
-    /**
-     * Look up a track from the host WorkTree component's fatherFolder computed array.
-     * Tries multiple strategies:
-     * 1. data-asmr-hash attribute (set by ThumbnailManager on all items)
-     * 2. DOM index matching against fatherFolder (both use index-based keys)
-     * 3. Title text matching
-     */
-    private getTrackFromFatherFolder(el: Element): PlayerTrack | null {
-        // Strategy 1: Use hash attribute set by ThumbnailManager
-        const hash = (el as HTMLElement).dataset.asmrHash;
-        if (hash) {
-            const treeVm = this.bridge.findWorkTreeComponent() as any;
-            const folder = treeVm?.fatherFolder;
-            if (Array.isArray(folder)) {
-                const match = folder.find((f: any) => f.hash === hash && f.type === 'audio');
-                if (match) return match as unknown as PlayerTrack;
-            }
-        }
-
-        const treeVm = this.bridge.findWorkTreeComponent() as any;
-        if (!treeVm) return null;
-
-        const folder = treeVm.fatherFolder;
-        if (!Array.isArray(folder)) return null;
-
-        // Strategy 2: DOM index matching (v-for uses :key="index")
-        const parent = el.parentElement;
-        if (parent) {
-            const siblings = parent.querySelectorAll(':scope > [role="listitem"], :scope > .q-item');
-            let idx = -1;
-            for (let i = 0; i < siblings.length; i++) {
-                if (siblings[i] === el) { idx = i; break; }
-            }
-            if (idx >= 0 && idx < folder.length) {
-                const item = folder[idx];
-                if (item?.type === 'audio') return item as unknown as PlayerTrack;
-            }
-        }
-
-        // Strategy 3: match by title text
-        const labelEl3 = el.querySelector('.q-item__label');
-        const titleText = labelEl3 ? getCleanText(labelEl3) : '';
-        if (titleText) {
-            const match = folder.find((f: any) => f.type === 'audio' && f.title === titleText);
-            if (match) return match as unknown as PlayerTrack;
-        }
-
-        return null;
+    private scheduleRefresh(): void {
+        if (this.refreshTimer !== null) clearTimeout(this.refreshTimer);
+        this.refreshTimer = window.setTimeout(() => {
+            this.refreshTimer = null;
+            this.refresh();
+        }, 80);
     }
 
-    private getTrackKey(track: PlayerTrack): string {
-        return track.hash || track.mediaStreamUrl || track.src || track.title || '';
-    }
-
-    /** Inject buttons directly into the work tree (for non-event triggers like whisper completion) */
-    private injectWorkTreeDirect(): void {
+    private refresh(): void {
         const workTree = document.getElementById('work-tree');
-        if (!workTree) return;
+        if (workTree) this.injectBadges(workTree);
 
-        const card = workTree.getElementsByClassName('q-card')[0];
-        if (!card) return;
-
-        const listContainer = card.children[0];
-        if (!listContainer) return;
-
-        this.injectButtons(listContainer as Element, false);
+        const flatBody = document.querySelector('.asmr-flat-panel__body');
+        if (flatBody) this.injectBadges(flatBody);
     }
 
-    private injectFlatPanel(): void {
+    private attachFlatPanel(): void {
         const body = document.querySelector('.asmr-flat-panel__body');
         if (!body) return;
 
-        this.injectButtons(body, true);
+        this.injectBadges(body);
+
         this.flatObserver?.disconnect();
         this.flatObserver = new MutationObserver(() => {
-            this.injectButtons(body, true);
+            // Debounce: batch rapid Vue re-renders into one injection pass
+            if (this.flatDebounce !== null) return;
+            this.flatDebounce = window.setTimeout(() => {
+                this.flatDebounce = null;
+                this.injectBadges(body);
+            }, 150);
         });
         this.flatObserver.observe(body, { childList: true, subtree: true });
     }
 
-    private injectButtons(container: Element, isFlatPanel: boolean): void {
-        const items = container.querySelectorAll('[role="listitem"]');
-        items.forEach((li) => {
-            if (li.querySelector('[data-asmr-transcript]')) return;
-            // Defensive guard: if WorkTreeManager has marked this item's type, respect it.
-            const itemType = (li as HTMLElement).dataset.itemType;
-            if (itemType && itemType !== 'audio') return;
-            const track = this.getTrackFromElement(li, isFlatPanel);
-            if (!track) return;
-            const trackKey = this.getTrackKey(track);
-            if (!trackKey) return;
-            const entry = this.getLatestEntry(trackKey);
-            if (!entry) return;
-
-            const buttonGroup = this.createButtonGroup(entry, track);
-            if (!buttonGroup) return;
-            const copyBtn = li.querySelector('[data-xxcopy]');
-            if (copyBtn) {
-                li.insertBefore(buttonGroup, copyBtn);
-            } else {
-                li.appendChild(buttonGroup);
-            }
-        });
+    private detachFlatPanel(): void {
+        this.flatObserver?.disconnect();
+        this.flatObserver = null;
+        if (this.flatDebounce !== null) {
+            clearTimeout(this.flatDebounce);
+            this.flatDebounce = null;
+        }
     }
 
-    private createButtonGroup(entry: TranscriptIndexEntry, track: PlayerTrack): HTMLElement | null {
-        const cached = SharedCache.get<CachedTranscript>(entry.cacheKey);
-        if (!cached || !cached.segments?.length) return null;
-        // Don't show download buttons until transcription is complete
-        if (!cached.complete) return null;
+    /** Build lookup maps from the whisper index: by normalized title and by trackKey (hash). */
+    private buildLookupMaps(): { byTitle: Map<string, TranscriptIndexEntry>; byHash: Map<string, TranscriptIndexEntry> } {
+        const index = SharedCache.get<Record<string, TranscriptIndexEntry[]>>(CacheKeys.whisperIndex()) || {};
+        const byTitle = new Map<string, TranscriptIndexEntry>();
+        const byHash = new Map<string, TranscriptIndexEntry>();
+
+        for (const [trackKey, list] of Object.entries(index)) {
+            for (const entry of list) {
+                // By title
+                const title = (entry.trackTitle || '').trim().toLowerCase();
+                if (title) {
+                    const existing = byTitle.get(title);
+                    if (!existing || entry.updatedAt > existing.updatedAt) {
+                        byTitle.set(title, entry);
+                    }
+                }
+                // By hash (trackKey)
+                if (trackKey) {
+                    const existing = byHash.get(trackKey);
+                    if (!existing || entry.updatedAt > existing.updatedAt) {
+                        byHash.set(trackKey, entry);
+                    }
+                }
+            }
+        }
+        return { byTitle, byHash };
+    }
+
+    private injectBadges(container: Element): void {
+        const { byTitle, byHash } = this.buildLookupMaps();
+
+        // Select worktree list items (skip breadcrumbs)
+        const items = Array.from(container.querySelectorAll<HTMLElement>('.q-list > .q-item'));
+
+        for (const li of items) {
+            const label = li.querySelector('.q-item__label');
+            // Prefer original text stored by TranslatedTags (data-asmrtag),
+            // then getCleanText which handles furigana (data-jpdb-original / strips <rt>),
+            // before falling back to raw textContent.
+            const rawTitle = label
+                ? ((label as HTMLElement).dataset?.asmrtag || getCleanText(label))
+                : '';
+            const title = rawTitle.trim().toLowerCase();
+
+            // Try title match first, then hash match (flat view items have data-asmr-flat-hash)
+            const hash = li.dataset.asmrFlatHash || li.dataset.asmrHash || '';
+            const entry = (title ? byTitle.get(title) : undefined) || (hash ? byHash.get(hash) : undefined);
+            if (!entry) {
+                li.querySelector(`[${BADGE_ATTR}]`)?.remove();
+                continue;
+            }
+
+            const cached = SharedCache.get<CachedTranscript>(entry.cacheKey);
+            if (!cached?.complete || !cached.segments?.length) {
+                li.querySelector(`[${BADGE_ATTR}]`)?.remove();
+                continue;
+            }
+
+            // Check if badge already matches this cache entry
+            const existingBadge = li.querySelector<HTMLElement>(`[${BADGE_ATTR}]`);
+            if (existingBadge?.dataset.asmrTranscriptKey === entry.cacheKey) continue;
+
+            // Remove stale badge
+            existingBadge?.remove();
+
+            const badge = this.createBadgeGroup(entry, cached);
+            if (!badge) continue;
+
+            // Insert before copy button if present, else append
+            const copyBtn = li.querySelector('[data-xxcopy]');
+            if (copyBtn) {
+                li.insertBefore(badge, copyBtn);
+            } else {
+                li.appendChild(badge);
+            }
+        }
+    }
+
+    private createBadgeGroup(entry: TranscriptIndexEntry, cached: CachedTranscript): HTMLElement | null {
+        const hasSegments = cached.segments?.length > 0;
+        if (!hasSegments) return null;
 
         const wrap = document.createElement('div');
         wrap.className = 'q-item__section column q-item__section--side justify-center asmr-transcript-actions';
-        wrap.setAttribute('data-asmr-transcript', 'true');
+        wrap.setAttribute(BADGE_ATTR, 'true');
+        wrap.dataset.asmrTranscriptKey = entry.cacheKey;
 
-        // LRC download — re-read cache at download time to get latest data
-        const primaryLabel = I18n.t('whisperTranscriptDownload');
-        wrap.appendChild(this.createDownloadButton(primaryLabel, () => {
+        // LRC download
+        const lrc = cached.lrc || buildLrcFromSegments(cached.segments);
+        if (lrc) {
+            wrap.appendChild(this.createButton(I18n.t('whisperTranscriptDownload'), () => {
+                const fresh = SharedCache.get<CachedTranscript>(entry.cacheKey);
+                const segs = fresh?.segments || cached.segments;
+                const content = fresh?.lrc || buildLrcFromSegments(segs);
+                if (content) this.download(buildTranscriptFileName(entry.trackTitle, entry.model, cached.language, 'lrc'), content);
+            }));
+        }
+
+        // VTT download
+        wrap.appendChild(this.createButton(I18n.t('vttDownload'), () => {
             const fresh = SharedCache.get<CachedTranscript>(entry.cacheKey);
             const segs = fresh?.segments || cached.segments;
-            const lrc = fresh?.lrc || this.buildLrcFromSegments(segs);
-            if (!lrc) return;
-            this.downloadTextFile(this.buildFileName(track, entry, (fresh || cached).language, 'lrc'), lrc);
+            const vtt = buildVttFromSegments(segs);
+            if (vtt) this.download(buildTranscriptFileName(entry.trackTitle, entry.model, cached.language, 'vtt'), vtt);
         }));
 
-        // VTT download (karaoke-style with word timestamps)
-        const vttLabel = I18n.t('vttDownload');
-        wrap.appendChild(this.createDownloadButton(vttLabel, () => {
-            const fresh = SharedCache.get<CachedTranscript>(entry.cacheKey);
-            const segs = fresh?.segments || cached.segments;
-            const vtt = this.buildVttFromSegments(segs);
-            if (vtt) this.downloadTextFile(this.buildFileName(track, entry, (fresh || cached).language, 'vtt'), vtt);
-        }));
-
+        // Translated variants
         const targetLang = ((Config.get('subtitleLang') as string | undefined) || '').toLowerCase();
-        if (targetLang) {
-            const translated = cached.translations?.[targetLang];
-            if (translated?.lrc) {
-                const translatedLabel = I18n.format('whisperTranscriptDownloadLang', { lang: targetLang.toUpperCase() });
-                wrap.appendChild(this.createDownloadButton(translatedLabel, () => {
-                    const fresh = SharedCache.get<CachedTranscript>(entry.cacheKey);
-                    const tr = fresh?.translations?.[targetLang] || translated;
-                    this.downloadTextFile(this.buildFileName(track, entry, targetLang, 'lrc'), tr.lrc);
-                }, true));
+        const translated = targetLang ? cached.translations?.[targetLang] : undefined;
+        if (translated) {
+            if (translated.lrc) {
+                wrap.appendChild(this.createButton(
+                    I18n.format('whisperTranscriptDownloadLang', { lang: targetLang.toUpperCase() }),
+                    () => {
+                        const fresh = SharedCache.get<CachedTranscript>(entry.cacheKey);
+                        const tr = fresh?.translations?.[targetLang] || translated;
+                        this.download(buildTranscriptFileName(entry.trackTitle, entry.model, targetLang, 'lrc'), tr.lrc);
+                    },
+                    true,
+                ));
             }
-
-            if (translated?.vtt) {
-                const translatedVttLabel = I18n.t('vttDownloadTranslated');
-                wrap.appendChild(this.createDownloadButton(translatedVttLabel, () => {
+            if (translated.vtt) {
+                wrap.appendChild(this.createButton(I18n.t('vttDownloadTranslated'), () => {
                     const fresh = SharedCache.get<CachedTranscript>(entry.cacheKey);
                     const tr = fresh?.translations?.[targetLang] || translated;
-                    if (tr.vtt) this.downloadTextFile(this.buildFileName(track, entry, targetLang, 'vtt'), tr.vtt);
+                    if (tr.vtt) this.download(buildTranscriptFileName(entry.trackTitle, entry.model, targetLang, 'vtt'), tr.vtt);
                 }, true));
             }
         }
 
-        return wrap;
+        return wrap.children.length > 0 ? wrap : null;
     }
 
-    private createDownloadButton(label: string, onClick: () => void, isSecondary = false): HTMLElement {
+    private createButton(label: string, onClick: () => void, isSecondary = false): HTMLElement {
         const btn = document.createElement('button');
         btn.type = 'button';
         btn.className = `q-btn q-btn-item non-selectable no-outline q-btn--standard q-btn--rectangle q-btn--dense q-btn--actionable q-focusable q-hoverable asmr-transcript-btn${isSecondary ? ' asmr-transcript-btn--secondary' : ''}`;
         btn.title = label;
         btn.ariaLabel = label;
-        btn.innerHTML = `
-            <span class="q-focus-helper"></span>
-            <span class="q-btn__content text-center col items-center q-anchor--skip justify-center row">
-                <i aria-hidden="true" role="img" class="q-icon notranslate material-icons">subtitles</i>
-                <span class="asmr-transcript-label">${label}</span>
-            </span>
-        `;
+
+        const focus = document.createElement('span');
+        focus.className = 'q-focus-helper';
+
+        const content = document.createElement('span');
+        content.className = 'q-btn__content text-center col items-center q-anchor--skip justify-center row';
+
+        const icon = document.createElement('i');
+        icon.setAttribute('aria-hidden', 'true');
+        icon.setAttribute('role', 'img');
+        icon.className = 'q-icon notranslate material-icons';
+        icon.textContent = 'subtitles';
+
+        const labelEl = document.createElement('span');
+        labelEl.className = 'asmr-transcript-label';
+        labelEl.textContent = label;
+
+        content.appendChild(icon);
+        content.appendChild(labelEl);
+        btn.appendChild(focus);
+        btn.appendChild(content);
+
         btn.addEventListener('click', (ev) => {
             ev.preventDefault();
             ev.stopPropagation();
@@ -284,60 +294,7 @@ export class TranscriptFileInjector {
         return btn;
     }
 
-    private buildLrcFromSegments(segments: WhisperSegment[]): string {
-        if (!segments?.length) return '';
-        return segments.map((seg) => `[${this.formatLrcTimestamp(seg.start)}]${seg.text}`).join('\n');
-    }
-
-    private formatLrcTimestamp(seconds: number): string {
-        const safe = Math.max(0, seconds);
-        const minutes = Math.floor(safe / 60);
-        const secs = safe % 60;
-        const mm = String(minutes).padStart(2, '0');
-        const ss = String(Math.floor(secs)).padStart(2, '0');
-        const xx = String(Math.floor((secs - Math.floor(secs)) * 100)).padStart(2, '0');
-        return `${mm}:${ss}.${xx}`;
-    }
-
-    private buildFileName(track: PlayerTrack, entry: TranscriptIndexEntry, lang: string, ext = 'lrc'): string {
-        const title = track.title || entry.trackTitle || 'transcript';
-        const safeTitle = title.replace(/[\\/:*?"<>|]/g, '_');
-        const modelSuffix = entry.model?.split('/').pop() || 'whisper';
-        return `${safeTitle}.${lang}.${modelSuffix}.${ext}`;
-    }
-
-    private buildVttFromSegments(segments: WhisperSegment[]): string {
-        if (!segments?.length) return '';
-        const lines = ['WEBVTT', ''];
-        for (let i = 0; i < segments.length; i++) {
-            const seg = segments[i];
-            const safeEnd = Math.max(seg.start + 0.01, seg.end);
-            lines.push(`${i + 1}`);
-            lines.push(`${this.formatVttTimestamp(seg.start)} --> ${this.formatVttTimestamp(safeEnd)}`);
-            if (seg.words?.length) {
-                const parts = seg.words.map(w => `<${this.formatVttTimestamp(w.start)}>${w.text}`);
-                lines.push(parts.join(''));
-            } else {
-                lines.push(seg.text);
-            }
-            lines.push('');
-        }
-        return lines.join('\n');
-    }
-
-    private formatVttTimestamp(seconds: number): string {
-        const safe = Math.max(0, seconds);
-        const hours = Math.floor(safe / 3600);
-        const minutes = Math.floor((safe % 3600) / 60);
-        const secs = safe % 60;
-        const hh = String(hours).padStart(2, '0');
-        const mm = String(minutes).padStart(2, '0');
-        const ss = String(Math.floor(secs)).padStart(2, '0');
-        const mmm = String(Math.floor((secs - Math.floor(secs)) * 1000)).padStart(3, '0');
-        return `${hh}:${mm}:${ss}.${mmm}`;
-    }
-
-    private downloadTextFile(filename: string, content: string): void {
+    private download(filename: string, content: string): void {
         try {
             const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
             const url = URL.createObjectURL(blob);

@@ -123,13 +123,14 @@ function getModelForText(text: string, targetLang: string): ModelRoute | null {
     return null; // EN text or unsupported direction — remote handles it
 }
 
+
 // ============================================================================
 // Quality Checks
 // ============================================================================
 
 /**
  * Hallucination pattern: opus-mt produces stock first-person conversational phrases
- * ("I'm sorry...", "I don't know...") when it can't decode the input.
+ * ("I'm sorry...", "I don't know...") when it can't decode the input (e.g. proper nouns).
  * DLsite titles/tags are noun phrases — first-person output without first-person input is a red flag.
  */
 const _hallucinationFirstPerson = /^I['\u2019]?m\s|^I\s(don|can|won|didn|couldn|wouldn|shouldn)['\u2019]t\s|^I\s(have|want|need|think|know|like)\s/i;
@@ -233,13 +234,82 @@ function glossaryPreProcess(text: string, targetLang: string): [string, boolean]
 }
 
 /**
- * Split multi-sentence text on 。 boundaries for opus-mt translation.
- * MarianMT can treat 。 as end-of-sequence and drop subsequent sentences.
- * Returns null if text has only one sentence (no split needed).
+ * Split text into translatable segments for opus-mt.
+ *
+ * Two splitting strategies (applied in order):
+ * 1. **Bracket extraction** — DLsite titles use 【】（）brackets as logical
+ *    delimiters (e.g. 【tag】main title【bonus】). Each bracketed section and
+ *    the text between them become separate segments. The brackets are preserved
+ *    for re-wrapping after translation.
+ * 2. **Sentence splitting** — Within each segment, split on 。 boundaries.
+ *    MarianMT treats 。 as end-of-sequence and drops subsequent sentences.
+ *
+ * Returns null if text is a single segment with one sentence (no split needed).
+ * Each segment carries a `wrap` string pair for reassembly.
  */
-function splitForModel(text: string): string[] | null {
-    const sentences = text.split(/。/).filter(s => s.trim());
-    return sentences.length > 1 ? sentences : null;
+interface SplitSegment {
+    text: string;
+    /** [open, close] bracket pair to re-wrap after translation, or ['', ''] for bare text */
+    wrap: [string, string];
+}
+
+function splitForModel(text: string): SplitSegment[] | null {
+    // Phase 1: bracket extraction
+    // Match 【…】 or （…） sections — capture bracket content and surrounding text
+    const bracketRe = /([【（])((?:(?![【（】）]).)+)([】）])/g;
+    let segments: SplitSegment[] = [];
+    let lastEnd = 0;
+    let match: RegExpExecArray | null;
+
+    while ((match = bracketRe.exec(text)) !== null) {
+        // Bare text before this bracket
+        const before = text.slice(lastEnd, match.index).trim();
+        if (before) segments.push({ text: before, wrap: ['', ''] });
+        // Bracketed content
+        const open = match[1];
+        const content = match[2].trim();
+        const close = match[3];
+        if (content) segments.push({ text: content, wrap: [open, close] });
+        lastEnd = match.index + match[0].length;
+    }
+    // Trailing text after last bracket
+    const trailing = text.slice(lastEnd).trim();
+    if (trailing) segments.push({ text: trailing, wrap: ['', ''] });
+
+    // If no brackets found, treat whole text as single bare segment
+    if (segments.length === 0) {
+        segments = [{ text: text.trim(), wrap: ['', ''] }];
+    }
+
+    // Phase 2: sentence splitting within each segment (split on 。)
+    const expanded: SplitSegment[] = [];
+    for (const seg of segments) {
+        const sentences = seg.text.split(/。/).filter(s => s.trim());
+        if (sentences.length > 1) {
+            for (const s of sentences) {
+                expanded.push({ text: s.trim(), wrap: seg.wrap });
+            }
+        } else {
+            expanded.push(seg);
+        }
+    }
+
+    return expanded.length > 1 ? expanded : null;
+}
+
+/** Rejoin translated segments with their original bracket wrappers. */
+function joinTranslatedSegments(segments: SplitSegment[], translations: string[]): string {
+    const parts: string[] = [];
+    for (let i = 0; i < segments.length; i++) {
+        const [open, close] = segments[i].wrap;
+        const translated = translations[i] || '';
+        if (open && close) {
+            parts.push(`${open}${translated}${close}`);
+        } else {
+            parts.push(translated);
+        }
+    }
+    return parts.join(' ').replace(/\s{2,}/g, ' ').trim();
 }
 
 // ============================================================================
@@ -263,8 +333,8 @@ function getCached(text: string, lang: string): string | null {
 // ============================================================================
 
 interface PendingRequest {
-    resolve: (val: any) => void;
-    reject: (err: any) => void;
+    resolve: (val: string | string[]) => void;
+    reject: (err: unknown) => void;
     timer: ReturnType<typeof setTimeout>;
 }
 
@@ -569,7 +639,7 @@ function initWorker(model: string, force = false): Promise<void> {
 
 function sendToWorker(
     entry: WorkerEntry, text: string | string[], model: string, timeoutMs: number,
-): Promise<any> {
+): Promise<string | string[]> {
     return new Promise((resolve, reject) => {
         const id = ++nextId;
         const timer = setTimeout(() => {
@@ -611,7 +681,7 @@ async function translateLocal(text: string, targetLang: string): Promise<string 
     });
     if (!raw) return null;
 
-    const cleaned = TranslationService.cleanQuotes(raw);
+    const cleaned = TranslationService.cleanQuotes(raw as string);
     return isLikelyGarbage(text, cleaned) ? null : cleaned;
 }
 
@@ -749,7 +819,7 @@ async function translateRemoteSingle(text: string, targetLang: string): Promise<
             { attempts: 2, backoffMs: 500, shouldRetry: (e) => !(e instanceof HttpError) || e.status >= 500 },
         );
         const parsed = JSON.parse(res.responseText);
-        return parsed?.[0]?.map((x: any) => x?.[0] || '').join('') || text;
+        return parsed?.[0]?.map((x: unknown[]) => x?.[0] || '').join('') || text;
     } catch (e) {
         if (e instanceof HttpError && e.status === 429) {
             remotePausedUntil = Date.now() + REMOTE_RATE_LIMIT_PAUSE_MS;
@@ -830,13 +900,13 @@ export const TranslationService = {
 
     /** @internal */
     async _translateInner(text: string, targetLang: string): Promise<string> {
-        // 0. Multi-sentence split: translate each sentence independently, then join.
-        const sentences = splitForModel(text);
-        if (sentences) {
+        // 0. Multi-segment split: bracket extraction + sentence splitting.
+        const segments = splitForModel(text);
+        if (segments) {
             const results = await Promise.all(
-                sentences.map(s => this.translate(s, targetLang)),
+                segments.map(s => this.translate(s.text, targetLang)),
             );
-            const joined = results.join('. ');
+            const joined = joinTranslatedSegments(segments, results);
             SharedCache.set(cacheKey(text, targetLang, 'local'), joined, CACHE_TTL_MS);
             return joined;
         }
@@ -925,66 +995,120 @@ export const TranslationService = {
 
         if (stillUncached.length === 0) return results;
 
-        // Pre-process remaining texts with glossary substitution + model normalization
+        // 1c. Expand multi-segment texts (bracket/sentence splits) into the batch.
+        //     Instead of routing to individual translate() calls (slow: per-call overhead),
+        //     we split them here, add each segment to the batch, then rejoin after translation.
+        interface SplitRecord { originalText: string; segments: SplitSegment[] }
+        const splitRecords: SplitRecord[] = [];
+        const flatBatch: { originalText: string; text: string; segIdx: number; splitIdx: number }[] = [];
+        const singleSentence: typeof uncached = [];
+
+        for (const entry of stillUncached) {
+            const segments = splitForModel(entry.text);
+            if (!segments) {
+                singleSentence.push(entry);
+                continue;
+            }
+            const splitIdx = splitRecords.length;
+            splitRecords.push({ originalText: entry.text, segments });
+            for (let s = 0; s < segments.length; s++) {
+                flatBatch.push({ originalText: entry.text, text: segments[s].text, segIdx: s, splitIdx });
+            }
+        }
+
+        // Merge split segments + single-sentence texts into one flat batch for the model
+        const allBatchItems = [
+            ...singleSentence.map(u => ({ text: u.text, isSplit: false as const, originalText: u.text })),
+            ...flatBatch.map(fb => ({ text: fb.text, isSplit: true as const, originalText: fb.originalText, segIdx: fb.segIdx, splitIdx: fb.splitIdx })),
+        ];
+
+        if (allBatchItems.length === 0) return results;
+
+        // Pre-process all batch items with glossary substitution + model normalization
         const preprocessedMap = new Map<string, string>();
-        const preprocessedTexts = stillUncached.map(u => {
+        const preprocessedTexts = allBatchItems.map(u => {
+            if (preprocessedMap.has(u.text)) return preprocessedMap.get(u.text)!;
             const [preprocessed] = glossaryPreProcess(u.text, targetLang);
             const normalized = normalizeForModel(preprocessed);
             preprocessedMap.set(u.text, normalized);
             return normalized;
         });
-        let remaining: { idx: number; text: string }[] = [];
+        // Collect per-item translations (indexed by allBatchItems position)
+        const batchTranslations: (string | null)[] = new Array(allBatchItems.length).fill(null);
+        let remainingIndices: number[] = [];
 
         // 2. Try local batch translation (with glossary-preprocessed texts)
         if (!whisperActive && Config.get('preferLocalTranslation') !== false) {
             try {
                 const localResults = await translateLocalBatch(preprocessedTexts, targetLang);
-
-                for (let i = 0; i < stillUncached.length; i++) {
-                    const translated = localResults[i];
-                    if (translated) {
-                        const indices = seen.get(stillUncached[i].text) || [];
-                        for (const idx of indices) results[idx] = translated;
-                        SharedCache.set(cacheKey(stillUncached[i].text, targetLang, 'local'), translated, CACHE_TTL_MS);
-                    } else {
-                        remaining.push(stillUncached[i]);
-                    }
+                for (let i = 0; i < allBatchItems.length; i++) {
+                    batchTranslations[i] = localResults[i] || null;
+                    if (!localResults[i]) remainingIndices.push(i);
                 }
             } catch (e) {
                 Logger.debug('[TranslationService] Local batch failed:', e);
-                remaining = [...stillUncached];
+                remainingIndices = allBatchItems.map((_, i) => i);
             }
         } else {
-            remaining = [...stillUncached];
+            remainingIndices = allBatchItems.map((_, i) => i);
         }
 
         // 3. Remote fallback for anything local didn't handle
-        if (remaining.length > 0) {
-            Logger.debug('[TranslationService] Remote batch:', remaining.length, 'texts');
-            for (let i = 0; i < remaining.length; i += REMOTE_BATCH_CHUNK_SIZE) {
-                const chunk = remaining.slice(i, i + REMOTE_BATCH_CHUNK_SIZE);
-                await Promise.allSettled(chunk.map(async ({ text: original }) => {
-                    const preprocessed = preprocessedMap.get(original) || original;
+        if (remainingIndices.length > 0) {
+            Logger.debug('[TranslationService] Remote batch:', remainingIndices.length, 'texts');
+            for (let i = 0; i < remainingIndices.length; i += REMOTE_BATCH_CHUNK_SIZE) {
+                const chunkIndices = remainingIndices.slice(i, i + REMOTE_BATCH_CHUNK_SIZE);
+                await Promise.allSettled(chunkIndices.map(async (batchIdx) => {
+                    const item = allBatchItems[batchIdx];
+                    const preprocessed = preprocessedMap.get(item.text) || item.text;
                     let translated: string;
                     try {
                         translated = await translateRemoteSingle(preprocessed, targetLang);
                     } catch {
-                        translated = original;
+                        translated = item.text;
                     }
-                    translated = this.cleanQuotes(translated);
-
-                    const indices = seen.get(original) || [];
-                    for (const idx of indices) results[idx] = translated;
-
-                    if (translated && translated !== original) {
-                        SharedCache.set(cacheKey(original, targetLang, 'remote'), translated, CACHE_TTL_MS);
-                    }
+                    batchTranslations[batchIdx] = this.cleanQuotes(translated);
                 }));
-
-                // Yield between chunks so real-time single-line calls can interleave.
-                if (i + REMOTE_BATCH_CHUNK_SIZE < remaining.length) {
+                if (i + REMOTE_BATCH_CHUNK_SIZE < remainingIndices.length) {
                     await new Promise(resolve => setTimeout(resolve, REMOTE_BATCH_YIELD_MS));
                 }
+            }
+        }
+
+        // 4. Collect results: single items go directly, split items are rejoined
+        // 4a. Single-sentence items (no split)
+        const singleCount = singleSentence.length;
+        for (let i = 0; i < singleCount; i++) {
+            const translated = batchTranslations[i];
+            if (translated) {
+                const original = singleSentence[i].text;
+                const indices = seen.get(original) || [];
+                for (const idx of indices) results[idx] = translated;
+                SharedCache.set(cacheKey(original, targetLang, 'local'), translated, CACHE_TTL_MS);
+            }
+        }
+
+        // 4b. Split items: rejoin segments per original text
+        for (const record of splitRecords) {
+            const segTranslations: string[] = record.segments.map(() => '');
+            let allResolved = true;
+            // Find this record's segment translations in the flat batch
+            for (let i = singleCount; i < allBatchItems.length; i++) {
+                const item = allBatchItems[i];
+                if (item.isSplit && item.originalText === record.originalText) {
+                    const t = batchTranslations[i];
+                    if (t) {
+                        segTranslations[item.segIdx] = t;
+                    } else {
+                        allResolved = false;
+                    }
+                }
+            }
+            if (allResolved) {
+                const joined = joinTranslatedSegments(record.segments, segTranslations);
+                const indices = seen.get(record.originalText) || [];
+                for (const idx of indices) results[idx] = joined;
+                SharedCache.set(cacheKey(record.originalText, targetLang, 'local'), joined, CACHE_TTL_MS);
             }
         }
 
@@ -1075,4 +1199,4 @@ export const TranslationService = {
 };
 
 // Exported for unit testing — not part of the public API
-export const _testExports = { normalizeForModel, splitForModel, isLikelyGarbage, glossaryPreProcess };
+export const _testExports = { normalizeForModel, splitForModel, joinTranslatedSegments, isLikelyGarbage, glossaryPreProcess };

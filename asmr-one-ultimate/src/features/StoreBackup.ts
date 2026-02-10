@@ -13,6 +13,7 @@ import { KikoeruBridge } from '../infrastructure/KikoeruBridge';
 import { AppStore } from '../store/AppStore';
 import { Logger } from '../core/Utils';
 import { GM_getValue, GM_setValue } from '$';
+import type { PlaylistState, WorksState } from '../types/store';
 
 const BACKUP_KEY = 'asmr-ult:store-backup';
 const BACKUP_INTERVAL_MS = 5000;
@@ -20,8 +21,8 @@ const BACKUP_INTERVAL_MS = 5000;
 interface SerializedState {
     timestamp: number;
     siteState: {
-        Playlist?: any;
-        Works?: any;
+        Playlist?: PlaylistState;
+        Works?: WorksState;
     };
     app: {
         learnerActive: boolean;

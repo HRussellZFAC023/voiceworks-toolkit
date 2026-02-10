@@ -12,6 +12,40 @@ import { KikoeruBridge } from '../infrastructure/KikoeruBridge';
 import { AppStore } from '../store/AppStore';
 import { Logger } from '../core/Utils';
 import { EventBus } from '../core/EventBus';
+import type { KikoeruApp } from '../types';
+import { buildInfiniteScrollApiUrl } from './infiniteScrollApiUtils';
+
+/** Element with Vue 2 __vue__ internal property */
+interface VueElement extends HTMLElement {
+    __vue__?: KikoeruApp;
+}
+
+/**
+ * Loose work record shape from varying API responses.
+ * Used for DOM card creation where the exact response shape is not guaranteed.
+ */
+interface WorkRecord {
+    id?: number | string;
+    source_id?: string;
+    title?: string;
+    name?: string;
+    circle?: { name?: string };
+    maker?: { name?: string };
+    mainCoverUrl?: string;
+    release?: string;
+    rate_average_2dp?: number;
+    rating?: number;
+    rate_count_detail?: { total?: number } & Record<string, unknown>;
+    rate_count?: number;
+    review_count?: number;
+    price?: number;
+    dl_count?: number;
+    sales?: number;
+    duration?: number;
+    age_category_string?: string;
+    nsfw?: boolean;
+    [key: string]: unknown;
+}
 
 declare const unsafeWindow: Window & typeof globalThis;
 
@@ -320,7 +354,7 @@ export class InfiniteScrollManager {
                 this.reachedEnd = true;
             }
         } catch (error) {
-            const status = (error as any)?.response?.status || (error as any)?.status;
+            const status = (error as { response?: { status?: number }; status?: number })?.response?.status || (error as { status?: number })?.status;
             if (status === 429) {
                 this.currentPage--; // Revert page so retry fetches same page
                 this.handleRateLimit();
@@ -513,85 +547,22 @@ export class InfiniteScrollManager {
     }
 
     private buildApiUrl(): string | null {
-        const path = this.currentPath;
-        const query = this.bridge.route.query || {};
-        const q = (value: string | string[] | undefined, fallback = ''): string =>
-            Array.isArray(value) ? (value[0] || fallback) : (value || fallback);
-
-        // Recommendations page
-        if (path === '/' || path === '/works' || path.startsWith('/works')) {
-            const params = new URLSearchParams();
-            params.set('page', String(this.currentPage));
-            params.set('order', q(query.order, 'release'));
-            params.set('sort', q(query.sort, 'desc'));
-            params.set('subtitle', q(query.subtitle, '0'));
-            if (query.keyword) params.set('keyword', q(query.keyword));
-            if (query.seed) params.set('seed', q(query.seed));
-            // Copy other query params
-            Object.entries(query).forEach(([key, value]) => {
-                if (!params.has(key) && value) {
-                    params.set(key, String(value));
-                }
-            });
-            return `/api/works?${params.toString()}`;
-        }
-
-        // Search results
-        if (path === '/search') {
-            const params = new URLSearchParams();
-            params.set('page', String(this.currentPage));
-            Object.entries(query).forEach(([key, value]) => {
-                if (key !== 'page' && value) {
-                    params.set(key, String(value));
-                }
-            });
-            return `/api/search?${params.toString()}`;
-        }
-
-        // Circle/maker page
-        if (path.startsWith('/circle/')) {
-            const circleId = path.split('/')[2];
-            const params = new URLSearchParams();
-            params.set('page', String(this.currentPage));
-            return `/api/circles/${circleId}/works?${params.toString()}`;
-        }
-
-        // Tag page
-        if (path.startsWith('/tag/')) {
-            const tagId = path.split('/')[2];
-            const params = new URLSearchParams();
-            params.set('page', String(this.currentPage));
-            return `/api/tags/${tagId}/works?${params.toString()}`;
-        }
-
-        // VA page
-        if (path.startsWith('/va/')) {
-            const vaId = path.split('/')[2];
-            const params = new URLSearchParams();
-            params.set('page', String(this.currentPage));
-            return `/api/vas/${vaId}/works?${params.toString()}`;
-        }
-
-        // Playlist detail page: /playlist?id=xxx
-        if (path === '/playlist' && query.id) {
-            const params = new URLSearchParams();
-            params.set('id', String(query.id));
-            params.set('page', String(this.currentPage));
-            params.set('pageSize', String(this.pageSize));
-            return `/api/playlist/get-playlist-works?${params.toString()}`;
-        }
-
-        return null;
+        return buildInfiniteScrollApiUrl({
+            path: this.currentPath,
+            query: this.bridge.route.query || {},
+            page: this.currentPage,
+            pageSize: this.pageSize,
+        });
     }
 
     private appendWorksToGrid(works: unknown[]): string[] {
         const addedWorkIds: string[] = [];
 
         // Extract work IDs for tracking
-        const workIdList = (works as any[]).map(work => {
+        const workIdList = (works as WorkRecord[]).map(work => {
             const id = work.id || work.source_id;
             return id ? (String(id).startsWith('RJ') ? String(id) : `RJ${id}`) : null;
-        }).filter(Boolean) as string[];
+        }).filter((id): id is string => id !== null);
 
         // Try Vue store integration first
         if (this.appendWorksViaVue(works)) {
@@ -608,7 +579,7 @@ export class InfiniteScrollManager {
             return [];
         }
 
-        works.forEach((work: any) => {
+        (works as WorkRecord[]).forEach((work) => {
             const workId = work.id || work.source_id;
             if (!workId) return;
 
@@ -642,17 +613,18 @@ export class InfiniteScrollManager {
 
             if (worksArray && Array.isArray(worksArray)) {
                 // Get existing work IDs to avoid duplicates
-                const existingIds = new Set(worksArray.map((w: any) => String(w.id || w.source_id)));
+                const storeWorks = worksArray as unknown as WorkRecord[];
+                const existingIds = new Set(storeWorks.map((w) => String(w.id || w.source_id)));
 
                 // Filter and add new works
-                const newWorks = (works as any[]).filter(work => {
+                const newWorks = (works as WorkRecord[]).filter(work => {
                     const workId = String(work.id || work.source_id);
                     return !existingIds.has(workId);
                 });
 
                 if (newWorks.length > 0) {
                     // Push directly to the reactive array - Vue 2 will detect this
-                    worksArray.push(...newWorks);
+                    storeWorks.push(...newWorks);
                     Logger.debug(`[InfiniteScrollManager] Added ${newWorks.length} works via Vue store`);
                     return true;
                 }
@@ -662,10 +634,10 @@ export class InfiniteScrollManager {
             // Alternative: Try to find the grid component's Vue instance
             const gridComponent = this.findGridVueComponent();
             if (gridComponent) {
-                const componentWorks = gridComponent.works || gridComponent.$data?.works || gridComponent.list || gridComponent.$data?.list;
+                const componentWorks = (gridComponent.works || gridComponent.$data?.works || gridComponent.list || gridComponent.$data?.list) as WorkRecord[] | undefined;
                 if (componentWorks && Array.isArray(componentWorks)) {
-                    const existingIds = new Set(componentWorks.map((w: any) => String(w.id || w.source_id)));
-                    const newWorks = (works as any[]).filter(work => {
+                    const existingIds = new Set(componentWorks.map((w) => String(w.id || w.source_id)));
+                    const newWorks = (works as WorkRecord[]).filter(work => {
                         const workId = String(work.id || work.source_id);
                         return !existingIds.has(workId);
                     });
@@ -689,7 +661,7 @@ export class InfiniteScrollManager {
     /**
      * Find the Vue component instance managing the works grid
      */
-    private findGridVueComponent(): any {
+    private findGridVueComponent(): KikoeruApp | null {
         const grid = document.querySelector('.row.q-col-gutter-x-sm.q-col-gutter-y-lg')
             || document.querySelector('[class*="q-col-gutter"]');
 
@@ -698,7 +670,7 @@ export class InfiniteScrollManager {
         // Walk up the DOM tree to find a Vue instance with works data
         let el: HTMLElement | null = grid as HTMLElement;
         while (el) {
-            const vue = (el as any).__vue__;
+            const vue = (el as VueElement).__vue__;
             if (vue) {
                 // Check if this component has works data
                 if (vue.works || vue.$data?.works || vue.list || vue.$data?.list) {
@@ -719,7 +691,7 @@ export class InfiniteScrollManager {
         return null;
     }
 
-    private createWorkCard(work: any): HTMLElement {
+    private createWorkCard(work: WorkRecord): HTMLElement {
         const workId = work.id || work.source_id;
         const rjCode = `RJ${workId}`;
         const title = work.title || work.name || rjCode;

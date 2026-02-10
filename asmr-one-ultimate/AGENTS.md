@@ -83,12 +83,32 @@ Review carefully before editing:
 
 Vue-first migration is in progress and must remain incremental.
 
+Recently refactored:
+
+- `src/features/JoiTool.ts` now renders bar UI via `src/features/components/JoiBar.vue` with reactive state.
+- `src/features/FolderDiver.ts` path/tree and DOM folder-matching logic now use extracted helpers in `src/features/folderDiverTreeUtils.ts` and `src/features/folderDiverDomUtils.ts` with dedicated tests.
+- Learner subtitle source/parsing logic is centralized in `src/features/learnerLyricsUtils.ts` and shared by `src/features/LearnerMode.ts` and `src/features/components/LearnerSubtitles.vue`.
+- RJ-code parsing/normalization is centralized in `src/features/rjCodeUtils.ts` and reused by HVDB links, comment section parsing, and work metadata modules to avoid divergent matching behavior.
+- `src/features/HVDBLinkController.ts` and `src/features/components/HVDBLink.vue` now share `resolveHvdbRjCode` route/work fallback logic, and `findHvdbInjectionPoint` prefers metadata-scoped DLsite anchors (before generic rating fallbacks) to reduce mis-mounting from unrelated global DLsite links.
+- Work-tree enhancement internals now use shared helpers: title-slot alignment in `src/features/workTreeTextSyncUtils.ts` and item-type synchronization in `src/features/workTreeItemTypeUtils.ts` (with regression tests for stale-label and stale-`data-item-type` cases).
+- `src/features/WorkTreeManager.ts` now resets route/navigation runtime state on disable to avoid stale same-work suppression on re-enable; regression tests assert prefetch re-handshake after disable/enable cycles.
+- Transcript action injection now uses shared helpers in `src/features/transcriptInjectionUtils.ts` (item selection, fatherFolder audio resolution, action-group replacement, and cleanup helpers), coalesces refreshes on `lang:change` / `subtitleLang` updates, and removes injected transcript controls when the feature is disabled.
+- `src/features/MediaViewer.ts` is now a compatibility wrapper that delegates to `src/features/MediaViewerController.ts`, removing a large legacy imperative duplicate implementation while preserving old call sites.
+- Media viewer DOM/media classification logic is extracted into `src/features/media/mediaViewerDomUtils.ts`; delegated-click filtering and media-type matching now have focused tests to reduce controller-level imperative branching.
+- Media stream URL + token handling is centralized in `src/features/media/mediaStreamUrlUtils.ts` and shared by `MediaViewerController` and `components/MediaLightbox.vue`, including `/media/stream` support, token de-duplication, and fragment-safe query appending.
+- Media viewer WorkTree patch lifecycle is now centralized in `src/features/media/mediaViewerWorkTreePatchUtils.ts`; `MediaViewerController` now restores patched `onClickItem` handlers and disposes folder-path watchers on disable/route cleanup to prevent stale hooks after feature toggles.
+- Work-tree copy injection now performs upsert behavior (update/remove/rebind existing buttons), cleans up injected copy buttons on disable, and uses shared DOM helpers in `src/features/workTreeCopyUtils.ts`, preventing stale copy metadata on reused rows and stale controls when the feature is toggled off.
+- Media viewer candidate-type resolution now uses title-first + explicit-type fallback in `src/features/media/mediaViewerDomUtils.ts`, fixing over-inclusive DOM-scan matching and preserving delegated-click behavior for typed media items without standard extensions.
+- Infinite-scroll route/query API URL construction is now centralized in `src/features/infiniteScrollApiUtils.ts` and reused by both `src/features/components/InfiniteScrollGrid.vue` and `src/features/InfiniteScrollManager.ts`, fixing dropped `'0'` filter values and array-query normalization inconsistencies.
+
 Not refactored yet (legacy imperative DOM-heavy paths still present):
 
-- `src/features/CommentSection.ts`
-- `src/features/AdvancedSearch.ts`
-- `src/features/FlatView.ts`
-- `src/features/JoiTool.ts`
+- `src/features/WorkTreeManager.ts` (path sync + folder control injection still imperative; route/path, text-sync, and item-type sync helpers are extracted, but DOM orchestration and lifecycle hooks remain legacy)
+- `src/features/WorkTreeCopy.ts` (button-state upsert and helper extraction are improved, but list-item injection and button rendering are still imperative DOM code)
+- `src/features/TranscriptFileInjector.ts` (track resolution and action replacement helpers are extracted, but host-list rendering and DOM button construction remain imperative)
+- `src/features/MediaViewerController.ts` (media-type/click helper extraction has progressed, but host integration still relies on imperative click interception, WorkTree patching, and thumbnail injection)
+- `src/features/HVDBLinkController.ts` (link UI is Vue-based and injection lookup is improved, but mount-point discovery still depends on host DOM scanning and selector fallback heuristics)
+- `src/features/components/InfiniteScrollGrid.vue` (core flow is Vue-driven, but host-grid detection and DOM fallback card injection still contain substantial imperative paths)
 
 Rule: refactor one feature at a time behind existing toggles, preserve host-app behavior, and add regression tests before moving to the next feature.
 

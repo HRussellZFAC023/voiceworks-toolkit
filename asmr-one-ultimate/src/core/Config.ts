@@ -468,7 +468,7 @@ const i18nData: I18nData = {
         enableTagFilters: 'Tag Filters',
         enableTagFiltersSub: 'Hide works with specific tags',
         enableVectorSearch: 'Semantic Search',
-        enableVectorSearchSub: 'AI-powered search',
+        enableVectorSearchSub: 'AI-powered search — initial indexing may take about a day',
         enableWhisper: 'Whisper',
         enableWhisperSub: 'Local AI transcription',
         alwaysTranscribe: 'Auto-Transcribe',
@@ -1103,7 +1103,7 @@ const i18nData: I18nData = {
         enableTagFilters: '标签过滤器',
         enableTagFiltersSub: '隐藏特定标签的作品',
         enableVectorSearch: '语义搜索',
-        enableVectorSearchSub: 'AI 驱动的搜索',
+        enableVectorSearchSub: 'AI 驱动的搜索——首次索引可能需要约一天',
         enableWhisper: 'Whisper',
         enableWhisperSub: '本地 AI 转录',
         alwaysTranscribe: '自动转录',
@@ -1738,7 +1738,7 @@ const i18nData: I18nData = {
         enableTagFilters: 'タグフィルター',
         enableTagFiltersSub: '特定のタグを持つ作品を非表示',
         enableVectorSearch: 'セマンティック検索',
-        enableVectorSearchSub: 'AI 駆動の検索',
+        enableVectorSearchSub: 'AI 駆動の検索——初回インデックスに約1日かかる場合があります',
         enableWhisper: 'Whisper',
         enableWhisperSub: 'ローカル AI 文字起こし',
         alwaysTranscribe: '自動文字起こし',
@@ -1940,9 +1940,9 @@ export const I18n = {
     syncFromHost(): void {
         // Priority 1: Kikoeru Vue app's $i18n locale (reads from the live Vue instance)
         try {
-            const root = document.getElementById('q-app') as HTMLElement & { __vue__?: any } | null;
+            const root = document.getElementById('q-app') as HTMLElement & { __vue__?: Record<string, unknown> } | null;
             const vueApp = root?.__vue__;
-            const i18nLocale = vueApp?.$i18n?.locale;
+            const i18nLocale = (vueApp?.$i18n as Record<string, unknown> | undefined)?.locale as string | undefined;
             if (i18nLocale) {
                 this.setLang(i18nLocale);
                 return;

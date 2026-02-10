@@ -1,95 +1,134 @@
 import { HttpClient } from '../infrastructure/HttpClient';
-import { Logger } from '../core/Utils';
+import { Logger, Config } from '../core/Utils';
 import type {
     DLsiteProductApiResponse,
     DLsiteProductApiParams,
     DLsiteReviewApiResponse,
-    DLsiteReviewApiParams
+    DLsiteReviewApiParams,
 } from '../types/dlsite';
 
-/**
- * DLsite Maniax API Client
- *
- * Provides strongly-typed access to DLsite's internal AJAX APIs.
- * Note: These APIs are unofficial and subject to change.
- *
- * Endpoints:
- * - Product: https://www.dlsite.com/{domain}/api/=/product.json
- * - Review:  https://www.dlsite.com/{domain}/api/=/review.json
- */
+type ApiQueryValue = string | number | boolean;
+type ApiQueryParams = Record<string, ApiQueryValue>;
+
+function isValidProxyUrl(url: string): boolean {
+    try {
+        const parsed = new URL(url);
+        return parsed.protocol === 'https:' || parsed.protocol === 'http:';
+    } catch {
+        return false;
+    }
+}
+
+function getProxyBaseUrl(): string {
+    let raw = String(Config.get('dlsiteProxyUrl') || '').trim().replace(/\/+$/, '');
+    if (!raw) return '';
+    if (!/^https?:\/\//i.test(raw)) {
+        raw = `https://${raw}`;
+    }
+    if (!isValidProxyUrl(raw)) {
+        Logger.warn('[DLsiteApi] Invalid proxy URL configured, using direct requests:', raw);
+        return '';
+    }
+    return raw;
+}
+
+function proxyDlsiteUrl(originalUrl: string): string {
+    const base = getProxyBaseUrl();
+    if (!base) return originalUrl;
+    try {
+        const parsed = new URL(originalUrl);
+        const host = parsed.hostname.toLowerCase();
+        if (!host.includes('dlsite.com') && !host.includes('dlsite.jp')) {
+            return originalUrl;
+        }
+
+        const params = new URLSearchParams(parsed.search);
+        if (host !== 'www.dlsite.com') {
+            params.set('__host', host);
+        }
+        const query = params.toString();
+        return `${base}${parsed.pathname}${query ? `?${query}` : ''}`;
+    } catch {
+        return originalUrl;
+    }
+}
+
+function normalizeWorkno(input: string): string {
+    return String(input || '').trim().toUpperCase();
+}
+
+function toApiQueryParams<T extends object>(params: T): ApiQueryParams {
+    const query: ApiQueryParams = {};
+    const source = params as Record<string, ApiQueryValue | null | undefined>;
+    for (const [key, value] of Object.entries(source)) {
+        if (value !== undefined && value !== null) {
+            query[key] = value;
+        }
+    }
+    return query;
+}
+
+function normalizeProductResponse(data: unknown): DLsiteProductApiResponse {
+    if (Array.isArray(data)) {
+        if (data.length > 0) return data[0];
+        throw new Error('Empty product response');
+    }
+    if (data && typeof data === 'object' && 'workno' in data) {
+        return data as DLsiteProductApiResponse;
+    }
+    throw new Error('Invalid product response');
+}
+
+function normalizeProductListResponse(data: unknown): DLsiteProductApiResponse[] {
+    if (Array.isArray(data)) return data;
+    if (data && typeof data === 'object' && 'workno' in data) {
+        return [data as DLsiteProductApiResponse];
+    }
+    return [];
+}
+
 export class DLsiteApiClient {
     private static readonly BASE_URL = 'https://www.dlsite.com';
-    private static readonly DOMAINS = ['maniax', 'home', 'girls', 'pro', 'ana', 'eng'] as const;
+    private static readonly FALLBACK_DOMAINS = ['home', 'girls', 'pro', 'ana', 'eng'] as const;
 
-    /**
-     * Fetch product information by RJ code.
-     * Checks multiple domains (maniax, home, etc.) in parallel to find the product.
-     *
-     * @param workno - RJ code (e.g. RJ123456)
-     * @returns Promise resolving to the product data or null if not found
-     */
     public async getProduct(workno: string): Promise<DLsiteProductApiResponse | null> {
-        const normalized = workno.toUpperCase();
-        // Race all domains to find the product
-        const tasks = DLsiteApiClient.DOMAINS.map(domain =>
-            this.fetchProductFromDomain(domain, { workno: normalized })
-        );
+        const normalized = normalizeWorkno(workno);
+        if (!normalized) return null;
 
         try {
-            const result = await Promise.any(tasks);
-            return result;
-        } catch (error) {
-            Logger.warn(`[DLsiteApi] Product not found: ${normalized}`, error);
-            return null;
+            return await this.fetchProductFromDomain('maniax', { workno: normalized });
+        } catch (maniaxError) {
+            const tasks = DLsiteApiClient.FALLBACK_DOMAINS.map((domain) =>
+                this.fetchProductFromDomain(domain, { workno: normalized }),
+            );
+            try {
+                return await Promise.any(tasks);
+            } catch (error) {
+                Logger.warn(`[DLsiteApi] Product not found: ${normalized}`, { maniaxError, error });
+                return null;
+            }
         }
     }
 
-    /**
-     * Search for products using the product.json endpoint.
-     * Note: This uses the `keyword_work_name` parameter which seems to filter by name.
-     *
-     * @param keyword - Search keyword
-     * @returns Promise resolving to a list of products
-     */
-    public async search(keyword: string): Promise<DLsiteProductApiResponse[]> {
-        // Search usually works best on maniax or home
-        const domain = 'maniax';
-        const params: DLsiteProductApiParams = {
-            workno: '', // Not used for search, but required by type? No, interface allows strict keys if we want, but for now workno is mandatory in our type?
-            // Actually DLsiteProductApiParams defined 'workno' as string.
-            // But we can trick it or make workno optional in params if we change the type.
-            // For now, let's use type casting or ignore. A cleaner way is to use a separate SearchParams interface.
+    public async search(keywordInput: string): Promise<DLsiteProductApiResponse[]> {
+        const keyword = String(keywordInput || '').trim();
+        if (!keyword) return [];
+        return this.fetchProductListFromDomain('maniax', {
             keyword_work_name: keyword,
-            locale: 'ja-jp'
-        };
-        // workno is required in the interface I defined? check dlsite.ts.
-        // It is `workno: string`. Ill pass empty string which is likely ignored if keyword is present.
-
-        return this.fetchProductListFromDomain(domain, params);
+            locale: 'ja-jp',
+        });
     }
 
-    /**
-     * Fetch specific product list by params (e.g. maker_id).
-     */
     public async getProducts(params: Partial<DLsiteProductApiParams>): Promise<DLsiteProductApiResponse[]> {
-        const domain = 'maniax';
-        return this.fetchProductListFromDomain(domain, params as DLsiteProductApiParams);
+        return this.fetchProductListFromDomain('maniax', params);
     }
 
-    /**
-     * Fetch reviews for a work.
-     *
-     * @param params - Review query parameters
-     * @returns Promise resolving to the review API response
-     */
     public async getReviews(params: DLsiteReviewApiParams): Promise<DLsiteReviewApiResponse | null> {
-        // Reviews are usually accessible via maniax or home
-        const url = `${DLsiteApiClient.BASE_URL}/maniax/api/=/review.json`;
-
+        const path = '/maniax/api/=/review.json';
         try {
-            const response = await HttpClient.getJsonViaCors<DLsiteReviewApiResponse>(url, {
-                params: params as unknown as Record<string, string | number | boolean>,
-                retry: { attempts: 2 }
+            const response = await this.fetchJsonViaCors<DLsiteReviewApiResponse>(path, {
+                params: toApiQueryParams(params),
+                retry: { attempts: 2 },
             });
             return response.data;
         } catch (error) {
@@ -98,54 +137,45 @@ export class DLsiteApiClient {
         }
     }
 
-    // ========================================================================
-    // Private Helpers
-    // ========================================================================
-
-    private async fetchProductFromDomain(domain: string, params: Partial<DLsiteProductApiParams>): Promise<DLsiteProductApiResponse> {
-        const url = `${DLsiteApiClient.BASE_URL}/${domain}/api/=/product.json`;
-        const query = {
-            workno: params.workno,
-            locale: params.locale || 'ja-jp',
-            ...params
-        };
-
-        const response = await HttpClient.getJsonViaCors<DLsiteProductApiResponse[] | DLsiteProductApiResponse>(url, {
-            params: query as unknown as Record<string, string | number | boolean>,
-            retry: { attempts: 1 } // Do not retry aggressively for racing
-        });
-
-        // The API can return a single object or an array depending on context/params.
-        // For 'workno', it usually returns array [ { ... } ] or just { ... }?
-        // Based on read_url_content, it returned [ { ... } ].
-
-        const data = response.data;
-        if (Array.isArray(data)) {
-            if (data.length > 0) return data[0];
-            throw new Error('Empty array');
-        }
-        if (data && typeof data === 'object') {
-            // Check if it's a valid product object
-            if ((data as any).workno) return data as DLsiteProductApiResponse;
-        }
-
-        throw new Error('Invalid response');
+    private buildApiUrl(path: string): string {
+        return proxyDlsiteUrl(`${DLsiteApiClient.BASE_URL}${path}`);
     }
 
-    private async fetchProductListFromDomain(domain: string, params: Partial<DLsiteProductApiParams>): Promise<DLsiteProductApiResponse[]> {
-        const url = `${DLsiteApiClient.BASE_URL}/${domain}/api/=/product.json`;
+    private async fetchJsonViaCors<T>(
+        path: string,
+        options: {
+            params?: ApiQueryParams;
+            retry?: { attempts: number };
+        },
+    ) {
+        return HttpClient.getJsonViaCors<T>(this.buildApiUrl(path), options);
+    }
 
-        const response = await HttpClient.getJsonViaCors<DLsiteProductApiResponse[]>(url, {
-            params: params as unknown as Record<string, string | number | boolean>,
-            retry: { attempts: 2 }
+    private async fetchProductFromDomain(
+        domain: string,
+        params: Partial<DLsiteProductApiParams>,
+    ): Promise<DLsiteProductApiResponse> {
+        const path = `/${domain}/api/=/product.json`;
+        const response = await this.fetchJsonViaCors<DLsiteProductApiResponse[] | DLsiteProductApiResponse>(path, {
+            params: toApiQueryParams({
+                locale: params.locale || 'ja-jp',
+                ...params,
+            }),
+            retry: { attempts: 1 },
         });
+        return normalizeProductResponse(response.data);
+    }
 
-        const data = response.data;
-        if (Array.isArray(data)) return data;
-
-        // Sometimes it might return a wrapper?
-        // But for keyword/maker search it usually returns array.
-        return [];
+    private async fetchProductListFromDomain(
+        domain: string,
+        params: Partial<DLsiteProductApiParams>,
+    ): Promise<DLsiteProductApiResponse[]> {
+        const path = `/${domain}/api/=/product.json`;
+        const response = await this.fetchJsonViaCors<DLsiteProductApiResponse[] | DLsiteProductApiResponse>(path, {
+            params: toApiQueryParams(params),
+            retry: { attempts: 2 },
+        });
+        return normalizeProductListResponse(response.data);
     }
 }
 

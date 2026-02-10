@@ -148,7 +148,7 @@ export class GooglePlaylistScraper {
         this.safeSetValue(RATE_LIMIT_KEY, 0);
     }
 
-    static safeSetValue(key: string, value: any): void {
+    static safeSetValue(key: string, value: unknown): void {
         try {
             if (typeof GM_setValue !== 'undefined') {
                 GM_setValue(key, value);
@@ -156,7 +156,7 @@ export class GooglePlaylistScraper {
         } catch (e) { /* ignore */ }
     }
 
-    static safeGetValue(key: string, defaultValue: any): any {
+    static safeGetValue<T>(key: string, defaultValue: T): T {
         try {
             if (typeof GM_getValue !== 'undefined') {
                 return GM_getValue(key, defaultValue);
@@ -200,14 +200,16 @@ export class GooglePlaylistScraper {
 
             return response.responseText;
 
-        } catch (error: any) {
+        } catch (error: unknown) {
             // Handle specific errors
-            if (error.status === 429 || error.message === 'RATE_LIMITED') {
+            const err = error as Record<string, unknown>;
+            const errMsg = err.message as string | undefined;
+            if (err.status === 429 || errMsg === 'RATE_LIMITED') {
                 Logger.warn('[GooglePlaylistScraper] Rate limited (429)');
                 this.safeSetValue(RATE_LIMIT_KEY, Date.now());
                 throw new Error('RATE_LIMITED');
             }
-            throw new Error(`Fetch failed: ${error.message}`);
+            throw new Error(`Fetch failed: ${errMsg ?? String(error)}`);
         }
     }
 

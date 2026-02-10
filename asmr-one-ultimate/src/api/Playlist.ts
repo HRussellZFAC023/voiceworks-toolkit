@@ -30,7 +30,7 @@ export interface PlaylistEntry {
 }
 
 export interface PlaylistWithWorks extends PlaylistEntry {
-    workDetails?: any[]; // Detailed work info when fetched
+    workDetails?: PlaylistWorkItem[]; // Detailed work info when fetched
 }
 
 export interface PlaylistMetadata {
@@ -148,7 +148,7 @@ export const PlaylistApi = {
             params: { id, page, pageSize },
         });
         // Normalize response - ensure works is always an array
-        const data = (res.data || {}) as any;
+        const data = (res.data || {}) as PlaylistWorksResponse;
         return {
             works: Array.isArray(data.works) ? data.works : [],
             pagination: data.pagination,
@@ -158,7 +158,7 @@ export const PlaylistApi = {
     /**
      * Fetch all works from a playlist across all pages.
      */
-    async getAllPlaylistWorks(id: string): Promise<Array<{ id: number; source_id: string;[key: string]: any }>> {
+    async getAllPlaylistWorks(id: string): Promise<PlaylistWorkItem[]> {
         const pageSize = 100;
         const firstPage = await this.getPlaylistWorks(id, 1, pageSize);
         const allWorks = [...(firstPage.works || [])];

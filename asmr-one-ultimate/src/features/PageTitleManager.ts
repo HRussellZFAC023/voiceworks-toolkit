@@ -41,7 +41,7 @@ export class PageTitleManager {
         }));
 
         // Watch route for navigation to non-work pages
-        this.bridge.$watch?.('$route', (to: any) => {
+        this.bridge.$watch?.('$route', (to: { path: string }) => {
             if (!to.path.startsWith('/work/')) {
                 this.resetTitle();
             }

@@ -14,7 +14,7 @@ const DEFAULT_API_SERVER = 'https://api.asmr-200.com';
 function getApiBaseUrl(): string {
     try {
         const bridge = KikoeruBridge.getInstance();
-        const baseURL = (bridge.axios as any)?.defaults?.baseURL as string | undefined;
+        const baseURL = bridge.axios?.defaults?.baseURL;
         if (baseURL && baseURL.startsWith('http')) {
             return baseURL.replace(/\/$/, '');
         }

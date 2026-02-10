@@ -8,6 +8,7 @@ import { HeaderActions } from '../ui/HeaderActions';
 import { WorksApi } from '../api';
 import { EventBus } from '../core/EventBus';
 import { buildCoverUrl } from '../types/api';
+import type { WorkOrder, SortOrder, WorkDetail } from '../types/api';
 
 import { gmRequest, retryWithBackoff, HttpError } from '../infrastructure/HttpClient';
 
@@ -19,7 +20,7 @@ const DEFAULT_API_SERVER = 'https://api.asmr-200.com';
 function getApiBaseUrl(): string {
     try {
         const bridge = KikoeruBridge.getInstance();
-        const baseURL = (bridge.axios as any)?.defaults?.baseURL as string | undefined;
+        const baseURL = bridge.axios.defaults?.baseURL;
         if (baseURL && baseURL.startsWith('http')) {
             return baseURL.replace(/\/$/, '');
         }
@@ -124,7 +125,7 @@ export class VectorSearch {
     private observeRoute(): void {
         const app = this.bridge.app;
         if (!app?.$watch) return;
-        (app as any).$watch('$route', () => this.indexCurrentWork());
+        app.$watch('$route', () => this.indexCurrentWork());
         this.indexCurrentWork();
     }
 
@@ -142,7 +143,7 @@ export class VectorSearch {
     }
 
     private async indexCurrentWork(): Promise<void> {
-        const work = (this.bridge.store.state.AudioPlayer?.work as any);
+        const work = this.bridge.store.state.AudioPlayer?.work;
         if (!work?.id) return;
         if (!Config.get('vectorSearchApiKey')) return;
         const id = String(work.id);
@@ -153,14 +154,14 @@ export class VectorSearch {
 
         const title = work.title || work.name || '';
         const description = work.description || work.summary || '';
-        const tags = (work.tags || []).map((t: any) => t.name || t.title || '').filter(Boolean);
+        const tags = (work.tags || []).map((t: { name?: string; title?: string }) => t.name || t.title || '').filter(Boolean);
         const payload = [title, description, tags.join(', ')].filter(Boolean).join('\n');
         if (!payload) return;
 
         const vector = await this.getEmbedding(payload);
         if (!vector) return;
 
-        const cover = this.resolveCoverUrl(work, id) || undefined;
+        const cover = this.resolveCoverUrl(work as unknown as Record<string, unknown>, id) || undefined;
         await db.put('vectors', { id, title, description, tags, cover, vector });
         Logger.log('[VectorSearch] Indexed work:', id, title);
     }
@@ -346,7 +347,7 @@ export class VectorSearch {
                 this.setStatus(I18n.format('magicSearchFetchingPage', { page, end: endPage }), true);
                 let res;
                 try {
-                    res = await WorksApi.getWorks({ order: order as any, sort: sort as any, page });
+                    res = await WorksApi.getWorks({ order: order as WorkOrder, sort: sort as SortOrder, page });
                 } catch (fetchErr) {
                     if (fetchErr instanceof HttpError && fetchErr.status === 429) {
                         this.batchBackoffMs = Math.min(this.batchBackoffMs * 2, 120_000);
@@ -418,28 +419,29 @@ export class VectorSearch {
         }
     }
 
-    private async indexWork(work: any): Promise<boolean> {
+    private async indexWork(work: Record<string, unknown>): Promise<boolean> {
         if (!work?.id) return false;
         const id = String(work.id);
         const db = await this.dbPromise;
         const existing = await db.get('vectors', id);
         if (existing) return false;
 
-        const title = work.title || work.name || '';
-        const tags = (work.tags || []).map((t: any) => t.name || t.title || '').filter(Boolean);
-        const description = work.description || work.summary || '';
+        const title = (work.title as string) || (work.name as string) || '';
+        const rawTags = (work.tags || []) as Array<{ name?: string; title?: string }>;
+        const tags = rawTags.map((t) => t.name || t.title || '').filter(Boolean);
+        const description = (work.description as string) || (work.summary as string) || '';
         const payload = [title, description, tags.join(', ')].filter(Boolean).join('\n').slice(0, 8000);
 
         const vector = await this.getEmbedding(payload);
         if (vector) {
-            const cover = this.resolveCoverUrl(work, id) || undefined;
+            const cover = this.resolveCoverUrl(work as Record<string, unknown>, id) || undefined;
             await db.put('vectors', { id, title, description, tags, cover, vector });
             return true;
         }
         return false;
     }
 
-    private async indexWorks(works: any[]): Promise<number> {
+    private async indexWorks(works: Record<string, unknown>[]): Promise<number> {
         if (works.length === 0) return 0;
         let added = 0;
         let index = 0;
@@ -494,7 +496,7 @@ export class VectorSearch {
                 score: this.scoreEntry(entry, queryVector, searchMeta)
             })).sort((a, b) => b.score - a.score);
             // Free vector arrays after scoring — no longer needed, saves ~25-50MB
-            for (const r of scored) (r.entry as any).vector = null;
+            for (const r of scored) (r.entry as { vector: number[] | null }).vector = null;
             this.renderResults(scored);
             return;
         }
@@ -504,7 +506,7 @@ export class VectorSearch {
             score: this.scoreEntry(entry, queryVector, searchMeta)
         })).sort((a, b) => b.score - a.score);
         // Free vector arrays after scoring — no longer needed, saves ~25-50MB
-        for (const r of scored) (r.entry as any).vector = null;
+        for (const r of scored) (r.entry as { vector: number[] | null }).vector = null;
 
         Logger.log(`[VectorSearch] Search completed: ${scored.length} results from ${entries.length} indexed entries`, {
             topResults: scored.slice(0, 5).map(r => ({ id: r.entry.id, title: r.entry.title, score: r.score.toFixed(3) })),
@@ -715,8 +717,8 @@ export class VectorSearch {
             );
 
             const data = typeof res.response === 'object' && res.response
-                ? res.response as any
-                : JSON.parse(res.responseText);
+                ? res.response as { data?: Array<{ embedding?: number[] }> }
+                : JSON.parse(res.responseText) as { data?: Array<{ embedding?: number[] }> };
 
             const embedding: number[] | null = data?.data?.[0]?.embedding || null;
             Logger.debug(`[VectorSearch] Embedding received: dim=${embedding?.length || 0}`);
@@ -904,9 +906,9 @@ export class VectorSearch {
         return dot / (Math.sqrt(normA) * Math.sqrt(normB));
     }
 
-    private resolveCoverUrl(work: any, id: string): string | null {
-        if (work.coverUrl) return work.coverUrl;
-        if (work.main_cover_url) return work.main_cover_url;
+    private resolveCoverUrl(work: Record<string, unknown>, id: string): string | null {
+        if (work.coverUrl) return work.coverUrl as string;
+        if (work.main_cover_url) return work.main_cover_url as string;
         return buildCoverUrl(id, 'main', getApiBaseUrl());
     }
 

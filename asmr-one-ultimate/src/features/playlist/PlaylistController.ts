@@ -4,7 +4,7 @@
 
 import { KikoeruBridge } from '../../infrastructure/KikoeruBridge';
 import { Logger } from '../../core/Utils';
-import type { PlayerTrack } from '../../types';
+import type { PlayerTrack, KikoeruStore } from '../../types';
 
 export class PlaylistController {
     private bridge: KikoeruBridge;
@@ -22,20 +22,20 @@ export class PlaylistController {
         if (!work) return [];
 
         const tracks: PlayerTrack[] = [];
-        const queue = (arr: any[]) => {
+        const collectTracks = (arr: Record<string, unknown>[]) => {
             for (const item of arr) {
                 if (item.type === 'audio' || item.mediaStreamUrl || item.stream_url) {
-                    tracks.push(item);
+                    tracks.push(item as unknown as PlayerTrack);
                 }
-                if (item.children) queue(item.children);
-                if (item.tracks) queue(item.tracks);
-                if (item.dirs) queue(item.dirs);
+                if (item.children) collectTracks(item.children as Record<string, unknown>[]);
+                if (item.tracks) collectTracks(item.tracks as Record<string, unknown>[]);
+                if (item.dirs) collectTracks(item.dirs as Record<string, unknown>[]);
             }
         };
 
-        if (work.children) queue(work.children);
-        if (work.tracks) queue(work.tracks);
-        if (work.dirs) queue(work.dirs);
+        if (work.children) collectTracks(work.children as unknown as Record<string, unknown>[]);
+        if (work.tracks) collectTracks(work.tracks as unknown as Record<string, unknown>[]);
+        if (work.dirs) collectTracks(work.dirs as unknown as Record<string, unknown>[]);
 
         return tracks;
     }
@@ -60,10 +60,10 @@ export class PlaylistController {
         }
     }
 
-    private setQueueViaCommit(store: any, tracks: PlayerTrack[], index: number): void {
+    private setQueueViaCommit(store: KikoeruStore, tracks: PlayerTrack[], index: number): void {
         try {
-            store.commit('AudioPlayer/SET_QUEUE', { queue: tracks, index });
-            store.commit('AudioPlayer/SET_TRACK', index);
+            store.commit!('AudioPlayer/SET_QUEUE', { queue: tracks, index });
+            store.commit!('AudioPlayer/SET_TRACK', index);
             Logger.debug('[PlaylistController] Started playback via commit');
         } catch (e) {
             Logger.error('[PlaylistController] Failed to set queue:', e);

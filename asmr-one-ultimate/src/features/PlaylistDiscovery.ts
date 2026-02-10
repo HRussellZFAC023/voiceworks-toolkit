@@ -20,6 +20,7 @@ import { GooglePlaylistScraper } from '../scrapers/GooglePlaylistScraper';
 import { AppStore } from '../store/AppStore';
 import { apiRequest } from './playlist/PlaylistService';
 import KNOWN_PLAYLISTS from '../data/known-playlists.json';
+import type { VueRouter } from '../types';
 import type {
     CachedPlaylistMetadata,
     CachedUserPlaylists,
@@ -31,6 +32,45 @@ import type {
 } from './playlist/types';
 
 type PlaylistFilterMode = 'all' | 'mine' | 'public' | 'online';
+
+/** Location parameter accepted by Vue Router push/replace */
+type RouteLocation = string | { path?: string; query?: Record<string, string | string[] | undefined> };
+
+/** Vue Router extended with our monkey-patch marker */
+type PatchableVueRouter = VueRouter & { __asmrPatched?: boolean };
+
+/** Loosely-typed Vue 2 component instance for native DOM __vue__ access */
+interface Vue2Instance {
+    [key: string]: unknown;
+    $data?: Record<string, unknown>;
+    $parent?: Vue2Instance;
+    $forceUpdate?: () => void;
+    playlists?: NativePlaylistEntry[];
+    list?: NativePlaylistEntry[];
+    loadMore?: () => void;
+    options?: Vue2SelectOption[];
+    $watch?: (expr: string, callback: (newVal: unknown, oldVal: unknown) => void, options?: { immediate?: boolean; deep?: boolean }) => (() => void);
+}
+
+/** Shape of a playlist entry in the native Vue 2 grid */
+interface NativePlaylistEntry {
+    id: string;
+    name: string;
+    user: { name: string };
+    worksCount: number;
+    latestWorkId: number | string;
+    latestWork: { id: number | string } | null;
+    privacy: number;
+    _source?: string;
+    _discovered?: string;
+}
+
+/** Shape of the native dropdown select option */
+interface Vue2SelectOption {
+    label?: string;
+    value?: string;
+    [key: string]: unknown;
+}
 const PLAYLISTS_PER_PAGE = 24;
 const STORAGE_KEY = 'asmr_ultimate_discovered_playlists';
 const METADATA_CACHE_KEY = 'asmr_ultimate_playlist_metadata_cache';
@@ -226,17 +266,18 @@ export class PlaylistDiscovery {
      */
     private patchVueRouter(): void {
         try {
-            const router = this.bridge.router;
-            if (!router || (router as any).__asmrPatched) return;
+            const router = this.bridge.router as PatchableVueRouter;
+            if (!router || router.__asmrPatched) return;
 
             const originalPush = router.push.bind(router);
             const originalReplace = router.replace?.bind(router);
 
-            router.push = function (location: any, onComplete?: any, onAbort?: any) {
-                return (originalPush as any)(location, onComplete, onAbort).catch((err: any) => {
+            router.push = function (location: RouteLocation) {
+                return originalPush(location).catch((err: unknown) => {
                     // Ignore NavigationDuplicated errors
-                    if (err?.name === 'NavigationDuplicated' ||
-                        err?.message?.includes('Avoided redundant navigation')) {
+                    const e = err as { name?: string; message?: string };
+                    if (e?.name === 'NavigationDuplicated' ||
+                        e?.message?.includes('Avoided redundant navigation')) {
                         return Promise.resolve();
                     }
                     throw err;
@@ -244,10 +285,11 @@ export class PlaylistDiscovery {
             };
 
             if (originalReplace) {
-                router.replace = function (location: any, onComplete?: any, onAbort?: any) {
-                    return (originalReplace as any)(location, onComplete, onAbort).catch((err: any) => {
-                        if (err?.name === 'NavigationDuplicated' ||
-                            err?.message?.includes('Avoided redundant navigation')) {
+                router.replace = function (location: RouteLocation) {
+                    return originalReplace(location).catch((err: unknown) => {
+                        const e = err as { name?: string; message?: string };
+                        if (e?.name === 'NavigationDuplicated' ||
+                            e?.message?.includes('Avoided redundant navigation')) {
                             return Promise.resolve();
                         }
                         throw err;
@@ -255,7 +297,7 @@ export class PlaylistDiscovery {
                 };
             }
 
-            (router as any).__asmrPatched = true;
+            router.__asmrPatched = true;
             Logger.debug('[PlaylistDiscovery] Patched Vue Router to handle NavigationDuplicated');
         } catch (e) {
             Logger.warn('[PlaylistDiscovery] Failed to patch Vue Router:', e);
@@ -291,17 +333,17 @@ export class PlaylistDiscovery {
     private async tryInjectIntoNativeComponent(): Promise<boolean> {
         try {
             // Find the native playlists Vue component
-            const qPage = document.querySelector('.q-page') as HTMLElement & { __vue__?: any };
+            const qPage = document.querySelector('.q-page') as HTMLElement & { __vue__?: Vue2Instance };
             if (!qPage?.__vue__) {
                 Logger.debug('[PlaylistDiscovery] No Vue component found on .q-page');
                 return false;
             }
 
             // Walk up to find the component that has playlists data
-            let vue = qPage.__vue__;
-            let playlistsComponent: any = null;
+            const vue = qPage.__vue__;
+            let playlistsComponent: Vue2Instance | null = null;
 
-            const findPlaylistsData = (vm: any): any => {
+            const findPlaylistsData = (vm: Vue2Instance | undefined): Vue2Instance | null => {
                 if (!vm) return null;
                 // Check if this component has playlists array
                 if (vm.playlists && Array.isArray(vm.playlists)) return vm;
@@ -318,7 +360,8 @@ export class PlaylistDiscovery {
                 return false;
             }
 
-            const playlistsArray = playlistsComponent.playlists || playlistsComponent.$data?.playlists || playlistsComponent.list;
+            const playlistsArray = (playlistsComponent.playlists || playlistsComponent.$data?.playlists || playlistsComponent.list) as NativePlaylistEntry[] | undefined;
+            if (!playlistsArray) return false;
             Logger.debug(`[PlaylistDiscovery] Found native playlists array with ${playlistsArray.length} items`);
 
             // Hide native pagination
@@ -370,9 +413,9 @@ export class PlaylistDiscovery {
     /**
      * Inject our public playlists into the native component's array
      */
-    private async injectPublicPlaylistsIntoNative(component: any, playlistsArray: any[]): Promise<void> {
+    private async injectPublicPlaylistsIntoNative(component: Vue2Instance, playlistsArray: NativePlaylistEntry[]): Promise<void> {
         // Get existing IDs to avoid duplicates
-        const existingIds = new Set(playlistsArray.map((p: any) => p.id?.toLowerCase()));
+        const existingIds = new Set(playlistsArray.map((p: NativePlaylistEntry) => p.id?.toLowerCase()));
 
         // Fetch metadata for our public playlists in batches
         // Filter out both existing playlists and ones that have previously failed
@@ -435,13 +478,13 @@ export class PlaylistDiscovery {
         this.updateInlineStatus(`${playlistsArray.length} ${I18n.t('playlistLoadingDone')}`);
     }
 
-    private cachedToPlaylistEntry(cached: CachedPlaylistMetadata, discovered: DiscoveredPlaylist): any {
+    private cachedToPlaylistEntry(cached: CachedPlaylistMetadata, discovered: DiscoveredPlaylist): NativePlaylistEntry {
         return {
             id: cached.id,
             name: cached.name,
             user: { name: cached.user_name },
             worksCount: cached.worksCount,
-            latestWorkId: cached.latestWorkId,
+            latestWorkId: cached.latestWorkId ?? 0,
             latestWork: cached.latestWorkId ? { id: cached.latestWorkId } : null,
             privacy: 2, // public
             _source: 'asmr-ultimate',
@@ -449,12 +492,12 @@ export class PlaylistDiscovery {
         };
     }
 
-    private metadataToPlaylistEntry(metadata: PlaylistMetadata, discovered: DiscoveredPlaylist): any {
+    private metadataToPlaylistEntry(metadata: PlaylistMetadata, discovered: DiscoveredPlaylist): NativePlaylistEntry {
         return {
             id: metadata.id,
             name: metadata.name,
-            user: { name: metadata.user_name },
-            worksCount: metadata.works_count,
+            user: { name: metadata.user_name ?? '' },
+            worksCount: metadata.works_count ?? 0,
             latestWorkId: 0,
             latestWork: null,
             privacy: 2,
@@ -472,7 +515,7 @@ export class PlaylistDiscovery {
     /**
      * Setup infinite scroll by watching scroll position
      */
-    private setupNativeInfiniteScroll(component: any): void {
+    private setupNativeInfiniteScroll(component: Vue2Instance): void {
         // Create sentinel for infinite scroll detection
         const sentinel = document.createElement('div');
         sentinel.id = 'asmr-playlist-scroll-sentinel';
@@ -509,7 +552,7 @@ export class PlaylistDiscovery {
             page: 1, pageSize, filterBy,
         });
         const firstData = Array.isArray(first) ? first : (first?.playlists || []);
-        const pagination = (first as any)?.pagination;
+        const pagination = (!Array.isArray(first) && first) ? first.pagination : undefined;
         const totalCount: number = pagination?.totalCount ?? firstData.length;
         const totalPages = Math.ceil(totalCount / pageSize);
 
@@ -1519,8 +1562,9 @@ export class PlaylistDiscovery {
                                 this.rateLimitBackoff = Math.max(1, this.rateLimitBackoff * 0.9);
                             }
                         })
-                        .catch((err: any) => {
-                            if (err?.status === 429) {
+                        .catch((err: unknown) => {
+                            const e = err as { status?: number };
+                            if (e?.status === 429) {
                                 // Hit rate limit!
                                 this.rateLimitBackoff = Math.min(this.rateLimitBackoff * 2, 30); // Max 30x backoff
                                 this.rateLimitUntil = Date.now() + (5000 * this.rateLimitBackoff);
@@ -1624,9 +1668,9 @@ export class PlaylistDiscovery {
             const card = this.createPlaylistCard({ ...playlist, id: playlistId });
             this.replaceSkeletonWithCard(playlistId, card);
             return true;
-        } catch (error: any) {
+        } catch (error: unknown) {
             Logger.warn(`[PlaylistDiscovery] Failed to update cover/count for ${playlistId}:`, error);
-            if (error?.status === 429) {
+            if ((error as { status?: number })?.status === 429) {
                 throw error; // Re-throw to trigger backoff
             }
             return false;
@@ -2214,7 +2258,7 @@ export class PlaylistDiscovery {
     private setupNativeFilterWatcher(): void {
         // Find the native filter dropdown Vue component
         const select = document.querySelector('.q-page .q-select');
-        const selectVue = (select as any)?.__vue__;
+        const selectVue = (select as HTMLElement & { __vue__?: Vue2Instance })?.__vue__;
 
         if (!selectVue) {
             Logger.warn('[PlaylistDiscovery] Could not find native filter dropdown');
@@ -2226,7 +2270,7 @@ export class PlaylistDiscovery {
         if (Array.isArray(options)) {
             // Check if we already added it
             const onlineLabel = I18n.t('playlistOnlineOnly');
-            const hasOnlineOption = options.some((opt: any) =>
+            const hasOnlineOption = options.some((opt: Vue2SelectOption) =>
                 opt?.label === onlineLabel || opt?.value === 'online'
             );
 
@@ -2247,10 +2291,11 @@ export class PlaylistDiscovery {
 
         // Watch for changes using Vue's $watch
         if (selectVue.$watch) {
-            this.nativeFilterUnwatch = selectVue.$watch('value', (newVal: any) => {
+            this.nativeFilterUnwatch = selectVue.$watch('value', (newVal: unknown) => {
                 // Determine filter mode from value
                 // Options: All, I created, I liked, Online only (injected)
-                const valueLabel = newVal?.label || newVal?.value || '';
+                const v = newVal as Vue2SelectOption | null;
+                const valueLabel = v?.label || v?.value || '';
                 const valueLower = String(valueLabel).toLowerCase();
                 const onlineLabel = I18n.t('playlistOnlineOnly').toLowerCase();
 

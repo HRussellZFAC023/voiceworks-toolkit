@@ -1,6 +1,7 @@
 import { KikoeruBridge } from '../infrastructure/KikoeruBridge';
 import { I18n } from '../core/Utils';
 import { hasPlayerBar } from '../core/DomUtils';
+import type { VueRoute } from '../types/store';
 
 export class TagFilters {
     private bridge: KikoeruBridge;
@@ -89,7 +90,7 @@ export class TagFilters {
         const currentRoute = router?.currentRoute;
 
         if (router) {
-            const query = { ...(currentRoute?.query || {}) } as Record<string, any>;
+            const query = { ...(currentRoute?.query || {}) } as Record<string, string | string[] | undefined>;
             if (tags.length) {
                 query.tags = tags.join(',');
             } else {
@@ -105,7 +106,7 @@ export class TagFilters {
 
         if (store?.dispatch) {
             const existing = store.state?.Works?.searchParams || {};
-            const payload: Record<string, any> = { ...existing, tags };
+            const payload: Record<string, unknown> = { ...existing, tags };
             if (tags.length === 1) {
                 payload.tag_id = tags[0];
             } else if ('tag_id' in payload) {
@@ -199,13 +200,13 @@ export class TagFilters {
     }
 
     private observeRoute(): void {
-        const app = this.bridge.app as any;
+        const app = this.bridge.app;
         if (!app?.$watch) return;
-        this.routeUnwatch = app.$watch('$route', (to: any) => this.syncFromRoute(to));
+        this.routeUnwatch = app.$watch('$route', (to: VueRoute) => this.syncFromRoute(to));
         this.syncFromRoute(app.$route);
     }
 
-    private syncFromRoute(route: any): void {
+    private syncFromRoute(route: VueRoute | undefined): void {
         const tags = this.parseRouteTags(route?.query?.tags);
         const signature = tags.join(',');
         if (signature === this.lastRouteTags) return;
@@ -236,7 +237,7 @@ export class TagFilters {
             const parsed = JSON.parse(raw);
             if (!Array.isArray(parsed)) return new Map();
             const map = new Map<string, string>();
-            parsed.forEach((entry: any) => {
+            parsed.forEach((entry: { id?: string; label?: string }) => {
                 if (!entry?.id) return;
                 map.set(String(entry.id), String(entry.label || `Tag ${entry.id}`));
             });
@@ -246,8 +247,8 @@ export class TagFilters {
         }
     }
 
-    private parseRouteTags(tagsParam: any): string[] {
-        const raw = typeof tagsParam === 'string' ? tagsParam : '';
+    private parseRouteTags(tagsParam: string | string[] | undefined): string[] {
+        const raw = typeof tagsParam === 'string' ? tagsParam : (Array.isArray(tagsParam) ? tagsParam[0] || '' : '');
         if (!raw) return [];
         return raw.split(',').map((t) => t.trim()).filter(Boolean);
     }

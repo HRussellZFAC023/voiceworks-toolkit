@@ -6,9 +6,9 @@
 .asmr-viz-bar {
     position: fixed;
     bottom: 60px; /* JS overrides dynamically via updatePosition() */
-    left: var(--asmr-drawer-width, 0px);
+    left: 0;
     right: 0;
-    width: auto;
+    width: 100%;
     display: flex;
     align-items: center;
     padding: 0;
@@ -17,7 +17,7 @@
     backdrop-filter: blur(24px);
     border-top: 1px solid var(--asmr-border-color);
     z-index: var(--z-viz, 9991);
-    transition: opacity 0.3s ease, transform 0.3s ease, left 0.3s ease;
+    transition: opacity 0.3s ease, transform 0.3s ease;
     box-shadow: 0 -2px 12px rgba(0, 0, 0, 0.08);
     pointer-events: auto;
 }
@@ -34,7 +34,7 @@
 .asmr-viz-bar.asmr-viz-paused {
     opacity: 0.4;
     filter: saturate(0.2);
-    transition: opacity 0.5s ease, filter 0.5s ease, left 0.3s ease;
+    transition: opacity 0.5s ease, filter 0.5s ease;
 }
 
 /* ============================================
@@ -130,6 +130,13 @@ body.asmr-fullscreen-active .asmr-viz-bar:not(.audio-player .asmr-viz-bar) {
 /* ============================================
    Responsive
    ============================================ */
+@media (min-width: 601px) {
+    .asmr-viz-bar {
+        left: var(--asmr-drawer-width, 0px);
+        width: auto;
+    }
+}
+
 @media (max-width: 600px) {
     .asmr-viz-canvas {
         height: 36px;

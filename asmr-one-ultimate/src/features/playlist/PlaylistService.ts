@@ -10,7 +10,7 @@ const DEFAULT_API_SERVER = 'https://api.asmr-200.com';
 export function getApiBaseUrl(): string {
     try {
         const bridge = KikoeruBridge.getInstance();
-        const baseURL = (bridge.axios as any)?.defaults?.baseURL as string | undefined;
+        const baseURL = bridge.axios.defaults?.baseURL;
         if (baseURL && baseURL.startsWith('http')) {
             const normalized = baseURL.replace(/\/$/, '');
             return normalized.endsWith('/api')
@@ -24,8 +24,9 @@ export function getApiBaseUrl(): string {
 export function getAuthHeader(): Record<string, string> {
     try {
         const bridge = KikoeruBridge.getInstance();
-        const axiosHeader = (bridge.axios as any)?.defaults?.headers?.common?.Authorization
-            || (bridge.axios as any)?.defaults?.headers?.common?.authorization;
+        const axiosDefaults = bridge.axios.defaults as Record<string, unknown>;
+        const headers = (axiosDefaults?.headers as Record<string, Record<string, unknown>> | undefined)?.common;
+        const axiosHeader = (headers?.Authorization || headers?.authorization) as string | undefined;
         if (typeof axiosHeader === 'string' && axiosHeader.trim()) {
             return { Authorization: axiosHeader.trim() };
         }
@@ -58,8 +59,8 @@ export async function apiRequest<T>(endpoint: string, params?: Record<string, st
         if (status === 401) {
             Logger.warn(`[PlaylistDiscovery] 401 for ${endpoint} via axios, falling back to CORS request...`);
         } else {
-            const errCode = (error as any)?.code || 'UNKNOWN';
-            const errMsg = (error as any)?.message || String(error);
+            const errCode = (error as { code?: string })?.code || 'UNKNOWN';
+            const errMsg = (error as { message?: string })?.message || String(error);
             Logger.warn(`[PlaylistDiscovery] Axios request failed for ${endpoint} (Status: ${status} Code: ${errCode}): ${errMsg}, falling back to CORS request...`);
         }
     }

@@ -5,6 +5,7 @@ import { KikoeruBridge } from './KikoeruBridge';
 import { EventBus } from '../core/EventBus';
 
 import { gmRequest, retryWithBackoff } from './HttpClient';
+import type { PlayerTrack } from '../types';
 
 interface AudioDB extends DBSchema {
     blobs: {
@@ -210,12 +211,12 @@ export class AudioCache {
         }
     }
 
-    public async interceptPlay(track: any): Promise<void> {
+    public async interceptPlay(track: PlayerTrack | null): Promise<void> {
         if (!track) return;
         Logger.debug('[AudioCache] interceptPlay called with track:', track);
         // P13 FIX: Support multiple URL naming conventions
-        const downloadUrl = track.mediaDownloadUrl || track.media_download_url || track.file_url;
-        const streamUrl = track.mediaStreamUrl || track.media_stream_url || track.stream_url || track.src || track.url;
+        const downloadUrl = (track.mediaDownloadUrl || track.media_download_url || track.file_url) as string | undefined;
+        const streamUrl = (track.mediaStreamUrl || track.media_stream_url || track.stream_url || track.src || track.url) as string | undefined;
 
         // Try download URL first (cacheable), fall back to stream URL
         let url = downloadUrl && !this.isStream(downloadUrl) ? downloadUrl : streamUrl;
@@ -311,7 +312,7 @@ export class AudioCache {
         }
     }
 
-    private handleTrackChange(track: any): void {
+    private handleTrackChange(track: PlayerTrack): void {
         if (!track) return;
 
         // Prefer direct download URL over streaming URL

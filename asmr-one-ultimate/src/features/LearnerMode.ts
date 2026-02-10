@@ -2,23 +2,38 @@ import { Logger, Config, I18n } from '../core/Utils';
 import { AppStore } from '../store/AppStore';
 import { TranslationService } from '../services/TranslationService';
 import { EventBus } from '../core/EventBus';
-import type { WhisperUpdatePayload } from '../types';
+import type { WhisperUpdatePayload, VueRoute, PlayerTrack, AudioPlayerState } from '../types';
 import { splitSubtitleSegments } from './subtitleSegmentSplitter';
+import {
+    findLyricsSource as findLyricsSourceUtil,
+    normalizeLyricLines,
+    parseLrcContent,
+    parseSubtitleContent,
+    type ExtendedAudioPlayerState,
+} from './learnerLyricsUtils';
 
 import { KikoeruBridge } from '../infrastructure/KikoeruBridge';
 import { getAudioElement, getPlayerBar } from '../core/DomUtils';
+
+/** Normalized lyric line used internally */
+interface LyricLine {
+    time: number;
+    endTime?: number;
+    text: string;
+    words?: Array<{ start: number; end: number; text: string }>;
+}
 
 export class LearnerMode {
     private bridge: KikoeruBridge;
     private expanded: HTMLElement | null = null;
     private collapsed: HTMLElement | null = null;
-    private currentLyrics: any[] = [];
+    private currentLyrics: LyricLine[] = [];
     private lastText = '';
     private lastDisplayedText = ''; // Track what's actually shown to prevent flashing
     private lastSecondaryShown = ''; // Track actual EN translation shown (vs empty placeholder)
     private lastTrackKey: string | null = null;
     private translationToken = 0;
-    private whisperLines: { time: number; endTime?: number; text: string; words?: Array<{ start: number; end: number; text: string }> }[] = [];
+    private whisperLines: LyricLine[] = [];
     private whisperText = '';
     private whisperActive = false;
     private whisperFromCache = false;
@@ -54,6 +69,9 @@ export class LearnerMode {
     private lrcFetchAttemptedHashes = new Set<string>(); // Tracks hashes we've already tried (even if failed)
     private lastNoLyricsLogHash: string | null = null; // Prevent "No lyrics found" spam
     private playerObserver: MutationObserver | null = null;
+    // rAF coalescing — prevent layout thrashing during window resize
+    private rafPlayerObserver = 0;
+    private rafDrawerSync = 0;
 
     // Cached DOM element references (avoid querySelectorAll in hot paths)
     private cachedJpEls: HTMLElement[] = [];
@@ -149,9 +167,9 @@ export class LearnerMode {
         }
 
         // Watch Vue route changes
-        const app = this.bridge.app as any;
+        const app = this.bridge.app;
         if (app?.$watch) {
-            app.$watch('$route', (to: any) => {
+            app.$watch('$route', (to: VueRoute) => {
                 this.lastText = '';
                 this.currentLyrics = [];
                 this.whisperLines = [];
@@ -226,19 +244,26 @@ export class LearnerMode {
     private setupPlayerObserver(): void {
         this.playerObserver?.disconnect();
         this.playerObserver = new MutationObserver(() => {
-            if (!this.expanded || !this.collapsed) {
-                this.ensureUIInjected();
-            } else if (this.cachedJpEls.length > 0 && !this.cachedJpEls[0]?.isConnected) {
-                // Cached subtitle elements detached (DOM rebuilt) — force re-query
-                this.invalidateCachedEls();
-            }
+            if (this.rafPlayerObserver) return;
+            this.rafPlayerObserver = requestAnimationFrame(() => {
+                this.rafPlayerObserver = 0;
+                if (!this.expanded || !this.collapsed) {
+                    this.ensureUIInjected();
+                } else if (this.cachedJpEls.length > 0 && !this.cachedJpEls[0]?.isConnected) {
+                    // Cached subtitle elements detached (DOM rebuilt) — force re-query
+                    this.invalidateCachedEls();
+                }
+            });
         });
         this.playerObserver.observe(document.body, { childList: true, subtree: true });
 
-        // Watch drawer resizes to keep subtitle bar aligned with sidebar edge
+        // Watch drawer resizes to keep subtitle bar aligned with sidebar edge — coalesce via rAF
         const drawer = document.querySelector('.q-drawer--left') as HTMLElement | null;
         if (drawer && typeof ResizeObserver !== 'undefined') {
-            const ro = new ResizeObserver(() => this.syncDrawerWidth());
+            const ro = new ResizeObserver(() => {
+                if (this.rafDrawerSync) return;
+                this.rafDrawerSync = requestAnimationFrame(() => { this.rafDrawerSync = 0; this.syncDrawerWidth(); });
+            });
             ro.observe(drawer);
             this.eventCleanups.push(() => ro.disconnect());
         }
@@ -270,27 +295,27 @@ export class LearnerMode {
             { immediate: true }
         ));
         save(store.watch(
-            (state) => (state.AudioPlayer as any)?.lyrics,
+            (state) => (state.AudioPlayer as AudioPlayerState & Record<string, unknown>)?.lyrics,
             () => this.updateLyrics(),
             { immediate: true }
         ));
         save(store.watch(
-            (state) => (state.AudioPlayer as any)?.lyricLines,
+            (state) => (state.AudioPlayer as AudioPlayerState & Record<string, unknown>)?.lyricLines,
             () => this.updateLyrics(),
             { immediate: true }
         ));
         save(store.watch(
-            (state) => (state.AudioPlayer as any)?.subtitleLines,
+            (state) => (state.AudioPlayer as AudioPlayerState & Record<string, unknown>)?.subtitleLines,
             () => this.updateLyrics(),
             { immediate: true }
         ));
         save(store.watch(
-            (state) => (state.AudioPlayer as any)?.subtitles,
+            (state) => (state.AudioPlayer as AudioPlayerState & Record<string, unknown>)?.subtitles,
             () => this.updateLyrics(),
             { immediate: true }
         ));
         save(store.watch(
-            (state) => (state.AudioPlayer as any)?.subtitle?.lines,
+            (state) => ((state.AudioPlayer as AudioPlayerState & Record<string, unknown>)?.subtitle as Record<string, unknown> | undefined)?.lines,
             () => this.updateLyrics(),
             { immediate: true }
         ));
@@ -503,9 +528,11 @@ export class LearnerMode {
         if (controls) {
             const existing = controls.querySelector('.learner-controls') as HTMLElement | null;
             if (existing) {
-                // Ensure slider exists in expanded player
+                // Ensure slider exists in expanded player (before overflow toggle)
                 if (!existing.querySelector('.asmr-speed-slider-wrap')) {
-                    existing.appendChild(this.createSpeedSlider());
+                    const overflowToggle = existing.querySelector('.learner-overflow-toggle');
+                    const slider = this.createSpeedSlider();
+                    overflowToggle ? existing.insertBefore(slider, overflowToggle) : existing.appendChild(slider);
                 }
                 setTimeout(() => this.captureControls(controls, existing), 0);
                 return;
@@ -954,6 +981,7 @@ export class LearnerMode {
                 Config.set('showJP', !Config.get('showJP'));
                 this.updateStyle();
             }, !!Config.get('showJP')),
+            this.createSpeedSlider(),
             // Overflow Toggle
             (() => {
                 const btn = createBtn('more_vert', I18n.t('more'), (b) => {
@@ -979,8 +1007,7 @@ export class LearnerMode {
                 }, false, 'learner-overflow-toggle');
                 btn.classList.add('hidden');
                 return btn;
-            })(),
-            this.createSpeedSlider()
+            })()
         );
         return div;
     }
@@ -1184,14 +1211,7 @@ export class LearnerMode {
                 // Debug: Log first lyric to check format
                 Logger.debug('[LearnerMode] Lyrics data found:', data.length, 'lines, sample:', JSON.stringify(data[0]));
 
-                const newLyrics = data.map((l: any) => ({
-                    // Handle both milliseconds (lrcLines) and seconds (VTT) formats
-                    time: typeof l.time === 'number'
-                        ? (l.time > 1000 ? l.time / 1000 : l.time)  // Auto-detect ms vs seconds
-                        : parseFloat(l.time || l.start || l.startTime || 0),
-                    endTime: l.end || l.endTime || undefined,
-                    text: l.text || l.content || ''
-                }));
+                const newLyrics = normalizeLyricLines(data as Record<string, unknown>[]);
 
                 // Pre-translate in background if lyrics changed
                 if (newLyrics.length !== this.currentLyrics.length ||
@@ -1402,146 +1422,13 @@ export class LearnerMode {
         this.whisperTickerInterval = 80;
     }
 
-    private findLyricsSource(): any[] | null {
-        const storeLyrics = this.getStoreLyricsSource();
-        if (storeLyrics && storeLyrics.length) {
-            Logger.debug('[LearnerMode] Found lyrics via store', storeLyrics.length);
-            return storeLyrics;
+    private findLyricsSource(): Record<string, unknown>[] | null {
+        const source = findLyricsSourceUtil(this.bridge.store?.state?.AudioPlayer, document);
+        if (source && source.length > 0) {
+            Logger.debug('[LearnerMode] Found lyrics source', source.length);
+            return source as Record<string, unknown>[];
         }
-
-        // Check multiple possible locations for lyrics data
-        const selectors = [
-            '#lyric',
-            '.lyric-content',        // Kikoeru lyrics panel
-            '.q-card__section',      // Parent of lyric-content
-            '.audio-player',
-            '.q-footer'
-        ];
-        for (const selector of selectors) {
-            const el = document.querySelector(selector) as any;
-            if (!el) continue;
-
-            // Try direct Vue instance
-            const vm = el.__vue__;
-            if (vm) {
-                // Check multiple possible property names
-                const data = vm.lyrics || vm.lrcLines || vm.lyricLines ||
-                    vm.$data?.lyrics || vm.$data?.lrcLines ||
-                    vm.$store?.state?.AudioPlayer?.lrcLines;
-                if (Array.isArray(data) && data.length) {
-                    Logger.debug(`[LearnerMode] Found lyrics via ${selector} __vue__`, data.length);
-                    return data;
-                }
-
-                // Walk up parent chain for nested components
-                let parent = vm.$parent;
-                for (let i = 0; i < 5 && parent; i++) {
-                    const parentData = parent.lyrics || parent.lrcLines || parent.lyricLines ||
-                        parent.$data?.lyrics || parent.$data?.lrcLines;
-                    if (Array.isArray(parentData) && parentData.length) {
-                        Logger.debug(`[LearnerMode] Found lyrics via ${selector} parent chain`, parentData.length);
-                        return parentData;
-                    }
-                    parent = parent.$parent;
-                }
-            }
-        }
-
-        // Try parsing lyrics from DOM if component data not accessible
-        const lrcDom = this.parseLyricsFromDom();
-        if (lrcDom && lrcDom.length > 0) {
-            Logger.debug('[LearnerMode] Parsed lyrics from DOM', lrcDom.length);
-            return lrcDom;
-        }
-
         return null;
-    }
-
-    private getStoreLyricsSource(): any[] | null {
-        const player = (this.bridge.store?.state?.AudioPlayer || {}) as any;
-        const candidates: any[] = [
-            player.lyrics,
-            player.lyricLines,
-            player.lrcLines,
-            player.lrc,
-            player.subtitleLines,
-            player.subtitles,
-            player.subtitle?.lines,
-            player.subtitle?.lrcLines,
-            player.subtitle?.lyrics,
-            player.subtitle?.items,
-            player.subtitle?.cues,
-            player.lyric?.lines,
-        ];
-
-        for (const candidate of candidates) {
-            if (Array.isArray(candidate) && candidate.length > 0) return candidate;
-        }
-
-        // One-level deep scan for arrays of timed lines
-        for (const key of Object.keys(player)) {
-            const value = player[key];
-            if (!value || typeof value !== 'object') continue;
-            if (Array.isArray(value) && value.length > 0) {
-                if (this.isLyricLineArray(value)) return value;
-            } else {
-                const inner = (value as any).lines || (value as any).items || (value as any).cues;
-                if (Array.isArray(inner) && inner.length > 0 && this.isLyricLineArray(inner)) {
-                    return inner;
-                }
-            }
-        }
-
-        return null;
-    }
-
-    private isLyricLineArray(lines: any[]): boolean {
-        const sample = lines.find(l => l);
-        if (!sample) return false;
-        return typeof sample.text === 'string' || typeof sample.content === 'string' || typeof sample.lyric === 'string';
-    }
-
-    /**
-     * Parse lyrics directly from DOM when Vue instance data isn't accessible.
-     * Looks for the lyric-content panel and extracts timestamps and text.
-     */
-    private parseLyricsFromDom(): Array<{ time: number; text: string }> | null {
-        const lyricContent = document.querySelector('.lyric-content');
-        if (!lyricContent) return null;
-
-        const items = lyricContent.querySelectorAll('.q-item');
-        if (items.length === 0) return null;
-
-        const lyrics: Array<{ time: number; text: string }> = [];
-        const timestampRegex = /\[(\d+):(\d+)\.(\d+)\]/;
-
-        for (const item of Array.from(items)) {
-            const label = item.querySelector('.q-item__label');
-            if (!label) continue;
-
-            // Get timestamp from caption element
-            const caption = item.querySelector('.q-item__label--caption');
-            const captionText = caption?.textContent?.trim() || '';
-            const match = timestampRegex.exec(captionText);
-
-            // Get the actual lyric text (text node after the caption div)
-            const labelText = label.textContent?.replace(captionText, '').trim() || '';
-
-            if (match && labelText) {
-                const minutes = parseInt(match[1], 10);
-                const seconds = parseInt(match[2], 10);
-                const centiseconds = parseInt(match[3], 10);
-                // Convert to milliseconds (matching Kikoeru's lrcLines format)
-                const timeMs = (minutes * 60 + seconds) * 1000 + centiseconds * 10;
-
-                lyrics.push({
-                    time: timeMs,
-                    text: labelText
-                });
-            }
-        }
-
-        return lyrics.length > 0 ? lyrics : null;
     }
 
     /**
@@ -1579,7 +1466,7 @@ export class LearnerMode {
         return this.lrcFetchPromise;
     }
 
-    private async _fetchLrcForCurrentTrackInner(track: any, trackHash: string): Promise<void> {
+    private async _fetchLrcForCurrentTrackInner(track: PlayerTrack, trackHash: string): Promise<void> {
         Logger.debug('[LearnerMode] fetchLrcForCurrentTrack:', track.title || track.hash || 'unknown');
 
         let fetched = false;
@@ -1687,11 +1574,7 @@ export class LearnerMode {
 
             Logger.debug(`[LearnerMode] Fetched subtitle content (${content.length} chars)`);
 
-            // Try VTT format first, then LRC format
-            let lyrics = this.parseVttContent(content);
-            if (lyrics.length === 0) {
-                lyrics = this.parseLrcContent(content);
-            }
+            const lyrics = parseSubtitleContent(content);
 
             if (lyrics.length > 0) {
                 Logger.debug(`[LearnerMode] Parsed ${lyrics.length} cues from subtitle file`);
@@ -1707,69 +1590,6 @@ export class LearnerMode {
             Logger.error('[LearnerMode] Error fetching subtitle:', err);
         }
         return false;
-    }
-
-    /**
-     * Parse VTT (WebVTT) file content into lyrics array.
-     * VTT format:
-     * WEBVTT
-     *
-     * 00:00:01.000 --> 00:00:04.000
-     * First subtitle line
-     */
-    private parseVttContent(content: string): Array<{ time: number; endTime?: number; text: string }> {
-        const lyrics: Array<{ time: number; endTime?: number; text: string }> = [];
-        const lines = content.split(/\r?\n/);
-
-        // VTT timestamp regex: HH:MM:SS.mmm or MM:SS.mmm
-        const timestampRegex = /^(?:(\d+):)?(\d{2}):(\d{2})\.(\d{3})\s*-->\s*(?:(\d+):)?(\d{2}):(\d{2})\.(\d{3})/;
-
-        let i = 0;
-        // Skip WEBVTT header and any metadata
-        while (i < lines.length && !timestampRegex.test(lines[i])) {
-            i++;
-        }
-
-        while (i < lines.length) {
-            const line = lines[i];
-            const match = timestampRegex.exec(line);
-
-            if (match) {
-                // Parse start time
-                const startHours = match[1] ? parseInt(match[1], 10) : 0;
-                const startMinutes = parseInt(match[2], 10);
-                const startSeconds = parseInt(match[3], 10);
-                const startMs = parseInt(match[4], 10);
-                const startTime = startHours * 3600 + startMinutes * 60 + startSeconds + startMs / 1000;
-
-                // Parse end time
-                const endHours = match[5] ? parseInt(match[5], 10) : 0;
-                const endMinutes = parseInt(match[6], 10);
-                const endSeconds = parseInt(match[7], 10);
-                const endMs = parseInt(match[8], 10);
-                const endTime = endHours * 3600 + endMinutes * 60 + endSeconds + endMs / 1000;
-
-                // Collect subtitle text (can be multiple lines)
-                i++;
-                const textLines: string[] = [];
-                while (i < lines.length && lines[i].trim() !== '' && !timestampRegex.test(lines[i])) {
-                    // Skip cue identifiers (lines that are just numbers)
-                    if (!/^\d+$/.test(lines[i].trim())) {
-                        textLines.push(lines[i].trim());
-                    }
-                    i++;
-                }
-
-                const text = textLines.join(' ').trim();
-                if (text) {
-                    lyrics.push({ time: startTime, endTime, text });
-                }
-            } else {
-                i++;
-            }
-        }
-
-        return lyrics;
     }
 
     /**
@@ -1791,7 +1611,7 @@ export class LearnerMode {
             Logger.debug(`[LearnerMode] Fetched LRC content (${lrcContent.length} chars)`);
 
             // Parse LRC format
-            const lyrics = this.parseLrcContent(lrcContent);
+            const lyrics = parseLrcContent(lrcContent);
             if (lyrics.length > 0) {
                 Logger.debug(`[LearnerMode] Parsed ${lyrics.length} lines from LRC file`);
                 // Set lastTrackKey FIRST to prevent updateLyrics() from clearing our lyrics
@@ -1807,56 +1627,6 @@ export class LearnerMode {
             Logger.debug('[LearnerMode] Error fetching LRC by hash:', err);
         }
         return false;
-    }
-
-    /**
-     * Parse LRC file content into lyrics array.
-     * LRC format: [mm:ss.xx]Text or [mm:ss]Text
-     */
-    private parseLrcContent(content: string): Array<{ time: number; text: string }> {
-        const lyrics: Array<{ time: number; text: string }> = [];
-        const lines = content.split(/\r?\n/);
-
-        // LRC timestamp regex: [mm:ss.xx] or [mm:ss] or [m:ss.xx]
-        const timestampRegex = /\[(\d+):(\d+)(?:\.(\d+))?\]/g;
-
-        for (const line of lines) {
-            if (!line.trim()) continue;
-
-            // Skip metadata lines like [ti:Title], [ar:Artist], etc.
-            if (/^\[(ti|ar|al|by|offset|re|ve):/i.test(line)) continue;
-
-            // Extract all timestamps and the text
-            const timestamps: number[] = [];
-            let text = line;
-            let match;
-
-            while ((match = timestampRegex.exec(line)) !== null) {
-                const minutes = parseInt(match[1], 10);
-                const seconds = parseInt(match[2], 10);
-                const centiseconds = match[3] ? parseInt(match[3].padEnd(2, '0').slice(0, 2), 10) : 0;
-
-                // Convert to seconds (for consistency with audio.currentTime)
-                const time = minutes * 60 + seconds + centiseconds / 100;
-                timestamps.push(time);
-
-                // Remove this timestamp from text
-                text = text.replace(match[0], '');
-            }
-
-            text = text.trim();
-            if (!text || timestamps.length === 0) continue;
-
-            // Add a lyric entry for each timestamp (some LRC files have multiple timestamps per line)
-            for (const time of timestamps) {
-                lyrics.push({ time, text });
-            }
-        }
-
-        // Sort by time
-        lyrics.sort((a, b) => a.time - b.time);
-
-        return lyrics;
     }
 
     /**
@@ -2120,6 +1890,8 @@ export class LearnerMode {
         this.expanded = null;
         this.collapsed?.remove();
         this.collapsed = null;
+        if (this.rafPlayerObserver) { cancelAnimationFrame(this.rafPlayerObserver); this.rafPlayerObserver = 0; }
+        if (this.rafDrawerSync) { cancelAnimationFrame(this.rafDrawerSync); this.rafDrawerSync = 0; }
         this.playerObserver?.disconnect();
         this.playerObserver = null;
         this.clearWhisperTicker();
@@ -2149,7 +1921,7 @@ export class LearnerMode {
         const domText = document.querySelector('#lyric')?.textContent?.trim() || '';
         if (domText) return domText;
 
-        const player = this.bridge.store?.state?.AudioPlayer as any;
+        const player = this.bridge.store?.state?.AudioPlayer as ExtendedAudioPlayerState | undefined;
         const storeText = player?.currentLyric?.trim()
             || player?.currentLyricText?.trim()
             || player?.subtitle?.current?.trim()
@@ -2233,9 +2005,9 @@ export class LearnerMode {
     }
 
     private findActiveLine(
-        lines: { time: number; endTime?: number; text: string; words?: Array<{ start: number; end: number; text: string }> }[],
+        lines: LyricLine[],
         now: number
-    ): { time: number; endTime?: number; text: string } | null {
+    ): LyricLine | null {
         if (lines.length === 0) return null;
 
         let activeIdx = -1;
@@ -2261,7 +2033,7 @@ export class LearnerMode {
     }
 
     private getTextFromTimelineFor(
-        lines: { time: number; endTime?: number; text: string; words?: Array<{ start: number; end: number; text: string }> }[],
+        lines: LyricLine[],
         leadSec = 0,
         progressive = false,
         appendWindowSec = 0,
@@ -2317,7 +2089,7 @@ export class LearnerMode {
         return this.getTextFromTimelineFor(this.whisperLines, this.effectiveLead(this.whisperLeadSec), true);
     }
 
-    private getWhisperDisplay(): { displayText: string; fullText: string; activeLine?: any; now?: number; audioTime?: number } {
+    private getWhisperDisplay(): { displayText: string; fullText: string; activeLine?: LyricLine; now?: number; audioTime?: number } {
         const audio = getAudioElement();
         if (!audio || this.whisperLines.length === 0) return { displayText: '', fullText: '' };
         const audioTime = audio.currentTime;
@@ -2333,7 +2105,7 @@ export class LearnerMode {
      * Get progressive subtitle display for regular lyrics (VTT/LRC).
      * Returns both the progressive (word-by-word) text and the full segment text.
      */
-    private getSubtitleDisplay(): { displayText: string; fullText: string; activeLine?: any; now?: number; audioTime?: number } {
+    private getSubtitleDisplay(): { displayText: string; fullText: string; activeLine?: LyricLine; now?: number; audioTime?: number } {
         const audio = getAudioElement();
         if (!audio || this.currentLyrics.length === 0) return { displayText: '', fullText: '' };
         const audioTime = audio.currentTime;
@@ -2511,4 +2283,3 @@ export class LearnerMode {
         this.cachedElsDirty = true;
     }
 }
-

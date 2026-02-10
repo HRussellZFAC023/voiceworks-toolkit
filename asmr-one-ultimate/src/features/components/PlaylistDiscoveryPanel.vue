@@ -12,7 +12,7 @@
  * - Text search filter with debounce
  */
 
-import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue';
+import { ref, computed, watch, onMounted, onUnmounted, nextTick, type ComponentPublicInstance } from 'vue';
 import { useBridge } from '../../composables/useBridge';
 import { useI18n } from '../../composables/useI18n';
 import { useConfig } from '../../composables/useConfig';
@@ -24,6 +24,7 @@ import { AuthApi } from '../../api/Auth';
 import { AppStore } from '../../store/AppStore';
 import { apiRequest } from '../playlist/PlaylistService';
 import KNOWN_PLAYLISTS from '../../data/known-playlists.json';
+import type { VueRouter } from '../../types';
 import type { PlaylistEntry, PlaylistMetadata, PlaylistWorksResponse } from '../../api/Playlist';
 import type {
     CachedPlaylistMetadata,
@@ -34,6 +35,29 @@ import type {
     PlaylistFetchResult,
     PlaylistListResponse,
 } from '../playlist/types';
+
+/** Location parameter accepted by Vue Router push/replace */
+type RouteLocation = string | { path?: string; query?: Record<string, string | string[] | undefined> };
+
+/** Vue Router extended with our monkey-patch marker */
+type PatchableVueRouter = VueRouter & { __asmrPatched?: boolean };
+
+/** Loosely-typed Vue 2 component instance for native DOM __vue__ access */
+interface Vue2Instance {
+    [key: string]: unknown;
+    $data?: Record<string, unknown>;
+    $parent?: Vue2Instance;
+    $forceUpdate?: () => void;
+    options?: Vue2SelectOption[];
+    $watch?: (expr: string, callback: (newVal: unknown, oldVal: unknown) => void) => (() => void);
+}
+
+/** Shape of the native dropdown select option */
+interface Vue2SelectOption {
+    label?: string;
+    value?: string;
+    [key: string]: unknown;
+}
 
 // ---------------------------------------------------------------------------
 // Composables
@@ -330,7 +354,7 @@ async function fetchAllPlaylistPages(filterBy: 'all' | 'liked' | 'owned', pageSi
         page: 1, pageSize, filterBy,
     });
     const firstData = Array.isArray(first) ? first : (first?.playlists || []);
-    const pagination = (first as any)?.pagination;
+    const pagination = (!Array.isArray(first) && first) ? first.pagination : undefined;
     const totalCount: number = pagination?.totalCount ?? firstData.length;
     const totalPages = Math.ceil(totalCount / pageSize);
 
@@ -691,8 +715,9 @@ function processCoverUpdateQueue(): void {
                             rateLimitBackoff = Math.max(1, rateLimitBackoff * 0.9);
                         }
                     })
-                    .catch((err: any) => {
-                        if (err?.status === 429) {
+                    .catch((err: unknown) => {
+                        const e = err as { status?: number };
+                        if (e?.status === 429) {
                             rateLimitBackoff = Math.min(rateLimitBackoff * 2, 30);
                             rateLimitUntil = Date.now() + (5000 * rateLimitBackoff);
                             Logger.warn(`[PlaylistDiscovery] Rate limit hit! Backing off for ${5 * rateLimitBackoff}s`);
@@ -774,9 +799,9 @@ async function updatePlaylistCoverAndCount(playlist: FetchedPlaylist, pageSize: 
 
         updateLoadedPlaylist(playlistId, playlist);
         return true;
-    } catch (error: any) {
+    } catch (error: unknown) {
         Logger.warn(`[PlaylistDiscovery] Failed to update cover/count for ${playlistId}:`, error);
-        if (error?.status === 429) throw error;
+        if ((error as { status?: number })?.status === 429) throw error;
         return false;
     }
 }
@@ -1202,16 +1227,17 @@ function handleLoadMore(): void {
 
 function patchVueRouter(): void {
     try {
-        const router = bridge.router;
-        if (!router || (router as any).__asmrPatched) return;
+        const router = bridge.router as PatchableVueRouter;
+        if (!router || router.__asmrPatched) return;
 
         const originalPush = router.push.bind(router);
         const originalReplace = router.replace?.bind(router);
 
-        router.push = function (location: any, onComplete?: any, onAbort?: any) {
-            return (originalPush as any)(location, onComplete, onAbort).catch((err: any) => {
-                if (err?.name === 'NavigationDuplicated' ||
-                    err?.message?.includes('Avoided redundant navigation')) {
+        router.push = function (location: RouteLocation) {
+            return originalPush(location).catch((err: unknown) => {
+                const e = err as { name?: string; message?: string };
+                if (e?.name === 'NavigationDuplicated' ||
+                    e?.message?.includes('Avoided redundant navigation')) {
                     return Promise.resolve();
                 }
                 throw err;
@@ -1219,10 +1245,11 @@ function patchVueRouter(): void {
         };
 
         if (originalReplace) {
-            router.replace = function (location: any, onComplete?: any, onAbort?: any) {
-                return (originalReplace as any)(location, onComplete, onAbort).catch((err: any) => {
-                    if (err?.name === 'NavigationDuplicated' ||
-                        err?.message?.includes('Avoided redundant navigation')) {
+            router.replace = function (location: RouteLocation) {
+                return originalReplace(location).catch((err: unknown) => {
+                    const e = err as { name?: string; message?: string };
+                    if (e?.name === 'NavigationDuplicated' ||
+                        e?.message?.includes('Avoided redundant navigation')) {
                         return Promise.resolve();
                     }
                     throw err;
@@ -1230,7 +1257,7 @@ function patchVueRouter(): void {
             };
         }
 
-        (router as any).__asmrPatched = true;
+        router.__asmrPatched = true;
         Logger.debug('[PlaylistDiscovery] Patched Vue Router to handle NavigationDuplicated');
     } catch (e) {
         Logger.warn('[PlaylistDiscovery] Failed to patch Vue Router:', e);
@@ -1297,7 +1324,7 @@ function restoreNativeGridAndPagination(): void {
 
 function setupNativeFilterWatcher(): void {
     const select = document.querySelector('.q-page .q-select');
-    const selectVue = (select as any)?.__vue__;
+    const selectVue = (select as HTMLElement & { __vue__?: Vue2Instance })?.__vue__;
 
     if (!selectVue) {
         Logger.warn('[PlaylistDiscovery] Could not find native filter dropdown');
@@ -1307,7 +1334,7 @@ function setupNativeFilterWatcher(): void {
     const options = selectVue.options;
     if (Array.isArray(options)) {
         const onlineLabel = t('playlistOnlineOnly');
-        const hasOnlineOption = options.some((opt: any) =>
+        const hasOnlineOption = options.some((opt: Vue2SelectOption) =>
             opt?.label === onlineLabel || opt?.value === 'online'
         );
 
@@ -1322,8 +1349,9 @@ function setupNativeFilterWatcher(): void {
     }
 
     if (selectVue.$watch) {
-        const nativeFilterUnwatch = selectVue.$watch('value', (newVal: any) => {
-            const valueLabel = newVal?.label || newVal?.value || '';
+        const nativeFilterUnwatch = selectVue.$watch('value', (newVal: unknown) => {
+            const v = newVal as Vue2SelectOption | null;
+            const valueLabel = v?.label || v?.value || '';
             const valueLower = String(valueLabel).toLowerCase();
             const onlineLabelLower = t('playlistOnlineOnly').toLowerCase();
 
@@ -1549,7 +1577,7 @@ onUnmounted(() => {
                                     v-else
                                     class="absolute-full fit playlist-lazy-image"
                                     :data-src="getCardData(playlist).coverUrl"
-                                    :ref="(el: any) => onLazyImageMounted(el as HTMLElement)"
+                                    :ref="(el: Element | ComponentPublicInstance | null) => onLazyImageMounted(el as HTMLElement)"
                                     style="width: 100%; height: 100%; object-fit: cover;"
                                     alt=""
                                 />
@@ -1617,7 +1645,7 @@ onUnmounted(() => {
         <!-- Infinite scroll sentinel -->
         <div
             v-show="showSentinel"
-            :ref="(el: any) => onSentinelRef(el as HTMLElement)"
+            :ref="(el: Element | ComponentPublicInstance | null) => onSentinelRef(el as HTMLElement)"
             style="height: 20px; margin: 20px 0;"
         >
             <div class="text-center text-caption text-grey">

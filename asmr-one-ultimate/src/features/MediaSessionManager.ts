@@ -1,6 +1,8 @@
 import { KikoeruBridge } from '../infrastructure/KikoeruBridge';
 import { Logger } from '../core/Utils';
 import { getAudioElement } from '../core/DomUtils';
+import type { KikoeruStoreState, AudioPlayerState } from '../types';
+import type { PlayerTrack, WorkDetail } from '../types';
 
 export class MediaSessionManager {
     private bridge: KikoeruBridge;
@@ -22,12 +24,12 @@ export class MediaSessionManager {
         if (store.watch) {
             // Watch current track specifically for metadata updates
             this.unwatch = store.watch(
-                (state: any) => ({
+                (state: KikoeruStoreState) => ({
                     track: state.AudioPlayer?.currentTrack || state.AudioPlayer?.currentPlayingFile,
                     playing: state.AudioPlayer?.playing,
                     work: state.AudioPlayer?.work
                 }),
-                (val: any) => this.update(val)
+                (val: { track: PlayerTrack | undefined; playing: boolean | undefined; work: WorkDetail | undefined }) => this.update(val)
             );
         }
 
@@ -43,27 +45,27 @@ export class MediaSessionManager {
         });
     }
 
-    private update(state: { track: any; playing: boolean; work: any }): void {
+    private update(state: { track: PlayerTrack | undefined; playing: boolean | undefined; work: WorkDetail | undefined }): void {
         this.updateMetadata(state.track, state.work);
-        this.updatePlaybackState(state.playing);
+        this.updatePlaybackState(!!state.playing);
     }
 
-    private updateMetadata(track: any, work: any): void {
+    private updateMetadata(track: PlayerTrack | undefined, work: WorkDetail | undefined): void {
         const title = track?.title || (work ? (work.title || 'Unknown Work') : 'No Track');
         const artist = work?.name || work?.circle?.name || (track?.workTitle || 'ASMR.one');
         const album = work?.title || 'Unknown Album';
 
         // Try to find the best cover (comprehensive fallback chain)
-        let artwork: any[] = [];
+        let artwork: MediaImage[] = [];
+        const w = work as (WorkDetail & Record<string, unknown>) | undefined;
         const coverUrl =
             track?.cover ||
-            work?.main_cover_url ||
-            work?.mainCoverUrl ||
-            work?.main_cover ||
-            work?.cover ||
-            work?.thumbnail ||
-            work?.image_main?.url ||
-            work?.image_thum?.url;
+            w?.mainCoverUrl ||
+            (w?.main_cover as string | undefined) ||
+            (w?.cover as string | undefined) ||
+            (w?.thumbnail as string | undefined) ||
+            ((w?.image_main as { url?: string } | undefined)?.url) ||
+            ((w?.image_thum as { url?: string } | undefined)?.url);
 
         if (coverUrl) {
             // Provide multiple sizes for better quality on different devices
@@ -101,10 +103,10 @@ export class MediaSessionManager {
         const ms = navigator.mediaSession;
         const store = this.bridge.store;
 
-        const safeDispatch = (action: string, payload?: any) => {
+        const safeDispatch = (action: string, payload?: unknown) => {
             Logger.debug(`[MediaSession] Action triggered: ${action}`);
             if (store.dispatch) {
-                store.dispatch(action, payload).catch((err: any) =>
+                store.dispatch(action, payload).catch((err: unknown) =>
                     Logger.warn(`[MediaSession] Action ${action} failed:`, err)
                 );
             }

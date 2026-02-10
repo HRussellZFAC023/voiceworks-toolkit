@@ -18,6 +18,7 @@
  */
 
 const ALLOWED_ORIGIN_PATTERN = /^https?:\/\/(localhost(:\d+)?|.*\.workers\.dev|.*asmr.*)$/;
+const DLSITE_HOST_PATTERN = /^(?:[a-z0-9-]+\.)*dlsite\.(?:com|jp)$/i;
 
 export default {
     async fetch(request) {
@@ -27,7 +28,10 @@ export default {
         }
 
         const url = new URL(request.url);
-        const path = url.pathname + url.search;
+        const query = new URLSearchParams(url.search);
+        const hostOverride = query.get('__host');
+        if (hostOverride) query.delete('__host');
+        const path = url.pathname + (query.toString() ? `?${query.toString()}` : '');
 
         if (path === '/' || path === '') {
             return new Response('DLsite CORS Proxy. Append a DLsite path to proxy it.', {
@@ -36,8 +40,11 @@ export default {
             });
         }
 
-        // Build target DLsite URL
-        const target = `https://www.dlsite.com${path}`;
+        // Build target DLsite URL (default www, override for hosts like img.dlsite.jp)
+        const targetHost = hostOverride && DLSITE_HOST_PATTERN.test(hostOverride)
+            ? hostOverride
+            : 'www.dlsite.com';
+        const target = `https://${targetHost}${path}`;
 
         try {
             const resp = await fetch(target, {

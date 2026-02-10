@@ -20,13 +20,54 @@ import { KikoeruBridge } from '../infrastructure/KikoeruBridge';
 import { CentralObserver } from '../core/CentralObserver';
 import { mountApp, type MountedApp } from '../core/MountApp';
 import { Logger } from '../core/Utils';
-import { getCleanText } from '../core/DomUtils';
 import { WorkService } from '../services/WorkService';
 import { ThumbnailManager } from './media/ThumbnailManager';
 import type { MediaFile, WorkTreeComponent } from './media/types';
 import type { KikoeruApp } from '../types/store';
 import type { TrackFolder, TrackItem } from '../types/api';
 import MediaLightboxVue from './components/MediaLightbox.vue';
+import {
+    findMatchingMediaItem,
+    getFileExtension,
+    isImageExtension,
+    isPdfExtension,
+    isTextExtension,
+    isVideoExtension,
+} from './media/mediaFileUtils';
+import { buildMediaStreamUrl } from './media/mediaStreamUrlUtils';
+import {
+    applyMediaViewerWorkTreePatch,
+    restoreMediaViewerWorkTreePatch,
+    type WorkTreeClickHandler,
+} from './media/mediaViewerWorkTreePatchUtils';
+import {
+    type ViewerMediaType,
+    type Vue2MediaElement,
+    getMediaTitleFromListItem,
+    matchesRequestedMediaType,
+    readMediaHashFromElement,
+    readMediaItemFromVueElement,
+    resolveMediaTypeForCandidate,
+    shouldIgnoreDelegatedClickTarget,
+} from './media/mediaViewerDomUtils';
+
+/** Extended WorkTree with imperative patching marker and Vue 2 internals */
+interface PatchableWorkTree extends WorkTreeComponent {
+    __mediaViewerPatched?: boolean;
+    __mediaViewerOriginalOnClickItem?: WorkTreeClickHandler<MediaFile>;
+    $el?: HTMLElement;
+    $data?: Record<string, unknown>;
+    _data?: Record<string, unknown>;
+    tree?: Array<TrackFolder | TrackItem>;
+}
+
+/** Vue 3 App internals for accessing exposed methods */
+interface Vue3AppInternal {
+    _instance?: {
+        exposed?: Record<string, unknown>;
+        proxy?: Record<string, unknown>;
+    };
+}
 
 /** Shape of the methods exposed by MediaLightbox.vue via defineExpose */
 interface MediaLightboxExposed {
@@ -39,18 +80,6 @@ interface MediaLightboxExposed {
     hideModal(): void;
     getIsActive(): boolean;
 }
-
-// File extensions (duplicated from lightbox for click interception)
-const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg'];
-const VIDEO_EXTENSIONS = ['.mp4', '.webm', '.mov', '.avi', '.mkv', '.m4v'];
-const PDF_EXTENSIONS = ['.pdf'];
-const TEXT_EXTENSIONS = ['.txt', '.md', '.log', '.nfo', '.csv', '.json', '.srt', '.ass', '.vtt', '.lrc'];
-
-declare const unsafeWindow: Window & typeof globalThis;
-
-const globalWindow = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window) as Window & {
-    __ASMR_MEDIA_VIEWER__?: MediaViewerController;
-};
 
 export class MediaViewerController {
     private static _instance: MediaViewerController | null = null;
@@ -66,6 +95,7 @@ export class MediaViewerController {
     private delegatedClickInstalled = false;
     private thumbnailCache = new Map<string, string>();
     private thumbnailManager: ThumbnailManager;
+    private patchedWorkTree: PatchableWorkTree | null = null;
 
     // Bound event handlers
     private boundDelegatedClick: (e: MouseEvent) => void;
@@ -73,6 +103,7 @@ export class MediaViewerController {
     // Cleanup handles
     private playerWatcher: (() => void) | undefined;
     private routeCleanupUnsubscribe: (() => void) | undefined;
+    private folderPathWatcherCleanup: (() => void) | undefined;
 
     private constructor() {
         this.bridge = KikoeruBridge.getInstance();
@@ -84,9 +115,9 @@ export class MediaViewerController {
             getWorkIdFromUrl: () => this.getWorkIdFromUrl(),
             flattenTracksResponse: (tracks) => this.flattenTracksResponse(tracks),
             getWorkTreeTree: () => this.getWorkTreeTree(),
-            getFileExtension: (fileName) => this.getFileExtension(fileName),
-            isImage: (ext) => this.isImage(ext),
-            isVideo: (ext) => this.isVideo(ext),
+            getFileExtension,
+            isImage: isImageExtension,
+            isVideo: isVideoExtension,
             getMediaUrl: (hash, fileData) => this.getMediaUrl(hash, fileData),
             thumbnailCache: this.thumbnailCache,
         });
@@ -147,9 +178,12 @@ export class MediaViewerController {
             this.routeCleanupUnsubscribe = undefined;
         }
 
+        this.cleanupFolderWatcher();
+        this.cleanupWorkTreePatch();
         this.unmount();
         this.workTreeHooked = false;
         this.folderWatcherSetup = false;
+        this.activeRequestId++;
         this.thumbnailCache.clear();
     }
 
@@ -180,13 +214,13 @@ export class MediaViewerController {
 
             // Get the component instance to call exposed methods.
             // Vue 3's createApp()._instance.exposed holds the defineExpose() API.
-            const appAny = this.mounted.app as any;
-            const exposed = appAny._instance?.exposed;
+            const appInternal = this.mounted.app as unknown as Vue3AppInternal;
+            const exposed = appInternal._instance?.exposed;
             if (exposed) {
-                this.lightboxRef = exposed as MediaLightboxExposed;
+                this.lightboxRef = exposed as unknown as MediaLightboxExposed;
             } else {
                 // Fallback: try the proxy (component instance itself)
-                const proxy = appAny._instance?.proxy;
+                const proxy = appInternal._instance?.proxy;
                 if (proxy) {
                     this.lightboxRef = proxy as unknown as MediaLightboxExposed;
                 }
@@ -236,34 +270,23 @@ export class MediaViewerController {
 
         const qItem = target.closest('.q-item') as HTMLElement | null;
         if (!qItem) return;
+        if (shouldIgnoreDelegatedClickTarget(target, qItem)) return;
 
-        const labelEl = qItem.querySelector('.q-item__label');
-        if (!labelEl) return;
-
-        let title = this.getCleanLabelText(labelEl);
-        const translationMatch = title.match(/^(.+?)\s*\([^)]+\)$/);
-        if (translationMatch) title = translationMatch[1].trim();
+        const title = getMediaTitleFromListItem(qItem);
         if (!title) return;
 
-        const ext = this.getFileExtension(title);
-        const isImg = this.isImage(ext);
-        const isVid = this.isVideo(ext);
-        const isPdf = this.isPdf(ext);
-        const isTxt = this.isText(ext);
-        if (!isImg && !isVid && !isPdf && !isTxt) return;
+        const vueItem = readMediaItemFromVueElement(qItem as Vue2MediaElement);
+        const mediaType = resolveMediaTypeForCandidate(title, vueItem?.type);
+        if (!mediaType) return;
 
         e.stopPropagation();
         e.preventDefault();
 
-        let hash = '';
+        let hash = readMediaHashFromElement(qItem as Vue2MediaElement);
         let itemData: MediaFile | null = null;
 
-        // Check for stashed hash
-        if (!itemData) {
-            hash = qItem.dataset.asmrHash || qItem.dataset.asmrFlatHash || '';
-            if (hash) {
-                itemData = { hash, title, type: isImg ? 'image' : isVid ? 'video' : isPdf ? 'pdf' : 'text' };
-            }
+        if (hash) {
+            itemData = { hash, title, type: mediaType };
         }
 
         // Try thumbnail as fallback
@@ -274,41 +297,24 @@ export class MediaViewerController {
                     hash: `__delegated_stream_${Date.now()}`,
                     title,
                     mediaStreamUrl: thumbImg.src,
-                    type: isImg ? 'image' : isVid ? 'video' : 'text'
+                    type: mediaType,
                 };
             }
         }
 
         // For native tree items, try Vue component data
-        if (!itemData) {
-            const vueEl = qItem as any;
-            if (vueEl.__vue__) {
-                const candidates = [
-                    vueEl.__vue__.$attrs?.item,
-                    vueEl.__vue__.item,
-                    vueEl.__vue__.$props?.item,
-                    vueEl.__vue__.file,
-                    vueEl.__vue__.$props?.file,
-                    vueEl.__vue__.node,
-                    vueEl.__vue__.$props?.node
-                ];
-                for (const candidate of candidates) {
-                    if (candidate && candidate.hash) {
-                        itemData = candidate;
-                        hash = candidate.hash;
-                        break;
-                    }
-                }
-            }
+        if (!itemData && vueItem) {
+            itemData = vueItem;
+            hash = vueItem.hash;
         }
 
         // Fallback: try WorkTree component's fatherFolder
         if (!itemData) {
-            const workTree = this.findWorkTreeComponent();
-            const folder = (workTree as any)?.fatherFolder ||
-                (workTree as any)?.$data?.fatherFolder || [];
+            const workTree = this.findWorkTreeComponent() as PatchableWorkTree | null;
+            const folder = (workTree?.fatherFolder ??
+                workTree?.$data?.fatherFolder ?? []) as MediaFile[];
             if (folder.length > 0) {
-                const match = this.findMatchingMediaItem({ hash: '', title }, folder);
+                const match = findMatchingMediaItem({ hash: '', title }, folder);
                 if (match) {
                     itemData = match;
                     hash = match.hash || '';
@@ -320,7 +326,6 @@ export class MediaViewerController {
             itemData = { hash: hash || `__delegated_${Date.now()}`, title };
         }
 
-        const mediaType: 'image' | 'video' | 'pdf' | 'text' = isImg ? 'image' : isVid ? 'video' : isPdf ? 'pdf' : 'text';
         Logger.debug(`[MediaViewerController] Delegated click: ${title} (${mediaType}), hash=${itemData.hash}`);
 
         const workTreeContext = this.findWorkTreeComponent() || undefined;
@@ -351,46 +356,50 @@ export class MediaViewerController {
 
     private findWorkTreeElement(): HTMLElement | null {
         return document.getElementById('work-tree')
-            || (this.findWorkTreeComponent() as any)?.$el as HTMLElement
+            || (this.findWorkTreeComponent() as PatchableWorkTree | null)?.$el
             || null;
     }
 
     private patchWorkTree(workTree: WorkTreeComponent): void {
         const self = this;
-        const original = workTree.onClickItem;
         const workTreeRef = workTree;
+        const patchable = workTree as PatchableWorkTree;
 
-        if (!original) {
+        if (typeof patchable.onClickItem !== 'function') {
             Logger.warn('[MediaViewerController] WorkTree.onClickItem not found');
             return;
         }
 
-        if ((workTree as any).__mediaViewerPatched) return;
-        (workTree as any).__mediaViewerPatched = true;
+        const patched = applyMediaViewerWorkTreePatch<MediaFile>(
+            patchable as unknown as {
+                onClickItem?: WorkTreeClickHandler<MediaFile>;
+                __mediaViewerPatched?: boolean;
+                __mediaViewerOriginalOnClickItem?: WorkTreeClickHandler<MediaFile>;
+            },
+            (original: WorkTreeClickHandler<MediaFile>) => function (this: WorkTreeComponent, item: MediaFile) {
+                if (matchesRequestedMediaType(item, 'image')) {
+                    self.showMedia(item, 'image', workTreeRef);
+                    return;
+                }
+                if (matchesRequestedMediaType(item, 'video')) {
+                    self.showMedia(item, 'video', workTreeRef);
+                    return;
+                }
+                if (matchesRequestedMediaType(item, 'pdf')) {
+                    self.showMedia(item, 'pdf', workTreeRef);
+                    return;
+                }
+                if (matchesRequestedMediaType(item, 'text')) {
+                    self.showMedia(item, 'text', workTreeRef);
+                    return;
+                }
 
-        workTree.onClickItem = function (this: WorkTreeComponent, item: MediaFile) {
-            const ext = self.getFileExtension(item.title);
+                return original.call(this, item);
+            }
+        );
+        if (!patched) return;
 
-            if (self.isImage(ext) || item.type === 'image') {
-                self.showMedia(item, 'image', workTreeRef);
-                return;
-            }
-            if (self.isVideo(ext)) {
-                self.showMedia(item, 'video', workTreeRef);
-                return;
-            }
-            if (self.isPdf(ext)) {
-                self.showMedia(item, 'pdf', workTreeRef);
-                return;
-            }
-            if (self.isText(ext)) {
-                self.showMedia(item, 'text', workTreeRef);
-                return;
-            }
-
-            return original.call(this, item);
-        };
-
+        this.patchedWorkTree = patchable;
         this.workTreeHooked = true;
         Logger.debug('[MediaViewerController] WorkTree patched successfully');
     }
@@ -411,13 +420,13 @@ export class MediaViewerController {
     }
 
     private watchFolderNavigation(): void {
-        if (this.folderWatcherSetup) return;
+        if (this.folderWatcherSetup || this.folderPathWatcherCleanup) return;
 
         const workTree = this.findWorkTreeComponent();
         if (!workTree) return;
 
         if (workTree.$watch) {
-            workTree.$watch('path', () => {
+            const unwatch = workTree.$watch('path', () => {
                 const doInject = () => this.thumbnailManager.injectThumbnails();
                 if (typeof workTree.$nextTick === 'function') {
                     workTree.$nextTick(() => setTimeout(doInject, 50));
@@ -425,6 +434,8 @@ export class MediaViewerController {
                     setTimeout(doInject, 200);
                 }
             }, { deep: true });
+
+            this.folderPathWatcherCleanup = unwatch || undefined;
             this.folderWatcherSetup = true;
         }
     }
@@ -436,10 +447,32 @@ export class MediaViewerController {
 
         this.routeCleanupUnsubscribe = router.beforeEach((_to: unknown, _from: unknown, next: () => void) => {
             this.thumbnailManager.clearStaleThumbnails();
-            this.workTreeHooked = false;
-            this.folderWatcherSetup = false;
+            this.cleanupFolderWatcher();
+            this.cleanupWorkTreePatch();
             next();
         });
+    }
+
+    private cleanupFolderWatcher(): void {
+        if (this.folderPathWatcherCleanup) {
+            this.folderPathWatcherCleanup();
+            this.folderPathWatcherCleanup = undefined;
+        }
+        this.folderWatcherSetup = false;
+    }
+
+    private cleanupWorkTreePatch(): void {
+        if (this.patchedWorkTree) {
+            restoreMediaViewerWorkTreePatch(
+                this.patchedWorkTree as unknown as {
+                    onClickItem?: WorkTreeClickHandler<MediaFile>;
+                    __mediaViewerPatched?: boolean;
+                    __mediaViewerOriginalOnClickItem?: WorkTreeClickHandler<MediaFile>;
+                }
+            );
+            this.patchedWorkTree = null;
+        }
+        this.workTreeHooked = false;
     }
 
     private setupPlayerWatcher(): void {
@@ -508,7 +541,7 @@ export class MediaViewerController {
         if (requestId !== this.activeRequestId || !this.lightboxRef) return;
 
         if (mediaList && mediaList.length > 0) {
-            const matchedItem = this.findMatchingMediaItem(item, mediaList);
+            const matchedItem = findMatchingMediaItem(item, mediaList);
             const matchedIndex = matchedItem ? mediaList.indexOf(matchedItem) : 0;
             this.lightboxRef.updateMediaList(mediaList, Math.max(0, matchedIndex));
 
@@ -551,20 +584,20 @@ export class MediaViewerController {
 
         let allItems: MediaFile[] = [];
         if (workTreeContext) {
-            const ctx = workTreeContext as any;
-            allItems = ctx.fatherFolder || ctx.$data?.fatherFolder || [];
+            const ctx = workTreeContext as PatchableWorkTree;
+            allItems = (ctx.fatherFolder ?? ctx.$data?.fatherFolder ?? []) as MediaFile[];
         }
         if (allItems.length === 0) {
-            const wt = this.findWorkTreeComponent() as any;
+            const wt = this.findWorkTreeComponent() as PatchableWorkTree | null;
             if (wt) {
-                allItems = wt.fatherFolder || wt.$data?.fatherFolder || [];
+                allItems = (wt.fatherFolder ?? wt.$data?.fatherFolder ?? []) as MediaFile[];
             }
         }
 
         const queue = allItems.filter((f: MediaFile) => {
-            if ((f as any).type === 'audio') return true;
-            const fExt = this.getFileExtension(f.title);
-            return this.isVideo(fExt);
+            if (f.type === 'audio') return true;
+            const fExt = getFileExtension(f.title);
+            return isVideoExtension(fExt);
         }).map(f => ({ ...f, type: 'audio' as const }));
 
         const index = queue.findIndex(f => f.hash === item.hash);
@@ -590,30 +623,35 @@ export class MediaViewerController {
 
         // Synchronous sources first
         if (workTreeContext) {
-            const ctx = workTreeContext as any;
-            if (Array.isArray(ctx.fatherFolder) && ctx.fatherFolder.length > 0) {
-                fatherFolder = ctx.fatherFolder;
-            } else if (ctx.$data?.fatherFolder && Array.isArray(ctx.$data.fatherFolder)) {
-                fatherFolder = ctx.$data.fatherFolder;
-            } else if (ctx._data?.fatherFolder && Array.isArray(ctx._data.fatherFolder)) {
-                fatherFolder = ctx._data.fatherFolder;
+            const ctx = workTreeContext as PatchableWorkTree;
+            const ctxFolder = ctx.fatherFolder ?? ctx.$data?.fatherFolder ?? ctx._data?.fatherFolder;
+            if (Array.isArray(ctxFolder) && ctxFolder.length > 0) {
+                fatherFolder = ctxFolder as MediaFile[];
             }
             if (fatherFolder.length === 0 && Array.isArray(ctx.tree)) {
-                fatherFolder = this.flattenTracksResponse(ctx.tree);
-            } else if (fatherFolder.length === 0 && Array.isArray(ctx.$data?.tree)) {
-                fatherFolder = this.flattenTracksResponse(ctx.$data.tree);
+                fatherFolder = this.flattenTracksResponse(ctx.tree as Array<TrackFolder | TrackItem>);
+            } else if (fatherFolder.length === 0) {
+                const ctxDataTree = ctx.$data?.tree;
+                if (Array.isArray(ctxDataTree)) {
+                    fatherFolder = this.flattenTracksResponse(ctxDataTree as Array<TrackFolder | TrackItem>);
+                }
             }
         }
 
         if (fatherFolder.length === 0) {
-            const workTree = this.findWorkTreeComponent();
+            const workTree = this.findWorkTreeComponent() as PatchableWorkTree | null;
             if (workTree) {
-                const wt = workTree as any;
-                fatherFolder = wt.fatherFolder || wt.$data?.fatherFolder || wt._data?.fatherFolder || [];
-                if (fatherFolder.length === 0 && Array.isArray(wt.tree)) {
-                    fatherFolder = this.flattenTracksResponse(wt.tree);
-                } else if (fatherFolder.length === 0 && Array.isArray(wt.$data?.tree)) {
-                    fatherFolder = this.flattenTracksResponse(wt.$data.tree);
+                const wtFolder = workTree.fatherFolder ?? workTree.$data?.fatherFolder ?? workTree._data?.fatherFolder;
+                if (Array.isArray(wtFolder) && wtFolder.length > 0) {
+                    fatherFolder = wtFolder as MediaFile[];
+                }
+                if (fatherFolder.length === 0 && Array.isArray(workTree.tree)) {
+                    fatherFolder = this.flattenTracksResponse(workTree.tree as Array<TrackFolder | TrackItem>);
+                } else if (fatherFolder.length === 0) {
+                    const wtDataTree = workTree.$data?.tree;
+                    if (Array.isArray(wtDataTree)) {
+                        fatherFolder = this.flattenTracksResponse(wtDataTree as Array<TrackFolder | TrackItem>);
+                    }
                 }
             }
         }
@@ -649,13 +687,7 @@ export class MediaViewerController {
         if (fatherFolder.length === 0 || requestId !== this.activeRequestId) return [];
 
         // Filter to requested media type
-        const mediaList = fatherFolder.filter((f: MediaFile) => {
-            const ext = this.getFileExtension(f.title);
-            if (type === 'image') return this.isImage(ext) || f.type === 'image';
-            if (type === 'video') return this.isVideo(ext);
-            if (type === 'pdf') return this.isPdf(ext);
-            return this.isText(ext);
-        });
+        const mediaList = fatherFolder.filter((f: MediaFile) => matchesRequestedMediaType(f, type));
 
         return mediaList;
     }
@@ -664,69 +696,40 @@ export class MediaViewerController {
     // DOM scanning fallback
     // =========================================================================
 
-    private scanDomForMediaItems(type: 'image' | 'video' | 'pdf' | 'text'): MediaFile[] {
+    private scanDomForMediaItems(type: ViewerMediaType): MediaFile[] {
         const workTreeEl = this.findWorkTreeElement();
         if (!workTreeEl) return [];
 
         const items: MediaFile[] = [];
+        const seenHashes = new Set<string>();
         const qItems = workTreeEl.querySelectorAll('.q-item');
 
         qItems.forEach((qItem) => {
-            const labelEl = qItem.querySelector('.q-item__label') || qItem.querySelector('.q-item__section--main');
-            if (!labelEl) return;
-
-            let title = this.getCleanLabelText(labelEl);
-            const translationMatch = title.match(/^(.+?)\s*\([^)]+\)$/);
-            if (translationMatch) title = translationMatch[1].trim();
+            const title = getMediaTitleFromListItem(qItem);
             if (!title) return;
 
-            const ext = this.getFileExtension(title);
-            let isMedia = false;
-            if (type === 'image') isMedia = this.isImage(ext);
-            else if (type === 'video') isMedia = this.isVideo(ext);
-            else if (type === 'pdf') isMedia = this.isPdf(ext);
-            else isMedia = this.isText(ext);
-            if (!isMedia) return;
+            const vueEl = qItem as Vue2MediaElement;
+            const fromVue = readMediaItemFromVueElement(vueEl);
+            const candidateType = resolveMediaTypeForCandidate(title, fromVue?.type);
+            if (candidateType !== type) return;
 
-            const vueEl = qItem as any;
-            let hash = '';
+            let hash = readMediaHashFromElement(vueEl);
 
-            if (vueEl.__vue__) {
-                const candidates = [
-                    vueEl.__vue__.$attrs?.item,
-                    vueEl.__vue__.item,
-                    vueEl.__vue__.$props?.item,
-                    vueEl.__vue__.file,
-                    vueEl.__vue__.$props?.file,
-                    vueEl.__vue__.node,
-                    vueEl.__vue__.$props?.node
-                ];
-                for (const candidate of candidates) {
-                    if (candidate && candidate.hash) {
-                        hash = candidate.hash;
-                        break;
-                    }
-                }
-            }
+            if (!hash && fromVue?.hash) hash = fromVue.hash;
 
             if (!hash) {
-                const dataHash = qItem.getAttribute('data-hash');
-                if (dataHash) hash = dataHash;
-                else if ((vueEl as any).__vue__?.id) hash = (vueEl as any).__vue__.id;
-            }
-
-            if (!hash) {
-                const workTree = this.findWorkTreeComponent();
-                const folder = (workTree as any)?.fatherFolder ||
-                    (workTree as any)?.$data?.fatherFolder || [];
+                const workTree = this.findWorkTreeComponent() as PatchableWorkTree | null;
+                const folder = (workTree?.fatherFolder ??
+                    workTree?.$data?.fatherFolder ?? []) as MediaFile[];
                 if (folder.length > 0) {
-                    const match = this.findMatchingMediaItem({ hash: '', title }, folder);
+                    const match = findMatchingMediaItem({ hash: '', title }, folder);
                     if (match?.hash) hash = match.hash;
                 }
             }
 
-            if (hash && !items.find(i => i.hash === hash)) {
-                items.push({ hash, title, type });
+            if (hash && !seenHashes.has(hash)) {
+                seenHashes.add(hash);
+                items.push({ hash, title, type: candidateType });
             }
         });
 
@@ -734,82 +737,12 @@ export class MediaViewerController {
     }
 
     // =========================================================================
-    // Matching / Utility Methods
+    // Utility Methods
     // =========================================================================
-
-    private findMatchingMediaItem(target: MediaFile, list: MediaFile[]): MediaFile | undefined {
-        // 1. Hash match
-        if (target.hash && !target.hash.startsWith('__delegated_')) {
-            const match = list.find(f => f.hash === target.hash);
-            if (match) return match;
-        }
-
-        // 2. Normalized title match
-        const normTarget = this.normalizeMatchString(target.title);
-        let match = list.find(f => this.normalizeMatchString(f.title) === normTarget);
-        if (match) return match;
-
-        // 3. Exact title
-        match = list.find(f => f.title === target.title);
-        if (match) return match;
-
-        // 4. Containment
-        match = list.find(f => {
-            const normF = this.normalizeMatchString(f.title);
-            return (normF.length > 3 && normTarget.length > 3) &&
-                (normF.includes(normTarget) || normTarget.includes(normF));
-        });
-
-        return match;
-    }
-
-    private normalizeMatchString(t: string): string {
-        if (!t) return '';
-        let s = t.normalize('NFC').toLowerCase();
-        s = s.replace(/\s*\([^)]+\)\s*$/, '');
-        s = s.replace(/(\.[a-z0-9]{2,5})+$/, '');
-        s = s.replace(/[\s\-_.]+/g, ' ');
-        return s.trim();
-    }
-
-    private getCleanLabelText(el: Element): string {
-        return getCleanText(el);
-    }
-
-    private getFileExtension(filename: string): string {
-        const match = filename.match(/\.[^.]+$/);
-        return match ? match[0].toLowerCase() : '';
-    }
-
-    private isImage(ext: string): boolean { return IMAGE_EXTENSIONS.includes(ext); }
-    private isVideo(ext: string): boolean { return VIDEO_EXTENSIONS.includes(ext); }
-    private isPdf(ext: string): boolean { return PDF_EXTENSIONS.includes(ext); }
-    private isText(ext: string): boolean { return TEXT_EXTENSIONS.includes(ext); }
 
     private getMediaUrl(hash: string, item?: MediaFile): string {
         const token = localStorage.getItem('jwt-token') || '';
-
-        const appendToken = (url: string) => {
-            if (url.startsWith('http') || url.startsWith('//')) return url;
-            if (url.startsWith('/api/')) {
-                const separator = url.includes('?') ? '&' : '?';
-                return `${url}${separator}token=${token}`;
-            }
-            return url;
-        };
-
-        if (item?.mediaStreamUrl) return appendToken(item.mediaStreamUrl);
-        if (item?.media_stream_url) return appendToken(item.media_stream_url);
-
-        if (hash.includes('/')) {
-            if (hash.startsWith('media/stream/') || hash.startsWith('/media/stream/')) {
-                const path = hash.startsWith('/') ? hash : `/${hash}`;
-                return appendToken(path);
-            }
-            return appendToken(`/api/media/stream/${hash}`);
-        }
-
-        return appendToken(`/api/media/stream/${hash}`);
+        return buildMediaStreamUrl(hash, item, token);
     }
 
     private getWorkIdFromUrl(): string | null {
@@ -830,12 +763,13 @@ export class MediaViewerController {
                 if (item.type === 'folder') {
                     if (item.children) traverse(item.children);
                 } else {
+                    const trackWithAlt = item as TrackItem & { media_stream_url?: string };
                     result.push({
                         hash: item.hash,
                         title: item.title,
                         type: item.type,
-                        mediaStreamUrl: item.mediaStreamUrl || (item as any).media_stream_url,
-                        media_stream_url: (item as any).media_stream_url
+                        mediaStreamUrl: item.mediaStreamUrl || trackWithAlt.media_stream_url,
+                        media_stream_url: trackWithAlt.media_stream_url
                     });
                 }
             }
@@ -846,8 +780,8 @@ export class MediaViewerController {
     }
 
     private getWorkTreeTree(): Array<TrackFolder | TrackItem> | null {
-        const workTree = this.findWorkTreeComponent() as any;
-        const tree = workTree?.tree || workTree?.$data?.tree;
-        return Array.isArray(tree) ? tree : null;
+        const workTree = this.findWorkTreeComponent() as PatchableWorkTree | null;
+        const tree = workTree?.tree ?? workTree?.$data?.tree;
+        return Array.isArray(tree) ? tree as Array<TrackFolder | TrackItem> : null;
     }
 }

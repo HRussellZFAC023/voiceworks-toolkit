@@ -125,7 +125,7 @@ export class RadioMode {
         // Store cleanup functions for EventBus subscriptions
         this.eventCleanups.push(
             EventBus.on('track:end', () => this.handleTrackEnd()),
-            EventBus.on('work:change', (event: any) => this.onWorkChange(event)),
+            EventBus.on('work:change', (event: { workId: string; work: WorkDetail }) => this.onWorkChange(event)),
             EventBus.on('config:change', ({ key, value }: { key: string; value: unknown }) => {
                 if (key === 'playAllInFolder') this.playAllInFolder = !!value;
             }),
@@ -619,7 +619,7 @@ export class RadioMode {
             Logger.debug('[RadioMode] Work data loaded', {
                 workId,
                 title: work.title,
-                hasDirs: !!(work.dirs?.length || (work as any).children?.length),
+                hasDirs: !!(work.dirs?.length || work.children?.length),
                 hasTracks: !!(work.tracks?.length),
             });
 
@@ -711,7 +711,7 @@ export class RadioMode {
         }
     }
 
-    private onWorkChange(event: { workId: string, work: any }): void {
+    private onWorkChange(event: { workId: string; work: WorkDetail }): void {
         const { workId } = event;
 
         if (!this._isActive) return;

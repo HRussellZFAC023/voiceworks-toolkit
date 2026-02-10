@@ -10,7 +10,7 @@ import { Config, Logger, I18n } from '../../core/Utils';
 import { HttpError } from '../../infrastructure/HttpClient';
 import { EmbeddingService } from '../../services/EmbeddingService';
 import { GpuScheduler, Priority } from '../../core/GpuScheduler';
-import type { TagEntry } from '../../types/api';
+import type { TagEntry, WorkTag, WorkSummary, WorkDetail, WorkOrder } from '../../types/api';
 
 // ============================================================================
 // Types
@@ -294,14 +294,14 @@ function truncateText(text: string, maxChars: number): string {
     return `${text.slice(0, maxChars)}...`;
 }
 
-function extractTagInfo(tags: any[]): { displayTags: string[]; searchTags: string[] } {
-    const displayTags = uniqueStrings(tags.map((t: any) => t?.name || t?.title || '').filter(Boolean));
+function extractTagInfo(tags: WorkTag[]): { displayTags: string[]; searchTags: string[] } {
+    const displayTags = uniqueStrings(tags.map((t: WorkTag) => t?.name || '').filter(Boolean));
     const searchTags: string[] = [];
 
     for (const tag of tags) {
-        const raw = tag?.name || tag?.title || '';
-        const i18nEn = tag?.i18n?.['en-us']?.name || tag?.i18n?.en?.name;
-        const i18nJa = tag?.i18n?.['ja-jp']?.name || tag?.i18n?.ja?.name;
+        const raw = tag?.name || '';
+        const i18nEn = tag?.i18n?.['en-us']?.name || '';
+        const i18nJa = tag?.i18n?.['ja-jp']?.name || '';
 
         const tagId = Number(tag?.id || 0) || 0;
         const tagEntry = tagId ? tagById.get(tagId) : undefined;
@@ -318,22 +318,23 @@ function extractTagInfo(tags: any[]): { displayTags: string[]; searchTags: strin
     };
 }
 
-function resolveCoverUrl(work: any, id: string): string | null {
-    if (work.coverUrl) return work.coverUrl;
+function resolveCoverUrl(work: WorkSummary | WorkDetail, id: string): string | null {
+    if (work.mainCoverUrl) return work.mainCoverUrl;
     if (work.main_cover_url) return work.main_cover_url;
     return buildCoverUrl(id, 'main', getApiBaseUrl());
 }
 
-async function prepareWorkEntry(work: any): Promise<{ entry: VectorEntry; payload: string } | null> {
+async function prepareWorkEntry(work: (WorkSummary | WorkDetail) & Record<string, unknown>): Promise<{ entry: VectorEntry; payload: string } | null> {
     if (!work?.id) return null;
     const id = String(work.id);
-    const title = work.title || work.name || '';
-    const descriptionRaw = work.description || work.summary || '';
+    const title = work.title || '';
+    const descriptionRaw = ('description' in work ? (work as WorkDetail).description : '') || ('summary' in work ? (work as WorkDetail).summary : '') || '';
     const description = truncateText(descriptionRaw, MAX_DESCRIPTION_CHARS);
 
-    const circle = work.circle?.name || (work.name && work.name !== title ? work.name : '');
-    const series = work.series?.name || work.series_name || '';
-    const vas = (work.vas || []).map((v: any) => v?.name || '').filter(Boolean);
+    const circle = work.circle?.name || '';
+    const seriesObj = work.series as { name?: string } | undefined;
+    const series = seriesObj?.name || '';
+    const vas = (work.vas || []).map((v) => v?.name || '').filter(Boolean);
 
     const tagInfo = extractTagInfo(work.tags || []);
     const searchTags = tagInfo.searchTags;
@@ -344,9 +345,9 @@ async function prepareWorkEntry(work: any): Promise<{ entry: VectorEntry; payloa
     const rating = typeof work.rate_average_2dp === 'number' ? work.rate_average_2dp : undefined;
     const nsfw = typeof work.nsfw === 'boolean' ? work.nsfw : undefined;
     const hasSubtitle = typeof work.has_subtitle === 'boolean' ? work.has_subtitle : undefined;
-    const ageCategory = work.age_category_string || '';
+    const ageCategory = ('age_category_string' in work ? String(work.age_category_string || '') : '');
     const langEditions: string[] = Array.isArray(work.language_editions)
-        ? work.language_editions.map((e: any) => e?.lang || e?.label || '').filter(Boolean)
+        ? (work.language_editions as Array<{ lang?: string; label?: string }>).map((e) => e?.lang || e?.label || '').filter(Boolean)
         : [];
 
     const payloadParts: string[] = [];
@@ -385,7 +386,7 @@ async function prepareWorkEntry(work: any): Promise<{ entry: VectorEntry; payloa
     return { entry, payload };
 }
 
-async function indexWork(work: any): Promise<boolean> {
+async function indexWork(work: (WorkSummary | WorkDetail) & Record<string, unknown>): Promise<boolean> {
     if (!work?.id) return false;
     // Fully pause indexing while search is active to keep the GPU scheduler queue clear
     if (searchPriority) {
@@ -418,7 +419,7 @@ async function indexWork(work: any): Promise<boolean> {
 const MAX_CONSECUTIVE_FAILURES = 5;
 const BACKOFF_BASE_MS = 1000;
 
-async function indexWorks(works: any[]): Promise<number> {
+async function indexWorks(works: ((WorkSummary | WorkDetail) & Record<string, unknown>)[]): Promise<number> {
     if (works.length === 0) return 0;
     let added = 0;
     let index = 0;
@@ -480,7 +481,7 @@ async function indexWorks(works: any[]): Promise<number> {
 
 async function indexCurrentWork(): Promise<void> {
     if (whisperActive || EmbeddingService.isSuspended()) return;
-    const work = (bridge.store.state.AudioPlayer?.work as any);
+    const work = bridge.store.state.AudioPlayer?.work as (WorkDetail & Record<string, unknown>) | undefined;
     if (!work?.id) return;
     const id = String(work.id);
 
@@ -546,7 +547,7 @@ async function bulkIndex(opts?: { maxPages?: number; maxWorks?: number; order?: 
             setStatus(format('magicSearchFetchingPage', { page, end: endPage }), true);
             let res;
             try {
-                res = await WorksApi.getWorks({ order: order as any, sort: sort as any, page });
+                res = await WorksApi.getWorks({ order: order as WorkOrder, sort: sort as 'asc' | 'desc', page });
             } catch (fetchErr) {
                 if (fetchErr instanceof HttpError && fetchErr.status === 429) {
                     Logger.warn('[VectorSearch] Works API rate limited (429). Rescheduling.');
@@ -908,7 +909,7 @@ async function doSearch(): Promise<void> {
                 });
             }),
         ]);
-    } catch (err: any) {
+    } catch (err: unknown) {
         if (abort.signal.aborted) {
             setStatus(t('magicSearchCancelled'), false);
         } else {

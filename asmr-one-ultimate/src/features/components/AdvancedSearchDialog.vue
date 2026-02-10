@@ -22,6 +22,14 @@ import { RouteStateSync } from '../RouteStateSync';
 import { RadioMode } from '../radio';
 import { Logger, I18n } from '../../core/Utils';
 import type { TagEntry, VAEntry, CircleEntry, WorkOrder } from '../../types/api';
+import {
+    FALLBACK_SORT_OPTIONS,
+    getFallbackSortOptions as buildFallbackSortOptions,
+    parseStoredSortOption,
+    resolveSortOrder as resolveSortOrderUtil,
+    resolveSortSelection as resolveSortSelectionUtil,
+    type SortOption,
+} from '../advancedSearchSortUtils';
 
 import TagSelector from './TagSelector.vue';
 import EntitySelector from './EntitySelector.vue';
@@ -31,32 +39,21 @@ import type { EntityItem } from './EntitySelector.vue';
 // Sort option types and fallback data
 // ---------------------------------------------------------------------------
 
-interface SortOption {
-    label: string;
-    order: string;
-    sort: string;
+/** Minimal shape for a work returned by the search/playlist API */
+interface FetchedWork {
+    id?: number | string;
+    source_id?: number | string;
+    duration?: number;
+    [key: string]: unknown;
 }
 
 interface WorksVmComponent {
     sortOptions?: SortOption[];
     options?: SortOption[];
     sortOption?: SortOption;
-    $watch?: (path: string, cb: (val: any) => void, opts?: object) => () => void;
+    $watch?: (path: string, cb: (val: unknown) => void, opts?: object) => () => void;
     [key: string]: unknown;
 }
-
-const FALLBACK_SORT_OPTIONS: { value: WorkOrder; labelKey: string }[] = [
-    { value: 'insert_time', labelKey: 'sortNewest' },
-    { value: 'release', labelKey: 'sortRelease' },
-    { value: 'id', labelKey: 'sortRJCode' },
-    { value: 'nsfw', labelKey: 'sortNSFW' },
-    { value: 'rate_average_2dp', labelKey: 'sortDlsiteRating' },
-    { value: 'dl_count', labelKey: 'sortDownloads' },
-    { value: 'rating', labelKey: 'sortRating' },
-    { value: 'review_count', labelKey: 'sortReviews' },
-    { value: 'price', labelKey: 'sortPrice' },
-    { value: 'random', labelKey: 'sortRandom' },
-];
 
 const SORT_OPTIONS_CACHE_KEY = 'asmrSortOptions';
 const getSortOptionsCacheKey = () => `${SORT_OPTIONS_CACHE_KEY}:${I18n.lang}`;
@@ -133,7 +130,7 @@ const statusIsError = ref(false);
 
 // The sort watcher tracks the host Works component
 let sortWatcherCleanup: (() => void) | null = null;
-let sortWatcherVm: any = null;
+let sortWatcherVm: WorksVmComponent | null = null;
 let lastHostSortKey = '';
 
 const sortOptions = computed(() => {
@@ -184,12 +181,12 @@ function findWorksViaDom(): WorksVmComponent | null {
     for (const el of inputs) {
         let current: HTMLElement | null = el as HTMLElement;
         for (let i = 0; i < 20 && current; i++) {
-            let vue = (current as any).__vue__ as any | undefined;
+            let vue = (current as HTMLElement & { __vue__?: WorksVmComponent }).__vue__ as WorksVmComponent | undefined;
             for (let v = 0; v < 5 && vue; v++) {
                 if (vue.sortOption && typeof vue.sortOption?.order === 'string' && getVmSortOptions(vue).length > 0) {
                     return vue;
                 }
-                vue = vue.$parent;
+                vue = vue.$parent as WorksVmComponent | undefined;
             }
             current = current.parentElement;
         }
@@ -198,9 +195,9 @@ function findWorksViaDom(): WorksVmComponent | null {
 }
 
 function findWorksComponent(): WorksVmComponent | null {
-    return findWorksViaDom() || bridge.findComponent((c: any) =>
-        c.sortOption != null && typeof c.sortOption?.order === 'string' && getVmSortOptions(c).length > 0
-    );
+    return findWorksViaDom() || bridge.findComponent((c) =>
+        (c as WorksVmComponent).sortOption != null && typeof (c as WorksVmComponent).sortOption?.order === 'string' && getVmSortOptions(c as WorksVmComponent).length > 0
+    ) as WorksVmComponent | null;
 }
 
 function shouldIgnoreHostLabels(labels: string[]): boolean {
@@ -211,7 +208,7 @@ function shouldIgnoreHostLabels(labels: string[]): boolean {
 function resolveHostLabel(label: string): string {
     if (!label) return label;
     try {
-        const translated = (bridge as any)?.app?.$t?.(label);
+        const translated = (bridge as unknown as { app?: { $t?: (key: string) => string } })?.app?.$t?.(label);
         if (translated && translated !== label) return translated as string;
     } catch { /* ignore */ }
     return I18n.t(label);
@@ -248,10 +245,10 @@ function readCachedSortOptions(): SortOption[] {
         if (!cached) return [];
         const parsed = typeof cached === 'string' ? JSON.parse(cached) : cached;
         if (!Array.isArray(parsed)) return [];
-        const options = parsed.filter((opt: any) =>
-            opt && typeof opt.order === 'string' && typeof opt.label === 'string'
+        const options = parsed.filter((opt: unknown): opt is SortOption =>
+            !!opt && typeof (opt as SortOption).order === 'string' && typeof (opt as SortOption).label === 'string'
         );
-        if (shouldIgnoreHostLabels(options.map((opt: any) => opt.label))) return [];
+        if (shouldIgnoreHostLabels(options.map((opt: SortOption) => opt.label))) return [];
         return options;
     } catch (e) {
         Logger.warn('[AdvancedSearch] Failed to read cached sort options:', e);
@@ -260,10 +257,7 @@ function readCachedSortOptions(): SortOption[] {
 }
 
 function getFallbackSortOptions(): Array<{ order: string; label: string }> {
-    return FALLBACK_SORT_OPTIONS.map(opt => ({
-        order: opt.value,
-        label: I18n.t(opt.labelKey),
-    }));
+    return buildFallbackSortOptions((key: string) => I18n.t(key));
 }
 
 function getOrderLabel(order: string, hostLabel?: string): string {
@@ -276,10 +270,7 @@ function getOrderLabel(order: string, hostLabel?: string): string {
 }
 
 function resolveSortOrder(order: string, options: Array<{ order: string }>): string {
-    if (options.some(o => o.order === order)) return order;
-    if (order === 'create_date' && options.some(o => o.order === 'insert_time')) return 'insert_time';
-    if (order === 'insert_time' && options.some(o => o.order === 'create_date')) return 'create_date';
-    return order;
+    return resolveSortOrderUtil(order, options);
 }
 
 function getSortLabel(order: string, sort?: 'asc' | 'desc'): string {
@@ -310,23 +301,15 @@ function getSortLabelKey(order: WorkOrder, sort: 'asc' | 'desc'): string {
 }
 
 function resolveSortSelection(order: WorkOrder, sort: 'asc' | 'desc'): { order: WorkOrder; sort: 'asc' | 'desc'; label: string } {
-    const hostOptions = getHostSortOptions();
-    const available = hostOptions.length ? hostOptions : getFallbackSortOptions();
-    const resolvedOrder = resolveSortOrder(order, available);
-    const matchedExact = hostOptions.find(o => o.order === resolvedOrder && o.sort === sort);
-    const matchedOrder = matchedExact || hostOptions.find(o => o.order === resolvedOrder);
-    const label = matchedOrder?.label || getSortLabelKey(resolvedOrder as WorkOrder, sort);
-    return { order: resolvedOrder as WorkOrder, sort, label };
+    return resolveSortSelectionUtil(order, sort, getHostSortOptions(), (key: string) => I18n.t(key));
 }
 
 function readStoredSortOption(): { order: WorkOrder; sort: 'asc' | 'desc' } | null {
     try {
         const stored = localStorage.getItem('sortOption');
-        if (!stored) return null;
-        const parsed = JSON.parse(stored);
-        if (parsed?.order && parsed?.sort) {
-            return { order: parsed.order as WorkOrder, sort: parsed.sort as 'asc' | 'desc' };
-        }
+        const parsed = parseStoredSortOption(stored);
+        if (parsed) return parsed;
+        if (stored) Logger.warn('[AdvancedSearch] Malformed sortOption in localStorage');
     } catch (e) {
         Logger.warn('[AdvancedSearch] Malformed sortOption in localStorage:', e);
     }
@@ -483,7 +466,7 @@ async function translateInBackground<T extends { name?: string; ja?: string }>(
 
     for (const batch of batches) {
         await Promise.all(batch.map(async (item) => {
-            const text = (item as any).ja || (item as any).name || '';
+            const text = (item as T & { ja?: string; name?: string }).ja || (item as T & { ja?: string; name?: string }).name || '';
             if (!text) return;
             try {
                 const en = await TranslationService.translate(text, 'en');
@@ -741,8 +724,8 @@ async function performSearch(): Promise<void> {
         applySortToWorksVm(worksVm, newSortOption);
     }
 
-    bridge.router.push(searchUrl).catch((err: any) => {
-        if (err?.name !== 'NavigationDuplicated') {
+    bridge.router.push(searchUrl).catch((err: unknown) => {
+        if (err && typeof err === 'object' && 'name' in err && (err as { name: string }).name !== 'NavigationDuplicated') {
             Logger.warn('[AdvancedSearch] Navigation error:', err);
         }
     });
@@ -819,8 +802,8 @@ function generatePlaylistDescription(requestedCount: number, poolSize: number): 
     return `${summary}${parametersStr}`;
 }
 
-async function fetchWorks(maxWorks: number): Promise<any[]> {
-    const results: any[] = [];
+async function fetchWorks(maxWorks: number): Promise<FetchedWork[]> {
+    const results: FetchedWork[] = [];
     let page = 1;
     const MAX_PAGES = 10;
 
@@ -834,7 +817,7 @@ async function fetchWorks(maxWorks: number): Promise<any[]> {
 
         setStatus(format('advFetching', { page, max: MAX_PAGES }), true);
 
-        let works: any[] = [];
+        let works: FetchedWork[] = [];
 
         try {
             Logger.debug(`[AdvancedSearch] Fetching page ${page}, have ${results.length}/${maxWorks} works so far`);
@@ -846,7 +829,7 @@ async function fetchWorks(maxWorks: number): Promise<any[]> {
             const useCircleOrVA = !!(selectedVA.value || selectedCircle.value);
             const effectiveOrder = (isRandomOrder && useCircleOrVA) ? 'release' : resolved.order;
 
-            const baseParams: Record<string, any> = {
+            const baseParams: Record<string, string | number> = {
                 page,
                 order: effectiveOrder,
                 sort: resolved.sort,
@@ -866,7 +849,7 @@ async function fetchWorks(maxWorks: number): Promise<any[]> {
                 url = '/api/works';
             }
 
-            const res = await axios.get(url, { params: baseParams }) as { data: { works?: any[] } };
+            const res = await axios.get(url, { params: baseParams }) as { data: { works?: FetchedWork[] } };
             works = res.data?.works || [];
         } catch (e) {
             Logger.warn('[AdvancedSearch] Fetch failed:', e);

@@ -11,6 +11,8 @@ import {
     getPlayerBar,
     hasPlayerBar,
     getAudioSource,
+    isValidAudioSource,
+    hasValidAudioSource,
     isAudioPlaying,
     getVueItem,
     getFatherFolder,
@@ -248,6 +250,42 @@ describe('DomUtils', () => {
             const audio = document.querySelector('audio')!;
             // jsdom may not set currentSrc, so we check src fallback
             expect(getAudioSource()).not.toBeNull();
+        });
+    });
+
+    describe('isValidAudioSource', () => {
+        it('should reject empty values', () => {
+            expect(isValidAudioSource('')).toBe(false);
+            expect(isValidAudioSource('   ')).toBe(false);
+            expect(isValidAudioSource(null)).toBe(false);
+        });
+
+        it('should reject bare origin URLs', () => {
+            expect(isValidAudioSource('https://asmr.one/')).toBe(false);
+        });
+
+        it('should accept URLs with real paths', () => {
+            expect(isValidAudioSource('https://asmr.one/api/media/stream/abc')).toBe(true);
+        });
+
+        it('should accept blob URLs', () => {
+            expect(isValidAudioSource('blob:https://asmr.one/1234-5678')).toBe(true);
+        });
+    });
+
+    describe('hasValidAudioSource', () => {
+        it('should return false when no audio element exists', () => {
+            expect(hasValidAudioSource()).toBe(false);
+        });
+
+        it('should return false for bare-origin audio src', () => {
+            document.body.innerHTML = '<audio src="https://asmr.one/"></audio>';
+            expect(hasValidAudioSource()).toBe(false);
+        });
+
+        it('should return true for audio src with a real path', () => {
+            document.body.innerHTML = '<audio src="https://asmr.one/api/media/stream/abc"></audio>';
+            expect(hasValidAudioSource()).toBe(true);
         });
     });
 

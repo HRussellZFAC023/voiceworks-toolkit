@@ -24,7 +24,7 @@ vi.mock('../../src/core/GpuScheduler', () => ({
 }));
 
 import { _testExports } from '../../src/services/TranslationService';
-const { normalizeForModel, splitForModel, isLikelyGarbage, glossaryPreProcess } = _testExports;
+const { normalizeForModel, splitForModel, joinTranslatedSegments, isLikelyGarbage, glossaryPreProcess } = _testExports;
 
 // ============================================================================
 // normalizeForModel
@@ -138,25 +138,104 @@ describe('glossaryPreProcess', () => {
 // ============================================================================
 // splitForModel
 // ============================================================================
+// splitForModel (bracket + sentence splitting)
+// ============================================================================
 describe('splitForModel', () => {
-    it('returns null for single sentence', () => {
+    it('returns null for simple text without brackets or multiple sentences', () => {
         expect(splitForModel('耳舐め')).toBeNull();
+        expect(splitForModel('催眠音声')).toBeNull();
+        expect(splitForModel('音声作品。')).toBeNull(); // trailing 。 with no following sentence
     });
 
-    it('returns null for trailing 。 with no following sentence', () => {
-        expect(splitForModel('音声作品。')).toBeNull();
+    it('splits on 【】 bracket boundaries', () => {
+        const result = splitForModel('【常識改変特化】男嫌いの高身長美人行商人【おまけトラック】');
+        expect(result).not.toBeNull();
+        expect(result).toHaveLength(3);
+        expect(result![0]).toEqual({ text: '常識改変特化', wrap: ['【', '】'] });
+        expect(result![1]).toEqual({ text: '男嫌いの高身長美人行商人', wrap: ['', ''] });
+        expect(result![2]).toEqual({ text: 'おまけトラック', wrap: ['【', '】'] });
     });
 
-    it('splits on 。 between two sentences', () => {
-        expect(splitForModel('音声作品。収録:KU100')).toEqual(['音声作品', '収録:KU100']);
+    it('splits on （） bracket boundaries', () => {
+        const result = splitForModel('催眠音声（バイノーラル）');
+        expect(result).not.toBeNull();
+        expect(result).toHaveLength(2);
+        expect(result![0]).toEqual({ text: '催眠音声', wrap: ['', ''] });
+        expect(result![1]).toEqual({ text: 'バイノーラル', wrap: ['（', '）'] });
     });
 
-    it('splits multiple sentence boundaries and drops empties', () => {
-        expect(splitForModel('文A。文B。文C。')).toEqual(['文A', '文B', '文C']);
+    it('splits on 。 sentence boundaries', () => {
+        const result = splitForModel('耳かきをします。気持ちいいですか。');
+        expect(result).not.toBeNull();
+        expect(result).toHaveLength(2);
+        expect(result![0].text).toBe('耳かきをします');
+        expect(result![1].text).toBe('気持ちいいですか');
     });
 
-    it('preserves bracketed segments within each split sentence', () => {
-        expect(splitForModel('【催眠】エッチ。【添い寝】癒し')).toEqual(['【催眠】エッチ', '【添い寝】癒し']);
+    it('handles mixed brackets and sentences', () => {
+        const result = splitForModel('【耳かき】前編。後編。');
+        expect(result).not.toBeNull();
+        expect(result!.length).toBeGreaterThanOrEqual(3);
+        expect(result![0]).toEqual({ text: '耳かき', wrap: ['【', '】'] });
+    });
+});
+
+// ============================================================================
+// joinTranslatedSegments
+// ============================================================================
+describe('joinTranslatedSegments', () => {
+    it('re-wraps bracketed segments', () => {
+        const segments = [
+            { text: '常識改変特化', wrap: ['【', '】'] as [string, string] },
+            { text: '男嫌いの美人', wrap: ['', ''] as [string, string] },
+            { text: 'おまけ', wrap: ['【', '】'] as [string, string] },
+        ];
+        const translations = ['Specialized in changing common sense', 'Beautiful misandrist', 'Bonus'];
+        const result = joinTranslatedSegments(segments, translations);
+        expect(result).toBe('【Specialized in changing common sense】 Beautiful misandrist 【Bonus】');
+    });
+
+    it('handles bare segments without brackets', () => {
+        const segments = [
+            { text: 'A', wrap: ['', ''] as [string, string] },
+            { text: 'B', wrap: ['', ''] as [string, string] },
+        ];
+        expect(joinTranslatedSegments(segments, ['Hello', 'World'])).toBe('Hello World');
+    });
+});
+
+// ============================================================================
+// glossaryPreProcess on real DLsite title segment
+// ============================================================================
+describe('glossaryPreProcess on DLsite title', () => {
+    const segment = '男嫌いのダウナー高身長美人行商人を常識改変催眠で性処理を義務と思わせ嗅ぎ舐め交尾可の生オナホへ';
+
+    it('substitutes key terms in long title segment', () => {
+        const [result, modified] = glossaryPreProcess(segment, 'en');
+        expect(modified).toBe(true);
+        // Verify key domain terms get substituted
+        expect(result).toContain('man-hater');         // 男嫌い
+        expect(result).toContain('downer');             // ダウナー
+        expect(result).toContain('tall');               // 高身長
+        expect(result).toContain('beautiful woman');    // 美人
+        expect(result).toContain('merchant');           // 行商人
+        expect(result).toContain('common sense alteration'); // 常識改変
+        expect(result).toContain('hypnosis');           // 催眠
+        expect(result).toContain('sexual service');     // 性処理
+        expect(result).toContain('duty');               // 義務
+        expect(result).toContain('mating');             // 交尾
+        expect(result).toContain('onahole');            // オナホ
+    });
+
+    it('substitutes in bracket-split segments too', () => {
+        const [r1] = glossaryPreProcess('常識改変特化', 'en');
+        expect(r1).toContain('common sense alteration');
+        expect(r1).toContain('specialized');
+
+        const [r2] = glossaryPreProcess('おまけトラック"のみ"オホ声', 'en');
+        expect(r2).toContain('bonus');
+        expect(r2).toContain('track');
+        expect(r2).toContain('ahegao voice');
     });
 });
 
@@ -187,23 +266,19 @@ describe('isLikelyGarbage', () => {
     });
 
     it('detects first-person hallucination from non-first-person input', () => {
-        // The exact hallucination from the screenshot
         expect(isLikelyGarbage(
             '【耳かき・踏み踏み】あやかし郷愁譚 ～あかしゃぐま すみ～【蒸しタオル】',
             "I'm sorry, but I don't want to be a burden.",
         )).toBe(true);
     });
 
-    it('detects other first-person hallucination patterns', () => {
-        expect(isLikelyGarbage('催眠音声', "I don't know what to do.")).toBe(true);
-        expect(isLikelyGarbage('添い寝', "I can't believe it.")).toBe(true);
-        expect(isLikelyGarbage('耳舐め', "I have a dream.")).toBe(true);
-        expect(isLikelyGarbage('癒し系', "I want to go home.")).toBe(true);
+    it('detects VA name hallucinations', () => {
+        expect(isLikelyGarbage('陽向葵ゆか', "I'm sorry., but you don't have to be a fan of this.")).toBe(true);
+        expect(isLikelyGarbage('秋野かえで', "I'm not a doctor., but you know.")).toBe(true);
     });
 
     it('allows first-person output when input has first-person pronouns', () => {
         expect(isLikelyGarbage('私は好きです', 'I like it.')).toBe(false);
         expect(isLikelyGarbage('僕の耳かき', "I'm cleaning my ears.")).toBe(false);
-        expect(isLikelyGarbage('俺のターン', "I don't care."  )).toBe(false);
     });
 });

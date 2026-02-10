@@ -1,92 +1,83 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { AdvancedSearch } from '../../src/features/AdvancedSearch';
-import { RouteStateSync } from '../../src/features/RouteStateSync';
-import { AppStore } from '../../src/store/AppStore';
-import { KikoeruBridge } from '../../src/infrastructure/KikoeruBridge';
-vi.mock('../../src/infrastructure/KikoeruBridge');
-vi.mock('../../src/services/TranslationService');
+import { describe, expect, it } from 'vitest';
+import {
+    getFallbackSortOptions,
+    parseStoredSortOption,
+    resolveSortOrder,
+    resolveSortSelection,
+    type SortOption,
+} from '../../src/features/advancedSearchSortUtils';
+import type { WorkOrder } from '../../src/types/api';
 
-describe('AdvancedSearch Sort Integration', () => {
-    let advancedSearch: AdvancedSearch;
-    let bridge: any;
+const t = (key: string): string => `i18n:${key}`;
 
-    beforeEach(() => {
-        vi.clearAllMocks();
-        localStorage.clear();
+describe('advancedSearchSortUtils', () => {
+    describe('resolveSortOrder', () => {
+        it('keeps known orders unchanged', () => {
+            const options = [{ order: 'release' }, { order: 'insert_time' }];
+            expect(resolveSortOrder('release', options)).toBe('release');
+        });
 
-        const mockSortOptions = [
-            { label: 'works.releaseDesc', order: 'release', sort: 'desc' },
-            { label: 'works.releaseAsc', order: 'release', sort: 'asc' },
-            { label: 'works.ratingDesc', order: 'rating', sort: 'desc' },
-            { label: 'works.new', order: 'create_date', sort: 'desc' },
-        ];
-        const mockWorksVm = {
-            sortOption: mockSortOptions[0],
-            sortOptions: mockSortOptions,
-        };
+        it('maps create_date to insert_time when needed', () => {
+            const options = [{ order: 'insert_time' }];
+            expect(resolveSortOrder('create_date', options)).toBe('insert_time');
+        });
 
-        // Mock Bridge
-        bridge = {
-            router: { push: vi.fn().mockResolvedValue(undefined) },
-            findComponent: vi.fn().mockReturnValue(mockWorksVm),
-            app: { $t: (key: string) => key },
-        };
-        vi.spyOn(KikoeruBridge, 'getInstance').mockReturnValue(bridge);
-
-        // Mock RouteStateSync
-        const mockSync = {
-            syncDisplayToHost: vi.fn(),
-            getSortLabel: vi.fn().mockReturnValue('Sorted Label'),
-        };
-        vi.spyOn(RouteStateSync, 'getInstance').mockReturnValue(mockSync as any);
-
-        // Mock AppStore
-        vi.spyOn(AppStore, 'setSearchState').mockImplementation(() => { });
-        vi.spyOn(AppStore, 'state', 'get').mockReturnValue({ search: {} } as any);
-
-        // Setup DOM for dialog
-        document.body.innerHTML = '<div id="asmr-overlay-root"></div>';
-
-        advancedSearch = new AdvancedSearch();
+        it('maps insert_time to create_date when needed', () => {
+            const options = [{ order: 'create_date' }];
+            expect(resolveSortOrder('insert_time', options)).toBe('create_date');
+        });
     });
 
-    it('should update AppStore and RouteStateSync display when sort order changes', async () => {
-        // Initialize dialog
-        await advancedSearch.open();
-        const dialog = document.querySelector('.asmr-advanced-search-dialog') as HTMLElement;
-        const select = dialog.querySelector('.asmr-sort-order') as HTMLSelectElement;
+    describe('resolveSortSelection', () => {
+        it('uses exact host option label when available', () => {
+            const hostOptions: SortOption[] = [
+                { label: 'works.releaseDesc', order: 'release', sort: 'desc' },
+                { label: 'works.releaseAsc', order: 'release', sort: 'asc' },
+            ];
+            const resolved = resolveSortSelection('release', 'asc', hostOptions, t);
+            expect(resolved).toEqual({
+                order: 'release',
+                sort: 'asc',
+                label: 'works.releaseAsc',
+            });
+        });
 
-        // Simulate change
-        select.value = 'rating';
-        select.dispatchEvent(new Event('change'));
+        it('falls back to translated fallback labels when host options are absent', () => {
+            const resolved = resolveSortSelection('insert_time', 'desc', [], t);
+            expect(resolved.order).toBe('insert_time');
+            expect(resolved.sort).toBe('desc');
+            expect(resolved.label).toBe('i18n:sortNewest');
+        });
 
-        // Verify AppStore update
-        expect(AppStore.setSearchState).toHaveBeenCalledWith(expect.objectContaining({
-            pendingOrder: 'rating'
-        }));
-
-        // Verify RouteStateSync display update
-        const mockSync = RouteStateSync.getInstance();
-        expect(mockSync.syncDisplayToHost).toHaveBeenCalled();
-        expect(mockSync.getSortLabel).toHaveBeenCalledWith('rating', 'desc');
+        it('normalizes order aliases against available options', () => {
+            const hostOptions: SortOption[] = [
+                { label: 'works.new', order: 'create_date', sort: 'desc' },
+            ];
+            const resolved = resolveSortSelection('insert_time' as WorkOrder, 'desc', hostOptions, t);
+            expect(resolved.order).toBe('create_date');
+            expect(resolved.label).toBe('works.new');
+        });
     });
 
-    it('should update AppStore and RouteStateSync display when sort direction changes', async () => {
-        await advancedSearch.open();
-        const dialog = document.querySelector('.asmr-advanced-search-dialog') as HTMLElement;
-        const ascBtn = dialog.querySelector('.asmr-sort-asc') as HTMLElement;
+    describe('parseStoredSortOption', () => {
+        it('parses valid stored sort options', () => {
+            const stored = JSON.stringify({ order: 'rating', sort: 'asc' });
+            expect(parseStoredSortOption(stored)).toEqual({ order: 'rating', sort: 'asc' });
+        });
 
-        // Simulate click
-        ascBtn.click();
+        it('rejects malformed or invalid stored sort options', () => {
+            expect(parseStoredSortOption(null)).toBeNull();
+            expect(parseStoredSortOption('{not-json')).toBeNull();
+            expect(parseStoredSortOption(JSON.stringify({ order: 'rating' }))).toBeNull();
+            expect(parseStoredSortOption(JSON.stringify({ order: 'rating', sort: 'up' }))).toBeNull();
+        });
+    });
 
-        // Verify AppStore update
-        expect(AppStore.setSearchState).toHaveBeenCalledWith(expect.objectContaining({
-            pendingSort: 'asc'
-        }));
-
-        // Verify RouteStateSync display update
-        const mockSync = RouteStateSync.getInstance();
-        expect(mockSync.syncDisplayToHost).toHaveBeenCalled();
-        expect(mockSync.getSortLabel).toHaveBeenCalledWith('release', 'asc');
+    describe('getFallbackSortOptions', () => {
+        it('provides translated fallback options', () => {
+            const options = getFallbackSortOptions(t);
+            expect(options.length).toBeGreaterThan(0);
+            expect(options[0]).toEqual({ order: 'insert_time', label: 'i18n:sortNewest' });
+        });
     });
 });

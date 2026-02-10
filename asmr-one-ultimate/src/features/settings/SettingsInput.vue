@@ -14,7 +14,7 @@ const value = useConfig(props.configKey);
 
 function onInput(event: Event) {
     const target = event.target as HTMLInputElement;
-    value.value = target.value as any;
+    (value as { value: string }).value = target.value;
 }
 </script>
 

@@ -211,7 +211,7 @@ export class PlaybackController {
     // =========================================================================
 
     private extractTracksFromWork(work: WorkDetail): AudioTrack[] {
-        const dirs = work.dirs || (work as any).children || [];
+        const dirs = work.dirs || work.children || [];
         if (Array.isArray(dirs) && dirs.length > 0) {
             const bestFolder = selectBestFolder(dirs as WorkFolder[]);
             if (bestFolder) {

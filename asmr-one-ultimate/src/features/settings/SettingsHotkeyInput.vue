@@ -3,7 +3,7 @@ import { ref, computed } from 'vue';
 import { useConfig } from '../../composables/useConfig';
 import { useI18n } from '../../composables/useI18n';
 import { AppStore } from '../../store/AppStore';
-import type { ConfigKey } from '../../types';
+import type { ConfigKey, PluginConfig } from '../../types';
 
 const props = defineProps<{
     configKey: ConfigKey;
@@ -55,7 +55,7 @@ function onKeydown(e: KeyboardEvent) {
 
     // Backspace clears the binding
     if (e.key === 'Backspace') {
-        value.value = '' as any;
+        value.value = '' as PluginConfig[ConfigKey] & string;
         listening.value = false;
         (e.target as HTMLElement).blur();
         return;
@@ -66,7 +66,7 @@ function onKeydown(e: KeyboardEvent) {
 
     // Normalize space
     const keyValue = e.key === ' ' ? 'Space' : e.key;
-    value.value = keyValue as any;
+    value.value = keyValue as PluginConfig[ConfigKey] & string;
     listening.value = false;
     (e.target as HTMLElement).blur();
 }

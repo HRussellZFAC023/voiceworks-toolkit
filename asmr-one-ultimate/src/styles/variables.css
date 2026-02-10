@@ -43,12 +43,12 @@
     --asmr-star-color: #ffb300;
 
     /* Z-Index Scale — single source of truth */
-    --z-flat-backdrop: 4999;
-    --z-flat-panel: 5000;
     --z-viz: 9991;
     --z-joi: 9992;
     --z-subs: 9993;
-    --z-overflow-menu: 9995;
+    --z-flat-backdrop: 9994;
+    --z-flat-panel: 9995;
+    --z-overflow-menu: 9996;
     --z-media-viewer: 9999;
     --z-dialog: 10000;
     --z-menu: 10002;

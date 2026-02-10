@@ -1,6 +1,20 @@
 import { KikoeruBridge } from '../infrastructure/KikoeruBridge';
 import { gmRequest } from '../infrastructure/HttpClient';
 import { Logger } from '../core/Utils';
+import type { AxiosInstance } from '../types/store';
+
+/** Minimal shape for axios error objects in the interceptor */
+interface AxiosError {
+    message: string;
+    config?: {
+        url?: string;
+        method?: string;
+        headers?: Record<string, string>;
+        data?: unknown;
+        responseType?: string;
+        __isRetry?: boolean;
+    };
+}
 
 export class CorsFixer {
     static enable(): void {
@@ -14,12 +28,23 @@ export class CorsFixer {
         const axios = bridge.axios;
 
         // Check if already installed to avoid duplicates
-        if ((axios as any).__asmr_cors_fixed) return;
-        (axios as any).__asmr_cors_fixed = true;
+        const axiosExt = axios as AxiosInstance & {
+            __asmr_cors_fixed?: boolean;
+            interceptors?: {
+                response?: {
+                    use: (
+                        onFulfilled: (response: unknown) => unknown,
+                        onRejected: (error: AxiosError) => unknown
+                    ) => void;
+                };
+            };
+        };
+        if (axiosExt.__asmr_cors_fixed) return;
+        axiosExt.__asmr_cors_fixed = true;
 
-        (axios as unknown as { interceptors: { response: { use: (onFulfilled: (response: unknown) => unknown, onRejected: (error: any) => unknown) => void } } }).interceptors.response.use(
+        axiosExt.interceptors?.response?.use(
             (response) => response,
-            async (error) => {
+            async (error: AxiosError) => {
                 const config = error.config;
                 
                 // Only retry if:
@@ -44,7 +69,7 @@ export class CorsFixer {
                                 // Remove dangerous headers that might trigger CORS preflight failure if browser adds them but server rejects
                                 // GM_xmlhttpRequest handles User-Agent/Origin differently/safely
                             },
-                            data: config.data,
+                            data: config.data as string | undefined,
                             // Map axios responseType to GM responseType
                             responseType: config.responseType === 'blob' ? 'blob' : 'json' 
                         });

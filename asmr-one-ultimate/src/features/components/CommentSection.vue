@@ -3,12 +3,20 @@ import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue';
 import { useBridge } from '../../composables/useBridge';
 import { useI18n } from '../../composables/useI18n';
 import { useConfig } from '../../composables/useConfig';
+import { useRoute } from '../../composables/useRoute';
 import { ReviewApi } from '../../api/Review';
 import { DLsiteScraper } from '../DLsiteScraper';
 import { TranslationService } from '../../services/TranslationService';
 import { Logger } from '../../core/Logger';
 import { isChinese } from '../../core/DomUtils';
 import type { DLsiteUserReview } from '../../types/dlsite';
+import {
+    extractAllRjCodes,
+    getAllRelatedWorkIds,
+    getReviewParagraphs,
+    htmlToPlainText,
+    type CommentSectionWorkLike,
+} from '../commentSectionUtils';
 
 // ---------------------------------------------------------------------------
 // Composables & singletons
@@ -18,6 +26,7 @@ const bridge = useBridge();
 const { t } = useI18n();
 const translateMode = useConfig('translateMode');
 const cnToJp = useConfig('translateCnToJp');
+const route = useRoute();
 const scraper = DLsiteScraper.getInstance();
 
 // ---------------------------------------------------------------------------
@@ -33,7 +42,7 @@ const dlsiteLoaded = ref(false);
 const dlsiteLoading = ref(false);
 const dlsiteFetchFailed = ref(false);
 const combinedEditionReviewCount = ref(0);
-const currentWorkData = ref<any>(null);
+const currentWorkData = ref<CommentSectionWorkLike | null>(null);
 const currentWorkId = ref<string | null>(null);
 
 /** Translations for each review paragraph keyed by `${reviewIdx}:${paraIdx}` */
@@ -45,15 +54,16 @@ let eagerFetchPromise: Promise<void> | null = null;
 let syncing = false;
 let qRatingCleanup: (() => void) | null = null;
 let savedStatusTimer: ReturnType<typeof setTimeout> | null = null;
+let loadRequestVersion = 0;
 
 // ---------------------------------------------------------------------------
 // Computed
 // ---------------------------------------------------------------------------
 
 const workIdFromRoute = computed(() => {
-    const route = bridge.route;
-    if (route?.name === 'work' || route?.path?.startsWith('/work/')) {
-        return route.params?.id || null;
+    const currentRoute = route.value;
+    if (currentRoute?.name === 'work' || currentRoute?.path?.startsWith('/work/')) {
+        return currentRoute.params?.id || null;
     }
     return null;
 });
@@ -76,257 +86,36 @@ const reviewCount = computed(() => {
 const hasExistingReview = computed(() => currentRating.value > 0 || !!currentText.value);
 
 // ---------------------------------------------------------------------------
-// Review text sanitization (pure function, no DOM needed)
-// ---------------------------------------------------------------------------
-
-function escapeHtml(s: string): string {
-    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-}
-
-function sanitizeReviewText(text: string): string {
-    let s = text;
-
-    // 1. Truncate at page-chrome / age-gate boundaries
-    const stopMarkers = [
-        '\u3042\u306a\u305f\u306f18\u6b73\u4ee5\u4e0a\u3067\u3059\u304b',
-        '18\u6b73\u672a\u6e80\u306e\u65b9\u306f\u95b2\u89a7\u3067\u304d\u306a\u3044',
-        '\u6210\u4eba\u5411\u3051\u5165\u5ba4\u78ba\u8a8d',
-        'age_verification',
-        'Select Language',
-        '\u3053\u306e\u4f5c\u54c1\u3092\u8cb7\u3063\u305f\u4eba',
-        '\u6700\u8fd1\u30c1\u30a7\u30c3\u30af\u3057\u305f\u4f5c\u54c1',
-        '\u95a2\u9023\u30b5\u30fc\u30d3\u30b9',
-        'DLsite\u306b\u3064\u3044\u3066',
-        '\u30d8\u30eb\u30d7&\u30ac\u30a4\u30c9',
-        '\u304a\u652f\u6255\u3044&\u30dd\u30a4\u30f3\u30c8',
-        '\u63a8\u5968\u74b0\u5883',
-        '\u00a9 1996 DLsite',
-        'SORRY...',
-        '\u540c\u4eba\u8a8c\u30fb\u540c\u4eba\u30b2\u30fc\u30e0\u30fb\u540c\u4eba\u30dc\u30a4\u30b9',
-        '\u8a00\u8a9e\u3068\u901a\u8ca8\u3092\u8a2d\u5b9a',
-        '\u5168\u5e74\u9f62\u5411\u3051\u3078',
-        '\u5973\u6027\u5411\u3051',
-        '\u4f1a\u54e1\u767b\u9332\u3067\u30af\u30fc\u30dd\u30f3',
-        '\u30af\u30fc\u30dd\u30f3\u5229\u7528\u4fa1\u683c',
-        '\u30ab\u30fc\u30c8\u306b\u5165\u308c\u308b',
-        '\u304a\u6c17\u306b\u5165\u308a\u306b\u8ffd\u52a0',
-        '\u3053\u306e\u4f5c\u54c1\u3092\u8cb7\u3046',
-        '\u4f1a\u54e1\u767b\u9332\u3057\u3066\u8cfc\u5165',
-        '\u5bfe\u5fdc\u74b0\u5883\u30d6\u30e9\u30a6\u30b6\u8996\u8074',
-        '\u30a2\u30d5\u30a3\u30ea\u30a8\u30a4\u30c8\u30ea\u30f3\u30af\u4f5c\u6210',
-        '\u7dcf\u5408\u30c8\u30c3\u30d7',
-        '\u63a1\u7528\u60c5\u5831',
-        '\u63a1\u7528\u30b5\u30a4\u30c8\u3078',
-        '\u63a8\u5968\u74b0\u5883\uff1a\u6700\u65b0\u7248',
-    ];
-    for (const marker of stopMarkers) {
-        const idx = s.indexOf(marker);
-        if (idx !== -1) s = s.substring(0, idx);
-    }
-
-    // 2. Strip dangerous HTML tags
-    s = s.replace(/<script[\s\S]*?<\/script>/gi, '');
-    s = s.replace(/<iframe[\s\S]*?<\/iframe>/gi, '');
-    s = s.replace(/<style[\s\S]*?<\/style>/gi, '');
-
-    // 3. Strip tracking/banner images
-    s = s.replace(/!\[Image \d+[^\]]*\]\([^)]*\)/g, '');
-    s = s.replace(/!\[[^\]]*\]\([^)]*(?:analytics|octopuspop|adsct|twitter|doubleclick|facebook|banner|gsspat|bance|rubiconproject|modpub|logo|payment|recruit)[^)]*\)/gi, '');
-    s = s.replace(/<img[^>]*src="[^"]*(?:analytics|octopuspop|adsct|twitter|doubleclick|facebook|banner|gsspat|bance|rubiconproject|modpub|logo|payment|recruit)[^"]*"[^>]*\/?>/gi, '');
-
-    // 4. Strip navigation links
-    s = s.replace(/\*?\s*\[([^\]]*)\]\(https?:\/\/(?:www\.dlsite\.com\/home\/|www\.dlsite\.com\/maniax\/work|www\.dlsite\.com\/maniax\/(?:regist|login|mypage|guide|rule|faq|inquiry)|www\.dlsite\.com\/modpub|ci-en|ch\.dlsite|www\.nijiyome|chobit|triokini|play\.dlsite|hire\.wantedly|www\.eisys|www\.geonet|cs\.dlsite|min-hon|www\.youtube|x\.com|t\.co|analytics\.twitter)[^)]*\)/gi, '');
-    s = s.replace(/\*?\s*\[\s*\]\([^)]*\)/g, '');
-
-    // 5. Strip DLsite product images
-    s = s.replace(/!\[[^\]]*\]\(https?:\/\/img\.dlsite\.jp[^)]*\)/gi, '');
-
-    // 6. Convert markdown to HTML (with XSS protection)
-    s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, (_match, text, url) => {
-        const safeText = escapeHtml(text);
-        const safeUrl = escapeHtml(url);
-        return `<a href="${safeUrl}" target="_blank" rel="noopener noreferrer">${safeText}</a>`;
-    });
-    s = s.replace(/(^|[^("'])(https?:\/\/[^\s<>"')\]]+)/gm, (_match, prefix, url) => {
-        const safeUrl = escapeHtml(url);
-        return `${prefix}<a href="${safeUrl}" target="_blank" rel="noopener noreferrer">${safeUrl}</a>`;
-    });
-    s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-    s = s.replace(/__([^_]+)__/g, '<strong>$1</strong>');
-
-    // 7. Replace TeX-style quotes
-    s = s.replace(/``/g, '\u201c');
-    s = s.replace(/''/g, '\u201d');
-
-    // 8. Strip price lines and shopping UI fragments
-    s = s.replace(/^\d+\s*\u5186\s*$/gm, '');
-    s = s.replace(/^\u4fa1\u683c\s*$/gm, '');
-    s = s.replace(/^Multi Lang\.\s*$/gm, '');
-    s = s.replace(/^\u65e5\u672c\u8a9e\s*$/gm, '');
-    s = s.replace(/^Sales:\s*\d+\s*$/gm, '');
-    s = s.replace(/^\d+\s*JPY(?:Sales:\s*\d+)?\s*$/gm, '');
-    s = s.replace(/^\u96a0\u3059\s*$/gm, '');
-    s = s.replace(/^\u30ab\u30fc\u30c8\s*$/gm, '');
-
-    // 9. Strip OS/section headers
-    s = s.replace(/^(?:Windows|Mac|iOS|Android|\u305d\u306e\u4ed6)-?\s*$/gm, '');
-    s = s.replace(/^\u5bfe\u5fdc\uff2f\uff33\s*$/gm, '');
-    s = s.replace(/^\u5bfe\u5fdcOS\s*$/gm, '');
-    s = s.replace(/^\u5bfe\u5fdc\u30a2\u30d7\u30ea.*$/gm, '');
-    s = s.replace(/^DLsite Sound\s*$/gm, '');
-
-    // 10. Clean up
-    s = s.replace(/^\*\s*$/gm, '');
-    s = s.replace(/^---+$/gm, '');
-    s = s.replace(/^={3,}$/gm, '');
-    s = s.replace(/\n{3,}/g, '\n\n');
-    s = s.trim();
-
-    if (s.length < 10) return '';
-    const urlRatio = (s.match(/https?:\/\//g) || []).length / Math.max(1, s.split('\n').length);
-    if (urlRatio > 0.5) return '';
-
-    return s;
-}
-
-/**
- * Parse review text into paragraphs of sanitized HTML.
- * Each paragraph can contain <a>, <strong>, <br> from markdown conversion,
- * so we use v-html for rendering.
- */
-function getReviewParagraphs(review: DLsiteUserReview): string[] {
-    if (!review.text) return [];
-    const sanitized = sanitizeReviewText(review.text);
-    if (!sanitized || sanitized.length < 3) return [];
-    return sanitized
-        .split(/\n\n+/)
-        .map(p => p.trim())
-        .filter(p => p.length > 0)
-        .map(p => p.replace(/\n/g, '<br>'));
-}
-
-/**
- * Extract plain text from an HTML paragraph (strips tags).
- */
-function htmlToPlainText(html: string): string {
-    const tmp = document.createElement('div');
-    tmp.innerHTML = html;
-    return tmp.textContent || '';
-}
-
-// ---------------------------------------------------------------------------
-// RJ code / work ID extraction helpers
-// ---------------------------------------------------------------------------
-
-function extractRjCode(): string | null {
-    const work = currentWorkData.value;
-    if (!work) return null;
-
-    const sourceId = (work.source_id || work.sourceId || '').toString();
-    if (sourceId) {
-        const rjMatch = sourceId.match(/RJ\d{6,8}/i);
-        if (rjMatch) return rjMatch[0].toUpperCase();
-        const numericMatch = sourceId.match(/\d{6,8}/);
-        if (numericMatch) return 'RJ' + numericMatch[0];
-    }
-
-    const workIdStr = String(currentWorkId.value);
-    const idRjMatch = workIdStr.match(/RJ\d{6,8}/i);
-    if (idRjMatch) return idRjMatch[0].toUpperCase();
-    const idNumericMatch = workIdStr.match(/\d{6,8}/);
-    if (idNumericMatch) return 'RJ' + idNumericMatch[0];
-
-    const titleMatch = work.title?.match(/RJ\d{6,8}/i);
-    if (titleMatch) return titleMatch[0].toUpperCase();
-
-    return null;
-}
-
-function extractAllRjCodes(): string[] {
-    const work = currentWorkData.value;
-    const primary = extractRjCode();
-    const codes = new Set<string>();
-    if (primary) codes.add(primary);
-    if (!work) return [...codes];
-
-    const editions = work.language_editions;
-    if (Array.isArray(editions)) {
-        for (const ed of editions) {
-            const wno = String(ed?.workno || '');
-            const m = wno.match(/RJ\d{6,8}/i);
-            if (m) codes.add(m[0].toUpperCase());
-        }
-    }
-
-    const ti = work.translation_info;
-    if (ti) {
-        for (const field of ['original_workno', 'parent_workno']) {
-            const val = ti[field];
-            if (val && typeof val === 'string') {
-                const m = val.match(/RJ\d{6,8}/i);
-                if (m) codes.add(m[0].toUpperCase());
-            }
-        }
-        if (Array.isArray(ti.child_worknos)) {
-            for (const wno of ti.child_worknos) {
-                const m = String(wno).match(/RJ\d{6,8}/i);
-                if (m) codes.add(m[0].toUpperCase());
-            }
-        }
-    }
-
-    const otherEditions = work.other_language_editions_in_db;
-    if (Array.isArray(otherEditions)) {
-        for (const ed of otherEditions) {
-            const sid = String(ed?.source_id || ed?.sourceId || '');
-            const m = sid.match(/RJ\d{6,8}/i);
-            if (m) codes.add(m[0].toUpperCase());
-        }
-    }
-
-    return [...codes];
-}
-
-function getAllRelatedWorkIds(): number[] {
-    const ids = new Set<number>();
-    const primary = parseInt(currentWorkId.value || '', 10);
-    if (!isNaN(primary)) ids.add(primary);
-
-    const work = currentWorkData.value;
-    if (!work) return [...ids];
-
-    const otherEditions = work.other_language_editions_in_db;
-    if (Array.isArray(otherEditions)) {
-        for (const ed of otherEditions) {
-            const edId = parseInt(String(ed?.id || ''), 10);
-            if (!isNaN(edId)) ids.add(edId);
-        }
-    }
-
-    return [...ids];
-}
-
-// ---------------------------------------------------------------------------
 // Data fetching
 // ---------------------------------------------------------------------------
 
-async function getWorkData(id: string): Promise<any> {
-    const storeWork = bridge.store?.state?.AudioPlayer?.work;
+type RootStoreStateLike = {
+    AudioPlayer?: { work?: CommentSectionWorkLike | null };
+    Works?: {
+        work?: CommentSectionWorkLike | null;
+        currentWork?: CommentSectionWorkLike | null;
+        detail?: CommentSectionWorkLike | null;
+    };
+};
+
+async function getWorkData(id: string): Promise<CommentSectionWorkLike | null> {
+    const state = bridge.store?.state as RootStoreStateLike | undefined;
+    const storeWork = state?.AudioPlayer?.work;
     if (storeWork && String(storeWork.id) === String(id)) return storeWork;
-    const worksState = (bridge.store?.state as any)?.Works;
-    const cachedWork = worksState?.work || worksState?.currentWork || worksState?.detail;
+    const worksState = state?.Works;
+    const cachedWork = worksState?.work ?? worksState?.currentWork ?? worksState?.detail;
     if (cachedWork && String(cachedWork.id) === String(id)) return cachedWork;
 
     try {
-        const res = await bridge.axios.get(`/api/work/${id}`);
-        return res.data;
+        const res = await bridge.axios.get<CommentSectionWorkLike>(`/api/work/${id}`);
+        return res.data ?? null;
     } catch (e) {
         Logger.warn('[CommentSection] Failed to fetch work data', e);
         return null;
     }
 }
 
-async function fetchCombinedEditionReviewCount(): Promise<void> {
+async function fetchCombinedEditionReviewCount(expectedVersion: number, expectedWorkId: string): Promise<void> {
     const work = currentWorkData.value;
     if (!work) return;
 
@@ -338,12 +127,12 @@ async function fetchCombinedEditionReviewCount(): Promise<void> {
 
     let total = work.review_count || 0;
 
-    const fetches = otherEditions.map(async (ed: any) => {
+    const fetches = otherEditions.map(async ed => {
         const edId = ed?.id;
         if (!edId || String(edId) === String(currentWorkId.value)) return 0;
         try {
-            const res = await bridge.axios.get(`/api/work/${edId}`);
-            return (res.data as any)?.review_count || 0;
+            const res = await bridge.axios.get<{ review_count?: number }>(`/api/work/${edId}`);
+            return res.data?.review_count || 0;
         } catch (e) {
             Logger.warn(`[CommentSection] Failed to fetch review count for edition ${edId}`, e);
             return 0;
@@ -351,13 +140,14 @@ async function fetchCombinedEditionReviewCount(): Promise<void> {
     });
 
     const counts = await Promise.all(fetches);
+    if (loadRequestVersion !== expectedVersion || currentWorkId.value !== expectedWorkId) return;
     total += counts.reduce((sum: number, c: number) => sum + c, 0);
 
     combinedEditionReviewCount.value = total;
     Logger.debug(`[CommentSection] Combined review count across ${1 + otherEditions.length} editions: ${total}`);
 }
 
-async function fetchDLsiteReviewsData(): Promise<void> {
+async function fetchDLsiteReviewsData(expectedVersion = loadRequestVersion): Promise<void> {
     if (dlsiteLoading.value || dlsiteLoaded.value) return;
 
     const workIdAtStart = currentWorkId.value;
@@ -365,7 +155,7 @@ async function fetchDLsiteReviewsData(): Promise<void> {
 
     dlsiteLoading.value = true;
 
-    const allCodes = extractAllRjCodes();
+    const allCodes = extractAllRjCodes(currentWorkData.value, currentWorkId.value);
     Logger.debug('[CommentSection] Eager fetch starting for', allCodes.length, 'RJ codes:', allCodes);
     if (allCodes.length === 0) {
         dlsiteLoading.value = false;
@@ -378,7 +168,7 @@ async function fetchDLsiteReviewsData(): Promise<void> {
             allCodes.map(code => scraper.scrapeReviews(code))
         );
 
-        if (currentWorkId.value !== workIdAtStart) {
+        if (loadRequestVersion !== expectedVersion || currentWorkId.value !== workIdAtStart) {
             dlsiteLoading.value = false;
             return;
         }
@@ -427,12 +217,9 @@ function preTranslateReviews(reviews: DLsiteUserReview[]): void {
     const texts: string[] = [];
     const cnTexts: string[] = [];
     for (const review of reviews) {
-        if (!review.text) continue;
-        const sanitized = sanitizeReviewText(review.text);
-        if (!sanitized || sanitized.length < 3) continue;
-        const paragraphs = sanitized.split(/\n\n+/).map(p => p.trim()).filter(p => p.length > 0);
+        const paragraphs = getReviewParagraphs(review);
         for (const para of paragraphs) {
-            const plain = htmlToPlainText(para.replace(/\n/g, '<br>'));
+            const plain = htmlToPlainText(para);
             if (plain.length === 0) continue;
             if (cnOnlyMode) {
                 if (isChinese(plain)) cnTexts.push(plain);
@@ -451,20 +238,27 @@ function preTranslateReviews(reviews: DLsiteUserReview[]): void {
         });
     }
     if (cnTexts.length > 0) {
-        Logger.debug(`[CommentSection] Pre-translating ${cnTexts.length} CN→JA paragraphs`);
+        Logger.debug(`[CommentSection] Pre-translating ${cnTexts.length} CN->JA paragraphs`);
         TranslationService.translateBatch(cnTexts, 'ja').catch(err => {
-            Logger.error(`[CommentSection] CN→JA pre-translation failed`, err);
+            Logger.error(`[CommentSection] CN->JA pre-translation failed`, err);
         });
     }
 }
 
-async function translateParagraphs(reviewIdx: number, paragraphs: string[], targetLang?: string): Promise<void> {
+async function translateParagraphs(
+    reviewIdx: number,
+    paragraphs: string[],
+    expectedVersion: number,
+    expectedWorkId: string,
+    targetLang?: string
+): Promise<void> {
     const plainTexts = paragraphs.map(p => htmlToPlainText(p));
     const validTexts = plainTexts.filter(t => t.length > 0);
     if (validTexts.length === 0) return;
 
     try {
         const results = await TranslationService.translateBatch(validTexts, targetLang);
+        if (loadRequestVersion !== expectedVersion || currentWorkId.value !== expectedWorkId) return;
         let validIdx = 0;
         for (let paraIdx = 0; paraIdx < paragraphs.length; paraIdx++) {
             const plain = plainTexts[paraIdx];
@@ -479,6 +273,7 @@ async function translateParagraphs(reviewIdx: number, paragraphs: string[], targ
         }
     } catch (e) {
         Logger.warn('[CommentSection] Batch translation of review paragraphs failed', e);
+        if (loadRequestVersion !== expectedVersion || currentWorkId.value !== expectedWorkId) return;
         for (let paraIdx = 0; paraIdx < paragraphs.length; paraIdx++) {
             translations.value[`${reviewIdx}:${paraIdx}`] = '';
         }
@@ -489,7 +284,7 @@ function getTranslation(reviewIdx: number, paraIdx: number): string | undefined 
     return translations.value[`${reviewIdx}:${paraIdx}`];
 }
 
-/** In CN→JP mode (translateMode off), replace CN paragraph text with JP translation inline */
+/** In CN->JP mode (translateMode off), replace CN paragraph text with JP translation inline */
 function getCnToJpDisplay(para: string, reviewIdx: number, paraIdx: number): string {
     if (translateMode.value || !cnToJp.value) return para;
     const plain = htmlToPlainText(para);
@@ -573,17 +368,20 @@ function clickQRatingStar(rating: number): void {
 // ---------------------------------------------------------------------------
 
 function patchHostCommentCount(): void {
-    if (combinedEditionReviewCount.value <= 0) return;
     const work = currentWorkData.value;
-    const otherEditions = work?.other_language_editions_in_db;
-    if (!Array.isArray(otherEditions) || otherEditions.length === 0) return;
+    if (!work) return;
+    const otherEditions = work.other_language_editions_in_db;
+    const useCombinedCount = Array.isArray(otherEditions) && otherEditions.length > 0;
+    const targetCount = useCombinedCount
+        ? combinedEditionReviewCount.value
+        : (work.review_count || 0);
 
     const icons = document.querySelectorAll('.q-icon.material-icons');
     for (const icon of icons) {
         if (icon.textContent?.trim() === 'chat') {
             const countSpan = icon.parentElement?.querySelector('span.text-grey');
             if (countSpan) {
-                countSpan.textContent = ` (${combinedEditionReviewCount.value})`;
+                countSpan.textContent = ` (${targetCount})`;
             }
             break;
         }
@@ -618,7 +416,7 @@ function debouncedSave(): void {
 async function handleSave(): Promise<void> {
     if (!currentWorkId.value) return;
 
-    const allIds = getAllRelatedWorkIds();
+    const allIds = getAllRelatedWorkIds(currentWorkId.value, currentWorkData.value);
     if (allIds.length === 0) return;
 
     updateSaveStatus('saving');
@@ -644,7 +442,7 @@ async function handleDelete(): Promise<void> {
     if (!currentWorkId.value) return;
     if (!confirm(t('commentsDeleteConfirm'))) return;
 
-    const allIds = getAllRelatedWorkIds();
+    const allIds = getAllRelatedWorkIds(currentWorkId.value, currentWorkData.value);
     if (allIds.length === 0) return;
 
     try {
@@ -683,7 +481,8 @@ async function lazyLoadDLsiteReviews(): Promise<void> {
     if (dlsiteLoaded.value) return;
 
     if (!eagerFetchPromise) {
-        eagerFetchPromise = fetchDLsiteReviewsData();
+        const expectedVersion = loadRequestVersion;
+        eagerFetchPromise = fetchDLsiteReviewsData(expectedVersion);
     }
     await eagerFetchPromise;
 }
@@ -700,25 +499,34 @@ function onFetchErrorClick(): void {
 // Main load routine
 // ---------------------------------------------------------------------------
 
-async function load(workId: string): Promise<void> {
-    // Reset state
+function resetStateForWorkSwitch(): void {
     dlsiteReviews.value = [];
     dlsiteLoaded.value = false;
     dlsiteLoading.value = false;
     dlsiteFetchFailed.value = false;
     combinedEditionReviewCount.value = 0;
+    currentRating.value = 0;
+    currentText.value = '';
+    saveStatus.value = 'idle';
+    currentWorkData.value = null;
     eagerFetchPromise = null;
     translations.value = {};
+}
+
+async function load(workId: string): Promise<void> {
+    const expectedVersion = ++loadRequestVersion;
+    resetStateForWorkSwitch();
 
     const work = await getWorkData(workId);
-    if (currentWorkId.value !== workId) return;
+    if (loadRequestVersion !== expectedVersion || currentWorkId.value !== workId) return;
     currentWorkData.value = work;
 
     currentRating.value = work?.userRating || 0;
     currentText.value = work?.review_text || '';
+    patchHostCommentCount();
 
-    await fetchCombinedEditionReviewCount();
-    if (currentWorkId.value !== workId) return;
+    await fetchCombinedEditionReviewCount(expectedVersion, workId);
+    if (loadRequestVersion !== expectedVersion || currentWorkId.value !== workId) return;
 
     patchHostCommentCount();
 
@@ -729,7 +537,7 @@ async function load(workId: string): Promise<void> {
 
     // Eagerly fetch DLsite reviews in background
     if (!dlsiteLoaded.value && !dlsiteLoading.value) {
-        eagerFetchPromise = fetchDLsiteReviewsData();
+        eagerFetchPromise = fetchDLsiteReviewsData(expectedVersion);
     }
 }
 
@@ -742,8 +550,9 @@ watch(workIdFromRoute, (newId, oldId) => {
         currentWorkId.value = newId;
         load(newId);
     } else if (!newId) {
+        loadRequestVersion++;
         currentWorkId.value = null;
-        currentWorkData.value = null;
+        resetStateForWorkSwitch();
         teardownQRatingSync();
     }
 }, { immediate: true });
@@ -751,11 +560,14 @@ watch(workIdFromRoute, (newId, oldId) => {
 // Trigger translations when reviews load and translateMode or cnToJp is on
 watch([dlsiteLoaded, translateMode, cnToJp], ([loaded, shouldTranslate, cnToJpOn]) => {
     if (loaded && (shouldTranslate || cnToJpOn)) {
+        const expectedVersion = loadRequestVersion;
+        const expectedWorkId = currentWorkId.value;
+        if (!expectedWorkId) return;
         const cnOnlyMode = !shouldTranslate && cnToJpOn;
         validDlsiteReviews.value.forEach((review, idx) => {
             const paragraphs = getReviewParagraphs(review);
             if (paragraphs.length > 0) {
-                translateParagraphs(idx, paragraphs, cnOnlyMode ? 'ja' : undefined);
+                translateParagraphs(idx, paragraphs, expectedVersion, expectedWorkId, cnOnlyMode ? 'ja' : undefined);
             }
         });
     }
@@ -770,6 +582,7 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
+    loadRequestVersion++;
     teardownQRatingSync();
     if (saveDebounceTimer) {
         clearTimeout(saveDebounceTimer);

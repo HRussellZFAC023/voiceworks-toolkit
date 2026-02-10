@@ -12,26 +12,28 @@
  *     dependency. Works even without Whisper transcription.
  */
 
-import { Logger, I18n } from '../core/Utils';
+import { type Component, markRaw, reactive } from 'vue';
+import { Logger } from '../core/Utils';
 import { EventBus } from '../core/EventBus';
 import { CentralObserver } from '../core/CentralObserver';
+import { mountApp, type MountedApp } from '../core/MountApp';
 import { getAudioElement } from '../core/DomUtils';
 import { getOrCreateSourceNode } from '../core/AudioAnalysis';
 import { AppStore } from '../store/AppStore';
 import type { WhisperUpdatePayload } from '../types';
-
-// ============================================================================
-// Types
-// ============================================================================
-
-type JoiState = 'idle' | 'go' | 'stop' | 'edge' | 'cum' | 'denied' | 'ruined';
-type SemanticCategory = 'sexual' | 'stop' | 'encouragement' | 'climax' | 'edge' | 'neutral';
-
-interface ContextWindow {
-    text: string;
-    timestamp: number;
-    scores: Record<SemanticCategory, number>;
-}
+import JoiBarVue from './components/JoiBar.vue';
+import {
+    aggregateContextScores,
+    applyStopScoreMultiplier,
+    applyVolumeTextAgreement,
+    computeContextIntensity,
+    createEmptyScores,
+    pickDominantCategory,
+    type ContextWindow,
+    type JoiState,
+    type ScoreMap,
+    type SemanticCategory,
+} from './joiDecisionUtils';
 
 // ============================================================================
 // Semantic Patterns (pre-compiled for hot path)
@@ -329,6 +331,19 @@ const INSTRUCTIONS: Record<JoiState, string[]> = {
     ruined: ['joiRuinedMsg'],
 };
 
+interface JoiBarUiState {
+    state: JoiState;
+    instructionKey: string;
+    contextIntensity: number;
+    countdownSec: number;
+}
+
+interface JoiBarMount {
+    container: HTMLElement;
+    uiState: JoiBarUiState;
+    mounted: MountedApp;
+}
+
 // ============================================================================
 // JoiTool Class
 // ============================================================================
@@ -338,8 +353,8 @@ export class JoiTool {
 
     private state: JoiState = 'idle';
     private isActive = false;
-    private barEl: HTMLElement | null = null;
-    private expandedBarEl: HTMLElement | null = null;
+    private collapsedBar: JoiBarMount | null = null;
+    private expandedBar: JoiBarMount | null = null;
     private eventCleanups: (() => void)[] = [];
     private persistentCleanups: (() => void)[] = [];
     private contextWindows: ContextWindow[] = [];
@@ -347,6 +362,7 @@ export class JoiTool {
     private instructionIndex = 0;
     private terminalTimer: number | null = null;
     private countdownTimer: number | null = null;
+    private countdownSec = 0;
     private positionPollId: number | null = null;
     private lastSubtitleText = '';
     private isPaused = false;
@@ -386,7 +402,6 @@ export class JoiTool {
 
     public enable(): void {
         this.setupPersistentListeners();
-        this.setupEventListeners();
         CentralObserver.register('joi-tool', () => {
             if (this.isActive) this.ensureUI();
         }, 800);
@@ -403,10 +418,10 @@ export class JoiTool {
         this.deactivate();
         this.persistentCleanups.forEach(fn => fn());
         this.persistentCleanups = [];
-        this.barEl?.remove();
-        this.expandedBarEl?.remove();
-        this.barEl = null;
-        this.expandedBarEl = null;
+        this.destroyBar(this.collapsedBar);
+        this.destroyBar(this.expandedBar);
+        this.collapsedBar = null;
+        this.expandedBar = null;
         Logger.log('[JoiTool] Disabled');
     }
 
@@ -434,6 +449,7 @@ export class JoiTool {
         this.instructionIndex = 0;
         this.lastSubtitleText = '';
         this.isPaused = false;
+        this.countdownSec = 0;
         this.volumeSmoothed = 0;
         this.volumePeak = 0;
         this.volumeHistory = [];
@@ -445,6 +461,7 @@ export class JoiTool {
         this.ensureUI();
         this.updateDisplay();
         this.showBar();
+        this.setupEventListeners();
         this.startPositionPolling();
         this.syncPauseState();
         this.connectAudioAnalyser();
@@ -832,10 +849,8 @@ export class JoiTool {
     // Semantic Scoring
     // ------------------------------------------------------------------------
 
-    private scoreText(text: string): Record<SemanticCategory, number> {
-        const scores: Record<SemanticCategory, number> = {
-            sexual: 0, stop: 0, encouragement: 0, climax: 0, edge: 0, neutral: 0,
-        };
+    private scoreText(text: string): ScoreMap {
+        const scores = createEmptyScores();
 
         for (const group of SEMANTIC_PATTERNS) {
             let matchCount = 0;
@@ -924,70 +939,21 @@ export class JoiTool {
         const hasEnoughContext = this.contextWindows.length >= MIN_CONTEXT_DEPTH;
 
         // Aggregate text scores
-        const aggregated: Record<SemanticCategory, number> = {
-            sexual: 0, stop: 0, encouragement: 0, climax: 0, edge: 0, neutral: 0,
-        };
-        for (const w of this.contextWindows) {
-            const age = (now - w.timestamp) / 1000;
-            const recency = Math.max(0.2, 1 - (age / CONTEXT_WINDOW_SEC));
-            for (const cat of Object.keys(w.scores) as SemanticCategory[]) {
-                aggregated[cat] += w.scores[cat] * recency;
-            }
-        }
+        let aggregated = aggregateContextScores(this.contextWindows, now, CONTEXT_WINDOW_SEC);
 
         // --- Fairness: de-boost stop scores ---
-        aggregated.stop *= STOP_SCORE_MULTIPLIER;
+        aggregated = applyStopScoreMultiplier(aggregated, STOP_SCORE_MULTIPLIER);
 
         // --- Volume-text agreement: fuzzy confidence adjustments ---
         // Audio energy confirms or dampens text signals for accuracy.
         // "いく" during peak volume = real climax. During silence = just teasing.
         // "だめ" during high volume = dramatic acting. During silence = real stop.
         if (this.volumeAvailable) {
-            if (!vol.isSilent) {
-                const volBoost = 1 + vol.intensity * 2; // 1x at quiet → 3x at peak
-                // Proportional boost to active categories
-                aggregated.sexual *= volBoost;
-                aggregated.climax *= volBoost;
-                aggregated.edge *= volBoost;
-                aggregated.encouragement *= volBoost;
-
-                // Rising volume → confirm edge intensity; confirm climax only when text present
-                if (vol.trend > 0.005) {
-                    aggregated.edge += vol.trend * 20;
-                    aggregated.encouragement += vol.trend * 10;
-                    // Volume confirms existing text climax signal (amplify, don't inject)
-                    if (aggregated.climax > 0) aggregated.climax += vol.trend * 15;
-                }
-                // Peak volume → strong edge; confirm text climax if already present
-                if (vol.isPeak) {
-                    aggregated.edge += 1.0;
-                    if (aggregated.climax > 0) aggregated.climax += 1.5;
-                }
-                // High volume + stop text = dramatic acting, not a real stop
-                if (vol.isHigh) {
-                    aggregated.stop *= 0.5;
-                }
-            } else {
-                // Silence: active signals dampened — saying it ≠ doing it
-                aggregated.climax *= 0.25;   // very unlikely to climax during silence
-                aggregated.encouragement *= 0.5;
-                aggregated.sexual *= 0.5;
-                // Silence during go = probable stop/tease
-                if (this.state === 'go') {
-                    aggregated.stop += 0.5;
-                }
-            }
+            aggregated = applyVolumeTextAgreement(aggregated, vol, this.state);
         }
 
         // Find dominant category
-        let dominant: SemanticCategory = 'neutral';
-        let maxScore = 0;
-        for (const cat of Object.keys(aggregated) as SemanticCategory[]) {
-            if (aggregated[cat] > maxScore) {
-                maxScore = aggregated[cat];
-                dominant = cat;
-            }
-        }
+        const { dominant, maxScore } = pickDominantCategory(aggregated);
 
         // Neutral holdback: if neutral dominates but sexual context exists, hold state
         if (dominant === 'neutral' && aggregated.sexual > 1.0) return;
@@ -1200,13 +1166,16 @@ export class JoiTool {
     }
 
     private updatePosition(): void {
-        if (!this.barEl?.isConnected) return;
+        const collapsedBar = this.collapsedBar?.container;
+        if (!collapsedBar?.isConnected) return;
+
+        const expandedBar = this.expandedBar?.container;
 
         const isPlayerMinimized = !!AppStore.player?.hide;
 
         if (isPlayerMinimized) {
             // Minimized player: collapsed bar above mini player bar (+ subs if visible)
-            this.barEl.style.display = '';
+            collapsedBar.style.display = '';
 
             const subsBar = document.querySelector('body > .learner-subs-collapsed') as HTMLElement | null;
             const playerBar = document.querySelector('.q-footer, .player-bar-container') as HTMLElement | null;
@@ -1218,16 +1187,16 @@ export class JoiTool {
                 bottomOffset += subsBar.offsetHeight;
             }
 
-            this.barEl.style.bottom = `${bottomOffset}px`;
+            collapsedBar.style.bottom = `${bottomOffset}px`;
 
-            if (this.expandedBarEl?.isConnected) {
-                this.expandedBarEl.style.display = 'none';
+            if (expandedBar?.isConnected) {
+                expandedBar.style.display = 'none';
             }
         } else {
             // Expanded player: always show expanded bar inside the player
-            this.barEl.style.display = 'none';
-            if (this.expandedBarEl?.isConnected) {
-                this.expandedBarEl.style.display = '';
+            collapsedBar.style.display = 'none';
+            if (expandedBar?.isConnected) {
+                expandedBar.style.display = '';
             }
         }
     }
@@ -1252,125 +1221,91 @@ export class JoiTool {
     // ------------------------------------------------------------------------
 
     private ensureUI(): void {
-        if (!this.barEl || !this.barEl.isConnected) {
-            this.barEl?.remove();
-            this.barEl = this.createBar('asmr-joi-bar-collapsed');
-            document.body.appendChild(this.barEl);
+        if (!this.collapsedBar?.container.isConnected) {
+            this.destroyBar(this.collapsedBar);
+            this.collapsedBar = this.createBar('asmr-joi-bar-collapsed');
+            document.body.appendChild(this.collapsedBar.container);
             if (this.isActive) {
-                this.barEl.classList.remove('hidden');
+                this.collapsedBar.container.classList.remove('hidden');
                 this.updateDisplay();
+                this.updateCountdown(this.countdownSec);
             }
         }
 
         const player = document.querySelector('.audio-player');
-        if (player && (!this.expandedBarEl || !this.expandedBarEl.isConnected)) {
-            this.expandedBarEl?.remove();
-            this.expandedBarEl = this.createBar('asmr-joi-bar-expanded');
+        if (player && !this.expandedBar?.container.isConnected) {
+            this.destroyBar(this.expandedBar);
+            this.expandedBar = this.createBar('asmr-joi-bar-expanded');
 
             CentralObserver.withModification(() => {
                 // Target the Vue container (not the element inside it) to avoid
                 // inserting into Vue 3's managed DOM tree.
                 const subsRoot = player.querySelector('#asmr-learner-subs-root');
                 if (subsRoot) {
-                    subsRoot.before(this.expandedBarEl!);
+                    subsRoot.before(this.expandedBar!.container);
                 } else {
                     const albumArt = player.querySelector('.albumart');
                     if (albumArt) {
-                        albumArt.after(this.expandedBarEl!);
+                        albumArt.after(this.expandedBar!.container);
                     } else {
-                        player.prepend(this.expandedBarEl!);
+                        player.prepend(this.expandedBar!.container);
                     }
                 }
             });
 
             if (this.isActive) {
-                this.expandedBarEl.classList.remove('hidden');
+                this.expandedBar.container.classList.remove('hidden');
                 this.updateDisplay();
+                this.updateCountdown(this.countdownSec);
             }
         }
 
         if (this.isActive) this.updatePosition();
     }
 
-    private createBar(extraClass: string): HTMLElement {
-        const bar = document.createElement('div');
-        bar.className = `asmr-joi-bar hidden ${extraClass}`;
-        bar.dataset.state = 'idle';
-        bar.setAttribute('role', 'status');
-        bar.setAttribute('aria-live', 'assertive');
+    private createBar(extraClass: string): JoiBarMount {
+        const container = document.createElement('div');
+        container.className = `asmr-joi-bar hidden ${extraClass}`;
+        container.dataset.state = 'idle';
+        container.setAttribute('role', 'status');
+        container.setAttribute('aria-live', 'assertive');
 
-        bar.innerHTML = `
-            <div class="asmr-joi-status">
-                <span class="asmr-joi-label">${I18n.t('joiIdle')}</span>
-            </div>
-            <div class="asmr-joi-instruction"></div>
-            <div class="asmr-joi-context">
-                <span class="asmr-joi-context-dot"></span>
-                <span class="asmr-joi-context-dot"></span>
-                <span class="asmr-joi-context-dot"></span>
-            </div>
-            <div class="asmr-joi-countdown"></div>
-            <div class="asmr-joi-progress">
-                <div class="asmr-joi-ring"></div>
-            </div>
-            <button class="asmr-joi-close" title="${I18n.t('joiToggle')}">
-                <i class="material-icons" aria-hidden="true">close</i>
-            </button>
-        `;
-
-        bar.querySelector('.asmr-joi-close')?.addEventListener('click', (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            this.deactivate();
+        const uiState = reactive<JoiBarUiState>({
+            state: this.state,
+            instructionKey: INSTRUCTIONS.idle[0],
+            contextIntensity: this.getContextIntensity(),
+            countdownSec: this.countdownSec,
         });
 
-        return bar;
+        const mounted = mountApp(
+            markRaw(JoiBarVue as Component),
+            {
+                uiState,
+                onClose: () => this.deactivate(),
+            },
+            container
+        );
+
+        return { container, uiState, mounted };
     }
 
     private updateDisplay(): void {
-        const stateLabels: Record<JoiState, string> = {
-            idle: 'joiIdle',
-            go: 'joiGo',
-            stop: 'joiStop',
-            edge: 'joiEdge',
-            cum: 'joiCum',
-            denied: 'joiDenied',
-            ruined: 'joiRuined',
-        };
-
         const instructions = INSTRUCTIONS[this.state];
         const instructionKey = instructions[this.instructionIndex % instructions.length];
+        const intensity = this.getContextIntensity();
 
-        for (const bar of this.getBars()) {
-            bar.dataset.state = this.state;
-
-            const label = bar.querySelector('.asmr-joi-label');
-            if (label) label.textContent = I18n.t(stateLabels[this.state]);
-
-            const instruction = bar.querySelector('.asmr-joi-instruction');
-            if (instruction) {
-                (instruction as HTMLElement).textContent = I18n.t(instructionKey);
-            }
-
-            const dots = bar.querySelectorAll('.asmr-joi-context-dot');
-            const intensity = this.getContextIntensity();
-            dots.forEach((dot, i) => {
-                dot.classList.toggle('active', i < intensity);
-            });
+        for (const bar of this.getBarMounts()) {
+            bar.container.dataset.state = this.state;
+            bar.uiState.state = this.state;
+            bar.uiState.instructionKey = instructionKey;
+            bar.uiState.contextIntensity = intensity;
         }
     }
 
     private updateCountdown(sec: number): void {
-        for (const bar of this.getBars()) {
-            const el = bar.querySelector('.asmr-joi-countdown') as HTMLElement;
-            if (!el) continue;
-            if (sec > 0) {
-                el.textContent = I18n.format('joiResuming', { sec });
-                el.style.display = '';
-            } else {
-                el.textContent = '';
-                el.style.display = 'none';
-            }
+        this.countdownSec = Math.max(0, sec);
+        for (const bar of this.getBarMounts()) {
+            bar.uiState.countdownSec = this.countdownSec;
         }
     }
 
@@ -1384,17 +1319,24 @@ export class JoiTool {
         for (const bar of this.getBars()) {
             bar.classList.add('hidden');
         }
-        for (const bar of this.getBars()) {
-            const el = bar.querySelector('.asmr-joi-countdown') as HTMLElement;
-            if (el) { el.textContent = ''; el.style.display = 'none'; }
-        }
+        this.updateCountdown(0);
     }
 
     private getBars(): HTMLElement[] {
-        const bars: HTMLElement[] = [];
-        if (this.barEl?.isConnected) bars.push(this.barEl);
-        if (this.expandedBarEl?.isConnected) bars.push(this.expandedBarEl);
+        return this.getBarMounts().map(bar => bar.container);
+    }
+
+    private getBarMounts(): JoiBarMount[] {
+        const bars: JoiBarMount[] = [];
+        if (this.collapsedBar?.container.isConnected) bars.push(this.collapsedBar);
+        if (this.expandedBar?.container.isConnected) bars.push(this.expandedBar);
         return bars;
+    }
+
+    private destroyBar(bar: JoiBarMount | null): void {
+        if (!bar) return;
+        bar.mounted.unmount();
+        bar.container.remove();
     }
 
     /**
@@ -1402,22 +1344,7 @@ export class JoiTool {
      * Now combines volume + text signals.
      */
     private getContextIntensity(): number {
-        let total = 0;
-
-        // Text signal
-        for (const w of this.contextWindows) {
-            total += w.scores.sexual + w.scores.climax * 1.5 + w.scores.edge;
-        }
-
-        // Volume signal boost
-        if (this.volumeAvailable) {
-            const vol = this.getVolumeDynamics();
-            total += vol.intensity * 5; // volume contributes up to 5 points
-        }
-
-        if (total > 8) return 3;
-        if (total > 4) return 2;
-        if (total > 1.5) return 1;
-        return 0;
+        const volumeIntensity = this.volumeAvailable ? this.getVolumeDynamics().intensity : 0;
+        return computeContextIntensity(this.contextWindows, volumeIntensity);
     }
 }

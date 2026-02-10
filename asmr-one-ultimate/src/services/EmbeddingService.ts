@@ -26,8 +26,8 @@ const GPU_ERROR_PATTERN = /createBuffer|RangeError|out of memory|OOM|allocation|
 // ============================================================================
 
 interface PendingRequest {
-    resolve: (val: any) => void;
-    reject: (err: any) => void;
+    resolve: (val: number[] | number[][]) => void;
+    reject: (err: unknown) => void;
     timer: ReturnType<typeof setTimeout>;
 }
 
@@ -270,7 +270,9 @@ function initWorker(): Promise<void> {
     return initPromise;
 }
 
-function sendToWorker(type: 'embed' | 'embed-batch', payload: string | string[], timeoutMs: number): Promise<any> {
+function sendToWorker(type: 'embed', payload: string, timeoutMs: number): Promise<number[]>;
+function sendToWorker(type: 'embed-batch', payload: string[], timeoutMs: number): Promise<number[][]>;
+function sendToWorker(type: 'embed' | 'embed-batch', payload: string | string[], timeoutMs: number): Promise<number[] | number[][]> {
     return new Promise((resolve, reject) => {
         if (!worker || !workerReady) {
             reject(new Error('Worker not ready'));
@@ -327,9 +329,9 @@ export const EmbeddingService = {
         const existing = embedInFlight.get(flightKey);
         if (existing) return existing;
 
-        const promise = (async () => {
+        const promise: Promise<number[]> = (async () => {
             await initWorker();
-            return GpuScheduler.enqueue({
+            return GpuScheduler.enqueue<number[]>({
                 priority: options?.priority ?? Priority.LOW,
                 worker: 'embedding',
                 execute: () => sendToWorker('embed', prefixed, SINGLE_TIMEOUT_MS),
@@ -363,7 +365,7 @@ export const EmbeddingService = {
         await initWorker();
         const timeoutMs = BATCH_TIMEOUT_BASE_MS + texts.length * BATCH_TIMEOUT_PER_ITEM_MS;
         // Batch embedding is LOW priority and cancellable
-        return GpuScheduler.enqueue({
+        return GpuScheduler.enqueue<number[][]>({
             priority: Priority.LOW,
             worker: 'embedding',
             execute: () => sendToWorker('embed-batch', prefixed, timeoutMs),

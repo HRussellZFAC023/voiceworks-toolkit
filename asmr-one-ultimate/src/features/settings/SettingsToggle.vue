@@ -16,7 +16,7 @@ const emit = defineEmits<{
 const value = useConfig(props.configKey);
 
 function toggle() {
-    value.value = !value.value as any;
+    (value as { value: boolean }).value = !(value as { value: boolean }).value;
     emit('change', props.configKey, value.value as unknown as boolean);
 }
 </script>

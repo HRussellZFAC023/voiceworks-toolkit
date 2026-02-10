@@ -47,7 +47,7 @@ export interface WorksParams {
 function getApiBaseUrl(): string {
     // Read from the host app's axios baseURL (set by "Select server" setting)
     try {
-        const axios = getAxios() as any;
+        const axios = getAxios();
         const baseURL = axios?.defaults?.baseURL;
         if (baseURL && baseURL.startsWith('http')) {
             return baseURL.replace(/\/$/, '');

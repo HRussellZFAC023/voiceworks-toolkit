@@ -6,9 +6,9 @@
 .asmr-joi-bar {
     position: fixed;
     bottom: 60px; /* default fallback; JS overrides dynamically via updatePosition() */
-    left: var(--asmr-drawer-width, 0px);
+    left: 0;
     right: 0;
-    width: auto;
+    width: 100%;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -19,7 +19,7 @@
     border-top: 1px solid var(--asmr-border-color);
     z-index: var(--z-joi, 9992);
     transition: opacity 0.3s ease, transform 0.3s ease, background 0.4s ease,
-                box-shadow 0.4s ease, left 0.3s ease;
+                box-shadow 0.4s ease;
     box-shadow: 0 -2px 12px rgba(0, 0, 0, 0.08);
     pointer-events: auto;
 }
@@ -37,7 +37,7 @@
     opacity: 0.5;
     filter: saturate(0.3);
     transition: opacity 0.5s ease, filter 0.5s ease, background 0.4s ease,
-                box-shadow 0.4s ease, left 0.3s ease;
+                box-shadow 0.4s ease;
 }
 
 .asmr-joi-bar.asmr-joi-paused .asmr-joi-ring {
@@ -369,6 +369,13 @@ body.asmr-fullscreen-active .asmr-joi-bar:not(.audio-player .asmr-joi-bar) {
 /* ============================================
    Responsive
    ============================================ */
+@media (min-width: 601px) {
+    .asmr-joi-bar {
+        left: var(--asmr-drawer-width, 0px);
+        width: auto;
+    }
+}
+
 @media (max-width: 600px) {
     .asmr-joi-bar {
         padding: 8px 12px;

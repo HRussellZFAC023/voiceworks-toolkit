@@ -13,7 +13,7 @@ import {
 
 import { useEventBus } from '../../composables/useEventBus';
 import { useI18n } from '../../composables/useI18n';
-import { getAudioElement, getPlayerBar } from '../../core/DomUtils';
+import { getAudioElement, getPlayerBar, hasValidAudioSource } from '../../core/DomUtils';
 import { getOrCreateSourceNode } from '../../core/AudioAnalysis';
 import { AppStore } from '../../store/AppStore';
 import { Logger } from '../../core/Utils';
@@ -41,6 +41,7 @@ const SMOOTHING = 0.35;        // lerp factor toward new value (lower = smoother
 
 const isActive = ref(false);
 const isPaused = ref(false);
+const hasAudioSource = ref(false);
 
 // Template refs
 const expandedCanvas = ref<HTMLCanvasElement | null>(null);
@@ -68,11 +69,16 @@ let phase = 0;                                  // slow phase for idle sway
 
 const isPlayerMinimized = ref(false);
 
-const showExpanded = computed(() => isActive.value && !isPlayerMinimized.value);
-const showCollapsed = computed(() => isActive.value && isPlayerMinimized.value);
+const showExpanded = computed(() => isActive.value && hasAudioSource.value && !isPlayerMinimized.value);
+const showCollapsed = computed(() => isActive.value && hasAudioSource.value && isPlayerMinimized.value);
 
 function refreshMinimizedState() {
     isPlayerMinimized.value = !!AppStore.state?.player?.hide || !!AppStore.player?.hide;
+}
+
+function refreshAudioSourceState(): boolean {
+    hasAudioSource.value = hasValidAudioSource();
+    return hasAudioSource.value;
 }
 
 // ---------------------------------------------------------------------------
@@ -91,6 +97,7 @@ function activate() {
     isActive.value = true;
     isPaused.value = false;
     refreshMinimizedState();
+    refreshAudioSourceState();
     connectAudioAnalyser();
     syncPauseState();
     startRendering();
@@ -114,8 +121,8 @@ function deactivate() {
 
 function connectAudioAnalyser() {
     const audio = getAudioElement();
-    if (!audio) {
-        Logger.debug('[Visualizer] No audio element found');
+    if (!audio || !hasValidAudioSource(audio)) {
+        Logger.debug('[Visualizer] No valid audio source found');
         analyserAvailable = false;
         return;
     }
@@ -349,6 +356,15 @@ function stopPositionPolling() {
 
 function updatePosition() {
     refreshMinimizedState();
+    const hadAudioSource = hasAudioSource.value;
+    const hasSource = refreshAudioSourceState();
+
+    if (isActive.value && hasSource && (!hadAudioSource || !analyserAvailable)) {
+        connectedAudioEl = null;
+        analyser = null;
+        connectAudioAnalyser();
+        syncPauseState();
+    }
 
     const bar = collapsedBar.value;
     if (!bar?.isConnected || !isActive.value) return;
@@ -391,6 +407,7 @@ on('viz:toggle', () => toggle());
 
 on('track:change', () => {
     if (isActive.value) {
+        refreshAudioSourceState();
         connectedAudioEl = null;
         analyser = null;
         connectAudioAnalyser();

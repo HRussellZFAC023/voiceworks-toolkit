@@ -14,9 +14,11 @@ import { EventBus } from '../../core/EventBus';
 import { Logger, Config } from '../../core/Utils';
 import { RadioMode } from '../radio';
 import { PlaybackController } from '../radio/PlaybackController';
+import { FolderDiver } from '../FolderDiver';
 import { PlaylistApi, PlaylistWorkItem } from '../../api/Playlist';
 import { WorkService } from '../../services/WorkService';
-import type { PlaylistModeState, WorkDetail, PlayerTrack } from '../../types';
+import type { PlaylistModeState, WorkDetail, PlayerTrack, AudioTrack } from '../../types';
+import type { TrackFolder, TracksResponse } from '../../types/api';
 
 const QUEUE_END_CHECK_INTERVAL = 1500;
 const WORK_CHANGE_DEBOUNCE_MS = 500;
@@ -32,6 +34,7 @@ export class PlaylistMode {
     private static _instance: PlaylistMode;
     private bridge: KikoeruBridge;
     private playbackController: PlaybackController;
+    private folderDiver: FolderDiver;
 
     // State
     private _isActive = false;
@@ -42,6 +45,7 @@ export class PlaylistMode {
     private isNavigating = false;
     private isInitialized = false;
     private hasAdvanced = false; // Prevents double-trigger from queue monitor + track:end
+    private playAllInFolder = false;
 
     // Shuffle visited tracking: indices already played in this cycle
     private visitedIndices: Set<number> = new Set();
@@ -58,6 +62,7 @@ export class PlaylistMode {
     private constructor() {
         this.bridge = KikoeruBridge.getInstance();
         this.playbackController = new PlaybackController();
+        this.folderDiver = FolderDiver.getInstance();
     }
 
     static getInstance(): PlaylistMode {
@@ -82,6 +87,7 @@ export class PlaylistMode {
     private refreshDependencies(): void {
         this.bridge = KikoeruBridge.getInstance();
         this.playbackController = new PlaybackController();
+        this.folderDiver = FolderDiver.getInstance();
     }
 
     /**
@@ -129,6 +135,11 @@ export class PlaylistMode {
 
         // Listen for work change events
         EventBus.on('work:change', (event: { workId: string; work: WorkDetail }) => this.onWorkChange(event));
+        EventBus.on('config:change', ({ key, value }: { key: string; value: unknown }) => {
+            if (key === 'playlistPlayAllInFolder') {
+                this.playAllInFolder = !!value;
+            }
+        });
 
         Logger.log('[PlaylistMode] Initialized');
     }
@@ -164,6 +175,8 @@ export class PlaylistMode {
         this.currentWorkIndex = 0;
         this.playlistId = playlistId || null;
         this.playlistName = playlistName || null;
+        this.playAllInFolder = Config.get('playlistPlayAllInFolder');
+        this.lastQueueIndex = this.bridge.player.queueIndex ?? 0;
 
         // Emit activation event
         EventBus.emit('playlist:active', {
@@ -319,6 +332,7 @@ export class PlaylistMode {
         this.playlistName = null;
         this.isNavigating = false;
         this.hasAdvanced = false;
+        this.playAllInFolder = false;
         this.visitedIndices.clear();
 
         // Clear route watcher
@@ -663,13 +677,60 @@ export class PlaylistMode {
         try {
             const work = await WorkService.getWork(workId) as WorkDetail;
             if (!this._isActive) return;
+            if (currentExpected && this.normalizeWorkId(currentExpected) !== this.normalizeWorkId(workId)) {
+                Logger.debug('[PlaylistMode] Work changed during fetch, aborting');
+                return;
+            }
 
             if (!work) {
                 Logger.warn('[PlaylistMode] Failed to fetch work data for:', workId);
                 return;
             }
 
-            const tracks = this.playbackController.getPlayableTracksFromWork(work);
+            const useFlatTracks = Config.get('playlistUseFlatTracks');
+            let tracks: AudioTrack[] = [];
+
+            if (useFlatTracks) {
+                Logger.debug('[PlaylistMode] Using flat track selection (all files)');
+                try {
+                    const treeData = await WorkService.getTracks(workId);
+                    tracks = treeData ? this.collectAllAudioFromTree(treeData) : [];
+                } catch (error) {
+                    Logger.warn('[PlaylistMode] Flat track fetch failed, falling back:', error);
+                }
+                if (tracks.length === 0) {
+                    tracks = this.playbackController.getPlayableTracksFromWork(work);
+                }
+            } else {
+                try {
+                    const treeData = await WorkService.getTracks(workId);
+                    const autoFilter = Config.get('playlistAutoFilterFolders');
+                    if (!autoFilter) {
+                        Logger.debug('[PlaylistMode] playlistAutoFilterFolders disabled, skipping dive');
+                    } else if (treeData) {
+                        const startPath = this.folderDiver.getHostPath();
+                        this.folderDiver.syncPath(startPath);
+                        if (this.folderDiver.needsDiveFromPath(treeData, startPath)) {
+                            Logger.debug('[PlaylistMode] Auto-diving into folder structure', {
+                                startPath: startPath.join('/') || '(root)',
+                            });
+                            const result = await this.folderDiver.diveFromPath(treeData, startPath);
+                            Logger.debug('[PlaylistMode] Dive result', {
+                                success: result.success,
+                                reason: result.reason,
+                                path: result.path.join('/') || '(root)',
+                                depth: result.depth,
+                            });
+                        }
+                    }
+                } catch (error) {
+                    Logger.warn('[PlaylistMode] Failed to fetch tracks for dive:', error);
+                }
+
+                if (!this._isActive) return;
+                tracks = this.playbackController.getPlayableTracksFromWork(work);
+            }
+
             Logger.debug('[PlaylistMode] Extracted playable tracks', {
                 count: tracks.length,
                 firstTrack: tracks[0]?.title || tracks[0]?.hash || '(none)',
@@ -708,6 +769,12 @@ export class PlaylistMode {
     private checkAndAdvance(): void {
         if (!this._isActive) return;
         if (this.isNavigating || this.hasAdvanced) return;
+
+        if (!this.playAllInFolder) {
+            Logger.debug('[PlaylistMode] Track ended and playlistPlayAllInFolder=false, triggering advance');
+            this.next();
+            return;
+        }
 
         const player = this.bridge.player;
         const queue = player.queue || player.playlist || [];
@@ -751,6 +818,16 @@ export class PlaylistMode {
         // Only advance when within 3 seconds of the end - no premature highProgress check
         const nearEnd = duration > 0 && (duration - currentTime) < 3;
 
+        if (!this.playAllInFolder && !isLastTrack
+            && queueIndex !== this.lastQueueIndex && this.lastQueueIndex >= 0) {
+            Logger.debug('[PlaylistMode] Track advanced but playlistPlayAllInFolder=false, skipping to next work', {
+                prevIndex: this.lastQueueIndex, queueIndex, queueLength: queue.length,
+            });
+            this.lastQueueIndex = queueIndex;
+            this.next();
+            return;
+        }
+
         if (isLastTrack && nearEnd) {
             Logger.debug('[PlaylistMode] Near end of last track, will advance playlist', {
                 isLastTrack,
@@ -760,5 +837,20 @@ export class PlaylistMode {
         }
 
         this.lastQueueIndex = queueIndex;
+    }
+
+    /**
+     * Collect ALL audio tracks recursively from a TracksResponse tree (flat mode).
+     */
+    private collectAllAudioFromTree(nodes: TracksResponse): AudioTrack[] {
+        const audio: AudioTrack[] = [];
+        for (const node of nodes) {
+            if (node.type === 'audio') {
+                audio.push(node as unknown as AudioTrack);
+            } else if (node.type === 'folder') {
+                audio.push(...this.collectAllAudioFromTree((node as TrackFolder).children));
+            }
+        }
+        return audio;
     }
 }

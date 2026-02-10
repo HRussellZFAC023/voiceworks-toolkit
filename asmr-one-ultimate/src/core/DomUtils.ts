@@ -162,12 +162,83 @@ export function hasPlayerBar(): boolean {
     return !!getPlayerBar();
 }
 
+// ============================================================================
+// Stacked Bottom Bar Height
+// ============================================================================
+
+let _stackedPollId: ReturnType<typeof setInterval> | null = null;
+
+function isBarVisible(el: HTMLElement | null): boolean {
+    return !!el && el.style.display !== 'none' && !el.classList.contains('hidden') && el.offsetHeight > 0;
+}
+
+/**
+ * Measure the total height of fixed bars stacked above the q-footer
+ * (collapsed subs, JOI bar, visualizer) and publish the result as
+ * `--asmr-stacked-bottom-height` so page content can add padding.
+ */
+export function syncStackedBottomHeight(): void {
+    const subsBar = document.querySelector('body > .learner-subs-collapsed') as HTMLElement | null;
+    const joiBar = document.querySelector('body > .asmr-joi-bar-collapsed') as HTMLElement | null;
+    const vizBar = document.querySelector('body > .asmr-viz-bar') as HTMLElement | null;
+
+    let extra = 0;
+    if (isBarVisible(subsBar)) extra += subsBar!.offsetHeight;
+    if (isBarVisible(joiBar)) extra += joiBar!.offsetHeight;
+    if (isBarVisible(vizBar)) extra += vizBar!.offsetHeight;
+
+    document.documentElement.style.setProperty('--asmr-stacked-bottom-height', `${extra}px`);
+}
+
+/** Start a 500ms poll that keeps --asmr-stacked-bottom-height in sync. */
+export function startStackedBottomHeightWatch(): void {
+    stopStackedBottomHeightWatch();
+    syncStackedBottomHeight();
+    _stackedPollId = setInterval(syncStackedBottomHeight, 500);
+}
+
+export function stopStackedBottomHeightWatch(): void {
+    if (_stackedPollId) {
+        clearInterval(_stackedPollId);
+        _stackedPollId = null;
+    }
+}
+
 /**
  * Get current audio source URL
  */
 export function getAudioSource(): string | null {
     const audio = getAudioElement();
     return audio?.currentSrc || audio?.src || null;
+}
+
+/**
+ * Validate that a source string points to an actual media URL.
+ * Rejects empty values and bare origins (e.g. "https://asmr.one/").
+ */
+export function isValidAudioSource(src: string | null | undefined): boolean {
+    if (!src) return false;
+    const trimmed = src.trim();
+    if (!trimmed) return false;
+
+    try {
+        const url = new URL(trimmed, window.location.href);
+        if ((url.protocol === 'http:' || url.protocol === 'https:') && url.pathname.length <= 1) {
+            return false;
+        }
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * Check whether the current audio element has a valid source URL.
+ */
+export function hasValidAudioSource(audio: HTMLAudioElement | null = getAudioElement()): boolean {
+    if (!audio) return false;
+    const src = audio.currentSrc || audio.getAttribute('src') || audio.src || '';
+    return isValidAudioSource(src);
 }
 
 /**

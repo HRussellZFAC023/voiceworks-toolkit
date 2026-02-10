@@ -50,12 +50,32 @@ For DOM-heavy features:
 
 Migration to Vue-first UI is ongoing and must be incremental to avoid host integration regressions.
 
+Recently refactored:
+
+- `src/features/JoiTool.ts` now uses `src/features/components/JoiBar.vue` for bar rendering and i18n updates.
+- `src/features/FolderDiver.ts` now delegates tree/path and folder DOM matching to `src/features/folderDiverTreeUtils.ts` and `src/features/folderDiverDomUtils.ts`.
+- `src/features/LearnerMode.ts` and `src/features/components/LearnerSubtitles.vue` now share lyric-source/parsing logic via `src/features/learnerLyricsUtils.ts`.
+- RJ-code extraction/normalization now lives in `src/features/rjCodeUtils.ts` and is shared by HVDB links, comment section helpers, and work metadata modules.
+- `src/features/HVDBLinkController.ts` and `src/features/components/HVDBLink.vue` now share `resolveHvdbRjCode` (work + route fallback), and `findHvdbInjectionPoint` now prefers metadata-scoped DLsite rows before generic rating fallbacks to avoid mis-mounting from unrelated global DLsite links.
+- Work-tree enhancement now delegates stale label repair and item-type synchronization to `src/features/workTreeTextSyncUtils.ts` and `src/features/workTreeItemTypeUtils.ts`, reducing fragile inline DOM mutation logic in the manager.
+- `src/features/WorkTreeManager.ts` now resets internal route/navigation state during disable so re-enable on the same work route re-runs prefetch/auto-dive handshakes instead of being skipped by stale `currentWorkId` state.
+- Transcript list-action injection now delegates item selection/track resolution/action replacement/cleanup to `src/features/transcriptInjectionUtils.ts`, coalesces refreshes on `lang:change` and `subtitleLang` config updates, and removes injected controls when the feature is disabled.
+- `src/features/MediaViewer.ts` is now a thin compatibility adapter over `src/features/MediaViewerController.ts`, eliminating a large legacy imperative duplicate while keeping old imports functional.
+- `src/features/media/mediaViewerDomUtils.ts` now centralizes delegated-click target filtering, media-type classification, and Vue item/hash extraction used by `MediaViewerController`.
+- `src/features/media/mediaStreamUrlUtils.ts` now centralizes stream-URL construction/token appending and is shared by `MediaViewerController` and `components/MediaLightbox.vue`, including `/media/stream` path support and hash-fragment-safe token insertion.
+- `src/features/media/mediaViewerWorkTreePatchUtils.ts` now centralizes WorkTree click-handler patch/restore logic; `MediaViewerController` now performs deterministic cleanup of WorkTree patches and folder-path watchers during disable/route cleanup to avoid stale hooks.
+- `src/features/WorkTreeCopy.ts` now upserts existing copy buttons (update/remove/rebind), removes injected copy controls on disable, and uses shared helpers in `src/features/workTreeCopyUtils.ts`, eliminating stale copied-title metadata on reused rows and stale controls after feature toggles.
+- `src/features/media/mediaViewerDomUtils.ts` now resolves candidate media types via title-first + explicit-type fallback, preventing over-inclusive DOM-scan matches while still supporting typed media rows lacking standard extensions.
+- Infinite-scroll API URL construction is now centralized in `src/features/infiniteScrollApiUtils.ts` and shared by `src/features/components/InfiniteScrollGrid.vue` and `src/features/InfiniteScrollManager.ts`, fixing dropped `'0'` query filters and inconsistent array-query handling.
+
 Features not refactored yet (still mostly imperative DOM code):
 
-- `src/features/CommentSection.ts`
-- `src/features/AdvancedSearch.ts`
-- `src/features/FlatView.ts`
-- `src/features/JoiTool.ts`
+- `src/features/WorkTreeManager.ts` (DOM-driven folder navigation and control injection paths; route/path, label-sync, and item-type sync utilities are extracted, but rendering/enhancement flow is still imperative)
+- `src/features/WorkTreeCopy.ts` (DOM-driven copy-button injection into host-rendered list rows; stale-state handling is improved, but rendering/injection remains imperative)
+- `src/features/TranscriptFileInjector.ts` (DOM-driven transcript action injection into host-rendered list rows; item selection/track resolution/action replacement utilities are extracted, but UI rendering remains imperative)
+- `src/features/MediaViewerController.ts` (helper extraction is progressing, but host integration still relies on imperative click interception, WorkTree patching, and thumbnail injection; modal rendering itself is Vue-driven)
+- `src/features/HVDBLinkController.ts` (link UI is Vue-based and anchor lookup is improved, but injection-point resolution still depends on host DOM scanning and selector fallbacks)
+- `src/features/components/InfiniteScrollGrid.vue` (feature is mounted via Vue controller, but host-grid discovery and fallback card rendering remain imperative DOM-heavy)
 
 Expectation for migration work:
 

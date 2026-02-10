@@ -1,7 +1,7 @@
 import { type Component } from 'vue';
 import { FeatureController } from './FeatureController';
 import HVDBLink from './components/HVDBLink.vue';
-import { extractRjCode } from './hvdbLinkUtils';
+import { findHvdbInjectionPoint, resolveHvdbRjCode } from './hvdbLinkUtils';
 
 export class HVDBLinkController extends FeatureController {
     constructor() {
@@ -22,16 +22,24 @@ export class HVDBLinkController extends FeatureController {
 
     protected shouldBeActive(): boolean {
         const route = this.bridge.route;
-        return !!route?.path?.match(/^\/work\//);
+        return route?.name === 'work' || !!route?.path?.startsWith('/work/');
+    }
+
+    protected tryInject(): void {
+        super.tryInject();
+        const container = document.getElementById(this.containerId);
+        if (container) {
+            container.style.display = 'contents';
+        }
     }
 
     findInjectionPoint(): HTMLElement | null {
-        const workId = this.bridge.currentWorkId;
-        const rjCode = extractRjCode(this.bridge.currentWork as any, workId);
+        const rjCode = resolveHvdbRjCode({
+            work: this.bridge.currentWork,
+            workId: this.bridge.currentWorkId,
+            route: this.bridge.route,
+        });
         if (!rjCode) return null;
-
-        const dlsiteLink = document.querySelector('a[href*="dlsite.com"]');
-        if (!dlsiteLink) return null;
-        return dlsiteLink.closest('.row.items-center.q-gutter-xs') as HTMLElement | null;
+        return findHvdbInjectionPoint(document, rjCode);
     }
 }

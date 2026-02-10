@@ -247,6 +247,24 @@
   background: rgba(128, 0, 255, 0.15);
 }
 
+/* Flat panel: icon-only transcript buttons */
+.asmr-flat-panel .asmr-transcript-actions {
+  gap: 2px;
+  max-width: 40%;
+}
+
+.asmr-flat-panel .asmr-transcript-btn {
+  padding: 2px 4px;
+}
+
+.asmr-flat-panel .asmr-transcript-label {
+  display: none;
+}
+
+.asmr-flat-panel .asmr-transcript-btn .q-icon {
+  margin-right: 0;
+}
+
 /* Mobile: icon-only transcript buttons to save space */
 @media (max-width: 600px) {
   .asmr-transcript-actions {
@@ -297,7 +315,8 @@
 }
 
 .audio-player {
-  min-width: 360px !important;
+  min-width: 0 !important;
+  box-sizing: border-box;
 }
 
 
@@ -849,9 +868,8 @@
 
 .learner-subs-collapsed .learner-jp,
 .learner-subs-collapsed .learner-en {
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  display: block;
+  text-align: center;
 }
 
 /* ========================================
@@ -1330,9 +1348,32 @@ body:not(.body--dark) .asmr-card-translation {
 
   /* Remove min-width that forces horizontal scroll */
   .audio-player {
-    min-width: unset !important;
-    min-width: 100vw !important;
+    min-width: 0 !important;
+    max-width: 100vw;
   }
+
+}
+
+/* ========================================
+   Expanded Player Controls — always compact
+   The audio-player card can be narrow at any
+   viewport width (sidebar open, split view, etc.)
+   ======================================== */
+.audio-player .learner-controls {
+  max-width: 100%;
+  box-sizing: border-box;
+  overflow: hidden;
+  padding: 0 !important;
+  margin: 0 !important;
+}
+
+.audio-player .learner-controls .q-btn,
+.audio-player .learner-controls .learner-control-btn {
+  min-width: 36px !important;
+  min-height: 36px !important;
+  width: 36px !important;
+  height: 36px !important;
+  margin: 0 2px !important;
 }
 
 /* ========================================
@@ -1347,4 +1388,22 @@ body:not(.body--dark) .asmr-card-translation {
 /* Ensure player "more" menu appears above learner panel and other overlays */
 .q-menu {
   z-index: var(--z-menu, 10002) !important;
+}
+
+/* ========================================
+   Fix: Remove default Quasar image overlay padding
+   ======================================== */
+.q-img--content > div {
+  padding: 0 !important;
+}
+
+/* ========================================
+   Stacked Bottom Bars — Extra Page Padding
+   ======================================== */
+
+/* Compensate for fixed bars (visualizer, subs, JOI) that stack above the
+   q-footer.  Quasar only accounts for the footer itself, so without this
+   the last few work-tree items are hidden behind the stacked bars. */
+.q-page-container > .q-page {
+  padding-bottom: var(--asmr-stacked-bottom-height, 0px);
 }

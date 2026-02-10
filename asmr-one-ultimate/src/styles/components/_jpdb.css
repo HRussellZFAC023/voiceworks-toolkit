@@ -435,15 +435,27 @@
         to   { transform: translateY(0); }
     }
 
-    /* Swipe handle */
-    .jpdb-popover::before {
+    /* Drag handle — tap to dismiss, swipe down to dismiss */
+    .jpdb-popover-handle {
+        width: 100%;
+        padding: 8px 0 4px;
+        cursor: pointer;
+        -webkit-tap-highlight-color: transparent;
+    }
+
+    .jpdb-popover-handle::after {
         content: '';
         display: block;
         width: 36px;
         height: 4px;
         background: var(--asmr-text-disabled);
         border-radius: 2px;
-        margin: 0 auto 12px;
+        margin: 0 auto;
+        transition: background 0.15s;
+    }
+
+    .jpdb-popover-handle:active::after {
+        background: var(--asmr-text-secondary);
     }
 
     .jpdb-popover-btn {

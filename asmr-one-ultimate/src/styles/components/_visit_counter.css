@@ -1,6 +1,6 @@
 /* Visit Counter Badge */
 .asmr-visit-badge {
-    padding: 0;
+    padding: 0 !important;
     pointer-events: none;
     z-index: 1;
 }

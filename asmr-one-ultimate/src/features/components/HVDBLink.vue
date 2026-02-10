@@ -1,12 +1,16 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import { useBridge } from '../../composables/useBridge';
-import { extractRjCode, buildHvdbUrl, buildChobitUrl } from '../hvdbLinkUtils';
+import { buildHvdbUrl, buildChobitUrl, resolveHvdbRjCode } from '../hvdbLinkUtils';
 
 const bridge = useBridge();
 
 const rjCode = computed(() => {
-    return extractRjCode(bridge.currentWork, bridge.currentWorkId);
+    return resolveHvdbRjCode({
+        work: bridge.currentWork,
+        workId: bridge.currentWorkId,
+        route: bridge.route,
+    });
 });
 
 const hvdbUrl = computed(() => buildHvdbUrl(rjCode.value));

@@ -37,8 +37,9 @@ export const CacheKeys = {
 const MAX_SIZE = 5000;
 
 export class CacheStore {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     private memory = new Map<string, CacheEnvelope<any>>();
-    private inflight = new Map<string, Promise<any>>();
+    private inflight = new Map<string, Promise<unknown>>();
 
     public get<T>(key: string): T | null {
         const now = Date.now();
@@ -72,7 +73,7 @@ export class CacheStore {
     public getOrFetch<T>(key: string, ttlMs: number, fetcher: () => Promise<T>): Promise<T> {
         const cached = this.get<T>(key);
         if (cached !== null && cached !== undefined) return Promise.resolve(cached);
-        if (this.inflight.has(key)) return this.inflight.get(key)!;
+        if (this.inflight.has(key)) return this.inflight.get(key)! as Promise<T>;
 
         const task = fetcher()
             .then((value) => {
@@ -82,7 +83,7 @@ export class CacheStore {
             .finally(() => {
                 this.inflight.delete(key);
             });
-        this.inflight.set(key, task);
+        this.inflight.set(key, task as Promise<unknown>);
         return task;
     }
 
@@ -146,7 +147,7 @@ export class CacheStore {
     public getOrFetchMemory<T>(key: string, ttlMs: number, fetcher: () => Promise<T>): Promise<T> {
         const cached = this.getMemory<T>(key);
         if (cached !== null && cached !== undefined) return Promise.resolve(cached);
-        if (this.inflight.has(key)) return this.inflight.get(key)!;
+        if (this.inflight.has(key)) return this.inflight.get(key)! as Promise<T>;
 
         const task = fetcher()
             .then((value) => {
@@ -156,7 +157,7 @@ export class CacheStore {
             .finally(() => {
                 this.inflight.delete(key);
             });
-        this.inflight.set(key, task);
+        this.inflight.set(key, task as Promise<unknown>);
         return task;
     }
 }

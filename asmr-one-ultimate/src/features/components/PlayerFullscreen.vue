@@ -17,6 +17,7 @@ import { Logger } from '../../core/Utils';
 
 const SWIPE_THRESHOLD = 80;   // px downward to trigger exit
 const SWIPE_MAX_TIME = 400;   // ms max duration for swipe gesture
+const IDLE_TIMEOUT = 4000;    // ms before auto-hiding controls on touch devices
 
 // -- Composables --
 const { t } = useI18n();
@@ -31,11 +32,41 @@ let touchStartY = 0;
 let touchStartX = 0;
 let touchStartTime = 0;
 
+// Idle auto-hide for touch devices
+let idleTimer: ReturnType<typeof setTimeout> | null = null;
+const isTouchDevice = window.matchMedia('(hover: none)').matches;
+
 // -- Computed --
 const iconName = computed(() => isFullscreen.value ? 'fullscreen_exit' : 'fullscreen');
 const buttonLabel = computed(() =>
     isFullscreen.value ? t('fullscreenExit') : t('fullscreenToggle')
 );
+
+// -- Idle auto-hide (touch devices only) --
+
+function startIdleTimer(): void {
+    if (!isTouchDevice) return;
+    clearIdleTimer();
+    idleTimer = setTimeout(hideControls, IDLE_TIMEOUT);
+}
+
+function clearIdleTimer(): void {
+    if (idleTimer !== null) {
+        clearTimeout(idleTimer);
+        idleTimer = null;
+    }
+}
+
+function showControls(): void {
+    const player = document.querySelector('.audio-player');
+    if (player) player.classList.remove('asmr-controls-idle');
+    startIdleTimer();
+}
+
+function hideControls(): void {
+    const player = document.querySelector('.audio-player');
+    if (player && isFullscreen.value) player.classList.add('asmr-controls-idle');
+}
 
 // -- Actions --
 
@@ -73,6 +104,8 @@ function enter(): void {
     document.addEventListener('touchstart', onTouchStart, { passive: true, capture: true });
     document.addEventListener('touchend', onTouchEnd, { passive: true, capture: true });
 
+    startIdleTimer();
+
     emit('fullscreen:enter', undefined);
     Logger.debug('[PlayerFullscreen] Entered fullscreen');
 }
@@ -80,9 +113,10 @@ function enter(): void {
 function exit(): void {
     if (!isFullscreen.value) return;
 
+    clearIdleTimer();
     const player = document.querySelector('.audio-player');
     if (player) {
-        player.classList.remove('asmr-player-fullscreen');
+        player.classList.remove('asmr-player-fullscreen', 'asmr-controls-idle');
     }
 
     document.body.classList.remove('asmr-fullscreen-active', 'asmr-lock-scroll');
@@ -111,6 +145,9 @@ function onKeydown(e: KeyboardEvent): void {
 
 function onTouchStart(e: TouchEvent): void {
     if (!isFullscreen.value || e.touches.length !== 1) return;
+
+    // Any touch resets idle timer (keeps controls visible while interacting)
+    showControls();
 
     // Don't track swipes on interactive controls (sliders, buttons, inputs)
     const target = e.touches[0].target as HTMLElement;
@@ -166,6 +203,7 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
+    clearIdleTimer();
     document.removeEventListener('keydown', onKeydown, true);
     document.removeEventListener('touchstart', onTouchStart, true);
     document.removeEventListener('touchend', onTouchEnd, true);
@@ -173,7 +211,7 @@ onUnmounted(() => {
     // Clean up fullscreen state if component is unmounted while active
     if (isFullscreen.value) {
         const player = document.querySelector('.audio-player');
-        if (player) player.classList.remove('asmr-player-fullscreen');
+        if (player) player.classList.remove('asmr-player-fullscreen', 'asmr-controls-idle');
         document.body.classList.remove('asmr-fullscreen-active', 'asmr-lock-scroll');
     }
 

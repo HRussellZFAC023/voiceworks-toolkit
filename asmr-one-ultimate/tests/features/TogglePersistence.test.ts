@@ -50,7 +50,6 @@ class SimulatedJoiTool {
 
     enable(): void {
         this.setupPersistentListeners();
-        this.setupEventListeners();
     }
 
     toggle(): void {
@@ -164,15 +163,15 @@ describe('Toggle listener persistence', () => {
             const tool = new SimulatedJoiTool(bus);
             tool.enable();
 
-            // Before activation: 1 whisper:update + 1 track:change from enable()
+            // Before activation: no activation-scoped listeners yet
             const whisperBefore = bus.listenerCount('whisper:update');
-            expect(whisperBefore).toBe(1);
+            expect(whisperBefore).toBe(0);
 
             // Activate: adds another set of activation-scoped listeners
             bus.emit('joi:toggle');
             expect(tool.isActive).toBe(true);
             const whisperActive = bus.listenerCount('whisper:update');
-            expect(whisperActive).toBe(2); // enable() + activate()
+            expect(whisperActive).toBe(1);
 
             // Deactivate: should clean up activation-scoped listeners
             bus.emit('joi:toggle');

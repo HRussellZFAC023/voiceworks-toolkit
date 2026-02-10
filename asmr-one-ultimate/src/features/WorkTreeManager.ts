@@ -11,29 +11,23 @@ import { KikoeruBridge } from '../infrastructure/KikoeruBridge';
 import { Logger, Config } from '../core/Utils';
 import { EventBus } from '../core/EventBus';
 import { CentralObserver } from '../core/CentralObserver';
-import { getCleanText } from '../core/DomUtils';
 import { FolderDiver } from './FolderDiver';
 import { FlatViewController } from './FlatViewController';
 import { WorkService } from '../services/WorkService';
 import type { TracksResponse } from '../types/api';
-
-declare const unsafeWindow: Window & typeof globalThis;
-
-const globalWindow = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window) as Window & {
-    __ASMR_WORKTREE_MANAGER__?: WorkTreeManager;
-};
+import type { VueRoute, WorkTreeComponent } from '../types/store';
+import {
+    arraysEqual,
+    getRouteKey,
+    getSegmentsFromRoute,
+    getWorkIdFromRoute,
+    hasExplicitPath,
+} from './workTreeManagerUtils';
+import { syncWorkTreeItemTypes } from './workTreeItemTypeUtils';
+import { applyLabelFixes, buildExpectedTitles, collectStaleLabelFixes } from './workTreeTextSyncUtils';
 
 const HOST_DIVER_WAIT_TIMEOUT = 150;
 const HOST_DIVER_STABLE_TICKS = 2;
-
-function arraysEqual(a: string[], b: string[]): boolean {
-    if (a === b) return true;
-    if (a.length !== b.length) return false;
-    for (let i = 0; i < a.length; i++) {
-        if (a[i] !== b[i]) return false;
-    }
-    return true;
-}
 
 export class WorkTreeManager {
     private static _instance: WorkTreeManager | null = null;
@@ -47,16 +41,21 @@ export class WorkTreeManager {
     private domDiveAt = 0;
     private lastPathKey = '';
     private treeObserver: MutationObserver | null = null;
+    private treeObserverDebounce: ReturnType<typeof setTimeout> | null = null;
     private manualOverrideUntil = 0;
     private autoDiveInProgress = false;
     private manualRouteKey = '';
     private manualRouteWorkId: string | null = null;
     private lastHostPathKey = '';
     private hostPathWatcherCleanup: (() => void) | null = null;
+    private routeWatcherCleanup: (() => void) | null = null;
+    private manualNavCleanups: Array<() => void> = [];
     private treeVmHooked = false;
     private syncWatcherCleanup: (() => void) | null = null;
     /** Dedup key for worktree:path-change emission from enhanceWorkTree */
     private lastEnhancedPathKey = '';
+    /** True while our own code is modifying the work-tree DOM (suppresses treeObserver) */
+    private modifyingDom = false;
 
     private constructor() {
         this.bridge = KikoeruBridge.getInstance();
@@ -82,7 +81,7 @@ export class WorkTreeManager {
         this.watchManualNav();
 
         if (this.bridge.route?.path?.includes('/work/')) {
-            const workId = this.getWorkIdFromRoute(this.bridge.route) || this.bridge.currentWorkId;
+            const workId = getWorkIdFromRoute(this.bridge.route) || this.bridge.currentWorkId;
             if (workId) {
                 this.handleWorkRoute(String(workId));
             }
@@ -95,13 +94,35 @@ export class WorkTreeManager {
         this.flatView.disable();
         this.treeObserver?.disconnect();
         this.treeObserver = null;
+        if (this.treeObserverDebounce) {
+            clearTimeout(this.treeObserverDebounce);
+            this.treeObserverDebounce = null;
+        }
+        this.routeWatcherCleanup?.();
+        this.routeWatcherCleanup = null;
         this.hostPathWatcherCleanup?.();
         this.hostPathWatcherCleanup = null;
+        for (const cleanup of this.manualNavCleanups) cleanup();
+        this.manualNavCleanups = [];
         this.syncWatcherCleanup?.();
         this.syncWatcherCleanup = null;
         this.treeVmHooked = false;
         this.bridge.invalidateWorkTreeCache();
+        this.resetNavigationState();
         this.diveToken++;
+    }
+
+    private resetNavigationState(): void {
+        this.currentWorkId = null;
+        this.domDiveWorkId = null;
+        this.domDiveAt = 0;
+        this.lastPathKey = '';
+        this.lastHostPathKey = '';
+        this.lastEnhancedPathKey = '';
+        this.manualOverrideUntil = 0;
+        this.autoDiveInProgress = false;
+        this.manualRouteKey = '';
+        this.manualRouteWorkId = null;
     }
 
     // =========================================================================
@@ -115,16 +136,17 @@ export class WorkTreeManager {
             return;
         }
 
-        app.$watch('$route', (to: any, from: any) => {
-            const workId = this.getWorkIdFromRoute(to);
+        this.routeWatcherCleanup?.();
+        this.routeWatcherCleanup = app.$watch('$route', (to: VueRoute, from: VueRoute) => {
+            const workId = getWorkIdFromRoute(to);
             if (!workId) return;
 
-            const toPath = this.getSegmentsFromRoute(to);
-            const fromPath = this.getSegmentsFromRoute(from);
-            const sameWork = this.getWorkIdFromRoute(from) === workId;
+            const toPath = getSegmentsFromRoute(to);
+            const fromPath = getSegmentsFromRoute(from);
+            const sameWork = getWorkIdFromRoute(from) === workId;
             const samePath = arraysEqual(toPath, fromPath);
-            const routeKey = this.getRouteKey(to);
-            const prevRouteKey = this.getRouteKey(from);
+            const routeKey = getRouteKey(to);
+            const prevRouteKey = getRouteKey(from);
             const routeChanged = routeKey !== prevRouteKey;
 
             if (sameWork && !samePath) {
@@ -184,7 +206,7 @@ export class WorkTreeManager {
             Logger.debug('[WorkTreeManager] Manual route override active, skipping auto-dive');
             return;
         }
-        if (this.hasExplicitPath(this.bridge.route)) {
+        if (hasExplicitPath(this.bridge.route)) {
             Logger.debug('[WorkTreeManager] Route has explicit path, skipping auto-dive');
             return;
         }
@@ -253,7 +275,7 @@ export class WorkTreeManager {
                     resolve(null);
                     return;
                 }
-                const treeVm = this.bridge.findWorkTreeComponent() as any;
+                const treeVm = this.bridge.findWorkTreeComponent() as WorkTreeComponent | null;
                 const tree = treeVm?.tree as TracksResponse | undefined;
                 const path = this.folderDiver.getHostPath();
                 if (Array.isArray(tree) && tree.length > 0) {
@@ -302,7 +324,7 @@ export class WorkTreeManager {
      * → hook:updated fires enhanceWorkTree.
      */
     private syncWorkTreeToRoute(path: string[]): void {
-        const treeVm = this.bridge.findWorkTreeComponent() as any;
+        const treeVm = this.bridge.findWorkTreeComponent() as WorkTreeComponent | null;
         if (!treeVm) return;
 
         this.installTreeHooks(treeVm);
@@ -312,7 +334,7 @@ export class WorkTreeManager {
         if (arraysEqual(currentPath, targetPath)) return;
 
         // Validate path exists in tree before setting it
-        const tree = treeVm.tree || treeVm.$data?.tree || treeVm._data?.tree;
+        const tree = (treeVm.tree || treeVm.$data?.tree || treeVm._data?.tree) as TracksResponse | undefined;
         if (Array.isArray(tree) && targetPath.length > 0) {
             const resolved = this.folderDiver.getNodesAtPath(tree, targetPath);
             if (resolved === tree) {
@@ -349,7 +371,7 @@ export class WorkTreeManager {
         if (!app?.$watch) return;
 
         const getPathKey = (): string => {
-            const treeVm = this.bridge.findWorkTreeComponent() as any;
+            const treeVm = this.bridge.findWorkTreeComponent() as WorkTreeComponent | null;
             if (!treeVm?.path || !Array.isArray(treeVm.path)) return '';
             this.installTreeHooks(treeVm);
             return treeVm.path.join('\x00');
@@ -365,30 +387,6 @@ export class WorkTreeManager {
             // Enhancement (markItemTypes, copy/transcript buttons, path-change event)
             // is handled by hook:updated → enhanceWorkTree
         });
-    }
-
-    private getWorkIdFromRoute(route?: { path?: string; params?: { id?: string }; query?: any } | null): string | null {
-        if (!route) return null;
-        const paramId = route.params?.id;
-        if (paramId) return String(paramId);
-        const path = route.path || '';
-        const match = path.match(/\/work\/([^/?#]+)/i);
-        return match?.[1] || null;
-    }
-
-    private getSegmentsFromRoute(route?: any): string[] {
-        const raw = route?.query?.path;
-        if (!raw) return [];
-        if (Array.isArray(raw)) {
-            return raw.map((segment) => String(segment));
-        }
-        if (typeof raw !== 'string') return [];
-        try {
-            const p = JSON.parse(raw);
-            return Array.isArray(p) ? p : [];
-        } catch {
-            return [];
-        }
     }
 
     private handleManual(): void {
@@ -410,35 +408,8 @@ export class WorkTreeManager {
 
     private isManualRouteOverrideActive(workId: string): boolean {
         if (!this.manualRouteKey || this.manualRouteWorkId !== workId) return false;
-        const currentKey = this.getRouteKey(this.bridge.route);
+        const currentKey = getRouteKey(this.bridge.route);
         return !!currentKey && currentKey === this.manualRouteKey;
-    }
-
-    private getRouteKey(route?: { fullPath?: string; path?: string; query?: any } | null): string {
-        if (!route) return '';
-        const fullPath = route.fullPath || route.path || '';
-        if (fullPath) return fullPath.split('#')[0];
-        const path = route.path || '';
-        const queryKey = this.normalizeQuery(route.query);
-        return queryKey ? `${path}?${queryKey}` : path;
-    }
-
-    private normalizeQuery(value: unknown): string {
-        if (!value || typeof value !== 'object') return value ? String(value) : '';
-        const entries = Object.keys(value as Record<string, unknown>)
-            .sort()
-            .map((key) => [key, (value as Record<string, unknown>)[key]]);
-        try {
-            return JSON.stringify(entries);
-        } catch {
-            return String(value);
-        }
-    }
-
-    private hasExplicitPath(route?: { query?: any } | null): boolean {
-        const query = route?.query;
-        if (!query || typeof query !== 'object') return false;
-        return Object.prototype.hasOwnProperty.call(query, 'path');
     }
 
     // =========================================================================
@@ -460,7 +431,7 @@ export class WorkTreeManager {
      * hook:beforeDestroy:
      * - Clears treeVmHooked so hooks are reinstalled on new VM instance
      */
-    private installTreeHooks(treeVm: any): void {
+    private installTreeHooks(treeVm: WorkTreeComponent): void {
         if (this.treeVmHooked) return;
         if (!treeVm?.$watch || !treeVm?.$on) return;
         this.treeVmHooked = true;
@@ -472,7 +443,7 @@ export class WorkTreeManager {
         const unwatch = treeVm.$watch('path', () => {
             Logger.debug('[WorkTreeManager] Sync path watcher: nuking vnode for fresh render');
             treeVm._vnode = null;
-            treeVm.$forceUpdate();
+            treeVm.$forceUpdate?.();
 
             // Pre-render: reset TranslatedTags/FuriganaRenderer state BEFORE Vue renders.
             // TranslatedTags modifies .q-item__label textContent (detaches Vue's text nodes).
@@ -491,17 +462,17 @@ export class WorkTreeManager {
         this.syncWatcherCleanup = unwatch || null;
 
         // After every render: single coordinated enhancement pass.
-        treeVm.$on('hook:updated', () => {
+        treeVm.$on?.('hook:updated', () => {
             this.enhanceWorkTree(treeVm);
         });
 
         // Also on initial mount (hook:updated only fires on re-renders).
-        treeVm.$on('hook:mounted', () => {
+        treeVm.$on?.('hook:mounted', () => {
             this.enhanceWorkTree(treeVm);
         });
 
         // Detect component destruction → re-install hooks on recreation.
-        treeVm.$on('hook:beforeDestroy', () => {
+        treeVm.$on?.('hook:beforeDestroy', () => {
             Logger.debug('[WorkTreeManager] WorkTree VM destroyed, clearing hooks');
             this.treeVmHooked = false;
             this.syncWatcherCleanup = null;
@@ -523,23 +494,33 @@ export class WorkTreeManager {
      * Note: worktree:path-change is emitted in the sync watcher (before render)
      * so TranslatedTags/FuriganaRenderer reset state BEFORE Vue renders fresh DOM.
      */
-    private enhanceWorkTree(treeVm: any): void {
+    private enhanceWorkTree(treeVm: WorkTreeComponent): void {
         const workTree = document.getElementById('work-tree');
         if (!workTree) return;
 
-        // 0. Force correct text on reused DOM elements.
-        //    Vue 2 reuses elements via :key="index". Features like FuriganaRenderer
-        //    and TranslatedTags modify .q-item__label, detaching Vue's tracked text
-        //    nodes. On navigation, Vue writes new text to detached nodes — the visible
-        //    DOM keeps stale content. This fixup runs synchronously in hook:updated
-        //    (before browser paint) and overwrites stale text from fatherFolder data.
-        this.fixWorkTreeText(treeVm, workTree);
+        // Suppress treeObserver while we modify DOM — prevents cascading
+        // mutations that would re-trigger expensive auto-dive checks.
+        this.modifyingDom = true;
+        try {
+            // 0. Force correct text on reused DOM elements.
+            //    Vue 2 reuses elements via :key="index". Features like FuriganaRenderer
+            //    and TranslatedTags modify .q-item__label, detaching Vue's tracked text
+            //    nodes. On navigation, Vue writes new text to detached nodes — the visible
+            //    DOM keeps stale content. This fixup runs synchronously in hook:updated
+            //    (before browser paint) and overwrites stale text from fatherFolder data.
+            this.fixWorkTreeText(treeVm, workTree);
 
-        // 1. Mark item types from fatherFolder
-        this.markItemTypes();
+            // 1. Mark item types from fatherFolder
+            this.markItemTypes(treeVm);
 
-        // 2. Trigger copy buttons + transcript chips
-        EventBus.emit('worktree:enhanced', { workTree });
+            // 2. Trigger copy buttons + transcript chips
+            EventBus.emit('worktree:enhanced', { workTree });
+        } finally {
+            // Use microtask to keep flag up until MutationObserver records are dispatched.
+            // MO callbacks fire as microtasks after the current task; clearing in the
+            // next microtask ensures the observer sees modifyingDom=true.
+            queueMicrotask(() => { this.modifyingDom = false; });
+        }
     }
 
     /**
@@ -553,46 +534,23 @@ export class WorkTreeManager {
      * This makes the work tree resilient to DOM corruption from any source
      * (FuriganaRenderer ruby replacement, TranslatedTags, or Vue patch failures).
      */
-    private fixWorkTreeText(treeVm: any, workTree: HTMLElement): void {
+    private fixWorkTreeText(treeVm: WorkTreeComponent, workTree: HTMLElement): void {
         try {
             const fatherFolder = treeVm.fatherFolder;
             if (!Array.isArray(fatherFolder) || fatherFolder.length === 0) return;
 
-            const labels = workTree.querySelectorAll('.q-item__label:not(.q-item__label--caption)');
+            const labels = Array.from(
+                workTree.querySelectorAll<HTMLElement>('.q-item__label:not(.q-item__label--caption)')
+            );
             if (labels.length === 0) return;
 
-            // Collect mismatches first, then batch-fix inside withModification
-            // to avoid triggering CentralObserver (FuriganaRenderer, TranslatedTags)
-            const fixes: Array<{ label: HTMLElement; expected: string }> = [];
-
-            for (let i = 0; i < Math.min(labels.length, fatherFolder.length); i++) {
-                const label = labels[i] as HTMLElement;
-                const expected = fatherFolder[i]?.title;
-                if (!label || !expected) continue;
-
-                // getCleanText reads data-jpdb-original if furigana was applied,
-                // or strips <rt>/<rp> from ruby annotations, falling back to textContent
-                const domText = getCleanText(label);
-                if (domText === expected || domText.includes(expected)) continue;
-
-                fixes.push({ label, expected });
-            }
+            const expectedTitles = buildExpectedTitles(fatherFolder);
+            const fixes = collectStaleLabelFixes(labels, expectedTitles);
 
             if (fixes.length === 0) return;
 
             CentralObserver.withModification(() => {
-                for (const { label, expected } of fixes) {
-                    // Mismatch: force correct text and strip stale feature state
-                    label.textContent = expected;
-                    delete label.dataset.asmrtag;
-                    delete label.dataset.asmrtagState;
-                    delete label.dataset.asmrtagScope;
-                    delete label.dataset.asmrtagTranslation;
-                    label.classList.remove('asmr-translated');
-                    label.classList.remove('asmr-worktree-translation');
-                    label.removeAttribute('data-jpdb');
-                    label.removeAttribute('data-jpdb-original');
-                }
+                applyLabelFixes(fixes);
             });
 
             if (fixes.length > 0) {
@@ -608,21 +566,15 @@ export class WorkTreeManager {
      * Features check this attribute before injecting elements
      * (e.g., skip transcript buttons on folders).
      */
-    private markItemTypes(): void {
-        const treeVm = this.bridge.workTreeVm as any;
-        const fatherFolder = treeVm?.fatherFolder;
-        if (!Array.isArray(fatherFolder) || fatherFolder.length === 0) return;
+    private markItemTypes(treeVm: WorkTreeComponent): void {
+        const fatherFolder = Array.isArray(treeVm?.fatherFolder) ? treeVm.fatherFolder : [];
 
         const workTree = document.getElementById('work-tree');
         if (!workTree) return;
 
         const items = workTree.querySelectorAll('.q-list > .q-item');
-        items.forEach((item, i) => {
-            if (i >= fatherFolder.length) return;
-            const data = fatherFolder[i];
-            if (!data) return;
-            (item as HTMLElement).dataset.itemType = data.type || 'unknown';
-        });
+        if (items.length === 0) return;
+        syncWorkTreeItemTypes(items, fatherFolder);
     }
 
     // =========================================================================
@@ -632,59 +584,86 @@ export class WorkTreeManager {
     /**
      * Observe work tree DOM changes for auto-dive detection and lazy hook installation.
      * Does NOT handle enhancement — that's done by hook:updated.
+     *
+     * Guards against self-triggered mutations via `modifyingDom` flag and debounces
+     * the callback to batch rapid mutations into a single processing pass.
      */
     private observeWorkTreeDom(): void {
         if (this.treeObserver) return;
-        const root = document.getElementById('work-tree') || document.body;
+        const root = document.getElementById('work-tree');
+        if (!root) {
+            // #work-tree not in DOM yet — retry once after a short delay
+            setTimeout(() => this.observeWorkTreeDom(), 200);
+            return;
+        }
         this.treeObserver = new MutationObserver(() => {
-            // Lazily install hooks when WorkTree component becomes available
-            if (!this.treeVmHooked) {
-                const treeVm = this.bridge.findWorkTreeComponent() as any;
-                if (treeVm) this.installTreeHooks(treeVm);
-            }
+            // Skip mutations caused by our own DOM modifications
+            if (this.modifyingDom) return;
 
-            const workId = this.getWorkIdFromRoute(this.bridge.route) || this.bridge.currentWorkId;
-            const hasItems = !!document.querySelector('#work-tree .q-item');
-            if (!hasItems) return;
-
-            if (!workId || !Config.get('autoFilterFolders')) return;
-
-            const pathKey = this.folderDiver.getHostPath().join('/');
-            const now = Date.now();
-
-            // Throttle: skip if same work + same path + within 2s
-            if (this.domDiveWorkId === workId && this.lastPathKey === pathKey &&
-                now - this.domDiveAt < 2000) {
-                return;
-            }
-
-            this.domDiveWorkId = workId;
-            this.lastPathKey = pathKey;
-            this.domDiveAt = now;
-
-            this.diveToken++;
-            Logger.debug('[WorkTreeManager] Work-tree ready, checking auto-dive', { workId, path: pathKey || '(root)' });
-            void this.maybeAutoDive(workId, this.diveToken);
+            // Debounce: batch rapid mutations into a single callback
+            if (this.treeObserverDebounce) return;
+            this.treeObserverDebounce = setTimeout(() => {
+                this.treeObserverDebounce = null;
+                this.processTreeMutation();
+            }, 100);
         });
         this.treeObserver.observe(root, { childList: true, subtree: true });
     }
 
+    /** Debounced handler for treeObserver mutations. */
+    private processTreeMutation(): void {
+        // Lazily install hooks when WorkTree component becomes available
+        if (!this.treeVmHooked) {
+            const treeVm = this.bridge.findWorkTreeComponent() as WorkTreeComponent | null;
+            if (treeVm) this.installTreeHooks(treeVm);
+        }
+
+        const workId = getWorkIdFromRoute(this.bridge.route) || this.bridge.currentWorkId;
+        const hasItems = !!document.querySelector('#work-tree .q-item');
+        if (!hasItems) return;
+
+        if (!workId || !Config.get('autoFilterFolders')) return;
+
+        const pathKey = this.folderDiver.getHostPath().join('/');
+        const now = Date.now();
+
+        // Throttle: skip if same work + same path + within 2s
+        if (this.domDiveWorkId === workId && this.lastPathKey === pathKey &&
+            now - this.domDiveAt < 2000) {
+            return;
+        }
+
+        this.domDiveWorkId = workId;
+        this.lastPathKey = pathKey;
+        this.domDiveAt = now;
+
+        this.diveToken++;
+        Logger.debug('[WorkTreeManager] Work-tree ready, checking auto-dive', { workId, path: pathKey || '(root)' });
+        void this.maybeAutoDive(workId, this.diveToken);
+    }
+
     private watchManualNav(): void {
-        document.addEventListener('pointerdown', (evt) => {
+        const onPointerDown = (evt: Event) => {
             const tree = document.getElementById('work-tree');
             if (!tree) return;
             if (tree.contains(evt.target as Node)) {
                 this.handleManual();
             }
-        }, true);
+        };
 
-        document.addEventListener('keydown', (evt) => {
-            if (evt.key === 'Enter' || evt.key === ' ') {
+        const onKeyDown = (evt: Event) => {
+            const keyEvt = evt as KeyboardEvent;
+            if (keyEvt.key === 'Enter' || keyEvt.key === ' ') {
                 const tree = document.getElementById('work-tree');
-                if (tree?.contains(evt.target as Node)) {
+                if (tree?.contains(keyEvt.target as Node)) {
                     this.handleManual();
                 }
             }
-        }, true);
+        };
+
+        document.addEventListener('pointerdown', onPointerDown, true);
+        document.addEventListener('keydown', onKeyDown, true);
+        this.manualNavCleanups.push(() => document.removeEventListener('pointerdown', onPointerDown, true));
+        this.manualNavCleanups.push(() => document.removeEventListener('keydown', onKeyDown, true));
     }
 }
