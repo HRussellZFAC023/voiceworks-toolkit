@@ -272,8 +272,6 @@ async function ensurePipeline(settings, progressCb) {
 // Transcription (word-level timestamps with segment grouping)
 // ------------------------------------------------------------
 
-let wordTimestampsSupported = true;
-
 // Hallucination detection for Whisper on ASMR/ambient audio.
 // Transformers.js doesn't expose per-segment no_speech_prob or avg_logprob,
 // and no_speech_threshold may not apply to chunked input (huggingface/transformers#29595).
@@ -423,7 +421,9 @@ async function transcribe(msg) {
         stride_length_s: msg.strideLengthS,
         language: msg.language,
         task: msg.subtask,
-        return_timestamps: wordTimestampsSupported ? 'word' : true,
+        // Always try word-level timestamps first. If the run fails, we retry
+        // that run with segment timestamps only.
+        return_timestamps: 'word',
         chunk_callback,
     };
 
@@ -447,10 +447,9 @@ async function transcribe(msg) {
             return null;
         }
 
-        // If word-level timestamps failed, retry with segment-level
-        if (wordTimestampsSupported) {
+        // If word-level timestamps failed, retry with segment-level for this run.
+        if (pipeOpts.return_timestamps === 'word') {
             console.warn('[Whisper Worker] Word-level timestamps failed (' + errMsg + '), retrying with segment timestamps');
-            wordTimestampsSupported = false;
             wordBuffer = [];
             lastUpdateAt = 0;
             detectedWordLevel = null;

@@ -8,6 +8,7 @@
 function getWorkerCode(): string {
     return `
 let gpuDeviceLost = false;
+let gpuFallbackSent = false;
 
 self.addEventListener('unhandledrejection', (event) => {
     const reason = event.reason;
@@ -354,7 +355,17 @@ function meanPool(embeddings, attentionMask) {
 async function embed(texts) {
     await ensurePipeline(currentModelName);
 
-    const output = await pipelineInstance(texts, { pooling: 'mean', normalize: true });
+    const prepared = texts.map((raw) => {
+        const normalized = String(raw || '').replace(/\\s+/g, ' ').trim();
+        const isFragileGpu = /intel|xe|arc|qualcomm|adreno/i.test(currentVendor || '');
+        const maxChars = currentBackend === 'webgpu'
+            ? (isFragileGpu ? 640 : 900)
+            : 1400;
+        const clipped = normalized.length > maxChars ? normalized.slice(0, maxChars) : normalized;
+        return clipped || ' ';
+    });
+
+    const output = await pipelineInstance(prepared, { pooling: 'mean', normalize: true });
 
     // output can be a Tensor with shape [batch, hidden_size] (already pooled)
     // or [batch, seq_len, hidden_size] (needs pooling)
@@ -389,9 +400,9 @@ async function switchToWasm(errMsg) {
     wasmSwitchPromise = (async () => {
         console.warn('[Embedding Worker] GPU inference failed, falling back to WASM:', errMsg);
         skipWebgpu = true;
-        if (!gpuDeviceLost) {
-            gpuDeviceLost = true;
-            self.postMessage({ status: 'gpu-device-lost', data: { message: errMsg } });
+        if (!gpuFallbackSent) {
+            gpuFallbackSent = true;
+            self.postMessage({ status: 'gpu-fallback', data: { message: errMsg } });
         }
         if (pipelineInstance) {
             try { pipelineInstance.dispose?.(); } catch {}
@@ -424,11 +435,11 @@ async function embedWithRecovery(texts) {
         // GPU error — switch to WASM if not already there
         if (currentBackend !== 'wasm') {
             await switchToWasm(errMsg);
-        } else if (!gpuDeviceLost) {
-            // Already on WASM but got a GPU error from an old session's in-flight op.
-            // Report device loss but don't need to switch backends.
-            gpuDeviceLost = true;
-            self.postMessage({ status: 'gpu-device-lost', data: { message: errMsg } });
+        } else if (!gpuFallbackSent) {
+            // Already on WASM but got a GPU error from an old in-flight GPU request.
+            // Report fallback state once without escalating to global device-loss.
+            gpuFallbackSent = true;
+            self.postMessage({ status: 'gpu-fallback', data: { message: errMsg } });
         }
 
         // Retry on WASM — ensurePipeline will create/return WASM pipeline

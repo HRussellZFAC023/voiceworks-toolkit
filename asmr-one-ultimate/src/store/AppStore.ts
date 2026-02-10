@@ -88,6 +88,9 @@ const CONFIG_DEFAULTS: PluginConfig = {
     preferLocalTranslation: true,
     translateCnToJp: false,
 
+    // Folder Selection
+    sePref: true,
+
     // UI
     autoProgress: false,
     dynamicFavicon: true,

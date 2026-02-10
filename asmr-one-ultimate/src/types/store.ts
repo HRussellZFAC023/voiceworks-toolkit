@@ -220,6 +220,9 @@ export interface PluginConfig {
     preferLocalTranslation: boolean;
     translateCnToJp: boolean;
 
+    // Folder Selection
+    sePref: boolean;
+
     // UI
     autoProgress: boolean;
     dynamicFavicon: boolean;

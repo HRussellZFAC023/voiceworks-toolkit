@@ -123,7 +123,7 @@ describe('glossaryPreProcess', () => {
     it('replaces トラック in mixed short track titles', () => {
         const [processed, modified] = glossaryPreProcess('トラック2ヘッドマッサージ・手足湯.mp3', 'en');
         expect(modified).toBe(true);
-        expect(processed).toContain('track2');
+        expect(processed).toContain('track 2');  // space-padded to avoid "track2" concatenation
         expect(processed).not.toContain('トラック');
     });
 
@@ -257,14 +257,31 @@ describe('isLikelyGarbage', () => {
         expect(isLikelyGarbage('短い', long)).toBe(true);
     });
 
-    it('rejects repeated punctuation', () => {
+    it('rejects repeated punctuation (same character 4+)', () => {
         expect(isLikelyGarbage('テスト', 'What!!!!!')).toBe(true);
+        expect(isLikelyGarbage('テスト', 'Huh????')).toBe(true);
+        expect(isLikelyGarbage('テスト', 'Wait.......')).toBe(true);
+    });
+
+    it('allows mixed punctuation like ...! and ...? (common in JA→EN)', () => {
+        expect(isLikelyGarbage('大好き…!そして', 'I love it...! And then')).toBe(false);
+        expect(isLikelyGarbage('本当…?', 'Really...?')).toBe(false);
+        expect(isLikelyGarbage('何…!?', 'What...!?')).toBe(false);
     });
 
     it('rejects repeated words (4+)', () => {
         expect(isLikelyGarbage('テスト', 'the the the the thing')).toBe(true);
     });
+    it('rejects repeated character runs', () => {
+        expect(isLikelyGarbage('カード', 'Cardssssssssssssssssss')).toBe(true);
+    });
 
+    it('rejects repeated n-gram loops', () => {
+        expect(isLikelyGarbage(
+            'サンプル',
+            'without voices recording audio without voices recording audio without voices recording audio',
+        )).toBe(true);
+    });
     it('detects first-person hallucination from non-first-person input', () => {
         expect(isLikelyGarbage(
             '【耳かき・踏み踏み】あやかし郷愁譚 ～あかしゃぐま すみ～【蒸しタオル】',

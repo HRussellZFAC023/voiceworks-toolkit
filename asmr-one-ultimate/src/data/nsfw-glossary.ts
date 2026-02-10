@@ -737,6 +737,9 @@ const GLOSSARY_DATA: readonly GlossaryEntry[] = [
     ['触手姦', 'tentacle sex', '触手奸', 'a'],
     ['母乳プレイ', 'lactation play', '母乳play', 'a'],
     ['アナル', 'anal', '肛交', 'a'],
+    ['色仕掛け', 'seduction', '色诱', 'a'],
+    ['快楽堕ち', 'pleasure corruption', '快乐堕落', 'a'],
+    ['インモラル', 'immoral', '不道德', 'a'],
 
     // Personality/character archetypes (katakana loanwords opus-mt garbles)
     ['ダウナー', 'downer', '阴郁系', 'a'],

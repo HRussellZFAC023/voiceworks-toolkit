@@ -181,7 +181,16 @@ button.learner-en:focus-visible {
 /* ============================================
    Controls & Layout
    ============================================ */
-.learner-controls,
+.learner-controls {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center;
+    position: relative;
+    height: 100%;
+    padding: 0 4px;
+    margin: 0 auto;
+}
+
 .learner-collapsed-controls {
     display: flex !important;
     align-items: center !important;

@@ -4,6 +4,7 @@ import { Logger } from '../core/Logger';
 import { Config, I18n } from '../core/Config';
 import { CentralObserver } from '../core/CentralObserver';
 import { EventBus } from '../core/EventBus';
+import { Priority } from '../core/GpuScheduler';
 import { isChinese } from '../core/DomUtils';
 import type { TagEntry, TagI18n } from '../types/api';
 
@@ -16,6 +17,7 @@ interface RawTag extends TagEntry {
 declare const unsafeWindow: Window & typeof globalThis;
 
 const TRANSLATED_TAGS_VERSION = '2026-02-03.5';
+const TAG_TRANSLATION_PRIORITY = Priority.NORMAL;
 const globalWindow = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window) as Window & {
     __ASMR_TRANSLATED_TAGS__?: TranslatedTags;
     __ASMR_TRANSLATED_TAGS_VERSION__?: string;
@@ -42,6 +44,8 @@ export class TranslatedTags {
     private boundKeyHandler: (e: KeyboardEvent) => void;
     private configCleanup?: () => void;
     private pathChangeCleanup?: () => void;
+    private routeKeyCleanup?: () => void;
+    private activeQueueKey = '';
 
     private constructor() {
         this.bridge = KikoeruBridge.getInstance();
@@ -126,15 +130,21 @@ export class TranslatedTags {
         // Listen for explicit path change events from WorkTreeManager
         // This ensures translation state is reset BEFORE Vue updates DOM elements
         this.pathChangeCleanup = EventBus.on('worktree:path-change', () => {
+            this.cancelActiveTranslationQueue();
             this.resetWorkTreeTranslationState();
         });
 
         // Reset per-element state on folder changes so cached DOM doesn't leak across levels
-        this.bridge.$watch?.(() => this.getCurrentWorkTreeKey(), (next: string, prev: string) => {
+        const unwatch = this.bridge.$watch?.(() => this.getCurrentWorkTreeKey(), (next: string, prev: string) => {
             if (next !== prev) {
+                this.cancelTranslationQueueForRouteKey(prev);
+                this.cancelTranslationQueueForRouteKey(next);
                 this.resetWorkTreeTranslationState();
             }
         });
+        if (typeof unwatch === 'function') {
+            this.routeKeyCleanup = unwatch;
+        }
 
         this.augmentTags();
         this.isEnabled = true;
@@ -154,6 +164,11 @@ export class TranslatedTags {
             this.pathChangeCleanup();
             this.pathChangeCleanup = undefined;
         }
+        if (this.routeKeyCleanup) {
+            this.routeKeyCleanup();
+            this.routeKeyCleanup = undefined;
+        }
+        this.cancelActiveTranslationQueue();
         if (globalWindow.__ASMR_TRANSLATED_TAGS__ === this) {
             delete globalWindow.__ASMR_TRANSLATED_TAGS__;
             delete globalWindow.__ASMR_TRANSLATED_TAGS_VERSION__;
@@ -226,8 +241,33 @@ export class TranslatedTags {
         if (state === 'pending' && tracked === currentText) return true;
 
         if (state === 'done' && tracked) {
-            if (currentText === tracked || currentText.includes(tracked)) return true;
-            // Content changed (e.g., Vue reused the element), clear stale translation state.
+            if (currentText === tracked || currentText.includes(tracked)) {
+                // Worktree translations survive via CSS ::after (data-attribute based)
+                if (el.classList.contains('asmr-worktree-translation') && el.dataset.asmrtagTranslation) {
+                    return true;
+                }
+                // Work titles: translation lives in a sibling <div class="asmr-card-translation">.
+                // Vue re-render can destroy the sibling while the <a>'s data attributes survive.
+                const container = el.closest('.ellipsis-3-lines, .ellipsis-2-lines, .text-h6');
+                if (container) {
+                    const sub = container.nextElementSibling;
+                    if (sub instanceof HTMLElement && sub.classList.contains('asmr-card-translation') && sub.textContent) {
+                        return true;
+                    }
+                    // Subtitle was removed by Vue re-render — re-translate
+                    this.clearTranslationPending(el);
+                    return false;
+                }
+                // Inline translations (chips, anchors, list items):
+                // 'done' means a different translation was applied inline (e.g. "original (translation)").
+                // If text is exactly the original, Vue's DOM patching stripped the inline suffix.
+                if (currentText === tracked) {
+                    this.clearTranslationPending(el);
+                    return false;
+                }
+                return true;
+            }
+            // Content completely changed (Vue reused the element for different data)
             this.clearTranslationPending(el);
             return false;
         }
@@ -271,7 +311,7 @@ export class TranslatedTags {
             const chips = Array.from(document.querySelectorAll('.q-chip:not(.asmr-ignore)')) as HTMLElement[];
             for (const chip of chips) {
                 const content = (chip.querySelector('.q-chip__content') as HTMLElement) || chip;
-                const text = (content.textContent || '').trim();
+                const text = this.extractBaseText(content);
                 if (!text) continue;
 
                 // Skip if already has a site-provided romanization (e.g. "佐倉江美 (Sakura Emi)")
@@ -295,7 +335,9 @@ export class TranslatedTags {
                     chip.dataset.asmrtagState = 'done';
                     delete chip.dataset.asmrtagUntil;
                     chip.classList.add('asmr-translated');
+                    const chipIcons = Array.from(content.querySelectorAll('i.material-icons, .q-chip__icon'));
                     content.textContent = formatted;
+                    for (const icon of chipIcons) content.appendChild(icon);
                     continue;
                 }
 
@@ -304,7 +346,11 @@ export class TranslatedTags {
                 if (this.looksJapanese(baseText) && !this.shouldSkipAutoTranslate(baseText, targetLang)) {
                     if (cnOnlyMode && !isChinese(baseText)) continue;
                     this.markTranslationPending(chip, text);
-                    pending.push({ el: chip, originalText: text, translateKey: baseText, format: cnOnlyMode ? 'raw' : 'pair', apply: (v) => { content.textContent = v; } });
+                    pending.push({ el: chip, originalText: text, translateKey: baseText, format: cnOnlyMode ? 'raw' : 'pair', apply: (v) => {
+                        const icons = Array.from(content.querySelectorAll('i.material-icons, .q-chip__icon'));
+                        content.textContent = v;
+                        for (const icon of icons) content.appendChild(icon);
+                    } });
                 }
             }
 
@@ -314,9 +360,14 @@ export class TranslatedTags {
                 const text = this.extractBaseText(item);
                 if (!text || !this.looksJapanese(text)) continue;
                 if (cnOnlyMode && !isChinese(text)) continue;
-                const isListing = location.pathname.includes('/circles') || location.pathname.includes('/vas') || location.pathname.includes('/works');
+                const isListing = location.pathname.includes('/circles') || location.pathname.includes('/vas') || location.pathname.includes('/works') || location.pathname.includes('/tags');
                 const isWorkTree = item.closest('#work-tree, .work-tree') !== null;
                 if (!isListing && !isWorkTree) continue;
+                // On /circles and /vas, ListSearchEnhancer handles translations via Vue data exclusively.
+                // Skip to avoid race where cancelled batches leave items in permanent "pending" state.
+                if (!isWorkTree && (location.pathname === '/circles' || location.pathname === '/vas')) continue;
+                // On other listing pages, skip items already augmented by ListSearchEnhancer
+                if (isListing && !isWorkTree && this.hasExistingRomanization(text)) continue;
                 const scopeKey = isWorkTree ? this.getCurrentWorkTreeKey() : undefined;
                 if (this.processedElements.has(item) && this.shouldSkipTranslation(item, text, scopeKey)) continue;
 
@@ -347,39 +398,40 @@ export class TranslatedTags {
             // 4. Anchors
             const anchors = Array.from(document.querySelectorAll('a[href*="/circles/"], a[href*="/authors/"], a[href*="/actors/"], a[href*="/vas/"], a[href*="/cv/"]')) as HTMLAnchorElement[];
             for (const anchor of anchors) {
-                const text = (anchor.textContent || '').trim();
+                const text = this.extractBaseText(anchor);
                 if (!text) continue;
                 if (this.hasExistingRomanization(text)) continue;
-                const baseText = this.extractBaseText(anchor);
-                if (!this.looksJapanese(baseText)) continue;
-                if (cnOnlyMode && !isChinese(baseText)) continue;
+                if (!this.looksJapanese(text)) continue;
+                if (cnOnlyMode && !isChinese(text)) continue;
                 if (this.processedElements.has(anchor) && this.shouldSkipTranslation(anchor, text)) continue;
-                if (this.shouldSkipAutoTranslate(baseText, targetLang)) continue;
+                if (this.shouldSkipAutoTranslate(text, targetLang)) continue;
 
                 this.markTranslationPending(anchor, text);
-                pending.push({ el: anchor, originalText: text, translateKey: baseText, format: cnOnlyMode ? 'raw' : 'pair', apply: (v) => { anchor.textContent = v; } });
+                pending.push({ el: anchor, originalText: text, translateKey: text, format: cnOnlyMode ? 'raw' : 'pair', apply: (v) => { anchor.textContent = v; } });
             }
 
             // 5. Work Card Circles / Studios
             const cardMetaNames = Array.from(document.querySelectorAll('.text-subtitle1 .text-grey.ellipsis')) as HTMLElement[];
             for (const el of cardMetaNames) {
-                const text = (el.textContent || '').trim();
+                const text = this.extractBaseText(el);
                 if (!text) continue;
                 if (this.hasExistingRomanization(text)) continue;
-                const baseText = this.extractBaseText(el);
-                if (!this.looksJapanese(baseText)) continue;
-                if (cnOnlyMode && !isChinese(baseText)) continue;
+                if (!this.looksJapanese(text)) continue;
+                if (cnOnlyMode && !isChinese(text)) continue;
                 if (this.processedElements.has(el) && this.shouldSkipTranslation(el, text)) continue;
-                if (this.shouldSkipAutoTranslate(baseText, targetLang)) continue;
+                if (this.shouldSkipAutoTranslate(text, targetLang)) continue;
 
                 this.markTranslationPending(el, text);
-                pending.push({ el, originalText: text, translateKey: baseText, format: cnOnlyMode ? 'raw' : 'pair', apply: (v) => { el.textContent = v; } });
+                pending.push({ el, originalText: text, translateKey: text, format: cnOnlyMode ? 'raw' : 'pair', apply: (v) => { el.textContent = v; } });
             }
 
             // 6. Work Titles — keep original, show translated subtitle below
             const workTitles = Array.from(document.querySelectorAll('.ellipsis-3-lines a[href*="/work/"], .ellipsis-2-lines a[href*="/work/"], .q-card .text-h6 a[href*="/work/"], .q-card a[href*="/work/"] .text-weight-medium')) as HTMLElement[];
             for (const el of workTitles) {
-                const text = (el.textContent || '').trim();
+                // Use extractBaseText to ignore JPDB furigana <rt> annotations —
+                // raw textContent includes interleaved readings (e.g. "生せい耳みみ")
+                // which would mismatch against the tracked original.
+                const text = this.extractBaseText(el);
                 if (!text || !this.looksJapanese(text)) continue;
                 if (cnOnlyMode && !isChinese(text)) continue;
                 if (this.processedElements.has(el) && this.shouldSkipTranslation(el, text)) continue;
@@ -413,7 +465,9 @@ export class TranslatedTags {
 
         // Pass 2: batch-translate all collected texts in one call
         if (pending.length > 0) {
-            this.batchTranslatePending(pending, targetLang);
+            const queueKey = this.buildTranslationQueueKey();
+            this.activeQueueKey = queueKey;
+            this.batchTranslatePending(pending, targetLang, queueKey);
         }
     }
 
@@ -430,7 +484,8 @@ export class TranslatedTags {
      */
     private batchTranslatePending(
         pending: Array<{ el: HTMLElement; originalText: string; translateKey: string; scopeKey?: string; format: 'pair' | 'raw' | 'worktree'; fileExt?: string; apply: (value: string) => void }>,
-        targetLang: string
+        targetLang: string,
+        queueKey: string,
     ): void {
         // Deduplicate translation keys
         const uniqueKeys: string[] = [];
@@ -442,7 +497,12 @@ export class TranslatedTags {
             }
         }
 
-        TranslationService.translateBatch(uniqueKeys, targetLang).then(results => {
+        TranslationService.cancelPendingLocal({ cancellableKey: queueKey });
+        TranslationService.translateBatch(uniqueKeys, targetLang, {
+            priority: TAG_TRANSLATION_PRIORITY,
+            cancellable: true,
+            cancellableKey: queueKey,
+        }).then(results => {
             const translationMap = new Map<string, string>();
             for (let i = 0; i < uniqueKeys.length; i++) {
                 if (results[i]) translationMap.set(uniqueKeys[i], results[i]);
@@ -474,6 +534,11 @@ export class TranslatedTags {
             }
         }).catch(err => {
             Logger.debug('[TranslatedTags] Batch translation failed:', err);
+            for (const item of pending) {
+                if (item.el.dataset.asmrtagState === 'pending') {
+                    this.clearTranslationPending(item.el);
+                }
+            }
         });
     }
 
@@ -506,7 +571,9 @@ export class TranslatedTags {
             return;
         }
         if (el.dataset.asmrtag !== original) return;
-        const currentText = (el.textContent || '').trim();
+        // Use extractBaseText to ignore ruby annotations (from FuriganaRenderer)
+        // and icon ligatures when comparing — the underlying text is unchanged.
+        const currentText = this.extractBaseText(el);
         if (currentText !== original) {
             this.clearTranslationPending(el);
             return;
@@ -567,11 +634,11 @@ export class TranslatedTags {
      * garbled "佐さ倉くら江え美み", this returns clean "佐倉江美".
      */
     private extractBaseText(el: HTMLElement): string {
-        if (!el.querySelector('rt')) {
+        if (!el.querySelector('rt, i.material-icons, .q-chip__icon')) {
             return (el.textContent || '').trim();
         }
         const clone = el.cloneNode(true) as HTMLElement;
-        for (const rt of clone.querySelectorAll('rt, rp')) rt.remove();
+        for (const node of clone.querySelectorAll('rt, rp, i.material-icons, .q-chip__icon')) node.remove();
         return (clone.textContent || '').trim();
     }
 
@@ -580,7 +647,7 @@ export class TranslatedTags {
      * Site-provided: "佐倉江美 (Sakura Emi)" — skip to avoid double translation.
      */
     private hasExistingRomanization(text: string): boolean {
-        return /\([A-Za-z][A-Za-z\s.,!?;:'"…-]*\)\s*$/.test(text);
+        return /\([A-Za-z][-A-Za-z\s.,!?;:'"…()]*\)\s*$/.test(text);
     }
 
     private getFileTranslationInfo(text: string): { original: string; input: string; ext: string } | null {
@@ -649,6 +716,22 @@ export class TranslatedTags {
         const path = route?.path || '';
         const queryKey = this.normalizeQueryPath(route?.query);
         return `${workId}|${path}${queryKey ? `?${queryKey}` : ''}`;
+    }
+
+    private buildTranslationQueueKey(routeKey?: string): string {
+        const key = routeKey || this.getCurrentWorkTreeKey() || 'global';
+        return `translated-tags:${key}`;
+    }
+
+    private cancelTranslationQueueForRouteKey(routeKey?: string): void {
+        if (!routeKey) return;
+        TranslationService.cancelPendingLocal({ cancellableKey: this.buildTranslationQueueKey(routeKey) });
+    }
+
+    private cancelActiveTranslationQueue(): void {
+        if (!this.activeQueueKey) return;
+        TranslationService.cancelPendingLocal({ cancellableKey: this.activeQueueKey });
+        this.activeQueueKey = '';
     }
 
     private normalizeQueryPath(value: unknown): string {

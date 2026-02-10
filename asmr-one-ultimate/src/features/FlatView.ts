@@ -15,6 +15,7 @@ import type { TrackFolder, TrackItem, TracksResponse } from '../types/api';
 import { WorkService } from '../services/WorkService';
 import { I18n } from '../core/Utils';
 import { TranslationService } from '../services/TranslationService';
+import { Priority } from '../core/GpuScheduler';
 
 /** A flattened item with folder path context */
 interface FlatItem {
@@ -44,6 +45,7 @@ export class FlatView {
     private prefetchedData: TracksResponse | null = null;
     private prefetchWorkId: string | null = null;
     private prefetchPromise: Promise<void> | null = null;
+    private static readonly TRANSLATION_PRIORITY = Priority.NORMAL;
 
     constructor() {
         this.bridge = KikoeruBridge.getInstance();
@@ -82,6 +84,7 @@ export class FlatView {
             this.unwatchTrack();
             this.unwatchTrack = null;
         }
+        TranslationService.cancelPendingLocal({ cancellableKey: this.getTranslationQueueKey() });
         EventBus.emit('flatview:toggle', { active: false });
     }
 
@@ -93,6 +96,7 @@ export class FlatView {
 
     public disable(): void {
         if (this.isActive) this.hide();
+        TranslationService.cancelPendingLocal({ cancellableKey: this.getTranslationQueueKey() });
         if (this.unwatchWork) {
             this.unwatchWork();
             this.unwatchWork = null;
@@ -432,7 +436,13 @@ export class FlatView {
         if (textsToTranslate.length === 0) return;
 
         try {
-            const translated = await TranslationService.translateBatch(textsToTranslate);
+            const queueKey = this.getTranslationQueueKey();
+            TranslationService.cancelPendingLocal({ cancellableKey: queueKey });
+            const translated = await TranslationService.translateBatch(textsToTranslate, 'en', {
+                priority: FlatView.TRANSLATION_PRIORITY,
+                cancellable: true,
+                cancellableKey: queueKey,
+            });
             for (const { el, textIdx } of elementMap) {
                 const original = textsToTranslate[textIdx];
                 const result = translated[textIdx];
@@ -443,6 +453,10 @@ export class FlatView {
         } catch (e) {
             Logger.warn('[FlatView] Translation failed:', e);
         }
+    }
+
+    private getTranslationQueueKey(): string {
+        return `flatview:${this.bridge.currentWorkId || 'unknown'}`;
     }
 
     private getItemIcon(item: FlatItem, token: string): string {

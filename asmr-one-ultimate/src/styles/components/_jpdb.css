@@ -26,6 +26,16 @@
     opacity: 0.85;
 }
 
+/* Override flex layout in Quasar chips so <ruby>/<rt> positions correctly.
+   .q-chip__content has Quasar utility classes (row, items-center) that make it
+   a flex container — flex items don't give <rt> proper vertical space.
+   Switching to block lets inline ruby flow naturally. The chip's parent (.q-chip)
+   still handles the overall flex layout (content + close icon). */
+.q-chip__content[data-jpdb] {
+    display: block !important;
+    white-space: nowrap;
+}
+
 /* Hide furigana for words the user already knows */
 .jpdb-word:is(.jpdb-never-forget, .jpdb-known, .jpdb-due) .jpdb-furi {
     display: none !important;

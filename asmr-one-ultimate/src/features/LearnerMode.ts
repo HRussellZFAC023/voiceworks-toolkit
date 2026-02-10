@@ -14,6 +14,10 @@ import {
 
 import { KikoeruBridge } from '../infrastructure/KikoeruBridge';
 import { getAudioElement, getPlayerBar } from '../core/DomUtils';
+import {
+    buildKaraokeCharMap, computeWordKaraokeIndices, computeTimeFallbackKaraokeIndices,
+    type KaraokeCharMap,
+} from './karaokeUtils';
 
 /** Normalized lyric line used internally */
 interface LyricLine {
@@ -466,6 +470,7 @@ export class LearnerMode {
         if (this.boundAudio && this.boundTimeHandler) {
             this.boundAudio.removeEventListener('timeupdate', this.boundTimeHandler);
             this.boundAudio.removeEventListener('play', this.handleAudioPlay);
+            this.boundAudio.removeEventListener('pause', this.handleAudioPause);
             this.boundAudio.removeEventListener('seeking', this.handleAudioSeeking);
             this.boundAudio.removeEventListener('seeked', this.handleAudioSeeked);
         }
@@ -482,12 +487,21 @@ export class LearnerMode {
         audio.addEventListener('seeked', this.handleAudioSeeked);
         // Extra robustness: re-apply rate on play in case browser reset it on src change
         audio.addEventListener('play', this.handleAudioPlay);
+        audio.addEventListener('pause', this.handleAudioPause);
     }
 
     private handleAudioPlay = () => {
         if (this.boundAudio && this.playbackRate !== 1.0) {
             this.boundAudio.playbackRate = this.playbackRate;
         }
+        // Restart karaoke rAF when playback resumes
+        if (Config.get('karaokeMode') && this.karaokeFullText) {
+            this.startKaraokeRaf();
+        }
+    };
+
+    private handleAudioPause = () => {
+        this.stopKaraokeRaf();
     };
 
     private handleAudioSeeking = () => {
@@ -1102,35 +1116,33 @@ export class LearnerMode {
                     } else if (wKaraoke && fullText) {
                         // Karaoke ON: always show full text, control visibility via CSS
                         primaryForDisplay = fullText;
-                        const words = display.activeLine?.words;
-                        let indices = { splitIdx: 0, hlStart: 0 };
                         const karaokeTime = display.audioTime ?? display.now;
-                        if (Array.isArray(words) && words.length > 0 && karaokeTime != null) {
-                            indices = this.computeWordKaraokeIndices(fullText, words, karaokeTime);
-                        } else if (display.activeLine && karaokeTime != null) {
-                            indices = this.computeTimeFallbackKaraokeIndices(fullText, display.activeLine, karaokeTime);
+                        if (display.activeLine && karaokeTime != null) {
+                            const indices = this.setKaraokeLineState(
+                                fullText, display.activeLine.words, display.activeLine.time,
+                                display.activeLine.endTime, karaokeTime,
+                            );
+                            wSplitIdx = indices.splitIdx;
+                            wHlStart = wSegment ? 0 : indices.hlStart;
                         }
-                        wSplitIdx = indices.splitIdx;
-                        // Segment ON (fill-up): hlStart=0, all spoken text in accent
-                        // Segment OFF (spotlight): hlStart=word start, only current word in accent
-                        wHlStart = wSegment ? 0 : indices.hlStart;
                     }
                     this.updatePrimaryLine(primaryForDisplay, wSplitIdx, wHlStart);
                     this.lastWhisperDisplayText = primaryForDisplay;
                 } else if (display.displayText && !!Config.get('karaokeMode')) {
-                    // Karaoke: text unchanged but indices may have advanced
-                    const ft = display.fullText || display.displayText;
-                    const words = display.activeLine?.words;
-                    let indices = { splitIdx: 0, hlStart: 0 };
-                    const karaokeTime = display.audioTime ?? display.now;
-                    if (Array.isArray(words) && words.length > 0 && karaokeTime != null) {
-                        indices = this.computeWordKaraokeIndices(ft, words, karaokeTime);
-                    } else if (display.activeLine && karaokeTime != null) {
-                        indices = this.computeTimeFallbackKaraokeIndices(ft, display.activeLine, karaokeTime);
+                    // Karaoke: text unchanged — rAF handles smooth updates.
+                    // Safety fallback if rAF not running.
+                    if (!this.karaokeRafId && display.activeLine) {
+                        const ft = display.fullText || display.displayText;
+                        const karaokeTime = display.audioTime ?? display.now;
+                        if (karaokeTime != null) {
+                            const indices = this.setKaraokeLineState(
+                                ft, display.activeLine.words, display.activeLine.time,
+                                display.activeLine.endTime, karaokeTime,
+                            );
+                            const newHlStart = !!Config.get('segmentMode') ? 0 : indices.hlStart;
+                            this.updatePrimaryLine(this.lastWhisperDisplayText, indices.splitIdx, newHlStart);
+                        }
                     }
-                    const newSplitIdx = indices.splitIdx;
-                    const newHlStart = !!Config.get('segmentMode') ? 0 : indices.hlStart;
-                    this.updatePrimaryLine(this.lastWhisperDisplayText, newSplitIdx, newHlStart);
                 } else if (!display.displayText) {
                     // Between segments (gap/silence) — hold previous text visible.
                     // Clearing causes blank flashes and content shift. The next segment
@@ -1214,9 +1226,11 @@ export class LearnerMode {
                 const newLyrics = normalizeLyricLines(data as Record<string, unknown>[]);
 
                 // Pre-translate in background if lyrics changed
+                // Deferred so the REALTIME translate() for the current line fires first
+                // and gets the GpuScheduler fast-path (worker idle → immediate execution).
                 if (newLyrics.length !== this.currentLyrics.length ||
                     (newLyrics.length > 0 && newLyrics[0]?.text !== this.currentLyrics[0]?.text)) {
-                    this.preTranslateAll(newLyrics);
+                    setTimeout(() => this.preTranslateAll(newLyrics), 100);
                 }
 
                 this.currentLyrics = newLyrics;
@@ -1258,18 +1272,15 @@ export class LearnerMode {
         } else if (karaokeEnabled) {
             // Karaoke ON: always show full text, control visibility via CSS
             primaryText = fullText;
-            const words = display.activeLine?.words;
-            let indices = { splitIdx: 0, hlStart: 0 };
             const karaokeTime = display.audioTime ?? display.now;
-            if (Array.isArray(words) && words.length > 0 && karaokeTime != null) {
-                indices = this.computeWordKaraokeIndices(fullText, words, karaokeTime);
-            } else if (display.activeLine && karaokeTime != null) {
-                indices = this.computeTimeFallbackKaraokeIndices(fullText, display.activeLine, karaokeTime);
+            if (display.activeLine && karaokeTime != null) {
+                const indices = this.setKaraokeLineState(
+                    fullText, display.activeLine.words, display.activeLine.time,
+                    display.activeLine.endTime, karaokeTime,
+                );
+                splitIdx = indices.splitIdx;
+                hlStart = segmentEnabled ? 0 : indices.hlStart;
             }
-            splitIdx = indices.splitIdx;
-            // Segment ON (fill-up): hlStart=0, all spoken text in accent
-            // Segment OFF (spotlight): hlStart=word start, only current word in accent
-            hlStart = segmentEnabled ? 0 : indices.hlStart;
         } else {
             primaryText = progressiveText;
         }
@@ -1367,7 +1378,7 @@ export class LearnerMode {
             // During live whisper, Whisper.translateNewSegments() handles delta translation
             // and fires whisper:segment-translated so updateLyrics() picks up cached results.
             if (!this.whisperLive && TranslationService.canPrefetch(newWhisperLines.length)) {
-                this.preTranslateAll(newWhisperLines);
+                setTimeout(() => this.preTranslateAll(newWhisperLines), 100);
             }
             this.whisperLines = newWhisperLines;
             // Don't reset lastWhisperDisplayText here — let _updateWhisperDisplay()
@@ -1582,7 +1593,7 @@ export class LearnerMode {
                 const trackKey = this.getTrackKey();
                 if (trackKey) this.lastTrackKey = trackKey;
                 this.currentLyrics = lyrics;
-                this.preTranslateAll(lyrics);
+                setTimeout(() => this.preTranslateAll(lyrics), 100);
                 this.updateLyrics();
                 return true;
             }
@@ -1618,7 +1629,7 @@ export class LearnerMode {
                 const trackKey = this.getTrackKey();
                 if (trackKey) this.lastTrackKey = trackKey;
                 this.currentLyrics = lyrics;
-                this.preTranslateAll(lyrics);
+                setTimeout(() => this.preTranslateAll(lyrics), 100);
                 this.updateLyrics();
                 return true;
             }
@@ -1895,10 +1906,12 @@ export class LearnerMode {
         this.playerObserver?.disconnect();
         this.playerObserver = null;
         this.clearWhisperTicker();
+        this.clearKaraokeState();
         if (this.seekedDebounceTimer) { clearTimeout(this.seekedDebounceTimer); this.seekedDebounceTimer = null; }
         if (this.boundAudio) {
             if (this.boundTimeHandler) this.boundAudio.removeEventListener('timeupdate', this.boundTimeHandler);
             this.boundAudio.removeEventListener('play', this.handleAudioPlay);
+            this.boundAudio.removeEventListener('pause', this.handleAudioPause);
             this.boundAudio.removeEventListener('seeking', this.handleAudioSeeking);
             this.boundAudio.removeEventListener('seeked', this.handleAudioSeeked);
             this.boundAudio = null;
@@ -2198,6 +2211,80 @@ export class LearnerMode {
         }
     }
 
+    // Karaoke rAF state
+    private karaokeCharMap: KaraokeCharMap | null = null;
+    private karaokeFullText = '';
+    private karaokeLineTime = 0;
+    private karaokeLineEndTime: number | undefined;
+    private karaokeTotalChars = 0;
+    private karaokeRafId = 0;
+
+    private setKaraokeLineState(
+        fullText: string,
+        words: Array<{ start: number; end: number; text: string }> | undefined,
+        lineTime: number,
+        lineEndTime: number | undefined,
+        now: number,
+    ): { splitIdx: number; hlStart: number } {
+        this.karaokeFullText = fullText;
+        this.karaokeLineTime = lineTime;
+        this.karaokeLineEndTime = lineEndTime;
+
+        if (words && words.length > 0) {
+            this.karaokeCharMap = buildKaraokeCharMap(fullText, words);
+            this.karaokeTotalChars = this.karaokeCharMap.totalChars;
+            this.startKaraokeRaf();
+            return computeWordKaraokeIndices(this.karaokeCharMap, now);
+        }
+        this.karaokeCharMap = null;
+        this.karaokeTotalChars = Array.from(fullText).length;
+        this.startKaraokeRaf();
+        return computeTimeFallbackKaraokeIndices(fullText, this.karaokeTotalChars, lineTime, lineEndTime, now);
+    }
+
+    private karaokeRafTick = () => {
+        this.karaokeRafId = 0;
+        const audio = getAudioElement();
+        if (!audio || !Config.get('karaokeMode') || !this.karaokeFullText) return;
+
+        const now = audio.currentTime;
+        let indices: { splitIdx: number; hlStart: number };
+        if (this.karaokeCharMap && this.karaokeCharMap.entries.length > 0) {
+            indices = computeWordKaraokeIndices(this.karaokeCharMap, now);
+        } else if (this.karaokeLineEndTime != null) {
+            indices = computeTimeFallbackKaraokeIndices(
+                this.karaokeFullText, this.karaokeTotalChars,
+                this.karaokeLineTime, this.karaokeLineEndTime, now,
+            );
+        } else {
+            return;
+        }
+
+        const segmentEnabled = !!Config.get('segmentMode');
+        const splitIdx = indices.splitIdx;
+        const hlStart = segmentEnabled ? 0 : indices.hlStart;
+        this.updatePrimaryLine(this.karaokeFullText, splitIdx, hlStart);
+
+        if (!audio.paused) this.karaokeRafId = requestAnimationFrame(this.karaokeRafTick);
+    };
+
+    private startKaraokeRaf(): void {
+        if (this.karaokeRafId) return;
+        const audio = getAudioElement();
+        if (!audio || audio.paused || !Config.get('karaokeMode')) return;
+        this.karaokeRafId = requestAnimationFrame(this.karaokeRafTick);
+    }
+
+    private stopKaraokeRaf(): void {
+        if (this.karaokeRafId) { cancelAnimationFrame(this.karaokeRafId); this.karaokeRafId = 0; }
+    }
+
+    private clearKaraokeState(): void {
+        this.stopKaraokeRaf();
+        this.karaokeCharMap = null;
+        this.karaokeFullText = '';
+    }
+
     // JPDB furigana state
     private jpdbTokens: import('../types/jpdb').JPDBToken[] | null = null;
     private lastJpdbText = '';
@@ -2212,54 +2299,6 @@ export class LearnerMode {
         } catch {
             // Silently fail
         }
-    }
-
-    /** Compute word-level karaoke indices from word timings. */
-    private computeWordKaraokeIndices(
-        fullText: string,
-        words: Array<{ start: number; end: number; text: string }>,
-        now: number,
-    ): { splitIdx: number; hlStart: number } {
-        const hasSpaces = /\s/.test(fullText);
-        let charOffset = 0;
-        let hlStart = 0;
-        let splitIdx = 0;
-        let foundAny = false;
-        for (let i = 0; i < words.length; i++) {
-            const wText = (words[i].text || '').trim();
-            const wChars = Array.from(wText).length;
-            if (words[i].end <= now + 0.05) {
-                hlStart = charOffset;
-                splitIdx = charOffset + wChars;
-                foundAny = true;
-            }
-            charOffset += wChars;
-            if (hasSpaces && i < words.length - 1) charOffset += 1;
-        }
-        return foundAny ? { splitIdx, hlStart } : { splitIdx: 0, hlStart: 0 };
-    }
-
-    /** Fallback karaoke indices when no word timings are available. */
-    private computeTimeFallbackKaraokeIndices(
-        fullText: string,
-        line: { time: number; endTime?: number },
-        now: number,
-    ): { splitIdx: number; hlStart: number } {
-        if (!line.endTime) return { splitIdx: -1, hlStart: -1 };
-        const duration = Math.max(0.05, line.endTime - line.time);
-        const progress = Math.max(0, Math.min(1, (now - line.time) / duration));
-        if (/\s/.test(fullText)) {
-            const ws = fullText.split(/\s+/).filter(Boolean);
-            const count = Math.max(1, Math.min(ws.length, Math.ceil(progress * ws.length)));
-            const spoken = ws.slice(0, count).join(' ');
-            const spokenChars = Array.from(spoken).length;
-            const prevWords = ws.slice(0, count - 1);
-            const prevLen = prevWords.length > 0 ? Array.from(prevWords.join(' ')).length + 1 : 0;
-            return { splitIdx: spokenChars, hlStart: prevLen };
-        }
-        const chars = Array.from(fullText);
-        const count = Math.max(1, Math.min(chars.length, Math.ceil(progress * chars.length)));
-        return { splitIdx: count, hlStart: Math.max(0, count - 1) };
     }
 
     /** Lazily refresh cached .learner-jp / .learner-en references */

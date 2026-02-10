@@ -14,6 +14,7 @@ import { KikoeruBridge } from '../infrastructure/KikoeruBridge';
 import { Logger } from '../core/Logger';
 import { calculateFolderScore } from '../core/WorkUtils';
 import { LIMITS, SCORING } from '../core/Constants';
+import { Config } from '../core/Config';
 import type { TrackFolder, TrackItem, TracksResponse, WorkDetail, WorkFolder } from '../types/api';
 import type { WorkTreeComponent } from '../types/store';
 import { findFolderBySegment, hasDirectPlayableMedia, resolveNodesAtPath } from './folderDiverTreeUtils';
@@ -507,6 +508,8 @@ export class FolderDiver {
     private selectBestTreeFolder(folders: TrackFolder[]): TrackFolder | null {
         if (!folders.length) return null;
 
+        const sePref = Config.get('sePref');
+
         const scored = folders.map(folder => {
             const audioChildren = this.collectAudioFromTree(folder.children);
             const audioCount = audioChildren.length;
@@ -524,7 +527,8 @@ export class FolderDiver {
                 '',
                 false,
                 this.formatPriority,
-                childFormats
+                childFormats,
+                sePref
             );
 
             if (audioCount === 0) score += SCORING.NO_AUDIO_PENALTY;

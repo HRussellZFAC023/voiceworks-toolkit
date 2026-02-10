@@ -55,6 +55,7 @@ import { SupportButton } from './features/SupportButton';
 import { WorkTreeManager } from './features/WorkTreeManager';
 import { TagFilters } from './features/TagFilters';
 import { TranslatedTags } from './features/TranslatedTags';
+import { ListSearchEnhancer } from './features/ListSearchEnhancer';
 import { VectorSearchController } from './features/VectorSearchController';
 import { Whisper } from './features/Whisper';
 import { TranscriptFileInjector } from './features/TranscriptFileInjector';
@@ -416,6 +417,10 @@ function initializeQOLFeatures(): void {
     const translatedTags = TranslatedTags.getInstance();
     translatedTags.enable();
     Logger.debug('[Init] TranslatedTags enabled');
+
+    const listSearchEnhancer = new ListSearchEnhancer();
+    listSearchEnhancer.enable();
+    Logger.debug('[Init] ListSearchEnhancer enabled');
 
     // Toggleable features — all instances created upfront, enabled by config
     registerFeature('enableSupportButton', new SupportButton());

@@ -113,6 +113,42 @@ describe('infiniteScrollApiUtils', () => {
             expect(url).toBeNull();
         });
 
+        it('builds review URL with filter and sort params', () => {
+            const url = buildInfiniteScrollApiUrl({
+                path: '/review',
+                page: 2,
+                pageSize: 20,
+                query: {
+                    order: 'updated_at',
+                    sort: 'desc',
+                    filter: 'postponed',
+                },
+            });
+
+            expect(url).not.toBeNull();
+            const parsed = parseRelativeUrl(url!);
+            expect(parsed.pathname).toBe('/api/review');
+            expect(parsed.searchParams.get('page')).toBe('2');
+            expect(parsed.searchParams.get('order')).toBe('updated_at');
+            expect(parsed.searchParams.get('sort')).toBe('desc');
+            expect(parsed.searchParams.get('filter')).toBe('postponed');
+        });
+
+        it('builds review URL without optional params', () => {
+            const url = buildInfiniteScrollApiUrl({
+                path: '/review',
+                page: 1,
+                pageSize: 20,
+                query: {},
+            });
+
+            expect(url).not.toBeNull();
+            const parsed = parseRelativeUrl(url!);
+            expect(parsed.pathname).toBe('/api/review');
+            expect(parsed.searchParams.get('page')).toBe('1');
+            expect(parsed.searchParams.has('filter')).toBe(false);
+        });
+
         it('returns null for unsupported paths', () => {
             const url = buildInfiniteScrollApiUrl({
                 path: '/work/RJ123',

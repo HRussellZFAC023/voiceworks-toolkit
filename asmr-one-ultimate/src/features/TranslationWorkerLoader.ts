@@ -99,6 +99,17 @@ let currentBackend = 'webgpu';
 let currentVendor = '';
 let currentDtype = '';
 let preferredDtype = '';
+let workerDebug = /^(localhost|127\\.0\\.0\\.1)$/i.test((self.location && self.location.hostname) || '');
+
+function debugLog(message, data) {
+    if (!workerDebug) return;
+    try {
+        self.postMessage({ status: 'debug', message, data });
+    } catch {}
+    try {
+        console.debug('[Translation Worker][debug]', message, data || '');
+    } catch {}
+}
 
 async function detectWebGPU() {
     if (typeof navigator === 'undefined' || !('gpu' in navigator)) return null;
@@ -335,6 +346,7 @@ async function translate(msg) {
     const maxInputLen = Array.isArray(text)
         ? Math.max(...text.map(t => t.length))
         : text.length;
+    const baseMaxNewTokens = Math.min(384, Math.max(32, maxInputLen * 3));
 
     const options = {
         return_tensors: false,
@@ -342,9 +354,9 @@ async function translate(msg) {
         // num_beams > 1 doubles GPU time per call, causing contention with Whisper worker.
         num_beams: 1,
         do_sample: false,
-        max_new_tokens: Math.min(384, Math.max(64, maxInputLen * 3)),
-        repetition_penalty: 1.2,
-        no_repeat_ngram_size: 3,
+        // Floor 32: after bracket splitting, many segments are very short (2-10 chars).
+        // Keep full dynamic budget for quality on long metadata/detail lines.
+        max_new_tokens: baseMaxNewTokens,
     };
 
     const output = await pipelineInstance(text, options);
@@ -354,10 +366,42 @@ async function translate(msg) {
 // ---- Job queue with coalescing ----
 
 const COALESCE_MS = 8;
-const MAX_BATCH = 500;
+const MAX_BATCH = 256;
 let jobQueue = [];
 let coalesceTimer = null;
 let processing = false;
+
+function getSingleBatchLimits() {
+    const isIntel = /intel|xe|arc/i.test(currentVendor || '');
+    const isQualcomm = /qualcomm|adreno/i.test(currentVendor || '');
+    if (isIntel || isQualcomm) {
+        return { maxItems: 20, maxChars: 900 };
+    }
+    return { maxItems: 40, maxChars: 1800 };
+}
+
+function splitTextsByBudget(texts) {
+    const { maxItems, maxChars } = getSingleBatchLimits();
+    const chunks = [];
+    let current = [];
+    let currentChars = 0;
+
+    for (const raw of texts) {
+        const text = String(raw || '');
+        const len = text.length;
+        const shouldSplit = current.length > 0
+            && (current.length >= maxItems || currentChars + len > maxChars);
+        if (shouldSplit) {
+            chunks.push(current);
+            current = [];
+            currentChars = 0;
+        }
+        current.push(text);
+        currentChars += len;
+    }
+    if (current.length > 0) chunks.push(current);
+    return chunks;
+}
 
 async function processBatch() {
     if (processing || jobQueue.length === 0) return;
@@ -369,27 +413,65 @@ async function processBatch() {
     // Coalesce single-text jobs into batches, grouped by language pair
     const singles = jobs.filter(j => typeof j.text === 'string');
     const batches = jobs.filter(j => Array.isArray(j.text));
-
     if (singles.length > 0) {
-        // All singles for this worker share the same model/direction — batch them
+        // All singles for this worker share the same model/direction.
+        // Sub-chunk coalesced singles to reduce mappedAtCreation pressure.
         const texts = singles.map(j => j.text);
-        try {
-            const results = await translate({ ...singles[0], text: texts });
-            singles.forEach((job, i) => {
-                self.postMessage({ status: 'complete', data: results[i], id: job.id });
+        const chunks = splitTextsByBudget(texts);
+        if (chunks.length > 1) {
+            debugLog('single-coalesce-chunked', {
+                singles: singles.length,
+                chunkCount: chunks.length,
+                limits: getSingleBatchLimits(),
+                vendor: currentVendor,
             });
-        } catch (err) {
-            const errMsg = err instanceof Error ? err.message : String(err);
-            singles.forEach(job => {
-                self.postMessage({ status: 'error', data: { message: errMsg }, id: job.id });
-            });
+        }
+
+        let offset = 0;
+        for (const chunk of chunks) {
+            const chunkJobs = singles.slice(offset, offset + chunk.length);
+            offset += chunk.length;
+            try {
+                const results = await translate({ ...singles[0], text: chunk });
+                chunkJobs.forEach((job, i) => {
+                    self.postMessage({ status: 'complete', data: results[i], id: job.id });
+                });
+            } catch (err) {
+                const errMsg = err instanceof Error ? err.message : String(err);
+                chunkJobs.forEach(job => {
+                    self.postMessage({ status: 'error', data: { message: errMsg }, id: job.id });
+                });
+            }
         }
     }
 
     for (const job of batches) {
         try {
-            const result = await translate(job);
-            self.postMessage({ status: 'complete', data: result, id: job.id });
+            const texts = Array.isArray(job.text) ? job.text : [];
+            const chunks = splitTextsByBudget(texts);
+            if (chunks.length <= 1) {
+                const result = await translate(job);
+                self.postMessage({ status: 'complete', data: result, id: job.id });
+                continue;
+            }
+
+            debugLog('batch-job-chunked', {
+                items: texts.length,
+                chunks: chunks.length,
+                limits: getSingleBatchLimits(),
+                vendor: currentVendor,
+            });
+
+            const merged = [];
+            for (const chunk of chunks) {
+                const part = await translate({ ...job, text: chunk });
+                if (Array.isArray(part)) {
+                    merged.push(...part);
+                } else {
+                    merged.push(...chunk.map(() => String(part || '')));
+                }
+            }
+            self.postMessage({ status: 'complete', data: merged, id: job.id });
         } catch (err) {
             self.postMessage({
                 status: 'error',
@@ -405,6 +487,14 @@ async function processBatch() {
 
 function scheduleProcess() {
     if (coalesceTimer) return;
+    // Fast path: when worker is idle and exactly 1 job queued, skip the 8ms
+    // coalesce timer. Batch arrays arrive one-at-a-time from the sequential
+    // host pipeline — waiting 8ms per chunk is pure GPU-idle waste.
+    // Lone singles (live whisper) also benefit from immediate processing.
+    if (!processing && jobQueue.length === 1) {
+        processBatch();
+        return;
+    }
     if (jobQueue.length >= MAX_BATCH) {
         processBatch();
     } else {
@@ -418,6 +508,11 @@ let readySent = false;
 
 self.addEventListener('message', async (event) => {
     const msg = event.data;
+
+    if (msg.type === 'debug') {
+        workerDebug = !!msg.enabled;
+        return;
+    }
 
     if (msg.type === 'preferred-dtype') {
         preferredDtype = msg.dtype || '';

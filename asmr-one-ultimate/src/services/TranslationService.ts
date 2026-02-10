@@ -29,17 +29,33 @@ const BATCH_TIMEOUT_BASE_MS = 15_000;
 const BATCH_TIMEOUT_PER_ITEM_MS = 50;
 
 // Larger chunks = fewer round-trips, better GPU utilization.
+// Short DLsite titles translate fast (~10-20ms each) — big chunks keep GPU saturated.
 // When Whisper is actively transcribing, reduce batch size to avoid GPU contention.
-const BATCH_CHUNK_SIZE_GPU = 64;
-const BATCH_CHUNK_SIZE_GPU_THROTTLED = 8;
+const BATCH_CHUNK_SIZE_GPU = 96;
+const BATCH_CHUNK_SIZE_GPU_THROTTLED = 12;
 
 // Remote (Google Translate) settings
 const REMOTE_CONCURRENCY = 12;
 const REMOTE_MIN_INTERVAL_MS = 50;
-const REMOTE_RATE_LIMIT_PAUSE_MS = 60_000;
-// Keep remote batch fallback from starving real-time subtitle/title translations.
-const REMOTE_BATCH_CHUNK_SIZE = Math.max(2, Math.floor(REMOTE_CONCURRENCY / 3));
-const REMOTE_BATCH_YIELD_MS = 0;
+const REMOTE_RATE_LIMIT_PAUSE_MS = 15_000;
+
+// TLD rotation: spread requests across Google Translate domains to reduce per-host 429s
+const GOOGLE_TRANSLATE_HOSTS = [
+    'translate.googleapis.com',
+    'translate.google.com',
+    'translate.google.co.jp',
+    'translate.google.de',
+    'translate.google.fr',
+    'translate.google.es',
+    'translate.google.co.kr',
+    'translate.google.com.tw',
+];
+let _gtldIndex = 0;
+function nextTranslateHost(): string {
+    const host = GOOGLE_TRANSLATE_HOSTS[_gtldIndex % GOOGLE_TRANSLATE_HOSTS.length];
+    _gtldIndex++;
+    return host;
+}
 
 // Single-pass quote/fullwidth normalization — compiled once at module scope
 const _quoteMap: Record<string, string> = {
@@ -92,6 +108,12 @@ interface ModelRoute {
     // MarianMT models have a fixed source→target direction; no language codes needed
 }
 
+export interface TranslationTaskOptions {
+    priority?: Priority;
+    cancellable?: boolean;
+    cancellableKey?: string;
+}
+
 // ============================================================================
 // Language Detection
 // ============================================================================
@@ -136,24 +158,103 @@ function getModelForText(text: string, targetLang: string): ModelRoute | null {
 const _hallucinationFirstPerson = /^I['\u2019]?m\s|^I\s(don|can|won|didn|couldn|wouldn|shouldn)['\u2019]t\s|^I\s(have|want|need|think|know|like)\s/i;
 const _firstPersonJa = /私|僕|俺|わたし|ぼく|おれ|あたし/;
 
-function isLikelyGarbage(input: string, output: string): boolean {
-    if (!output?.trim()) return true;
-    if (output.length > input.length * 5 && output.length > 100) return true;
-    if (/([!?.]{4,})/.test(output)) return true;
-    const words = output.toLowerCase().split(/\s+/);
-    let repeat = 1;
-    for (let i = 1; i < words.length; i++) {
-        if (words[i] === words[i - 1] && words[i].length > 1) {
-            if (++repeat >= 4) return true;
+interface DegenerateSampleLog {
+    localRejected: number;
+    remoteRejected: number;
+    lastLogAt: number;
+}
+
+const degenerateStats: DegenerateSampleLog = {
+    localRejected: 0,
+    remoteRejected: 0,
+    lastLogAt: 0,
+};
+
+function hasRepeatedNGram(tokens: string[], n: number, minRepeats: number): boolean {
+    if (tokens.length < n * minRepeats) return false;
+    let repeats = 1;
+    for (let i = n; i + n <= tokens.length; i += n) {
+        let same = true;
+        for (let j = 0; j < n; j++) {
+            if (tokens[i + j] !== tokens[i - n + j]) {
+                same = false;
+                break;
+            }
+        }
+        if (same) {
+            repeats++;
+            if (repeats >= minRepeats) return true;
         } else {
-            repeat = 1;
+            repeats = 1;
         }
     }
-    // Hallucination: first-person English from non-first-person Japanese input
-    if (!_firstPersonJa.test(input) && _hallucinationFirstPerson.test(output.trim())) {
-        return true;
-    }
     return false;
+}
+
+function getGarbageReason(input: string, output: string): string | null {
+    const trimmed = output?.trim() || '';
+    if (!trimmed) return 'empty-output';
+    if (trimmed.length > input.length * 5 && trimmed.length > 100) return 'excessive-length';
+    if (/([!?.])\1{3,}/.test(trimmed)) return 'repeated-punctuation';
+    if (/([a-z0-9])\1{15,}/i.test(trimmed)) return 'repeated-char-run';
+    if (/([^\s])\1{20,}/.test(trimmed)) return 'repeated-symbol-run';
+
+    const words = trimmed.toLowerCase().split(/\s+/).filter(Boolean);
+    if (words.length > 0) {
+        let repeat = 1;
+        for (let i = 1; i < words.length; i++) {
+            if (words[i] === words[i - 1] && words[i].length > 1) {
+                if (++repeat >= 4) return 'repeated-word-run';
+            } else {
+                repeat = 1;
+            }
+        }
+        const ngramTokens = words.filter((w) => w.length > 1);
+        if (
+            ngramTokens.length >= 12
+            && (
+                hasRepeatedNGram(ngramTokens, 2, 3)
+                || hasRepeatedNGram(ngramTokens, 3, 3)
+                || hasRepeatedNGram(ngramTokens, 4, 3)
+            )
+        ) {
+            return 'repeated-ngram-run';
+        }
+    }
+
+    // Hallucination: first-person English from non-first-person Japanese input
+    if (!_firstPersonJa.test(input) && _hallucinationFirstPerson.test(trimmed)) {
+        return 'first-person-hallucination';
+    }
+    return null;
+}
+
+function trackDegenerate(source: TranslationSource, input: string, output: string, reason: string): void {
+    if (source === 'local') {
+        degenerateStats.localRejected++;
+    } else {
+        degenerateStats.remoteRejected++;
+    }
+
+    if (!Config.get('debug')) return;
+    const now = Date.now();
+    if (now - degenerateStats.lastLogAt > 1500) {
+        degenerateStats.lastLogAt = now;
+        Logger.debug('[TranslationService] Rejected degenerate output', {
+            source,
+            reason,
+            input: input.slice(0, 120),
+            output: output.slice(0, 120),
+            stats: {
+                localRejected: degenerateStats.localRejected,
+                remoteRejected: degenerateStats.remoteRejected,
+            },
+        });
+    }
+}
+
+function isLikelyGarbage(input: string, output: string): boolean {
+    return getGarbageReason(input, output) !== null;
 }
 
 // ============================================================================
@@ -163,74 +264,72 @@ function isLikelyGarbage(input: string, output: string): boolean {
 /** Short-text threshold: below this, apply 'prefer' entries too */
 const GLOSSARY_SHORT_THRESHOLD = 30;
 
+/** CJK character ranges (hiragana, katakana, CJK unified ideographs) */
+const CJK_RE = /[\u3040-\u309f\u30a0-\u30ff\u4e00-\u9fff]/;
+
 /**
- * Apply glossary to a single text. Returns the glossary translation if the
- * entire text is an exact match, or performs substring substitution for
- * onomatopoeia / NSFW terms the model would otherwise get wrong.
+ * Result of a single glossary pass. Callers pick what they need:
+ *   - `full`:         non-null when ALL text was resolved (no remaining CJK) — use as final translation
+ *   - `preprocessed`: text with glossary substitutions — feed to model so it translates around them
+ *   - `modified`:     whether any substitution was made
  *
- * Returns null if glossary doesn't apply (let the model handle it).
+ * One regex pass serves both "full resolution" and "model pre-processing", so hot
+ * paths (translate, translateBatch) only pay the regex cost once.
  */
-function applyGlossary(text: string, targetLang: string): string | null {
+interface GlossaryResult {
+    full: string | null;
+    preprocessed: string;
+    modified: boolean;
+}
+
+function processGlossary(text: string, targetLang: string): GlossaryResult {
     const tgt = normalizeTargetLang(targetLang);
-    if (tgt !== 'en' && tgt !== 'zh') return null;
+    const none: GlossaryResult = { full: null, preprocessed: text, modified: false };
+    if (tgt !== 'en' && tgt !== 'zh') return none;
     const field = tgt === 'en' ? 'en' : 'zh';
 
     const trimmed = text.trim();
-    if (!trimmed) return null;
+    if (!trimmed) return none;
 
-    // 1. Exact full-text match (all modes)
+    // 1. Exact full-text match (all modes) — O(1) Map lookup
     const exact = glossaryMap.get(trimmed);
-    if (exact) return exact[field];
+    if (exact) {
+        const val = exact[field];
+        return { full: val, preprocessed: val, modified: true };
+    }
 
-    // 2. Single-pass regex replacement (compiled at import time)
-    //    - Short text: use prefer + always entries (more aggressive)
+    // 2. Single-pass regex replacement (compiled once at import time)
+    //    - Short text (≤30 chars): use prefer + always entries (more aggressive)
     //    - Long text: only always entries (onomatopoeia — MT never gets these right)
-    const regex = trimmed.length <= GLOSSARY_SHORT_THRESHOLD ? preferRegex : alwaysRegex;
-    const map = trimmed.length <= GLOSSARY_SHORT_THRESHOLD ? preferReplacerMap : alwaysReplacerMap;
-    const lookup = map[field];
+    const isShort = trimmed.length <= GLOSSARY_SHORT_THRESHOLD;
+    const regex = isShort ? preferRegex : alwaysRegex;
+    const lookup = (isShort ? preferReplacerMap : alwaysReplacerMap)[field];
 
-    // Reset regex lastIndex (global regexes are stateful)
     regex.lastIndex = 0;
     let anyReplaced = false;
-    const modified = trimmed.replace(regex, (match) => {
+    // Pad English replacements with spaces — Japanese has no word separators,
+    // so adjacent glossary hits like 性処理セックス → "sexual servicesex" without this.
+    const padEn = tgt === 'en';
+    const replaced = trimmed.replace(regex, (match) => {
         anyReplaced = true;
-        return lookup.get(match) || match;
+        const repl = lookup.get(match) || match;
+        return padEn ? ` ${repl} ` : repl;
     });
 
-    if (!anyReplaced) return null;
+    if (!anyReplaced) return none;
 
-    // If ALL content was replaced (no remaining CJK), return as-is
-    const hasRemainingCJK = /[\u3040-\u309f\u30a0-\u30ff\u4e00-\u9fff]/.test(modified);
-    if (!hasRemainingCJK) return modified;
+    // Collapse padding spaces for English
+    const cleaned = padEn ? replaced.replace(/\s{2,}/g, ' ').trim() : replaced;
 
-    // Mixed content: return the partially-substituted text for the model to finish.
-    // We return null here and let the model translate the original —
-    // but we DO want to guide the model, so we substitute and send to the model.
-    return null;
+    // If ALL content was replaced (no remaining CJK), it's a full translation
+    const full = CJK_RE.test(cleaned) ? null : cleaned;
+    return { full, preprocessed: cleaned, modified: true };
 }
 
-/**
- * Pre-process text for model translation: replace glossary terms with
- * target-language equivalents so the model translates around them.
- * Returns [modifiedText, wasModified].
- */
+/** Thin wrapper for test exports: returns [preprocessedText, wasModified] for model input. */
 function glossaryPreProcess(text: string, targetLang: string): [string, boolean] {
-    const tgt = normalizeTargetLang(targetLang);
-    if (tgt !== 'en' && tgt !== 'zh') return [text, false];
-    const field = tgt === 'en' ? 'en' : 'zh';
-
-    const regex = text.length <= GLOSSARY_SHORT_THRESHOLD ? preferRegex : alwaysRegex;
-    const map = text.length <= GLOSSARY_SHORT_THRESHOLD ? preferReplacerMap : alwaysReplacerMap;
-    const lookup = map[field];
-
-    regex.lastIndex = 0;
-    let anyReplaced = false;
-    const modified = text.replace(regex, (match) => {
-        anyReplaced = true;
-        return lookup.get(match) || match;
-    });
-
-    return [modified, anyReplaced];
+    const r = processGlossary(text, targetLang);
+    return [r.preprocessed, r.modified];
 }
 
 /**
@@ -361,13 +460,41 @@ let whisperActive = false;
 EventBus.on('whisper:transcribing', ({ active }) => {
     whisperActive = !!active;
     if (!active) return;
-    // Free translation GPU workers while Whisper is running to reduce
-    // cross-worker WebGPU contention and device-loss risk.
-    if (workers.length > 0) {
-        Logger.log('[TranslationService] Whisper active: unloading local translation workers');
-        terminateWorker();
+    if (workers.length === 0) return;
+
+    const profile = DeviceCapabilities.profile;
+    const pressure = GpuScheduler.getMemoryPressure();
+    const canRunParallel = profile.tier === 'full' && profile.hasGpu;
+
+    // Desktop/full-tier GPUs can keep ja-en warm for realtime subtitle translation.
+    // Under pressure, unload zh-en first and keep the primary ja-en model alive.
+    if (canRunParallel) {
+        if (pressure === 'low') {
+            Logger.debug('[TranslationService] Whisper active: keeping local translation workers warm for parallel throughput');
+            return;
+        }
+        if (workers.some(w => w.model === OPUS_ZH_EN)) {
+            Logger.log(`[TranslationService] Whisper active: unloading zh-en worker (${pressure} pressure), keeping ja-en for realtime`);
+            terminateWorker(OPUS_ZH_EN);
+            return;
+        }
+        Logger.debug('[TranslationService] Whisper active: keeping ja-en worker for realtime translation');
+        return;
     }
+
+    // Limited devices: unload all local translation workers to protect GPU stability.
+    Logger.log('[TranslationService] Whisper active: unloading local translation workers');
+    terminateWorker();
 });
+
+function shouldUseLocalTranslation(options?: TranslationTaskOptions): boolean {
+    if (Config.get('preferLocalTranslation') === false) return false;
+    if (!whisperActive) return true;
+    const priority = options?.priority ?? Priority.REALTIME;
+    // Keep local translation for interactive lanes while whisper is active.
+    // Background lanes fall back to remote to avoid starving whisper inference.
+    return priority <= Priority.HIGH;
+}
 
 // Cross-service device loss: when any worker reports GPU device lost, terminate
 // translation workers. Google Translate handles the fallback (faster than WASM).
@@ -460,6 +587,13 @@ function handleWorkerMessage(entry: WorkerEntry, model: string, onReady: () => v
     return (e: MessageEvent) => {
         const msg = e.data;
 
+        if (msg.status === 'debug') {
+            if (Config.get('debug')) {
+                Logger.debug('[Translation Worker]', msg.message || '', msg.data || '');
+            }
+            return;
+        }
+
         if (msg.status === 'initiate') {
             // Worker reports its initial backend
             entry.backend = msg.backend || 'webgpu';
@@ -528,7 +662,7 @@ function handleWorkerMessage(entry: WorkerEntry, model: string, onReady: () => v
                 clearTimeout(req.timer);
                 req.resolve(msg.data);
                 entry.pending.delete(msg.id);
-                GpuScheduler.onGpuSuccess();
+                GpuScheduler.onGpuSuccess('translation');
             }
         } else if (msg.status === 'cdn-success') {
             // Persist successful CDN indices so future workers try the known-good CDN first
@@ -570,19 +704,21 @@ function initWorker(model: string, force = false): Promise<void> {
         terminateWorker(model);
     }
 
-    // Free GPU memory: terminate workers for other models before loading a new one.
-    // Only one translation model should occupy GPU at a time to avoid buffer allocation failures.
-    if (!webgpuFailed) {
-        const otherModelWorkers = workers.filter(w => w.model !== model && w.pending.size === 0);
-        for (const w of otherModelWorkers) {
-            Logger.log(`[TranslationService] Freeing GPU: terminating ${w.model} before loading ${model}`);
-            terminateWorker(w.model);
-        }
-    }
-
     // Acquire a load lease from GpuScheduler to prevent concurrent model loading.
     // Only one worker loads a model at a time (requestAdapter + requestDevice + ONNX compile).
     const promise = GpuScheduler.acquireLoadLease('translation').then(releaseLease => {
+        // Free GPU memory AFTER acquiring the lease — this guarantees the other model
+        // has finished loading (it held the lease). Freeing BEFORE the lease caused a
+        // deadlock: terminating a still-loading worker orphaned its load lease forever,
+        // blocking all subsequent model loads (including Whisper init).
+        if (!webgpuFailed) {
+            const otherModelWorkers = workers.filter(w => w.model !== model && w.pending.size === 0);
+            for (const w of otherModelWorkers) {
+                Logger.log(`[TranslationService] Freeing GPU: terminating ${w.model} before loading ${model}`);
+                terminateWorker(w.model);
+            }
+        }
+
         return new Promise<void>((resolve, reject) => {
             try {
                 EventBus.emit('translation:progress', {
@@ -604,6 +740,7 @@ function initWorker(model: string, force = false): Promise<void> {
                 if (rememberedDtype && !['q8', 'q4'].includes(rememberedDtype)) {
                     entry.worker.postMessage({ type: 'preferred-dtype', dtype: rememberedDtype });
                 }
+                entry.worker.postMessage({ type: 'debug', enabled: !!Config.get('debug') });
                 // Send persisted CDN preference so worker tries known-good CDN first
                 const cdnTransformerIdx = SharedCache.get<number>('asmr-ult:cdn:transformer-idx');
                 const cdnHubIdx = SharedCache.get<number>('asmr-ult:cdn:hub-idx');
@@ -654,7 +791,11 @@ function sendToWorker(
     });
 }
 
-async function translateLocal(text: string, targetLang: string): Promise<string | null> {
+async function translateLocal(
+    text: string,
+    targetLang: string,
+    options?: TranslationTaskOptions,
+): Promise<string | null> {
     const route = getModelForText(text, targetLang);
     if (!route) return null;
 
@@ -673,27 +814,50 @@ async function translateLocal(text: string, targetLang: string): Promise<string 
         if (!entry) return null;
     }
 
-    // Single translations get REALTIME priority — they're the current subtitle/title
+    // Single translations get REALTIME priority — they're the current subtitle/title.
+    // The per-worker scheduler allows this to run concurrently with embedding/whisper
+    // while still serializing within the translation worker to prevent GPU flooding.
     const raw = await GpuScheduler.enqueue({
-        priority: Priority.REALTIME,
+        priority: options?.priority ?? Priority.REALTIME,
         worker: 'translation',
         execute: () => sendToWorker(entry, text, route.model, getSingleTimeout()),
+        cancellable: options?.cancellable,
+        cancellableKey: options?.cancellableKey,
     });
     if (!raw) return null;
 
     const cleaned = TranslationService.cleanQuotes(raw as string);
-    return isLikelyGarbage(text, cleaned) ? null : cleaned;
+    const reason = getGarbageReason(text, cleaned);
+    if (reason) {
+        trackDegenerate('local', text, cleaned, reason);
+        return null;
+    }
+    return cleaned;
 }
 
-async function translateLocalBatch(texts: string[], targetLang: string): Promise<(string | null)[]> {
+async function translateLocalBatch(
+    texts: string[],
+    targetLang: string,
+    options?: TranslationTaskOptions,
+): Promise<(string | null)[]> {
     const results: (string | null)[] = new Array(texts.length).fill(null);
 
     // Group texts by model (each opus-mt model handles one language pair)
     interface BatchGroup { indices: number[]; texts: string[]; route: ModelRoute }
     const groups = new Map<string, BatchGroup>();
+    const tgtNorm = normalizeTargetLang(targetLang);
     for (let i = 0; i < texts.length; i++) {
         const route = getModelForText(texts[i], targetLang);
-        if (!route) continue;
+        if (!route) {
+            // Text is already in target language (e.g., fully glossary-resolved:
+            // "催眠" → "hypnosis"). Return as-is instead of leaving null — otherwise
+            // it falls through to remote and makes an unnecessary Google API call.
+            const src = detectSourceLanguage(texts[i]);
+            if (src === tgtNorm) {
+                results[i] = texts[i];
+            }
+            continue;
+        }
         const key = route.model;
         let g = groups.get(key);
         if (!g) { g = { indices: [], texts: [], route }; groups.set(key, g); }
@@ -704,15 +868,19 @@ async function translateLocalBatch(texts: string[], targetLang: string): Promise
     await Promise.all(Array.from(groups.values()).map(async (group) => {
         let entry = getWorker(group.route.model);
         if (!entry) {
+            // Wait longer for model init in batch context (ONNX session creation + WebGPU
+            // shader compilation can take 20-30s on first load). If we timeout too early,
+            // the entire batch falls through to remote, leaving GPU idle.
+            const BATCH_INIT_WAIT_MS = 45_000;
             const pending = initPromises.get(group.route.model);
             if (pending) {
                 try {
-                    await Promise.race([pending, new Promise((_, rej) => setTimeout(() => rej(new Error('init-wait')), 15_000))]);
+                    await Promise.race([pending, new Promise((_, rej) => setTimeout(() => rej(new Error('init-wait')), BATCH_INIT_WAIT_MS))]);
                     entry = getWorker(group.route.model);
                 } catch { /* timed out */ }
             } else {
                 try {
-                    await Promise.race([initWorker(group.route.model), new Promise((_, rej) => setTimeout(() => rej(new Error('init-wait')), 15_000))]);
+                    await Promise.race([initWorker(group.route.model), new Promise((_, rej) => setTimeout(() => rej(new Error('init-wait')), BATCH_INIT_WAIT_MS))]);
                     entry = getWorker(group.route.model);
                 } catch { /* timed out or init failed */ }
             }
@@ -721,35 +889,61 @@ async function translateLocalBatch(texts: string[], targetLang: string): Promise
 
         // Sequential chunks: each chunk awaits completion before the next is sent.
         // This naturally staggers timeouts and creates interleave points where
-        // single-text requests (live whisper) can jump the worker queue.
-        // Adaptive: converge chunk size based on observed ms-per-item throughput.
-        let chunkSize = whisperActive ? BATCH_CHUNK_SIZE_GPU_THROTTLED : BATCH_CHUNK_SIZE_GPU;
-        if (adaptiveChunkSize > 0) chunkSize = whisperActive ? Math.max(4, adaptiveChunkSize >> 1) : adaptiveChunkSize;
+        // single-text REALTIME requests (live subtitle) can jump the worker queue.
+        //
+        // Initial ramp-up: first chunks are tiny (4→8 items, ~50-100ms each) so
+        // REALTIME translate() requests aren't blocked behind a 2.5s batch chunk.
+        // After the ramp-up phase, adaptive sizing takes over.
+        const taskPriority = options?.priority ?? Priority.NORMAL;
+        const RAMP_SIZES = [4, 8]; // first two chunks use these small sizes
+        let chunkIdx = 0;
 
-        for (let i = 0; i < group.texts.length; i += chunkSize) {
+        const getChunkSize = (): number => {
+            // During ramp-up, use small fixed sizes for fast interleaving
+            if (chunkIdx < RAMP_SIZES.length) return RAMP_SIZES[chunkIdx];
+
+            // If a REALTIME task is waiting, shrink to minimum to yield quickly
+            if (GpuScheduler.hasRealtimeQueued('translation')) return 4;
+
+            let size = whisperActive ? BATCH_CHUNK_SIZE_GPU_THROTTLED : BATCH_CHUNK_SIZE_GPU;
+            if (adaptiveChunkSize > 0) size = whisperActive ? Math.max(4, adaptiveChunkSize >> 1) : adaptiveChunkSize;
+            if (whisperActive && taskPriority <= Priority.HIGH) {
+                size = Math.min(size, BATCH_CHUNK_SIZE_GPU_THROTTLED);
+            }
+            // Under high GPU memory pressure, halve to create more interleave points
+            if (GpuScheduler.getMemoryPressure() === 'high') size = Math.max(4, size >> 1);
+            return size;
+        };
+
+        for (let i = 0; i < group.texts.length;) {
+            const chunkSize = getChunkSize();
             const chunkTexts = group.texts.slice(i, i + chunkSize);
             const chunkIndices = group.indices.slice(i, i + chunkSize);
             const timeoutMs = getBatchTimeout(chunkTexts.length);
+            i += chunkSize;
+            chunkIdx++;
 
             try {
                 const t0 = performance.now();
-                // Batch chunks get NORMAL priority — background pre-translation
+                // Batch chunks get NORMAL priority — background pre-translation.
+                // The per-worker scheduler serializes within the translation worker
+                // (preventing GPU flooding from fast scrolling) while allowing
+                // embedding/whisper to run concurrently on their own workers.
                 const translated = await GpuScheduler.enqueue({
-                    priority: Priority.NORMAL,
+                    priority: options?.priority ?? Priority.NORMAL,
                     worker: 'translation',
                     execute: () => sendToWorker(entry, chunkTexts, group.route.model, timeoutMs),
-                    cancellable: true,
+                    cancellable: options?.cancellable ?? true,
+                    cancellableKey: options?.cancellableKey,
                 });
                 const elapsedMs = performance.now() - t0;
 
-                // Adapt chunk size: target ~3s per chunk
+                // Adapt chunk size: target ~0.25s per chunk to improve queue fairness and UI latency.
                 if (chunkTexts.length >= 4 && elapsedMs > 100) {
-                    const targetMs = 3000;
+                    const targetMs = 250;
                     const msPerItem = elapsedMs / chunkTexts.length;
                     const ideal = Math.round(targetMs / msPerItem);
                     adaptiveChunkSize = Math.max(4, Math.min(128, ideal));
-                    // Update chunkSize for remaining chunks in this batch
-                    chunkSize = whisperActive ? Math.max(4, adaptiveChunkSize >> 1) : adaptiveChunkSize;
                 }
 
                 if (Array.isArray(translated)) {
@@ -757,7 +951,13 @@ async function translateLocalBatch(texts: string[], targetLang: string): Promise
                         const raw = translated[j];
                         if (raw) {
                             const cleaned = TranslationService.cleanQuotes(raw);
-                            results[chunkIndices[j]] = isLikelyGarbage(chunkTexts[j], cleaned) ? null : cleaned;
+                            const reason = getGarbageReason(chunkTexts[j], cleaned);
+                            if (reason) {
+                                trackDegenerate('local', chunkTexts[j], cleaned, reason);
+                                results[chunkIndices[j]] = null;
+                            } else {
+                                results[chunkIndices[j]] = cleaned;
+                            }
                         }
                     }
                 }
@@ -775,8 +975,10 @@ async function translateLocalBatch(texts: string[], targetLang: string): Promise
 // ============================================================================
 
 let remoteActive = 0;
-let remoteLastTime = 0;
-let remotePausedUntil = 0;
+// Per-host timing: min interval + 429 pause are tracked per host so requests to
+// different TLDs don't block each other.
+const remoteLastTimeByHost = new Map<string, number>();
+const remotePausedUntilByHost = new Map<string, number>();
 // Promise-based semaphore: waiters are resolved FIFO when a slot frees up (replaces polling loop)
 const remoteWaiters: Array<() => void> = [];
 
@@ -797,34 +999,44 @@ function releaseRemoteSlot(): void {
 }
 
 async function translateRemoteSingle(text: string, targetLang: string): Promise<string> {
-    // Rate limiting
-    if (Date.now() < remotePausedUntil) {
-        await new Promise(r => setTimeout(r, Math.max(0, remotePausedUntil - Date.now())));
+    await acquireRemoteSlot();
+
+    // Pick host, skipping any that are rate-limited
+    let host = nextTranslateHost();
+    const now = Date.now();
+    for (let i = 0; i < GOOGLE_TRANSLATE_HOSTS.length; i++) {
+        const pausedUntil = remotePausedUntilByHost.get(host) || 0;
+        if (now >= pausedUntil) break;
+        host = nextTranslateHost();
     }
 
-    // Minimum interval between requests
-    const elapsed = Date.now() - remoteLastTime;
+    // Per-host minimum interval — requests to different hosts fire immediately
+    const lastTime = remoteLastTimeByHost.get(host) || 0;
+    const elapsed = now - lastTime;
     if (elapsed < REMOTE_MIN_INTERVAL_MS) {
         await new Promise(r => setTimeout(r, REMOTE_MIN_INTERVAL_MS - elapsed));
     }
-
-    await acquireRemoteSlot();
-    remoteLastTime = Date.now();
+    remoteLastTimeByHost.set(host, Date.now());
 
     try {
         const res = await retryWithBackoff(
             () => gmRequest({
-                url: `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${targetLang}&dt=t&q=${encodeURIComponent(text)}`,
+                url: `https://${host}/translate_a/single?client=gtx&sl=auto&tl=${targetLang}&dt=t&q=${encodeURIComponent(text)}`,
             }),
-            { attempts: 2, backoffMs: 500, shouldRetry: (e) => !(e instanceof HttpError) || e.status >= 500 },
+            { attempts: 2, backoffMs: 250, shouldRetry: (e) => !(e instanceof HttpError) || e.status >= 500 },
         );
         const parsed = JSON.parse(res.responseText);
         return parsed?.[0]?.map((x: unknown[]) => x?.[0] || '').join('') || text;
     } catch (e) {
         if (e instanceof HttpError && e.status === 429) {
-            remotePausedUntil = Date.now() + REMOTE_RATE_LIMIT_PAUSE_MS;
-            SharedCache.set(CacheKeys.translationRateLimit(), remotePausedUntil, REMOTE_RATE_LIMIT_PAUSE_MS);
-            Logger.warn('[TranslationService] Google Translate 429, pausing', REMOTE_RATE_LIMIT_PAUSE_MS / 1000, 's');
+            remotePausedUntilByHost.set(host, Date.now() + REMOTE_RATE_LIMIT_PAUSE_MS);
+            // Signal rate-limit to rest of system (canPrefetch, isRateLimited) only when
+            // the majority of hosts are blocked — a single blocked host is not a global issue
+            const blockedCount = [...remotePausedUntilByHost.values()].filter(t => Date.now() < t).length;
+            if (blockedCount >= Math.ceil(GOOGLE_TRANSLATE_HOSTS.length / 2)) {
+                SharedCache.set(CacheKeys.translationRateLimit(), Date.now() + REMOTE_RATE_LIMIT_PAUSE_MS, REMOTE_RATE_LIMIT_PAUSE_MS);
+            }
+            Logger.warn('[TranslationService] Google Translate 429 on', host, `(${blockedCount}/${GOOGLE_TRANSLATE_HOSTS.length} blocked)`);
         }
         throw e;
     } finally {
@@ -876,7 +1088,7 @@ export const TranslationService = {
     /**
      * Translate a single text. Tries local first, falls back to remote.
      */
-    async translate(text: string, targetLang = 'en'): Promise<string> {
+    async translate(text: string, targetLang = 'en', options?: TranslationTaskOptions): Promise<string> {
         if (!text) return '';
         targetLang = normalizeTargetLang(targetLang);
         resetIdleUnloadTimer();
@@ -885,11 +1097,12 @@ export const TranslationService = {
         if (cached) return cached;
 
         // In-flight dedup: reuse pending translation for same text+lang
-        const flightKey = `${targetLang}:${text}`;
+        const laneKey = `${options?.priority ?? Priority.REALTIME}:${options?.cancellableKey || 'global'}`;
+        const flightKey = `${laneKey}:${targetLang}:${text}`;
         const existing = translateInFlight.get(flightKey);
         if (existing) return existing;
 
-        const promise = this._translateInner(text, targetLang);
+        const promise = this._translateInner(text, targetLang, options);
         translateInFlight.set(flightKey, promise);
         try {
             return await promise;
@@ -899,34 +1112,32 @@ export const TranslationService = {
     },
 
     /** @internal */
-    async _translateInner(text: string, targetLang: string): Promise<string> {
+    async _translateInner(text: string, targetLang: string, options?: TranslationTaskOptions): Promise<string> {
         // 0. Multi-segment split: bracket extraction + sentence splitting.
         const segments = splitForModel(text);
         if (segments) {
             const results = await Promise.all(
-                segments.map(s => this.translate(s.text, targetLang)),
+                segments.map(s => this.translate(s.text, targetLang, options)),
             );
             const joined = joinTranslatedSegments(segments, results);
             SharedCache.set(cacheKey(text, targetLang, 'local'), joined, CACHE_TTL_MS);
             return joined;
         }
 
-        // 1. Glossary exact match — bypasses model entirely
-        const glossaryResult = applyGlossary(text, targetLang);
-        if (glossaryResult) {
-            SharedCache.set(cacheKey(text, targetLang, 'local'), glossaryResult, CACHE_TTL_MS);
-            return glossaryResult;
+        // 1. Glossary — single regex pass for both exact resolution and model pre-processing
+        const glossary = processGlossary(text, targetLang);
+        if (glossary.full) {
+            SharedCache.set(cacheKey(text, targetLang, 'local'), glossary.full, CACHE_TTL_MS);
+            return glossary.full;
         }
-
-        // 2. Glossary pre-processing — substitute known terms so model translates around them
-        const [preprocessed, wasModified] = glossaryPreProcess(text, targetLang);
+        const { preprocessed, modified: wasModified } = glossary;
 
         // 3. Try local translation (with preprocessed text if glossary modified it)
         //    Normalize input: strip decorative chars (♡♪〜) and convert 「」→"" that confuse opus-mt
-        if (!whisperActive && Config.get('preferLocalTranslation') !== false) {
+        if (shouldUseLocalTranslation(options)) {
             try {
                 const localInput = normalizeForModel(wasModified ? preprocessed : text);
-                const result = await translateLocal(localInput, targetLang);
+                const result = await translateLocal(localInput, targetLang, options);
                 if (result) {
                     // Cache under the ORIGINAL text key
                     SharedCache.set(cacheKey(text, targetLang, 'local'), result, CACHE_TTL_MS);
@@ -941,6 +1152,11 @@ export const TranslationService = {
         try {
             const result = await translateRemoteSingle(wasModified ? preprocessed : text, targetLang);
             const cleaned = this.cleanQuotes(result);
+            const reason = getGarbageReason(text, cleaned);
+            if (reason) {
+                trackDegenerate('remote', text, cleaned, reason);
+                return text;
+            }
             if (cleaned && cleaned !== text) {
                 SharedCache.set(cacheKey(text, targetLang, 'remote'), cleaned, CACHE_TTL_MS);
             }
@@ -954,7 +1170,7 @@ export const TranslationService = {
     /**
      * Translate a batch of texts. Uses local for supported pairs, remote for the rest.
      */
-    async translateBatch(texts: string[], targetLang = 'en'): Promise<string[]> {
+    async translateBatch(texts: string[], targetLang = 'en', options?: TranslationTaskOptions): Promise<string[]> {
         if (texts.length === 0) return [];
         targetLang = normalizeTargetLang(targetLang);
 
@@ -980,14 +1196,16 @@ export const TranslationService = {
 
         if (uncached.length === 0) return results;
 
-        // 1b. Fill from glossary exact matches
+        // 1b. Fill from glossary — single regex pass per text, cache for reuse in preprocess step
+        const glossaryCache = new Map<string, GlossaryResult>();
         const stillUncached: typeof uncached = [];
         for (const entry of uncached) {
-            const glossaryResult = applyGlossary(entry.text, targetLang);
-            if (glossaryResult) {
+            const glossary = processGlossary(entry.text, targetLang);
+            glossaryCache.set(entry.text, glossary);
+            if (glossary.full) {
                 const indices = seen.get(entry.text) || [];
-                for (const idx of indices) results[idx] = glossaryResult;
-                SharedCache.set(cacheKey(entry.text, targetLang, 'local'), glossaryResult, CACHE_TTL_MS);
+                for (const idx of indices) results[idx] = glossary.full;
+                SharedCache.set(cacheKey(entry.text, targetLang, 'local'), glossary.full, CACHE_TTL_MS);
             } else {
                 stillUncached.push(entry);
             }
@@ -1024,56 +1242,63 @@ export const TranslationService = {
 
         if (allBatchItems.length === 0) return results;
 
-        // Pre-process all batch items with glossary substitution + model normalization
+        // Pre-process all batch items with glossary substitution + model normalization.
+        // Reuse glossary results from step 1b to avoid a second regex pass on the same texts.
         const preprocessedMap = new Map<string, string>();
         const preprocessedTexts = allBatchItems.map(u => {
             if (preprocessedMap.has(u.text)) return preprocessedMap.get(u.text)!;
-            const [preprocessed] = glossaryPreProcess(u.text, targetLang);
-            const normalized = normalizeForModel(preprocessed);
+            const glossary = glossaryCache.get(u.text) ?? processGlossary(u.text, targetLang);
+            const normalized = normalizeForModel(glossary.preprocessed);
             preprocessedMap.set(u.text, normalized);
             return normalized;
         });
         // Collect per-item translations (indexed by allBatchItems position)
         const batchTranslations: (string | null)[] = new Array(allBatchItems.length).fill(null);
-        let remainingIndices: number[] = [];
 
-        // 2. Try local batch translation (with glossary-preprocessed texts)
-        if (!whisperActive && Config.get('preferLocalTranslation') !== false) {
+        // Pre-route: classify items by whether a local model exists for them.
+        // This lets us start remote-only items (e.g. Chinese) immediately instead of
+        // waiting for local GPU inference (Japanese) to finish.
+        const localRoutable: number[] = [];
+        const remoteOnly: number[] = [];
+        const useLocal = shouldUseLocalTranslation(options);
+        for (let i = 0; i < allBatchItems.length; i++) {
+            if (useLocal && getModelForText(allBatchItems[i].text, targetLang)) {
+                localRoutable.push(i);
+            } else {
+                remoteOnly.push(i);
+            }
+        }
+
+        // Fire remote-only items immediately (semaphore handles concurrency — no chunking needed)
+        const remoteOnlyPromise = remoteOnly.length > 0
+            ? this._translateRemoteIndices(allBatchItems, remoteOnly, preprocessedMap, targetLang, batchTranslations)
+            : Promise.resolve();
+
+        // Run local batch concurrently for items that have a model route
+        let localFailures: number[] = [];
+        if (localRoutable.length > 0) {
             try {
-                const localResults = await translateLocalBatch(preprocessedTexts, targetLang);
-                for (let i = 0; i < allBatchItems.length; i++) {
-                    batchTranslations[i] = localResults[i] || null;
-                    if (!localResults[i]) remainingIndices.push(i);
+                const localResults = await translateLocalBatch(preprocessedTexts, targetLang, options);
+                for (const i of localRoutable) {
+                    if (localResults[i]) {
+                        batchTranslations[i] = localResults[i];
+                    } else {
+                        localFailures.push(i);
+                    }
                 }
             } catch (e) {
                 Logger.debug('[TranslationService] Local batch failed:', e);
-                remainingIndices = allBatchItems.map((_, i) => i);
+                localFailures = [...localRoutable];
             }
-        } else {
-            remainingIndices = allBatchItems.map((_, i) => i);
         }
 
-        // 3. Remote fallback for anything local didn't handle
-        if (remainingIndices.length > 0) {
-            Logger.debug('[TranslationService] Remote batch:', remainingIndices.length, 'texts');
-            for (let i = 0; i < remainingIndices.length; i += REMOTE_BATCH_CHUNK_SIZE) {
-                const chunkIndices = remainingIndices.slice(i, i + REMOTE_BATCH_CHUNK_SIZE);
-                await Promise.allSettled(chunkIndices.map(async (batchIdx) => {
-                    const item = allBatchItems[batchIdx];
-                    const preprocessed = preprocessedMap.get(item.text) || item.text;
-                    let translated: string;
-                    try {
-                        translated = await translateRemoteSingle(preprocessed, targetLang);
-                    } catch {
-                        translated = item.text;
-                    }
-                    batchTranslations[batchIdx] = this.cleanQuotes(translated);
-                }));
-                if (i + REMOTE_BATCH_CHUNK_SIZE < remainingIndices.length) {
-                    await new Promise(resolve => setTimeout(resolve, REMOTE_BATCH_YIELD_MS));
-                }
-            }
-        }
+        // Send local failures to remote as fallback
+        const localFallbackPromise = localFailures.length > 0
+            ? this._translateRemoteIndices(allBatchItems, localFailures, preprocessedMap, targetLang, batchTranslations)
+            : Promise.resolve();
+
+        // Wait for all remote translations (initial + fallback)
+        await Promise.all([remoteOnlyPromise, localFallbackPromise]);
 
         // 4. Collect results: single items go directly, split items are rejoined
         // 4a. Single-sentence items (no split)
@@ -1088,7 +1313,9 @@ export const TranslationService = {
             }
         }
 
-        // 4b. Split items: rejoin segments per original text
+        // 4b. Split items: cache individual segments AND rejoin per original text.
+        //     Segment caching prevents re-translation when translate() is later called
+        //     for the same title (it splits → translate(segment) → would miss cache).
         for (const record of splitRecords) {
             const segTranslations: string[] = record.segments.map(() => '');
             let allResolved = true;
@@ -1099,6 +1326,8 @@ export const TranslationService = {
                     const t = batchTranslations[i];
                     if (t) {
                         segTranslations[item.segIdx] = t;
+                        // Cache segment individually so translate(segmentText) hits cache
+                        SharedCache.set(cacheKey(item.text, targetLang, 'local'), t, CACHE_TTL_MS);
                     } else {
                         allResolved = false;
                     }
@@ -1132,6 +1361,14 @@ export const TranslationService = {
         return Config.get('preferLocalTranslation') !== false && workers.some(w => w.ready);
     },
 
+    /**
+     * Cancel queued local translation tasks.
+     * If `cancellableKey` is provided, only matching tasks are dropped.
+     */
+    cancelPendingLocal(options?: { cancellableKey?: string }): number {
+        return GpuScheduler.clearCancellable('translation', options?.cancellableKey);
+    },
+
     getLoadedModels(): Array<{ model: string; ready: boolean }> {
         const models = new Map<string, boolean>();
         for (const w of workers) {
@@ -1140,6 +1377,13 @@ export const TranslationService = {
             }
         }
         return Array.from(models.entries()).map(([model, ready]) => ({ model, ready }));
+    },
+
+    getDebugStats(): { degenerateLocalRejected: number; degenerateRemoteRejected: number } {
+        return {
+            degenerateLocalRejected: degenerateStats.localRejected,
+            degenerateRemoteRejected: degenerateStats.remoteRejected,
+        };
     },
 
     peekCached(text: string, targetLang = 'en'): string | null {
@@ -1195,7 +1439,36 @@ export const TranslationService = {
         s = s.replace(/"\s+([^"]+)\s+"/g, '"$1"');
         s = s.replace(/'\s+([^']+)\s+'/g, "'$1'");
         return s.trim();
-    }
+    },
+
+    /** @internal Fire remote translations for a set of batch indices concurrently (no chunking). */
+    async _translateRemoteIndices(
+        allBatchItems: { text: string }[],
+        indices: number[],
+        preprocessedMap: Map<string, string>,
+        targetLang: string,
+        batchTranslations: (string | null)[],
+    ): Promise<void> {
+        Logger.debug('[TranslationService] Remote concurrent:', indices.length, 'texts');
+        await Promise.allSettled(indices.map(async (batchIdx) => {
+            const item = allBatchItems[batchIdx];
+            const preprocessed = preprocessedMap.get(item.text) || item.text;
+            let translated: string;
+            try {
+                translated = await translateRemoteSingle(preprocessed, targetLang);
+            } catch {
+                translated = item.text;
+            }
+            const cleaned = this.cleanQuotes(translated);
+            const reason = getGarbageReason(item.text, cleaned);
+            if (reason) {
+                trackDegenerate('remote', item.text, cleaned, reason);
+                batchTranslations[batchIdx] = item.text;
+            } else {
+                batchTranslations[batchIdx] = cleaned;
+            }
+        }));
+    },
 };
 
 // Exported for unit testing — not part of the public API

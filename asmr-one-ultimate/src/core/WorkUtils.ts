@@ -287,7 +287,7 @@ const COVER_REGEX = /封面|cover|illust|ジャケット/i;
 const SCRIPT_REGEX = /script|台本|剧本|脚本/i;
 const IMAGE_REGEX = /画像|image file|images?$/i;
 const SE_REGEX = /\bSE\b|^SE[なな有無し]|Sound Effect|音効|効果音/;
-const SE_ARI_REGEX = /あり/;
+const SE_ARI_REGEX = /あり|有り|付き/;
 const SE_NASHI_REGEX = /無し|なし/;
 const FORMAT_PRIORITY = ['wav', 'mp3', 'flac', 'opus', 'm4a', 'aac'];
 
@@ -336,7 +336,8 @@ export function calculateFolderScore(
     }
 
     // SE preference: boost folders matching the user's あり/無し preference
-    if (sePreference != null && (SE_ARI_REGEX.test(name) || SE_NASHI_REGEX.test(name))) {
+    // Gate on SE_REGEX first to avoid false positives from unrelated なし/あり in names
+    if (sePreference != null && SE_REGEX.test(name) && (SE_ARI_REGEX.test(name) || SE_NASHI_REGEX.test(name))) {
         if (sePreference && SE_ARI_REGEX.test(name)) {
             score += SCORING.SE_PREF_BONUS;
         } else if (!sePreference && SE_NASHI_REGEX.test(name)) {
@@ -386,7 +387,7 @@ export function calculateFolderScore(
 /**
  * Select the best folder from a list based on scoring
  */
-export function selectBestFolder(folders: WorkFolder[], formatPriority: string[] = FORMAT_PRIORITY): WorkFolder | null {
+export function selectBestFolder(folders: WorkFolder[], formatPriority: string[] = FORMAT_PRIORITY, sePreference?: boolean): WorkFolder | null {
     if (!folders?.length) return null;
 
     const candidates: FolderCandidate[] = folders.map(folder => ({
@@ -396,7 +397,9 @@ export function selectBestFolder(folders: WorkFolder[], formatPriority: string[]
             folder.children_count || folder.tracks?.length || 0,
             folder.caption || folder.duration_text || '',
             false,
-            formatPriority
+            formatPriority,
+            [],
+            sePreference
         ),
         original: folder,
     }));

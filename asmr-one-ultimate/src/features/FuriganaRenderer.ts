@@ -128,6 +128,26 @@ export class FuriganaRenderer {
     }
 
     // =========================================================================
+    // Text Extraction
+    // =========================================================================
+
+    /**
+     * Get text content excluding Material icon ligatures and ruby readings.
+     * Icon elements use font ligatures (e.g. "close" renders as ×) so their
+     * textContent must not be sent to JPDB for annotation.
+     */
+    private getAnnotatableText(el: HTMLElement): string {
+        if (!el.querySelector('i.material-icons, .q-chip__icon, rt')) {
+            return (el.textContent || '').trim();
+        }
+        const clone = el.cloneNode(true) as HTMLElement;
+        for (const node of clone.querySelectorAll('i.material-icons, .q-chip__icon, rt, rp')) {
+            node.remove();
+        }
+        return (clone.textContent || '').trim();
+    }
+
+    // =========================================================================
     // Scan & Process
     // =========================================================================
 
@@ -155,8 +175,14 @@ export class FuriganaRenderer {
             // Work tree items get translations via TranslatedTags CSS ::after instead.
             if (htmlEl.closest('#work-tree')) continue;
 
+            // Skip containers with interactive children (buttons, chips, selects, icons).
+            // Their textContent includes button labels, icon ligatures, count badges, etc.
+            // The Japanese text inside these containers is already targeted via more
+            // specific selectors (e.g. .q-chip__content).
+            if (htmlEl.querySelector('.q-chip, .q-btn, .q-select, button, select, [role="button"]')) continue;
+
             // Must contain Japanese text with kanji
-            const text = htmlEl.textContent?.trim();
+            const text = this.getAnnotatableText(htmlEl);
             if (!text || !HAS_JAPANESE.test(text) || !HAS_KANJI.test(text)) continue;
 
             // Observe for viewport intersection
@@ -194,7 +220,7 @@ export class FuriganaRenderer {
                 if (this.processedElements.has(htmlEl)) continue;
                 if (htmlEl.hasAttribute('data-jpdb')) continue;
 
-                const text = htmlEl.textContent?.trim();
+                const text = this.getAnnotatableText(htmlEl);
                 if (!text || !HAS_KANJI.test(text)) continue;
 
                 texts.push(text);
@@ -339,10 +365,16 @@ export class FuriganaRenderer {
             );
         }
 
+        // Save icon elements before replacing content (e.g., chip close button).
+        // Icon text (font ligatures like "close" → ×) was excluded from originalText
+        // by getAnnotatableText(), so icons must be re-appended separately.
+        const savedIcons = Array.from(el.querySelectorAll('i.material-icons, .q-chip__icon'));
+
         // Replace element contents (store original for clean retrieval)
         el.setAttribute('data-jpdb-original', originalText);
         el.textContent = '';
         el.appendChild(fragment);
+        for (const icon of savedIcons) el.appendChild(icon);
         el.setAttribute('data-jpdb', 'true');
     }
 

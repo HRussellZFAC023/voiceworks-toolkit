@@ -584,6 +584,8 @@ const credits = [
             <hr class="q-separator q-separator--horizontal q-separator--dark">
             <SettingsToggle config-key="autoFilterFolders" :label="t('autoFilterFolders')" :sublabel="t('autoFilterFoldersSub')" icon="folder_open" />
             <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <SettingsToggle config-key="sePref" :label="t('sePref')" :sublabel="t('sePrefSub')" icon="surround_sound" />
+            <hr class="q-separator q-separator--horizontal q-separator--dark">
             <SettingsToggle config-key="shuffle" :label="t('shuffle')" :sublabel="t('shuffleSub')" icon="shuffle" />
             <hr class="q-separator q-separator--horizontal q-separator--dark">
             <SettingsToggle config-key="loopPlaylist" :label="t('loopPlaylist')" :sublabel="t('loopPlaylistSub')" icon="repeat" />

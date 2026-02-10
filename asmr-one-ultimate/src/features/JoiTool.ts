@@ -1054,10 +1054,6 @@ export class JoiTool {
         }
     }
 
-    // ------------------------------------------------------------------------
-    // Legacy evaluateContext (kept for whisper:segment-translated)
-    // ------------------------------------------------------------------------
-
     private evaluateContext(): void {
         this.evaluateCombined();
     }

@@ -16,6 +16,7 @@ import { useBridge } from '../../composables/useBridge';
 import { useI18n } from '../../composables/useI18n';
 import { useEventBus } from '../../composables/useEventBus';
 import { isDarkMode } from '../../core/DomUtils';
+import { Priority } from '../../core/GpuScheduler';
 import { WorkService } from '../../services/WorkService';
 import { TranslationService } from '../../services/TranslationService';
 import { Logger } from '../../core/Logger';
@@ -74,6 +75,7 @@ let escapeHandler: ((e: KeyboardEvent) => void) | null = null;
 let prefetchedTreeData: TracksResponse | null = null;
 let prefetchTreeWorkId: string | null = null;
 let prefetchPromise: Promise<void> | null = null;
+const FLATVIEW_TRANSLATION_PRIORITY = Priority.NORMAL;
 
 // ---------------------------------------------------------------------------
 // Computed
@@ -303,7 +305,13 @@ async function translateVisibleItems(): Promise<void> {
     if (textsToTranslate.length === 0) return;
 
     try {
-        const translated = await TranslationService.translateBatch(textsToTranslate);
+        const queueKey = `flatview:${bridge.currentWorkId || 'unknown'}`;
+        TranslationService.cancelPendingLocal({ cancellableKey: queueKey });
+        const translated = await TranslationService.translateBatch(textsToTranslate, 'en', {
+            priority: FLATVIEW_TRANSLATION_PRIORITY,
+            cancellable: true,
+            cancellableKey: queueKey,
+        });
         const newTranslations: TranslationMap = {};
         for (let i = 0; i < textsToTranslate.length; i++) {
             const original = textsToTranslate[i];
@@ -588,6 +596,7 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
+    TranslationService.cancelPendingLocal({ cancellableKey: `flatview:${bridge.currentWorkId || 'unknown'}` });
     if (isActive.value) hide();
     if (unwatchWork) {
         unwatchWork();

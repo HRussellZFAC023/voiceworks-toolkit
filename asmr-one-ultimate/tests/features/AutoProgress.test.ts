@@ -450,11 +450,23 @@ describe('AutoProgress', () => {
     // =========================================================================
 
     describe('postponed via partial listen', () => {
+        // Helper: prime the cached flat tracks for work 88888 (3 audio tracks)
+        // so checkPartialListen can compute the correct coverage ratio.
+        function primeCacheForWork88888() {
+            (ap as any).cachedFlatTracksWorkId = '88888';
+            (ap as any).cachedFlatTracks = [
+                { hash: 'track1.mp3', title: 'Track 1', type: 'audio' },
+                { hash: 'track2.mp3', title: 'Track 2', type: 'audio' },
+                { hash: 'track3.mp3', title: 'Track 3', type: 'audio' },
+            ];
+        }
+
         it('should mark "postponed" when navigating away with <30% of tracks played', () => {
             // Simulate listening to a work but not completing any tracks
-            // Work has 3 tracks (from mock), 0 played = 0% < 30%
+            // Work has 3 tracks, 0 played = 0% < 30%
             (ap as any).currentListeningWorkId = '88888';
             (ap as any).currentTrackStarted = true; // user actually started listening (>5s)
+            primeCacheForWork88888();
             // No tracks added to playedTracksInWork for '88888'
 
             // Navigate to a different work
@@ -470,6 +482,7 @@ describe('AutoProgress', () => {
         it('should NOT mark "postponed" if >=30% of tracks played', () => {
             (ap as any).currentListeningWorkId = '88888';
             (ap as any).currentTrackStarted = true;
+            primeCacheForWork88888();
             // Add 1 of 3 tracks played (33% > 30%)
             (ap as any).playedTracksInWork.set('88888', new Set(['track1.mp3']));
             (ap as any).handleWorkChange('77777');

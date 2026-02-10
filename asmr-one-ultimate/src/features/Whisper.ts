@@ -18,7 +18,7 @@ import { AppStore } from '../store/AppStore';
 import { TranslationService } from '../services/TranslationService';
 import { AudioCache } from '../infrastructure/AudioCache';
 import { gmRequest } from '../infrastructure/HttpClient';
-import { GpuScheduler } from '../core/GpuScheduler';
+import { GpuScheduler, Priority } from '../core/GpuScheduler';
 import { buildLrcFromSegments, buildVttFromSegments } from './transcriptFileUtils';
 
 // ============================================================================
@@ -35,6 +35,7 @@ const MODEL_READY_TTL_MS = 1000 * 60 * 60 * 24 * 30; // 30 days
 const INITIAL_BACKFILL_SEC = 30;
 const SEEK_BACKFILL_SEC = 15;
 const POLL_INTERVAL_MS = 250;
+const TRANSLATE_AHEAD_MAX_SEGMENTS_PER_RUN = 8;
 
 // ============================================================================
 // Worker message types
@@ -1277,7 +1278,7 @@ export class Whisper {
             case 'update': {
                 if (!this.transcribing) return;
                 Whisper.gpuRecoveryAttempts = 0; // GPU is working — reset recovery counter
-                GpuScheduler.onGpuSuccess();
+                GpuScheduler.onGpuSuccess('whisper');
                 const update = message as WorkerUpdateMessage;
                 if (typeof update.chunkId === 'number') {
                     if (!this.chunkSendTimes.has(update.chunkId)) return;
@@ -1368,11 +1369,10 @@ export class Whisper {
 
             case 'gpu-degraded': {
                 // GPU partially failed (e.g. createBuffer during word timestamps) but Whisper
-                // recovered with segment timestamps. Broadcast so other workers (Embedding,
-                // Translation) can preemptively switch to WASM before hitting the dead device.
+                // recovered with segment timestamps. Keep this local to Whisper and avoid
+                // escalating to global device-loss, which can unnecessarily disable other workers.
                 const degradedMsg = message.data?.message || 'GPU degraded';
                 Logger.warn('[Whisper] GPU degraded during inference:', degradedMsg);
-                EventBus.emit('gpu:device-lost', { worker: 'whisper' as const });
                 break;
             }
 
@@ -1391,14 +1391,18 @@ export class Whisper {
                 // "All WebGPU.*failed" means every dtype candidate was exhausted.
                 const isAllGpuFailed = /All WebGPU.*failed/i.test(errMsg);
                 const isTerminalGpuFailure = isWebgpuRequiredError || isAllGpuFailed;
+                const isExplicitDeviceLoss = /device lost|Instance reference|release session|invalid session/i.test(errMsg);
 
                 if ((isGpuError || isTerminalGpuFailure) && !Whisper.webgpuFailed) {
                     Whisper.webgpuFailed = true;
                     EventBus.emit('webgpu:failed', { source: 'whisper' });
-                    // Broadcast device-lost so other workers (Embedding, Translation) switch to WASM.
-                    // webgpu:failed is per-service; gpu:device-lost triggers GpuScheduler broadcast.
-                    EventBus.emit('gpu:device-lost', { worker: 'whisper' as const });
-                    Logger.warn('[Whisper] GPU failure — broadcasting device-lost:', errMsg);
+                    if (isExplicitDeviceLoss || isTerminalGpuFailure) {
+                        // Broadcast only on explicit/terminal device-loss class failures.
+                        EventBus.emit('gpu:device-lost', { worker: 'whisper' as const });
+                        Logger.warn('[Whisper] GPU failure — broadcasting device-lost:', errMsg);
+                    } else {
+                        Logger.warn('[Whisper] Recoverable GPU failure — keeping device-loss local:', errMsg);
+                    }
                 }
 
                 Logger.error('[Whisper] Worker error:', errMsg);
@@ -1775,7 +1779,12 @@ export class Whisper {
         this.translationInFlight.add(`${cacheKey}:${targetLang}`);
         try {
             const texts = payload.segments.map((seg) => seg.text);
-            const translated = await TranslationService.translateBatch(texts, targetLang);
+            const transcriptKey = `whisper:transcript:${cacheKey}:${targetLang}`;
+            const translated = await TranslationService.translateBatch(texts, targetLang, {
+                priority: Priority.NORMAL,
+                cancellable: true,
+                cancellableKey: transcriptKey,
+            });
             const translatedSegments: WhisperSegment[] = payload.segments.map((seg, idx) => ({
                 ...seg,
                 text: translated[idx] || seg.text,
@@ -1797,7 +1806,11 @@ export class Whisper {
                     /[\u4e00-\u9fff]/.test(t) && !/[\u3040-\u309f\u30a0-\u30ff]/.test(t)
                 );
                 if (cnTexts.length > 0) {
-                    TranslationService.translateBatch(cnTexts, 'ja').catch(() => { /* fire-and-forget */ });
+                    TranslationService.translateBatch(cnTexts, 'ja', {
+                        priority: Priority.NORMAL,
+                        cancellable: true,
+                        cancellableKey: `${transcriptKey}:ja`,
+                    }).catch(() => { /* fire-and-forget */ });
                 }
             }
 
@@ -1827,38 +1840,58 @@ export class Whisper {
         const settings = this.getWhisperSettings();
         if ((!translateMode && !cnToJp) || !targetLang || targetLang === settings.language) return;
 
-        // Collect ALL untranslated segments (no time window limit)
+        // Collect untranslated segments.
         const toTranslate = this.segments.filter(
             (seg) => seg.start > this.translateAheadUpTo,
         );
 
-        // Also include any segments not yet translated by count (fallback for out-of-order)
+        // Also include any segments not yet translated by count.
         const byCount = this.segments.slice(this.lastTranslatedSegmentCount);
-        const combined = toTranslate.length >= byCount.length ? toTranslate : byCount;
+        const combined = byCount.length > 0 ? byCount : toTranslate;
         if (combined.length === 0) return;
+        const selected = combined.slice(0, TRANSLATE_AHEAD_MAX_SEGMENTS_PER_RUN);
+        const liveKey = this.currentCacheKey || this.getTrackIdentity().trackKey || 'live';
+        const aheadKey = `whisper:ahead:${liveKey}:${targetLang}`;
+        const jaAheadKey = `${aheadKey}:ja`;
 
-        // Use individual translate() calls instead of translateBatch() to avoid
-        // blocking other callers (LearnerMode, CommentSection) with a large batch
-        const promises = combined.map(seg =>
-            TranslationService.translate(seg.text, targetLang).catch(() => null)
+        // Drop stale queued translate-ahead jobs so the newest audio context wins.
+        GpuScheduler.clearCancellable('translation', aheadKey);
+        GpuScheduler.clearCancellable('translation', jaAheadKey);
+
+        // Use HIGH priority for pre-translation so REALTIME subtitle translation can preempt it.
+        const promises = selected.map(seg =>
+            TranslationService.translate(seg.text, targetLang, {
+                priority: Priority.HIGH,
+                cancellable: true,
+                cancellableKey: aheadKey,
+            }).catch(() => null)
         );
 
         // Also pre-translate Chinese segments to 'ja' for LearnerMode primary display
         // (LearnerMode shows JA as primary line when source is Chinese)
         if (targetLang !== 'ja') {
-            const cnSegs = combined.filter(seg =>
+            const cnSegs = selected.filter(seg =>
                 /[\u4e00-\u9fff]/.test(seg.text) && !/[\u3040-\u309f\u30a0-\u30ff]/.test(seg.text)
             );
             for (const seg of cnSegs) {
-                promises.push(TranslationService.translate(seg.text, 'ja').catch(() => null));
+                promises.push(TranslationService.translate(seg.text, 'ja', {
+                    priority: Priority.HIGH,
+                    cancellable: true,
+                    cancellableKey: jaAheadKey,
+                }).catch(() => null));
             }
         }
 
         await Promise.allSettled(promises);
-        this.lastTranslatedSegmentCount = this.segments.length;
-        const furthest = combined[combined.length - 1];
+        const furthest = selected[selected.length - 1];
+        const furthestIdx = this.segments.indexOf(furthest);
+        if (furthestIdx >= 0) {
+            this.lastTranslatedSegmentCount = Math.max(this.lastTranslatedSegmentCount, furthestIdx + 1);
+        } else {
+            this.lastTranslatedSegmentCount = Math.min(this.segments.length, this.lastTranslatedSegmentCount + selected.length);
+        }
         this.translateAheadUpTo = Math.max(this.translateAheadUpTo, furthest.end);
-        EventBus.emit('whisper:segment-translated', { count: combined.length });
+        EventBus.emit('whisper:segment-translated', { count: selected.length });
     }
 
     // ------------------------------------------------------------------------

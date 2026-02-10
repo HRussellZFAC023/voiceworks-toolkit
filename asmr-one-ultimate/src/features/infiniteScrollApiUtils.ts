@@ -109,5 +109,16 @@ export function buildInfiniteScrollApiUrl(input: BuildInfiniteScrollApiUrlInput)
         return `/api/playlist/get-playlist-works?${params.toString()}`;
     }
 
+    // Review pages: /review?filter=listened, /review?filter=postponed, etc.
+    if (path === '/review') {
+        const params = new URLSearchParams();
+        params.set('page', String(page));
+        setQueryParamIfPresent(params, 'order', query.order);
+        setQueryParamIfPresent(params, 'sort', query.sort);
+        setQueryParamIfPresent(params, 'filter', query.filter);
+        setQueryParamIfPresent(params, 'seed', query.seed);
+        return `/api/review?${params.toString()}`;
+    }
+
     return null;
 }

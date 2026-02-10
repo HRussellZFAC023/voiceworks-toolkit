@@ -16,6 +16,7 @@ import {
 import { getAudioElement } from '../../core/DomUtils';
 import { findButtonByText, findPlayButtons, findAudioItems } from '../../core/DomUtils';
 import { FolderDiver } from '../FolderDiver';
+import { Config } from '../../core/Config';
 import type { PlayerTrack, WorkFolder, WorkDetail, AudioTrack } from '../../types';
 
 export class PlaybackController {
@@ -213,7 +214,7 @@ export class PlaybackController {
     private extractTracksFromWork(work: WorkDetail): AudioTrack[] {
         const dirs = work.dirs || work.children || [];
         if (Array.isArray(dirs) && dirs.length > 0) {
-            const bestFolder = selectBestFolder(dirs as WorkFolder[]);
+            const bestFolder = selectBestFolder(dirs as WorkFolder[], undefined, Config.get('sePref'));
             if (bestFolder) {
                 const tracks = collectTracks(bestFolder);
                 if (tracks.length > 0) {

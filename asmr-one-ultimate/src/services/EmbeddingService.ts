@@ -16,10 +16,17 @@ const IDLE_UNLOAD_MS = 15 * 60 * 1000; // 15 minutes
 const SINGLE_TIMEOUT_MS = 30_000;
 const BATCH_TIMEOUT_BASE_MS = 30_000;
 const BATCH_TIMEOUT_PER_ITEM_MS = 200;
+const EMBED_MAX_CHARS_FULL = 900;
+const EMBED_MAX_CHARS_LIMITED = 640;
+const EMBED_BATCH_MAX_ITEMS_FULL = 16;
+const EMBED_BATCH_MAX_ITEMS_LIMITED = 8;
+const EMBED_BATCH_MAX_CHARS_FULL = 6000;
+const EMBED_BATCH_MAX_CHARS_LIMITED = 2400;
 
 // Circuit breaker: kill & recreate worker after consecutive GPU errors
 const CIRCUIT_BREAKER_THRESHOLD = 3;
 const GPU_ERROR_PATTERN = /createBuffer|RangeError|out of memory|OOM|allocation|device lost|GPUDevice|mapAsync|Instance reference/i;
+const EXPLICIT_DEVICE_LOSS_PATTERN = /device lost|Instance reference|release session|invalid session/i;
 
 // ============================================================================
 // Worker State
@@ -119,6 +126,7 @@ function handleCircuitBreaker(errorMsg: string): void {
 
         // Circuit breaker tripped — kill worker and recreate on WASM
         Logger.warn('[EmbeddingService] Circuit breaker tripped — killing worker, will recreate on WASM');
+        Logger.warn('[EmbeddingService] GPU memory pressure at trip:', GpuScheduler.getMemoryPressure());
         webgpuFailed = true;
         EventBus.emit('webgpu:failed', { source: 'embedding' });
         SharedCache.set(CacheKeys.embeddingPreferredDtype(), '', CACHE_TTL_MS); // Clear GPU dtype preference
@@ -169,13 +177,25 @@ function handleMessage(e: MessageEvent): void {
     }
 
     if (msg.status === 'gpu-device-lost') {
-        // Transient GPU device loss — worker will recover with fresh device on next call.
-        // Don't count toward circuit breaker, but notify scheduler.
-        Logger.warn('[EmbeddingService] GPU device lost (transient):', msg.data?.message);
-        EventBus.emit('gpu:device-lost', { worker: 'embedding' as const });
+        const reason = String(msg.data?.message || '');
+        Logger.warn('[EmbeddingService] GPU device-lost signal:', reason || '(no message)');
+        if (EXPLICIT_DEVICE_LOSS_PATTERN.test(reason)) {
+            EventBus.emit('gpu:device-lost', { worker: 'embedding' as const });
+        } else {
+            Logger.debug('[EmbeddingService] Ignoring non-fatal device-lost signal from worker');
+        }
         return;
     }
 
+    if (msg.status === 'gpu-fallback') {
+        // Worker downgraded to WASM after a recoverable GPU error (e.g. createBuffer).
+        // Do not cascade this as global device loss.
+        const reason = String(msg.data?.message || '');
+        Logger.warn('[EmbeddingService] GPU fallback to WASM:', reason || '(no message)');
+        webgpuFailed = true;
+        EventBus.emit('webgpu:failed', { source: 'embedding' });
+        return;
+    }
     if (msg.status === 'error') {
         const err = msg.data?.message || 'Unknown worker error';
         if (msg.id && pending.has(msg.id)) {
@@ -185,6 +205,11 @@ function handleMessage(e: MessageEvent): void {
             pending.delete(msg.id);
         } else {
             Logger.error('[EmbeddingService] Worker error:', err);
+        }
+        if (webgpuFailed && isGpuError(err)) {
+            // Ignore stale GPU errors that arrive after we've already switched to WASM.
+            Logger.debug('[EmbeddingService] Ignoring stale GPU error after WebGPU fallback:', err);
+            return;
         }
         // Check circuit breaker for GPU errors
         handleCircuitBreaker(err);
@@ -200,7 +225,7 @@ function handleMessage(e: MessageEvent): void {
         }
         // Success — reset GPU error counter
         consecutiveGpuErrors = 0;
-        GpuScheduler.onGpuSuccess();
+        GpuScheduler.onGpuSuccess('embedding');
     }
 }
 
@@ -297,6 +322,54 @@ function sendToWorker(type: 'embed' | 'embed-batch', payload: string | string[],
     });
 }
 
+function normalizeEmbedInput(text: string): string {
+    const normalized = String(text || '').replace(/\s+/g, ' ').trim();
+    const tier = DeviceCapabilities.profile.tier;
+    const maxChars = tier === 'full' ? EMBED_MAX_CHARS_FULL : EMBED_MAX_CHARS_LIMITED;
+    if (normalized.length <= maxChars) return normalized;
+    return normalized.slice(0, maxChars);
+}
+
+function getEmbedBatchLimits(): { maxItems: number; maxChars: number } {
+    const tier = DeviceCapabilities.profile.tier;
+    const pressure = GpuScheduler.getMemoryPressure();
+
+    let maxItems = tier === 'full' ? EMBED_BATCH_MAX_ITEMS_FULL : EMBED_BATCH_MAX_ITEMS_LIMITED;
+    let maxChars = tier === 'full' ? EMBED_BATCH_MAX_CHARS_FULL : EMBED_BATCH_MAX_CHARS_LIMITED;
+
+    if (pressure === 'medium') {
+        maxItems = Math.max(4, Math.floor(maxItems * 0.75));
+        maxChars = Math.max(1200, Math.floor(maxChars * 0.7));
+    } else if (pressure === 'high') {
+        maxItems = Math.max(2, Math.floor(maxItems * 0.5));
+        maxChars = Math.max(900, Math.floor(maxChars * 0.45));
+    }
+
+    return { maxItems, maxChars };
+}
+
+function splitBatchByBudget(texts: string[]): string[][] {
+    const { maxItems, maxChars } = getEmbedBatchLimits();
+    const chunks: string[][] = [];
+    let current: string[] = [];
+    let chars = 0;
+
+    for (const text of texts) {
+        const nextChars = chars + text.length;
+        const shouldSplit = current.length > 0 && (current.length >= maxItems || nextChars > maxChars);
+        if (shouldSplit) {
+            chunks.push(current);
+            current = [];
+            chars = 0;
+        }
+        current.push(text);
+        chars += text.length;
+    }
+
+    if (current.length > 0) chunks.push(current);
+    return chunks;
+}
+
 // ============================================================================
 // Public API
 // ============================================================================
@@ -322,10 +395,11 @@ export const EmbeddingService = {
     async embed(text: string, task: 'query' | 'passage' = 'query', options?: { priority?: Priority; cancellable?: boolean }): Promise<number[]> {
         if (serviceDead || !DeviceCapabilities.budget.embeddingEnabled) throw new Error('Embedding service unavailable');
         resetIdleTimer();
-        const prefixed = task === 'query' ? `query: ${text}` : `passage: ${text}`;
+        const normalized = normalizeEmbedInput(text);
+        const prefixed = task === 'query' ? `query: ${normalized}` : `passage: ${normalized}`;
 
         // In-flight dedup
-        const flightKey = `${task}:${text}`;
+        const flightKey = `${task}:${normalized}`;
         const existing = embedInFlight.get(flightKey);
         if (existing) return existing;
 
@@ -358,19 +432,34 @@ export const EmbeddingService = {
         if (texts.length === 0) return [];
         resetIdleTimer();
 
-        const prefixed = texts.map(t =>
-            task === 'query' ? `query: ${t}` : `passage: ${t}`
-        );
+        const prefixed = texts.map((t) => {
+            const normalized = normalizeEmbedInput(t);
+            return task === 'query' ? `query: ${normalized}` : `passage: ${normalized}`;
+        });
 
         await initWorker();
-        const timeoutMs = BATCH_TIMEOUT_BASE_MS + texts.length * BATCH_TIMEOUT_PER_ITEM_MS;
-        // Batch embedding is LOW priority and cancellable
-        return GpuScheduler.enqueue<number[][]>({
-            priority: Priority.LOW,
-            worker: 'embedding',
-            execute: () => sendToWorker('embed-batch', prefixed, timeoutMs),
-            cancellable: true,
-        });
+        const chunks = splitBatchByBudget(prefixed);
+        if (chunks.length > 1) {
+            Logger.debug('[EmbeddingService] Chunked embedBatch for throughput/stability:', {
+                items: prefixed.length,
+                chunks: chunks.length,
+                limits: getEmbedBatchLimits(),
+                pressure: GpuScheduler.getMemoryPressure(),
+            });
+        }
+
+        const all: number[][] = [];
+        for (const chunk of chunks) {
+            const timeoutMs = BATCH_TIMEOUT_BASE_MS + chunk.length * BATCH_TIMEOUT_PER_ITEM_MS;
+            const vectors = await GpuScheduler.enqueue<number[][]>({
+                priority: Priority.LOW,
+                worker: 'embedding',
+                execute: () => sendToWorker('embed-batch', chunk, timeoutMs),
+                cancellable: true,
+            });
+            all.push(...vectors);
+        }
+        return all;
     },
 
     isReady(): boolean {

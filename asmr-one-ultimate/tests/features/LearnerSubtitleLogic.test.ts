@@ -6,6 +6,11 @@
  * - Cache continuation with incomplete transcripts
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import {
+    buildKaraokeCharMap,
+    computeWordKaraokeIndices as computeWordKaraokeIndicesImpl,
+    computeTimeFallbackKaraokeIndices as computeTimeFallbackKaraokeIndicesImpl,
+} from '../../src/features/karaokeUtils';
 
 // ---------------------------------------------------------------------------
 // Extracted pure functions (mirroring LearnerSubtitles.vue logic)
@@ -549,28 +554,15 @@ describe('Cache continuation', () => {
 // (Mirrors LearnerSubtitles.vue & LearnerMode.ts)
 // ---------------------------------------------------------------------------
 
+// Convenience wrappers matching the old 3-arg API for test readability.
+// Internally delegates to the shared karaokeUtils (buildKaraokeCharMap + compute).
 function computeWordKaraokeIndices(
     fullText: string,
     words: Array<{ start: number; end: number; text: string }>,
     now: number,
 ): { splitIdx: number; hlStart: number } {
-    const hasSpaces = /\s/.test(fullText);
-    let charOffset = 0;
-    let hlStart = 0;
-    let splitIdx = 0;
-    let foundAny = false;
-    for (let i = 0; i < words.length; i++) {
-        const wText = (words[i].text || '').trim();
-        const wChars = Array.from(wText).length;
-        if (words[i].start <= now + 0.01) {
-            hlStart = charOffset;
-            splitIdx = charOffset + wChars;
-            foundAny = true;
-        }
-        charOffset += wChars;
-        if (hasSpaces && i < words.length - 1) charOffset += 1;
-    }
-    return foundAny ? { splitIdx, hlStart } : { splitIdx: 0, hlStart: 0 };
+    const charMap = buildKaraokeCharMap(fullText, words);
+    return computeWordKaraokeIndicesImpl(charMap, now);
 }
 
 function computeTimeFallbackKaraokeIndices(
@@ -578,21 +570,8 @@ function computeTimeFallbackKaraokeIndices(
     line: { time: number; endTime?: number },
     now: number,
 ): { splitIdx: number; hlStart: number } {
-    if (!line.endTime) return { splitIdx: -1, hlStart: -1 };
-    const duration = Math.max(0.05, line.endTime - line.time);
-    const progress = Math.max(0, Math.min(1, (now - line.time) / duration));
-    if (/\s/.test(fullText)) {
-        const ws = fullText.split(/\s+/).filter(Boolean);
-        const count = Math.max(1, Math.min(ws.length, Math.ceil(progress * ws.length)));
-        const spoken = ws.slice(0, count).join(' ');
-        const spokenChars = Array.from(spoken).length;
-        const prevWords = ws.slice(0, count - 1);
-        const prevLen = prevWords.length > 0 ? Array.from(prevWords.join(' ')).length + 1 : 0;
-        return { splitIdx: spokenChars, hlStart: prevLen };
-    }
-    const chars = Array.from(fullText);
-    const count = Math.max(1, Math.min(chars.length, Math.ceil(progress * chars.length)));
-    return { splitIdx: count, hlStart: Math.max(0, count - 1) };
+    const totalChars = Array.from(fullText).length;
+    return computeTimeFallbackKaraokeIndicesImpl(fullText, totalChars, line.time, line.endTime, now);
 }
 
 describe('computeWordKaraokeIndices', () => {
@@ -610,17 +589,17 @@ describe('computeWordKaraokeIndices', () => {
         expect(result.splitIdx).toBe(2); // 'は' ends at char 2
     });
 
-    it('tracks current word for spaced text', () => {
+    it('tracks current word for spaced text with intra-word interpolation', () => {
         const fullText = 'hello beautiful world';
         const words = [
             { start: 0, end: 1, text: 'hello' },
             { start: 1, end: 2, text: 'beautiful' },
             { start: 2, end: 3, text: 'world' },
         ];
-        // At time 1.5: 'hello' and 'beautiful' spoken
+        // At time 1.5: 'hello' fully past, 'beautiful' is active at 50% → ceil(0.5*9)=5 chars
         const result = computeWordKaraokeIndices(fullText, words, 1.5);
         expect(result.hlStart).toBe(6); // 'beautiful' starts at char 6 (after "hello ")
-        expect(result.splitIdx).toBe(15); // 'beautiful' ends at char 15
+        expect(result.splitIdx).toBe(11); // 5 of 9 chars through "beautiful" → 6+5=11
     });
 
     it('returns 0,0 before any word starts', () => {
@@ -766,23 +745,23 @@ describe('Karaoke with spaced text', () => {
         { start: 2, end: 3, text: 'world' },
     ];
 
-    it('spotlight mode: accents only "beautiful" (the current word)', () => {
-        const now = 1.5; // 'hello' and 'beautiful' spoken
+    it('spotlight mode: accents partial "beautiful" via intra-word interpolation', () => {
+        const now = 1.5; // 'hello' fully past, 'beautiful' active at 50%
         const indices = computeWordKaraokeIndices(fullText, words, now);
 
         expect(indices.hlStart).toBe(6); // "beautiful" starts after "hello "
-        expect(indices.splitIdx).toBe(15); // "beautiful" ends at char 15
+        expect(indices.splitIdx).toBe(11); // 50% through 9-char word → ceil(4.5)=5, 6+5=11
 
         const chars = Array.from(fullText);
         const past = chars.slice(0, indices.hlStart).join('');
         const current = chars.slice(indices.hlStart, indices.splitIdx).join('');
         const upcoming = chars.slice(indices.splitIdx).join('');
         expect(past).toBe('hello ');
-        expect(current).toBe('beautiful');
-        expect(upcoming).toBe(' world');
+        expect(current).toBe('beaut');
+        expect(upcoming).toBe('iful world');
     });
 
-    it('fill-up mode: accents "hello beautiful" (all spoken)', () => {
+    it('fill-up mode: accents through partial "beautiful" (intra-word interpolation)', () => {
         const now = 1.5;
         const indices = computeWordKaraokeIndices(fullText, words, now);
         const hlStart = 0; // segment ON forces 0
@@ -790,7 +769,114 @@ describe('Karaoke with spaced text', () => {
         const chars = Array.from(fullText);
         const current = chars.slice(hlStart, indices.splitIdx).join('');
         const upcoming = chars.slice(indices.splitIdx).join('');
-        expect(current).toBe('hello beautiful');
-        expect(upcoming).toBe(' world');
+        expect(current).toBe('hello beaut'); // 50% through "beautiful"
+        expect(upcoming).toBe('iful world');
+    });
+});
+
+// ---------------------------------------------------------------------------
+// buildKaraokeCharMap
+// ---------------------------------------------------------------------------
+
+describe('buildKaraokeCharMap', () => {
+    it('computes correct offsets for CJK (no spaces)', () => {
+        const words = [
+            { start: 0, end: 1, text: 'お' },
+            { start: 1, end: 2, text: 'は' },
+            { start: 2, end: 3, text: 'よ' },
+            { start: 3, end: 4, text: 'う' },
+        ];
+        const map = buildKaraokeCharMap('おはよう', words);
+        expect(map.hasSpaces).toBe(false);
+        expect(map.totalChars).toBe(4);
+        expect(map.entries).toEqual([
+            { charStart: 0, charCount: 1, wordStart: 0, wordEnd: 1 },
+            { charStart: 1, charCount: 1, wordStart: 1, wordEnd: 2 },
+            { charStart: 2, charCount: 1, wordStart: 2, wordEnd: 3 },
+            { charStart: 3, charCount: 1, wordStart: 3, wordEnd: 4 },
+        ]);
+    });
+
+    it('computes correct offsets for spaced text (adds +1 for spaces between words)', () => {
+        const words = [
+            { start: 0, end: 1, text: 'hello' },
+            { start: 1, end: 2, text: 'world' },
+        ];
+        const map = buildKaraokeCharMap('hello world', words);
+        expect(map.hasSpaces).toBe(true);
+        expect(map.totalChars).toBe(11);
+        expect(map.entries).toEqual([
+            { charStart: 0, charCount: 5, wordStart: 0, wordEnd: 1 },
+            { charStart: 6, charCount: 5, wordStart: 1, wordEnd: 2 },
+        ]);
+    });
+
+    it('handles empty words array', () => {
+        const map = buildKaraokeCharMap('test', []);
+        expect(map.entries).toEqual([]);
+        expect(map.totalChars).toBe(4);
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Intra-word interpolation
+// ---------------------------------------------------------------------------
+
+describe('Intra-word character interpolation', () => {
+    it('interpolates through a multi-char word at 25%', () => {
+        const fullText = 'abcdefgh'; // 8 chars in one word
+        const words = [{ start: 0, end: 4, text: 'abcdefgh' }];
+        // At time 1.0: progress = 1/4 = 0.25, filled = ceil(0.25*8) = 2
+        const result = computeWordKaraokeIndices(fullText, words, 1.0);
+        expect(result.hlStart).toBe(0);
+        expect(result.splitIdx).toBe(2);
+    });
+
+    it('interpolates through a multi-char word at 75%', () => {
+        const fullText = 'abcdefgh'; // 8 chars in one word
+        const words = [{ start: 0, end: 4, text: 'abcdefgh' }];
+        // At time 3.0: progress = 3/4 = 0.75, filled = ceil(0.75*8) = 6
+        const result = computeWordKaraokeIndices(fullText, words, 3.0);
+        expect(result.hlStart).toBe(0);
+        expect(result.splitIdx).toBe(6);
+    });
+
+    it('shows at least 1 char at the very start of a word', () => {
+        const fullText = 'hello';
+        const words = [{ start: 2, end: 5, text: 'hello' }];
+        // At time 2.0 (word just started): progress=0, filled = max(1, ceil(0*5)) = 1
+        const result = computeWordKaraokeIndices(fullText, words, 2.0);
+        expect(result.hlStart).toBe(0);
+        expect(result.splitIdx).toBe(1);
+    });
+
+    it('fills entire word just before it ends (50ms tolerance)', () => {
+        const fullText = 'test';
+        const words = [{ start: 0, end: 2, text: 'test' }];
+        // At time 1.94: word.end=2, 2 <= 1.94+0.05=1.99? NO → active word
+        // progress = 1.94/2 = 0.97, filled = ceil(0.97*4) = 4
+        const result = computeWordKaraokeIndices(fullText, words, 1.94);
+        expect(result.splitIdx).toBe(4);
+    });
+
+    it('marks word as past within 50ms tolerance window', () => {
+        const fullText = 'test';
+        const words = [{ start: 0, end: 2, text: 'test' }];
+        // At time 1.96: word.end=2, 2 <= 1.96+0.05=2.01? YES → fully past
+        const result = computeWordKaraokeIndices(fullText, words, 1.96);
+        expect(result.splitIdx).toBe(4); // entire word past
+    });
+
+    it('interpolates second word while first is fully past', () => {
+        const fullText = 'hello world';
+        const words = [
+            { start: 0, end: 2, text: 'hello' },
+            { start: 2, end: 4, text: 'world' },
+        ];
+        // At time 3.0: 'hello' fully past, 'world' active at 50%
+        // progress = (3-2)/(4-2) = 0.5, filled = ceil(0.5*5) = 3
+        const result = computeWordKaraokeIndices(fullText, words, 3.0);
+        expect(result.hlStart).toBe(6); // 'world' starts at char 6
+        expect(result.splitIdx).toBe(9); // 6 + 3 = 9
     });
 });

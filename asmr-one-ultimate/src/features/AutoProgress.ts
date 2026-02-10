@@ -331,15 +331,17 @@ export class AutoProgress {
             this.setProgress(workId, 'listening');
         }
 
-        // 2. Mark as "listened" when last track reaches threshold
+        // 2. Mark as "listened" when track reaches threshold
         if (Config.get('autoProgressListened') && progress > THRESHOLDS.LISTENED_PROGRESS) {
             const key = this.getTrackKey(track);
             if (key && !this.listenedTracks.has(key)) {
                 this.listenedTracks.add(key);
+                Logger.debug(`[AutoProgress] Track completed: ${key} (${this.listenedTracks.size} total), checking isLastTrack...`);
 
-                // Only mark as "listened" if this is the last audio track in the work tree
                 if (this.isLastTrackInWork(track)) {
                     this.markAsListened(workId);
+                } else {
+                    Logger.debug(`[AutoProgress] Not last track yet for ${workId}`);
                 }
 
                 this.markTrackLocal(track);
@@ -398,23 +400,41 @@ export class AutoProgress {
         const playedTracks = this.playedTracksInWork.get(workId);
         const playedCount = playedTracks?.size ?? 0;
 
-        // Get total tracks in the work
-        const work = this.bridge.store.state.AudioPlayer?.work;
-        const totalTracks = work ? this.flattenAudioTracks(work).length : 0;
+        // Use cached flat tracks for the OLD work (not AudioPlayer.work which may already
+        // be the new work by the time handleWorkChange calls us).
+        // cachedFlatTracks is still from the previous work because handleWorkChange
+        // invalidates the cache AFTER calling checkPartialListen.
+        const totalTracks = (this.cachedFlatTracksWorkId === workId && this.cachedFlatTracks)
+            ? this.cachedFlatTracks.length
+            : 0;
+
+        // If we couldn't determine total tracks, use played count as a signal:
+        // if user started listening (currentTrackStarted) but played ≤1 track, mark postponed
+        if (totalTracks === 0) {
+            if (playedCount <= 1) {
+                Logger.debug(`[AutoProgress] Partial listen (${playedCount} tracks, total unknown) for ${workId}, marking postponed`);
+                this.maybeSetPostponed(workId);
+            }
+            return;
+        }
 
         // Compute per-work progress as fraction of tracks played >50%
-        const workProgress = totalTracks > 0 ? playedCount / totalTracks : 0;
+        const workProgress = playedCount / totalTracks;
 
         // Mark postponed if <30% of tracks played
         if (workProgress < 0.30) {
-            const currentStatus = this.getCurrentStatus(workId);
-            const currentStatusStr = currentStatus ? NUMBER_TO_STATUS[currentStatus] : null;
-            // Don't downgrade: only apply postponed if status is <= listening
-            const rank = currentStatusStr ? (PROGRESS_RANK[currentStatusStr] ?? 0) : 0;
-            if (rank <= (PROGRESS_RANK['listening'] ?? 0)) {
-                Logger.debug(`[AutoProgress] Partial listen (${playedCount}/${totalTracks} tracks) for ${workId}, marking postponed`);
-                this.setProgress(workId, 'postponed', true);
-            }
+            Logger.debug(`[AutoProgress] Partial listen (${playedCount}/${totalTracks} = ${(workProgress * 100).toFixed(0)}%) for ${workId}, marking postponed`);
+            this.maybeSetPostponed(workId);
+        }
+    }
+
+    /** Set postponed only if current status doesn't exceed listening (no-downgrade). */
+    private maybeSetPostponed(workId: string): void {
+        const currentStatus = this.getCurrentStatus(workId);
+        const currentStatusStr = currentStatus ? NUMBER_TO_STATUS[currentStatus] : null;
+        const rank = currentStatusStr ? (PROGRESS_RANK[currentStatusStr] ?? 0) : 0;
+        if (rank <= (PROGRESS_RANK['listening'] ?? 0)) {
+            this.setProgress(workId, 'postponed', true);
         }
     }
 
@@ -436,7 +456,7 @@ export class AutoProgress {
         const threshold = Config.get('autoProgressRadioSkipThreshold') || 3;
         if (this.visitsNoPlay[workId] >= threshold) {
             Logger.debug(`[AutoProgress] Visit-without-play threshold reached (${this.visitsNoPlay[workId]}) for ${workId}`);
-            this.setProgress(workId, 'postponed', true);
+            this.maybeSetPostponed(workId);
         }
     }
 
@@ -493,12 +513,23 @@ export class AutoProgress {
         Logger.debug(`[AutoProgress] ${workId}: ${currentStatusStr || 'none'} -> ${progress}`);
 
         // Optimistic update (capture previous value for rollback)
+        // Use Vue 2's $set for reactivity — direct property assignment on
+        // reactive objects doesn't trigger watchers for new keys.
         const previousStatusNum = currentStatusNum;
         if (this.bridge.store.state.User) {
-            if (!this.bridge.store.state.User.marks) {
-                this.bridge.store.state.User.marks = {};
+            const app = this.bridge.app as { $set?: (target: object, key: string, value: unknown) => void };
+            const user = this.bridge.store.state.User;
+            if (!user.marks) {
+                if (app.$set) {
+                    app.$set(user, 'marks', { [workId]: newStatusNum });
+                } else {
+                    user.marks = { [workId]: newStatusNum };
+                }
+            } else if (app.$set) {
+                app.$set(user.marks, workId, newStatusNum);
+            } else {
+                user.marks[workId] = newStatusNum;
             }
-            this.bridge.store.state.User.marks[workId] = newStatusNum;
         }
 
         this.sentUpdates.add(dedupKey);
@@ -519,10 +550,17 @@ export class AutoProgress {
         }).catch((err: unknown) => {
             Logger.error(`[AutoProgress] API Failed for ${workId}:`, err);
             this.sentUpdates.delete(dedupKey); // Allow retry
-            // Rollback optimistic update
+            // Rollback optimistic update (also via $set for reactivity)
             if (this.bridge.store.state.User?.marks) {
+                const rollbackApp = this.bridge.app as { $set?: (target: object, key: string, value: unknown) => void; $delete?: (target: object, key: string) => void };
                 if (previousStatusNum) {
-                    this.bridge.store.state.User.marks[workId] = previousStatusNum;
+                    if (rollbackApp.$set) {
+                        rollbackApp.$set(this.bridge.store.state.User.marks, workId, previousStatusNum);
+                    } else {
+                        this.bridge.store.state.User.marks[workId] = previousStatusNum;
+                    }
+                } else if (rollbackApp.$delete) {
+                    rollbackApp.$delete(this.bridge.store.state.User.marks, workId);
                 } else {
                     delete this.bridge.store.state.User.marks[workId];
                 }
@@ -613,36 +651,75 @@ export class AutoProgress {
     }
 
     /**
-     * Check if the given track is the last audio track in the entire work tree.
-     * Flattens the tree and compares by hash/src.
+     * Check if the user has finished the work — either on the last track or
+     * by completing enough tracks to count as "listened".
+     *
+     * Strategy (in priority order):
+     * 1. Queue position: if at the last track in the playback queue, reliable.
+     * 2. Work tree match: compare current track hash to last tree track hash.
+     * 3. Track coverage: if ≥80% of the work's audio tracks are in listenedTracks.
      */
     private isLastTrackInWork(track: PlayerTrack): boolean {
-        // Try the work tree first (with caching to avoid O(n) tree walk on every ~4Hz timeupdate)
-        const work = this.bridge.store.state.AudioPlayer?.work;
+        const workId = this.resolveWorkId(track);
+
+        // Strategy 1: playback queue position (most reliable — reflects actual play order)
+        const player = this.bridge.store.state.AudioPlayer;
+        const queue = player?.queue || [];
+        const queueIndex = player?.queueIndex ?? 0;
+        if (queue.length > 0 && queueIndex >= queue.length - 1) {
+            Logger.debug(`[AutoProgress] isLastTrack: YES via queue position (${queueIndex + 1}/${queue.length})`);
+            return true;
+        }
+
+        // Strategy 2: work tree last track comparison
+        const work = player?.work;
         if (work) {
-            const workId = String(work.id || '');
-            if (workId !== this.cachedFlatTracksWorkId || !this.cachedFlatTracks) {
+            const wId = String(work.id || '');
+            if (wId !== this.cachedFlatTracksWorkId || !this.cachedFlatTracks) {
                 this.cachedFlatTracks = this.flattenAudioTracks(work);
-                this.cachedFlatTracksWorkId = workId;
+                this.cachedFlatTracksWorkId = wId;
             }
             if (this.cachedFlatTracks.length > 0) {
                 const lastTrack = this.cachedFlatTracks[this.cachedFlatTracks.length - 1];
                 const trackKey = this.getTrackKey(track);
                 const lastKey = this.getTrackKey(lastTrack);
-                return !!trackKey && trackKey === lastKey;
+                if (trackKey && trackKey === lastKey) {
+                    Logger.debug(`[AutoProgress] isLastTrack: YES via tree match (key=${trackKey})`);
+                    return true;
+                }
+            }
+
+            // Strategy 3: track coverage — if ≥80% of the work's tracks are completed
+            if (workId && this.cachedFlatTracks.length > 0) {
+                const totalTracks = this.cachedFlatTracks.length;
+                let completedCount = 0;
+                for (const t of this.cachedFlatTracks) {
+                    const key = this.getTrackKey(t);
+                    if (key && this.listenedTracks.has(key)) completedCount++;
+                }
+                // Current track is finishing — count it too
+                const currentKey = this.getTrackKey(track);
+                if (currentKey && !this.listenedTracks.has(currentKey)) completedCount++;
+                const coverage = completedCount / totalTracks;
+                if (coverage >= 0.8) {
+                    Logger.debug(`[AutoProgress] isLastTrack: YES via track coverage (${completedCount}/${totalTracks} = ${(coverage * 100).toFixed(0)}%)`);
+                    return true;
+                }
             }
         }
 
-        // Fallback: use the playback queue
-        const player = this.bridge.store.state.AudioPlayer;
-        const queue = player?.queue || [];
-        const queueIndex = player?.queueIndex ?? 0;
-        if (queue.length > 0) {
-            return queueIndex >= queue.length - 1;
+        // If we have tree data but didn't match, this is genuinely not the last track
+        if (this.cachedFlatTracks && this.cachedFlatTracks.length > 1) {
+            return false;
         }
 
-        // No tree or queue data: assume last track
-        return true;
+        // No tree, no queue — single-track work or data unavailable; assume yes
+        if (queue.length === 0) {
+            Logger.debug('[AutoProgress] isLastTrack: YES (no queue/tree data, assuming single track)');
+            return true;
+        }
+
+        return false;
     }
 
     /**
@@ -679,8 +756,13 @@ export class AutoProgress {
         return /\.(mp3|wav|flac|opus|m4a|aac|ogg|wma)$/.test(name);
     }
 
+    /**
+     * Stable track identifier — prefers hash (consistent between player & tree tracks).
+     * URLs (src, mediaStreamUrl) are unreliable for comparison because the player
+     * enriches tracks with stream URLs or blob URLs that the tree tracks lack.
+     */
     private getTrackKey(track: PlayerTrack | AudioTrack | TrackItem): string | null {
-        return ('src' in track && track.src) || track.mediaStreamUrl || track.hash || track.title || null;
+        return track.hash || track.title || track.mediaStreamUrl || ('src' in track && track.src) || null;
     }
 
     // =========================================================================

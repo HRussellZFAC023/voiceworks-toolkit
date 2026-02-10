@@ -436,7 +436,7 @@ const i18nData: I18nData = {
         // Translation Toggle
         translateMode: 'Translations',
         translateModeSub: 'Translate tags, titles, and UI elements (reload required)',
-        preferLocalTranslation: 'On-device translation',
+        preferLocalTranslation: 'On-device translation (EXPERIMENTAL)',
         preferLocalTranslationSub: 'Opus-MT: JA→EN, ZH→EN locally (~105MB each). Google Translate fallback for other directions.',
         translateCnToJp: 'Chinese → Japanese',
         translateCnToJpSub: 'Silently replace Chinese text with Japanese (works even when translations are off)',
@@ -1071,7 +1071,7 @@ const i18nData: I18nData = {
         // Translation Toggle
         translateMode: '翻译',
         translateModeSub: '翻译标签、标题和界面元素（需要重新加载）',
-        preferLocalTranslation: '本地翻译',
+        preferLocalTranslation: '本地翻译 (EXPERIMENTAL)',
         preferLocalTranslationSub: 'Opus-MT 模型：JA→EN、ZH→EN 本地翻译（约105MB），其他方向使用 Google 翻译',
         translateCnToJp: '中文 → 日本語',
         translateCnToJpSub: '将中文文本替换为日语（翻译关闭时也有效）',
@@ -1706,7 +1706,7 @@ const i18nData: I18nData = {
         // Translation Toggle
         translateMode: '翻訳',
         translateModeSub: 'タグ、タイトル、UI要素を翻訳する（リロードが必要）',
-        preferLocalTranslation: 'ローカル翻訳',
+        preferLocalTranslation: 'ローカル翻訳 (EXPERIMENTAL)',
         preferLocalTranslationSub: 'Opus-MTモデル：JA→EN、ZH→EN ローカル翻訳（約105MB）。その他はGoogle翻訳',
         translateCnToJp: '中国語 → 日本語',
         translateCnToJpSub: '中国語テキストを日本語に置換する（翻訳オフでも有効）',

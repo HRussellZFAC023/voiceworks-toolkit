@@ -10,6 +10,7 @@ import type { DLsiteMetadata } from '../../types/dlsite';
 import type { Work, WorkDetail } from '../../types/api';
 import { CacheKeys, SharedCache } from '../../core/Cache';
 import { TranslationService } from '../../services/TranslationService';
+import { Priority } from '../../core/GpuScheduler';
 import { TranslatedTags } from '../TranslatedTags';
 import { MediaViewerController } from '../MediaViewerController';
 import { extractEmbeddedRjCode, extractPrimaryRjCode } from '../rjCodeUtils';
@@ -44,6 +45,14 @@ const chipTranslations = ref<Map<string, string>>(new Map());
 const currentWorkId = ref('');
 let loadRequestVersion = 0;
 let titleTranslationRequestVersion = 0;
+const METADATA_BODY_FIRST_BATCH = 20;
+const METADATA_BODY_STREAM_BATCH = 40;
+const METADATA_BODY_STREAM_YIELD_MS = 0;
+const METADATA_TRANSLATION_SCOPES = ['title', 'description', 'chips', 'body'] as const;
+const METADATA_TRANSLATION_PRIORITY = Priority.NORMAL;
+const lastDescriptionSignature = ref('');
+const lastChipSignature = ref('');
+const lastBodySignature = ref('');
 
 /** Image retry counters keyed by URL */
 const imageRetries = ref<Map<string, number>>(new Map());
@@ -223,7 +232,7 @@ function isImageLoaded(url: string): boolean {
 }
 
 async function tryBlobFallback(url: string): Promise<boolean> {
-    if (imageBlobAttempts.value.has(url) || imageBlobUrls.value.has(url)) return;
+    if (imageBlobAttempts.value.has(url) || imageBlobUrls.value.has(url)) return false;
     imageBlobAttempts.value.add(url);
     let loadedFromBlob = false;
 
@@ -339,6 +348,17 @@ function resetInjectedTitleElements(): void {
     if (h1) h1.style.display = '';
 }
 
+function getMetadataTranslationQueueKey(workId: string, scope: typeof METADATA_TRANSLATION_SCOPES[number]): string {
+    return `workmeta:${workId}:${scope}`;
+}
+
+function clearMetadataTranslationQueue(workId: string): void {
+    if (!workId) return;
+    for (const scope of METADATA_TRANSLATION_SCOPES) {
+        TranslationService.cancelPendingLocal({ cancellableKey: getMetadataTranslationQueueKey(workId, scope) });
+    }
+}
+
 // ============================================================================
 // Business Logic
 // ============================================================================
@@ -359,6 +379,10 @@ function openImageViewer(urls: string[], index: number): void {
 
 async function handleRefresh(): Promise<void> {
     if (!currentWorkId.value || !scrapeCode.value) return;
+    clearMetadataTranslationQueue(currentWorkId.value);
+    lastDescriptionSignature.value = '';
+    lastChipSignature.value = '';
+    lastBodySignature.value = '';
 
     // Invalidate cache for the scrape code
     const key = CacheKeys.dlsite(scrapeCode.value.toUpperCase());
@@ -582,9 +606,19 @@ async function translateTitle(originalTitle: string, expectedLoadVersion: number
     }
 
     try {
+        const queueKey = getMetadataTranslationQueueKey(expectedWorkId, 'title');
+        TranslationService.cancelPendingLocal({ cancellableKey: queueKey });
         const translated = cnOnlyMode.value
-            ? await TranslationService.translate(originalTitle, 'ja')
-            : await TranslationService.translate(originalTitle);
+            ? await TranslationService.translate(originalTitle, 'ja', {
+                priority: METADATA_TRANSLATION_PRIORITY,
+                cancellable: true,
+                cancellableKey: queueKey,
+            })
+            : await TranslationService.translate(originalTitle, 'en', {
+                priority: METADATA_TRANSLATION_PRIORITY,
+                cancellable: true,
+                cancellableKey: queueKey,
+            });
         if (
             expectedLoadVersion !== loadRequestVersion ||
             currentWorkId.value !== expectedWorkId ||
@@ -598,7 +632,7 @@ async function translateTitle(originalTitle: string, expectedLoadVersion: number
             return;
         }
 
-        const h1 = await SafeUtils.waitForElement('h1.text-h6');
+        const h1 = await SafeUtils.waitForElement('h1.text-h6') as HTMLElement | null;
         if (
             !h1 ||
             expectedLoadVersion !== loadRequestVersion ||
@@ -653,10 +687,19 @@ async function translateDescription(expectedLoadVersion: number, expectedWorkId:
     if ((!shouldTranslate.value && !cnToJp.value) || !meta.value?.description) return;
     const source = meta.value.description;
     if (cnOnlyMode.value && !isChinese(source)) return;
+    const targetLang = cnOnlyMode.value ? 'ja' : 'en';
+    const signature = `${targetLang}:${source}`;
+    if (signature === lastDescriptionSignature.value) return;
+    lastDescriptionSignature.value = signature;
+
     try {
-        const translated = cnOnlyMode.value
-            ? await TranslationService.translate(source, 'ja')
-            : await TranslationService.translate(source);
+        const queueKey = getMetadataTranslationQueueKey(expectedWorkId, 'description');
+        TranslationService.cancelPendingLocal({ cancellableKey: queueKey });
+        const translated = await TranslationService.translate(source, targetLang, {
+            priority: Priority.NORMAL,
+            cancellable: true,
+            cancellableKey: queueKey,
+        });
         if (
             expectedLoadVersion !== loadRequestVersion ||
             currentWorkId.value !== expectedWorkId ||
@@ -676,6 +719,10 @@ async function translateDescription(expectedLoadVersion: number, expectedWorkId:
 
 async function translateChips(expectedLoadVersion: number, expectedWorkId: string): Promise<void> {
     if (!shouldTranslate.value && !cnToJp.value) return;
+    const targetLang = cnOnlyMode.value ? 'ja' : 'en';
+    const chipSignature = `${targetLang}:${chips.value.map(chip => `${chip.key}:${chip.label}`).join('|')}`;
+    if (chipSignature === lastChipSignature.value) return;
+    lastChipSignature.value = chipSignature;
 
     const labelsToTranslate: { key: string; text: string }[] = [];
 
@@ -700,8 +747,13 @@ async function translateChips(expectedLoadVersion: number, expectedWorkId: strin
     if (labelsToTranslate.length === 0) return;
 
     try {
-        const targetLang = cnOnlyMode.value ? 'ja' : undefined;
-        const results = await TranslationService.translateBatch(labelsToTranslate.map(l => l.text), targetLang);
+        const queueKey = getMetadataTranslationQueueKey(expectedWorkId, 'chips');
+        TranslationService.cancelPendingLocal({ cancellableKey: queueKey });
+        const results = await TranslationService.translateBatch(labelsToTranslate.map(l => l.text), targetLang, {
+            priority: METADATA_TRANSLATION_PRIORITY,
+            cancellable: true,
+            cancellableKey: queueKey,
+        });
         if (
             expectedLoadVersion !== loadRequestVersion ||
             currentWorkId.value !== expectedWorkId
@@ -736,23 +788,61 @@ async function translateBodyParagraphs(expectedLoadVersion: number, expectedWork
     }).filter(t => t.length > 0);
 
     if (texts.length === 0) return;
+    const targetLang = cnOnlyMode.value ? 'ja' : 'en';
+    const bodySignature = `${targetLang}:${texts.join('\u241e')}`;
+    if (bodySignature === lastBodySignature.value) return;
+    lastBodySignature.value = bodySignature;
 
     try {
-        const targetLang = cnOnlyMode.value ? 'ja' : undefined;
-        const results = await TranslationService.translateBatch(texts, targetLang);
-        if (
-            expectedLoadVersion !== loadRequestVersion ||
-            currentWorkId.value !== expectedWorkId
-        ) {
-            return;
-        }
-        const newMap = new Map(bodyTranslations.value);
-        results.forEach((translated, i) => {
-            if (translated && translated !== texts[i]) {
-                newMap.set(i, translated);
+        const queueKey = getMetadataTranslationQueueKey(expectedWorkId, 'body');
+        TranslationService.cancelPendingLocal({ cancellableKey: queueKey });
+
+        const applyChunkResults = (chunkTexts: string[], offset: number, translatedResults: string[]) => {
+            const newMap = new Map(bodyTranslations.value);
+            translatedResults.forEach((translated, idx) => {
+                const source = chunkTexts[idx];
+                if (translated && translated !== source) {
+                    newMap.set(offset + idx, translated);
+                }
+            });
+            bodyTranslations.value = newMap;
+        };
+
+        const firstCount = Math.min(METADATA_BODY_FIRST_BATCH, texts.length);
+        if (firstCount > 0) {
+            const firstChunk = texts.slice(0, firstCount);
+            const firstResults = await TranslationService.translateBatch(firstChunk, targetLang, {
+                priority: METADATA_TRANSLATION_PRIORITY,
+                cancellable: true,
+                cancellableKey: queueKey,
+            });
+            if (
+                expectedLoadVersion !== loadRequestVersion ||
+                currentWorkId.value !== expectedWorkId
+            ) {
+                return;
             }
-        });
-        bodyTranslations.value = newMap;
+            applyChunkResults(firstChunk, 0, firstResults);
+        }
+
+        for (let start = firstCount; start < texts.length; start += METADATA_BODY_STREAM_BATCH) {
+            const chunk = texts.slice(start, start + METADATA_BODY_STREAM_BATCH);
+            const chunkResults = await TranslationService.translateBatch(chunk, targetLang, {
+                priority: METADATA_TRANSLATION_PRIORITY,
+                cancellable: true,
+                cancellableKey: queueKey,
+            });
+            if (
+                expectedLoadVersion !== loadRequestVersion ||
+                currentWorkId.value !== expectedWorkId
+            ) {
+                return;
+            }
+            applyChunkResults(chunk, start, chunkResults);
+            if (METADATA_BODY_STREAM_YIELD_MS > 0) {
+                await new Promise(resolve => setTimeout(resolve, METADATA_BODY_STREAM_YIELD_MS));
+            }
+        }
     } catch (e) {
         Logger.warn('[WorkMetadataPanel] Batch translation of body paragraphs failed:', e);
     }
@@ -781,6 +871,7 @@ async function getPageWorkDetails(id: string): Promise<(Work | WorkDetail) & Rec
 
 async function loadMetadata(id: string): Promise<void> {
     const version = ++loadRequestVersion;
+    clearMetadataTranslationQueue(id);
     titleTranslationRequestVersion++;
     resetInjectedTitleElements();
     const work = await getPageWorkDetails(id);
@@ -813,6 +904,9 @@ async function loadMetadata(id: string): Promise<void> {
     // Phase 0: Render fallback immediately for fast first paint
     if (fallback) {
         meta.value = fallback;
+        lastDescriptionSignature.value = '';
+        lastChipSignature.value = '';
+        lastBodySignature.value = '';
         // Trigger translations after fallback render
         translateDescription(version, id);
         translateChips(version, id);
@@ -830,6 +924,8 @@ async function loadMetadata(id: string): Promise<void> {
             }
             meta.value = merged;
             // Re-trigger translations on enriched data
+            lastDescriptionSignature.value = '';
+            lastChipSignature.value = '';
             descriptionTranslated.value = '';
             chipTranslations.value = new Map();
             translateDescription(version, id);
@@ -851,6 +947,9 @@ async function loadMetadata(id: string): Promise<void> {
         descriptionTranslated.value = '';
         chipTranslations.value = new Map();
         bodyTranslations.value = new Map();
+        lastDescriptionSignature.value = '';
+        lastChipSignature.value = '';
+        lastBodySignature.value = '';
         translateDescription(version, id);
         translateChips(version, id);
         translateBodyParagraphs(version, id);
@@ -866,6 +965,8 @@ async function loadMetadata(id: string): Promise<void> {
 
 watch(workId, (newId, oldId) => {
     if (newId && newId !== oldId) {
+        if (oldId) clearMetadataTranslationQueue(oldId);
+        clearMetadataTranslationQueue(newId);
         titleTranslationRequestVersion++;
         resetInjectedTitleElements();
         // Reset state for new work
@@ -873,6 +974,9 @@ watch(workId, (newId, oldId) => {
         descriptionTranslated.value = '';
         bodyTranslations.value = new Map();
         chipTranslations.value = new Map();
+        lastDescriptionSignature.value = '';
+        lastChipSignature.value = '';
+        lastBodySignature.value = '';
         detailsExpanded.value = false;
         resetImageState();
         currentWorkId.value = newId;
@@ -888,6 +992,7 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
+    clearMetadataTranslationQueue(currentWorkId.value);
     loadRequestVersion++;
     titleTranslationRequestVersion++;
     resetImageState();
