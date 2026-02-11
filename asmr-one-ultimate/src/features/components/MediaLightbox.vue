@@ -804,11 +804,14 @@ function renderVideo(wrapper: HTMLElement, item: MediaFile, url: string): void {
 
     const store = bridge.store;
     let syncTimer: number | null = null;
-    // Timestamp of the last user-initiated action on the video controls.
-    // The sync loop skips play/pause/seek adjustments for a grace period
-    // after user interaction, preventing the loop from fighting the user.
     let lastUserAction = 0;
-    const USER_ACTION_GRACE_MS = 300;
+    // Counters track sync-loop-initiated play/pause. The sync loop
+    // increments before calling video.play()/pause(). The corresponding
+    // event handler decrements and skips when > 0 (sync echo).
+    // This is deterministic — no timing races like timestamp approaches.
+    let syncPlayPending = 0;
+    let syncPausePending = 0;
+    const USER_GRACE_MS = 300;
 
     const getAudio = (): HTMLAudioElement | null => {
         return document.querySelector('audio');
@@ -825,34 +828,25 @@ function renderVideo(wrapper: HTMLElement, item: MediaFile, url: string): void {
             ? Number(audio.currentTime)
             : Number(store.state.AudioPlayer?.currentTime ?? 0);
 
-        // If the user recently interacted with the video controls, skip
-        // play/pause/seek sync entirely. This gives the PAUSE/PLAY mutations
-        // time to propagate through the host's Vue reactivity system.
-        const userActedRecently = (Date.now() - lastUserAction) < USER_ACTION_GRACE_MS;
+        const userActedRecently = (Date.now() - lastUserAction) < USER_GRACE_MS;
 
-        // Time sync: only when audio has loaded and user hasn't just seeked
+        // Time sync
         if (!userActedRecently && audioReady && Number.isFinite(nativeTime) && nativeTime >= 0 && Math.abs(video.currentTime - nativeTime) > 0.15) {
             video.currentTime = nativeTime;
         }
-        // Rate sync: always safe (no echo risk)
+        // Rate sync (no echo risk)
         if (Number.isFinite(nativeRate) && nativeRate > 0 && Math.abs(video.playbackRate - nativeRate) > 0.01) {
             video.playbackRate = nativeRate;
         }
-        // Play/pause sync: only when user hasn't recently acted
+        // Play/pause sync with counter-based echo prevention
         if (!userActedRecently) {
             if (nativePlaying && video.paused) {
-                video.play().catch(() => {});
+                syncPlayPending++;
+                video.play().catch(() => { syncPlayPending = Math.max(0, syncPlayPending - 1); });
             } else if (!nativePlaying && !video.paused) {
+                syncPausePending++;
                 video.pause();
             }
-        }
-    };
-
-    const syncVideoToNativeTime = (): void => {
-        const audio = getAudio();
-        if (!audio) return;
-        if (Math.abs(audio.currentTime - video.currentTime) > 0.05) {
-            audio.currentTime = video.currentTime;
         }
     };
 
@@ -862,22 +856,6 @@ function renderVideo(wrapper: HTMLElement, item: MediaFile, url: string): void {
             audio.playbackRate = video.playbackRate;
         }
         Config.set('playbackRate', video.playbackRate);
-    };
-
-    const requestNativePlay = (): void => {
-        try { store.commit?.('AudioPlayer/PLAY'); } catch { /* host variant */ }
-        const audio = getAudio();
-        if (audio?.paused && (audio.currentSrc || audio.src || audio.getAttribute('src'))) {
-            audio.play().catch(() => {});
-        }
-    };
-
-    const requestNativePause = (): void => {
-        try { store.commit?.('AudioPlayer/PAUSE'); } catch { /* host variant */ }
-        const audio = getAudio();
-        if (audio && !audio.paused) {
-            audio.pause();
-        }
     };
 
     video.onloadedmetadata = () => {
@@ -902,25 +880,38 @@ function renderVideo(wrapper: HTMLElement, item: MediaFile, url: string): void {
         }, 120);
     };
 
+    // CRITICAL: Event handlers ONLY commit Vuex mutations. They must NEVER
+    // call audio.play()/pause() directly — the host's AudioElement has an
+    // isLocked mutex that creates an infinite onPlaying↔onPause loop when
+    // play()/pause() is called externally while isLocked is true:
+    //   audio.play() → onPlaying() → isLocked? → player.pause() → onPause()
+    //   → isLocked? → returns (PAUSE not committed) → store still playing=true
+    //   → watcher calls player.play() → LOOP
+    // Committing mutations lets the host's own `playing` watcher handle
+    // the audio element through the proper channel (respecting isLocked).
+
     video.onplay = () => {
+        if (syncPlayPending > 0) { syncPlayPending--; return; }
         lastUserAction = Date.now();
-        syncVideoToNativeTime();
-        requestNativePlay();
+        try { store.commit?.('AudioPlayer/PLAY'); } catch { /* host variant */ }
     };
 
     video.onpause = () => {
+        if (syncPausePending > 0) { syncPausePending--; return; }
         lastUserAction = Date.now();
-        requestNativePause();
+        try { store.commit?.('AudioPlayer/PAUSE'); } catch { /* host variant */ }
     };
 
     video.onseeking = () => {
         lastUserAction = Date.now();
-        syncVideoToNativeTime();
+        const audio = getAudio();
+        if (audio && Math.abs(audio.currentTime - video.currentTime) > 0.5) {
+            audio.currentTime = video.currentTime;
+        }
     };
 
     video.onseeked = () => {
-        lastUserAction = Date.now();
-        syncVideoToNativeTime();
+        // Seek propagation handled by onseeking
     };
 
     video.onratechange = () => {
