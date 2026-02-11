@@ -121,7 +121,7 @@ export class TranslatedTags {
         }, 300); // 300ms debounce for responsiveness
 
         this.configCleanup = EventBus.on('config:change', ({ key, value, oldValue }) => {
-            if (key === 'preferLocalTranslation' && value !== oldValue) {
+            if ((key === 'translateMode' || key === 'translateCnToJp') && value !== oldValue) {
                 this.resetWorkTreeTranslationState();
                 this.augmentTags();
             }
@@ -219,8 +219,9 @@ export class TranslatedTags {
         delete el.dataset.asmrtagTranslation;
         el.classList.remove('asmr-translated');
         el.classList.remove('asmr-worktree-translation');
-        // Clean up card translation subtitle if present
-        const container = el.closest('.ellipsis-3-lines, .ellipsis-2-lines, .text-h6');
+        // Clean up card/list translation subtitle if present
+        const container = el.closest('.ellipsis-3-lines, .ellipsis-2-lines, .text-h6')
+            || (el.matches('.q-item__label.text-body2') ? el : null);
         if (container) {
             const sub = container.nextElementSibling;
             if (sub instanceof HTMLElement && sub.classList.contains('asmr-card-translation')) {
@@ -248,7 +249,8 @@ export class TranslatedTags {
                 }
                 // Work titles: translation lives in a sibling <div class="asmr-card-translation">.
                 // Vue re-render can destroy the sibling while the <a>'s data attributes survive.
-                const container = el.closest('.ellipsis-3-lines, .ellipsis-2-lines, .text-h6');
+                const container = el.closest('.ellipsis-3-lines, .ellipsis-2-lines, .text-h6')
+                    || (el.matches('.q-item__label.text-body2') ? el : null);
                 if (container) {
                     const sub = container.nextElementSibling;
                     if (sub instanceof HTMLElement && sub.classList.contains('asmr-card-translation') && sub.textContent) {
@@ -459,6 +461,40 @@ export class TranslatedTags {
                 }
             }
 
+            // 6b. Work Titles in list view (favourites, reviews, playlists, etc.)
+            // List view uses .q-item layout with .q-item__label.text-body2 instead of card layout
+            const listWorkLabels = document.querySelectorAll('.q-list .q-item__label.text-body2') as NodeListOf<HTMLElement>;
+            for (const el of listWorkLabels) {
+                // Only process work items — verify parent .q-item has a work link
+                const qItem = el.closest('.q-item');
+                if (!qItem || !qItem.querySelector('a[href*="/work/"]')) continue;
+                if (this.processedElements.has(el)) {
+                    if (this.shouldSkipTranslation(el, this.extractBaseText(el))) continue;
+                }
+
+                const text = this.extractBaseText(el);
+                if (!text || !this.looksJapanese(text)) continue;
+                if (cnOnlyMode && !isChinese(text)) continue;
+                if (this.shouldSkipAutoTranslate(text, targetLang)) continue;
+
+                this.markTranslationPending(el, text);
+                if (cnOnlyMode) {
+                    pending.push({ el, originalText: text, translateKey: text, format: 'raw', apply: (v) => { el.textContent = v; } });
+                } else {
+                    pending.push({ el, originalText: text, translateKey: text, format: 'raw', apply: (v) => {
+                        let sub = el.nextElementSibling as HTMLElement;
+                        if (!sub || !sub.classList.contains('asmr-card-translation')) {
+                            sub = document.createElement('div');
+                            sub.className = 'asmr-card-translation';
+                            el.after(sub);
+                        }
+                        sub.textContent = v;
+                        sub.title = v;
+                        el.title = v;
+                    } });
+                }
+            }
+
         } finally {
             this.endDOMModification();
         }
@@ -497,7 +533,7 @@ export class TranslatedTags {
             }
         }
 
-        TranslationService.cancelPendingLocal({ cancellableKey: queueKey });
+        TranslationService.cancelPending({ cancellableKey: queueKey });
         TranslationService.translateBatch(uniqueKeys, targetLang, {
             priority: TAG_TRANSLATION_PRIORITY,
             cancellable: true,
@@ -550,8 +586,7 @@ export class TranslatedTags {
         scopeKey?: string
     ): void {
         if (!translated || translated === original) {
-            const retryDelay = TranslationService.hasLocalTranslator() ? 2000
-                : TranslationService.isRateLimited() ? 60000 : 15000;
+            const retryDelay = TranslationService.isRateLimited() ? 60000 : 15000;
             Logger.debug('[TranslatedTags] Translation unchanged or empty, will retry', {
                 original: original.slice(0, 50),
                 retryInMs: retryDelay,
@@ -725,12 +760,12 @@ export class TranslatedTags {
 
     private cancelTranslationQueueForRouteKey(routeKey?: string): void {
         if (!routeKey) return;
-        TranslationService.cancelPendingLocal({ cancellableKey: this.buildTranslationQueueKey(routeKey) });
+        TranslationService.cancelPending({ cancellableKey: this.buildTranslationQueueKey(routeKey) });
     }
 
     private cancelActiveTranslationQueue(): void {
         if (!this.activeQueueKey) return;
-        TranslationService.cancelPendingLocal({ cancellableKey: this.activeQueueKey });
+        TranslationService.cancelPending({ cancellableKey: this.activeQueueKey });
         this.activeQueueKey = '';
     }
 

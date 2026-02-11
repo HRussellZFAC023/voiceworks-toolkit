@@ -33,7 +33,6 @@ interface ListVm extends KikoeruApp {
 
 const LIST_ROUTES = new Set(['/tags', '/circles', '/vas']);
 const BATCH_SIZE = 30;
-const MAX_TRANSLATE_ITEMS = 200;
 const FIND_RETRY_DELAY = 200;
 const FIND_MAX_RETRIES = 3;
 
@@ -244,8 +243,7 @@ export class ListSearchEnhancer {
         const token = ++this.augmentationToken;
 
         const toTranslate = vm.items
-            .filter(item => !item._origName && this.looksJapanese(item.name))
-            .slice(0, MAX_TRANSLATE_ITEMS);
+            .filter(item => !item._origName && this.looksJapanese(item.name));
 
         if (toTranslate.length === 0) return;
 

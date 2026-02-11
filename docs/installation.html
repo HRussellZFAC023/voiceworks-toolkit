@@ -65,7 +65,7 @@
             <p>Visit the Settings page to customize your experience. Key options include:</p>
             <ul style="margin-top: 8px; padding-left: 20px; color: var(--text-secondary);">
               <li>Whisper model selection and language</li>
-              <li>Translation model download</li>
+              <li>Web translation controls</li>
               <li>Jina API key for semantic search</li>
               <li>Radio mode and playlist preferences</li>
               <li>Learner mode display settings</li>
@@ -100,7 +100,7 @@ npm run build</code></pre>
 
         <h2>AI Model Downloads</h2>
 
-        <p>AI features (transcription and translation) require downloading models on first use. This happens automatically when you enable each feature:</p>
+        <p>Whisper transcription requires a one-time model download on first use. Other AI features run without additional model downloads:</p>
 
         <div class="feature-list">
           <div class="feature-item">
@@ -108,8 +108,8 @@ npm run build</code></pre>
             <p>Downloads the Whisper model (~150 MB) when you first enable live transcription. The model is cached in the browser and reused across sessions. You can choose the model size and quantization in Settings.</p>
           </div>
           <div class="feature-item">
-            <h3>Translation Models</h3>
-            <p>Downloads the Opus-MT translation model (~80 MB) when you click "Download Model" in Translation Settings. WebGPU uses fp16 precision; WASM fallback uses quantized variants for reduced memory usage.</p>
+            <h3>Web Translation</h3>
+            <p>Translations use a remote web pipeline with caching, retries, and rate-limit handling. No extra model download is required.</p>
           </div>
           <div class="feature-item">
             <h3>Semantic Search</h3>

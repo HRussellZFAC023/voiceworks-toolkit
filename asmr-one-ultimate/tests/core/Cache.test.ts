@@ -278,13 +278,13 @@ describe('CacheKeys', () => {
 
     it('should generate translation key with hash', () => {
         const key = CacheKeys.translation('こんにちは', 'en');
-        expect(key).toMatch(/^asmr-ult:trans:auto:en:/);
+        expect(key).toMatch(/^asmr-ult:trans:remote:en:/);
     });
 
     it('should generate different keys for different source types', () => {
-        const local = CacheKeys.translation('text', 'en', 'local');
+        const auto = CacheKeys.translation('text', 'en', 'auto');
         const remote = CacheKeys.translation('text', 'en', 'remote');
-        expect(local).not.toBe(remote);
+        expect(auto).not.toBe(remote);
     });
 
     it('should generate consistent hashes for same input', () => {

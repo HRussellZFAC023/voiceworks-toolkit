@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, onUnmounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted } from 'vue';
 import SettingsToggle from './SettingsToggle.vue';
 import SettingsInput from './SettingsInput.vue';
 import SettingsHotkeyInput from './SettingsHotkeyInput.vue';
@@ -12,7 +12,6 @@ import { TranslationService } from '../../services/TranslationService';
 import { CacheKeys, SharedCache } from '../../core/Cache';
 import { Logger } from '../../core/Utils';
 import { Whisper } from '../Whisper';
-import type { ConfigKey } from '../../types';
 // @ts-ignore – Vite ?raw import
 import PROXY_WORKER_CODE from '../../../dlsite-proxy-worker.js?raw';
 
@@ -26,7 +25,6 @@ const enablePlayerTranslator = useConfig('enablePlayerTranslator');
 const autoProgress = useConfig('autoProgress');
 const playlistAutoProgress = useConfig('playlistAutoProgress');
 const enableStoreBackup = useConfig('enableStoreBackup');
-const preferLocalTranslation = useConfig('preferLocalTranslation');
 const enableJpdb = useConfig('enableJpdb');
 
 const sectionVisibility = computed(() => ({
@@ -132,64 +130,6 @@ function downloadWhisperModel() {
     catch (e) { Logger.warn('[SettingsPanel] Failed to warmup Whisper model:', e); }
 }
 
-// ============================================================================
-// Translation status
-// ============================================================================
-
-interface ModelProgress { isLoading: boolean; progress: number; message: string; }
-const modelProgressMap = reactive(new Map<string, ModelProgress>());
-
-/** Aggregate: is ANY model currently loading? */
-const translationIsLoading = computed(() => {
-    for (const v of modelProgressMap.values()) { if (v.isLoading) return true; }
-    return false;
-});
-/** Aggregate: are ALL models done? */
-const translationAllDone = computed(() => {
-    if (modelProgressMap.size === 0) return TranslationService.hasLocalTranslator();
-    for (const v of modelProgressMap.values()) { if (v.isLoading || v.progress < 100) return false; }
-    return true;
-});
-
-const translationDownloadLabel = computed(() => {
-    if (translationIsLoading.value) {
-        const baseMessage = t('downloadTranslationModelLoading');
-        const parts: string[] = [];
-        for (const [model, status] of modelProgressMap) {
-            if (!status.isLoading) continue;
-            const short = model.replace('Xenova/', '').replace('opus-mt-', '');
-            const capped = Math.min(99, Math.max(0, status.progress || 0));
-            parts.push(capped > 0 ? `${short} (${Math.round(capped)}%)` : short);
-        }
-        return parts.length > 0 ? `${baseMessage} - ${parts.join(', ')}` : baseMessage;
-    } else if (translationAllDone.value) {
-        const loadedModels = TranslationService.getLoadedModels();
-        if (loadedModels.length > 0) {
-            const modelNames = loadedModels
-                .filter(m => m.ready)
-                .map(m => m.model.replace('Xenova/', '').replace('opus-mt-', ''))
-                .join(', ');
-            return modelNames ? format('modelsLoaded', { models: modelNames }) : (t('downloadModelReady') || 'Ready');
-        }
-        return t('downloadModelReady') || 'Ready';
-    }
-    // Fallback: show first message if available
-    for (const v of modelProgressMap.values()) { if (v.message) return v.message; }
-    return t('autoModelSelection');
-});
-
-const translationDownloadIcon = computed(() => {
-    if (translationIsLoading.value) return 'hourglass_empty';
-    if (translationAllDone.value) return 'check';
-    return 'download';
-});
-
-const translationDownloadDisabled = computed(() => translationIsLoading.value);
-
-function downloadTranslationModel() {
-    void ensureLocalTranslationModelsReady('downloadModelFailed');
-}
-
 function clearTranslationCache() {
     if (!window.confirm(t('clearTranslationCacheConfirm'))) return;
     const count = TranslationService.clearCache();
@@ -212,19 +152,6 @@ async function factoryReset() {
     if (!window.confirm(t('factoryResetConfirm'))) return;
     if (!window.confirm(t('factoryResetConfirm2'))) return;
     await StorageManager.nuke();
-}
-
-// ============================================================================
-// Feature toggle change handlers
-// ============================================================================
-
-function onToggleChange(key: ConfigKey, newVal: boolean) {
-    if (key === 'preferLocalTranslation' && newVal) {
-        void ensureLocalTranslationModelsReady('downloadModelFailed');
-    } else if (key === 'preferLocalTranslation' && !newVal) {
-        TranslationService.disableLocalTranslation('user-disabled');
-        modelProgressMap.clear();
-    }
 }
 
 // ============================================================================
@@ -276,22 +203,6 @@ on('whisper:fallback', (payload) => {
     updateWhisperModelStatus();
 });
 
-on('translation:progress', (payload) => {
-    const model = payload?.model || 'unknown';
-    if (payload?.stage === 'ready') {
-        modelProgressMap.set(model, { isLoading: false, progress: 100, message: '' });
-        modelProgressMap.delete('auto'); // clear the placeholder
-        return;
-    }
-    const existing = modelProgressMap.get(model);
-    if (existing && !existing.isLoading && existing.progress === 100 && payload?.stage === 'model') return; // already done
-    modelProgressMap.set(model, {
-        isLoading: payload?.stage === 'model',
-        progress: payload?.percent ?? 0,
-        message: payload?.message || '',
-    });
-});
-
 // ============================================================================
 // Initialization
 // ============================================================================
@@ -303,10 +214,6 @@ onMounted(() => {
     }
     updateWhisperModelStatus();
 
-    // Auto-load translation models if local translation is enabled
-    if (preferLocalTranslation.value !== false) {
-        void ensureLocalTranslationModelsReady('downloadModelFailed');
-    }
 });
 
 // ============================================================================
@@ -338,28 +245,6 @@ onUnmounted(() => {
         proxyCopyTimer = null;
     }
 });
-
-async function ensureLocalTranslationModelsReady(errorI18nKey: string): Promise<void> {
-    if (TranslationService.hasLocalTranslator()) {
-        modelProgressMap.delete('auto');
-        return;
-    }
-
-    modelProgressMap.set('auto', { isLoading: true, progress: 0, message: t('downloadModelSub') });
-
-    try {
-        await TranslationService.ensureLocalModelReady();
-        modelProgressMap.delete('auto');
-    } catch (e) {
-        Logger.warn('[SettingsPanel] Failed to ensure translation model ready:', e);
-        const message = (e as Error)?.message || t('whisperUnknownError');
-        modelProgressMap.set('auto', {
-            isLoading: false,
-            progress: 0,
-            message: format(errorI18nKey, { message }),
-        });
-    }
-}
 
 async function copyText(text: string): Promise<boolean> {
     try {
@@ -405,7 +290,6 @@ const credits = [
     { name: 'Tampermonkey', url: 'https://www.tampermonkey.net', descKey: 'creditsTampermonkey' },
     // AI & ML Models
     { name: 'OpenAI Whisper', url: 'https://github.com/openai/whisper', descKey: 'creditsWhisper' },
-    { name: 'Helsinki-NLP / Opus-MT', url: 'https://github.com/Helsinki-NLP/Opus-MT', descKey: 'creditsOpusMT' },
     { name: 'Xenova / onnx-community', url: 'https://huggingface.co/onnx-community', descKey: 'creditsXenova' },
     { name: 'Jina AI', url: 'https://jina.ai', descKey: 'creditsJina' },
     { name: 'Google Translate', url: 'https://translate.google.com', descKey: 'creditsGoogleTranslate' },
@@ -462,7 +346,7 @@ const credits = [
             <hr class="q-separator q-separator--horizontal q-separator--dark">
             <SettingsToggle config-key="enableLearnerMode" :label="t('enableLearnerMode')" :sublabel="t('enableLearnerModeSub')" icon="school" />
             <hr class="q-separator q-separator--horizontal q-separator--dark">
-            <SettingsToggle config-key="enableJpdb" :label="t('enableJpdb')" :sublabel="t('enableJpdbSub')" icon="menu_book" @change="onToggleChange" />
+            <SettingsToggle config-key="enableJpdb" :label="t('enableJpdb')" :sublabel="t('enableJpdbSub')" icon="menu_book" />
             <hr class="q-separator q-separator--horizontal q-separator--dark">
             <SettingsToggle config-key="learnerBlur" :label="t('learnerBlurLabel')" :sublabel="t('learnerBlurSub')" icon="blur_on" />
             <hr class="q-separator q-separator--horizontal q-separator--dark">
@@ -474,7 +358,7 @@ const credits = [
             <hr class="q-separator q-separator--horizontal q-separator--dark">
             <SettingsToggle config-key="enableWorkMetadata" :label="t('enableWorkMetadata')" :sublabel="t('enableWorkMetadataSub')" icon="info" />
             <hr class="q-separator q-separator--horizontal q-separator--dark">
-            <SettingsToggle config-key="enablePlayerTranslator" :label="t('enablePlayerTranslator')" :sublabel="t('enablePlayerTranslatorSub')" icon="translate" @change="onToggleChange" />
+            <SettingsToggle config-key="enablePlayerTranslator" :label="t('enablePlayerTranslator')" :sublabel="t('enablePlayerTranslatorSub')" icon="translate" />
             <hr class="q-separator q-separator--horizontal q-separator--dark">
             <SettingsToggle config-key="enableSupportButton" :label="t('enableSupportButton')" :sublabel="t('enableSupportButtonSub')" icon="favorite" />
             <hr class="q-separator q-separator--horizontal q-separator--dark">
@@ -670,40 +554,7 @@ const credits = [
         <template v-if="sectionVisibility.translation">
             <span class="text-weight-medium text-center flex q-my-md asmr-settings-header" id="asmr-translation-settings-section-header">{{ t('translationSettings') }}</span>
             <div id="asmr-translation-settings-section" class="asmr-settings-section rounded-borders q-list q-list--bordered q-list--dark bg-black" role="group" aria-labelledby="asmr-translation-settings-section-header">
-                <SettingsToggle config-key="preferLocalTranslation" :label="t('preferLocalTranslation')" :sublabel="t('preferLocalTranslationSub')" icon="offline_bolt" @change="onToggleChange" />
-                <hr class="q-separator q-separator--horizontal q-separator--dark">
                 <SettingsToggle config-key="translateCnToJp" :label="t('translateCnToJp')" :sublabel="t('translateCnToJpSub')" icon="swap_horiz" />
-                <hr class="q-separator q-separator--horizontal q-separator--dark">
-
-                <!-- Download Translation Model -->
-                <div role="listitem" class="q-py-sm q-item q-item-type row no-wrap q-item--dark">
-                    <div class="q-item__section column q-item__section--avatar q-item__section--side justify-center">
-                        <i class="q-icon notranslate material-icons asmr-settings-icon" aria-hidden="true" role="presentation">cloud_download</i>
-                    </div>
-                    <div class="q-item__section column q-item__section--main justify-center">
-                        <div class="q-item__label"><span class="text-weight-medium">{{ t('downloadModel') }}</span></div>
-                        <div class="q-item__label q-item__label--caption text-caption">
-                            <span class="text-weight-medium">{{ translationDownloadLabel }}</span>
-                        </div>
-                    </div>
-                    <div class="q-item__section column q-item__section--side justify-center">
-                        <button
-                            tabindex="0"
-                            type="button"
-                            class="q-btn q-btn-item non-selectable no-outline q-btn--standard q-btn--rectangle q-btn--actionable q-focusable q-hoverable"
-                            :class="{ disabled: translationDownloadDisabled }"
-                            :disabled="translationDownloadDisabled"
-                            :aria-label="t('downloadModel') || 'Download translation model'"
-                            :title="t('downloadModel') || 'Download translation model'"
-                            @click="downloadTranslationModel"
-                        >
-                            <span class="q-focus-helper"></span>
-                            <span class="q-btn__content text-center col items-center q-anchor--skip justify-center row">
-                                <i class="q-icon notranslate material-icons" aria-hidden="true" role="presentation">{{ translationDownloadIcon }}</i>
-                            </span>
-                        </button>
-                    </div>
-                </div>
                 <hr class="q-separator q-separator--horizontal q-separator--dark">
 
                 <!-- Clear Translation Cache -->

@@ -1,8 +1,8 @@
 /**
  * GpuScheduler — Main-thread GPU work coordinator
  *
- * Uses **per-worker queues and leases** so that different workers (Translation,
- * Embedding, Whisper) can run inference concurrently — they own separate GPU
+ * Uses **per-worker queues and leases** so that different workers (Embedding,
+ * Whisper) can run inference concurrently — they own separate GPU
  * devices and don't contend.  Within a single worker, tasks are serialized to
  * prevent queue flooding and GPU buffer exhaustion (e.g. fast-scrolling pages
  * that generate hundreds of translation requests).
@@ -12,8 +12,8 @@
  *
  * Priority levels:
  *   REALTIME (0) — current subtitle line, live whisper segment
- *   HIGH (1)     — near-playhead whisper, player bar translation
- *   NORMAL (2)   — batch preTranslateAll, page translations
+ *   HIGH (1)     — near-playhead whisper
+ *   NORMAL (2)   — interactive embedding tasks
  *   LOW (3)      — embedding indexing, background prefetch
  */
 
@@ -36,7 +36,7 @@ export const enum Priority {
     LOW = 3,
 }
 
-export type WorkerName = 'translation' | 'embedding' | 'whisper';
+export type WorkerName = 'embedding' | 'whisper';
 
 export interface SchedulerTask<T = unknown> {
     priority: Priority;
@@ -191,7 +191,6 @@ class GpuSchedulerImpl {
     private activeLeases = new Set<WorkerName>();
 
     private healthByWorker = new Map<WorkerName, HealthState>([
-        ['translation', createHealthState()],
         ['embedding', createHealthState()],
         ['whisper', createHealthState()],
     ]);

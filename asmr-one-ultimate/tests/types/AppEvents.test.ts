@@ -52,8 +52,7 @@ const EXPECTED_EVENTS = [
     'viz:toggle',
     'flatview:toggle',
     'lang:change',
-    // Translation & embedding
-    'translation:progress',
+    // Embedding
     'embedding:progress',
     // Fullscreen
     'fullscreen:enter',

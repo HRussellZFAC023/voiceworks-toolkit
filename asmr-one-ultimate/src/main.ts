@@ -35,7 +35,6 @@ import { initReactiveConfig } from './store/ReactiveConfig';
 import { DialogStyles, Logger, I18n, Config } from './core/Utils';
 import { DeviceCapabilities } from './core/DeviceCapabilities';
 import { GpuScheduler } from './core/GpuScheduler';
-import { TranslationService } from './services/TranslationService';
 import { EmbeddingService } from './services/EmbeddingService';
 import { CentralObserver } from './core/CentralObserver';
 import { EventBus } from './core/EventBus';
@@ -235,38 +234,23 @@ async function initialize(): Promise<void> {
         // Initialize GPU scheduler before any worker creation
         GpuScheduler.initialize();
 
-        // Eagerly warm up ML models — serialized via GpuScheduler load leases.
-        // Each worker acquires a load lease before model loading (requestAdapter +
-        // requestDevice + ONNX compile). Only one model loads at a time to prevent
-        // "Failed to create WebGPU Context Provider" and OOM tab crashes.
+        // Eagerly warm up remaining ML models — serialized via GpuScheduler load leases.
+        // Whisper loads on first use; translation is remote-only.
         const budget = DeviceCapabilities.budget;
-        const warmTranslation = Config.get('preferLocalTranslation') !== false &&
-            (Config.get('enablePlayerTranslator') || Config.get('enableLearnerMode'));
         const warmEmbedding = Config.get('enableVectorSearch') && budget.embeddingEnabled;
 
         if (!budget.embeddingEnabled && Config.get('enableVectorSearch')) {
             Logger.log('[Device] Embedding disabled on constrained device — vector search unavailable');
         }
 
-        if (DeviceCapabilities.shouldWarmup && (warmTranslation || warmEmbedding)) {
-            // Sequential warmup: Translation → Embedding (Whisper loads on first use).
-            // GpuScheduler load leases enforce exclusivity even for lazy/on-demand loading.
-            Logger.log('[Warmup] Starting serialized ML warmup (Translation → Embedding)');
-            if (warmTranslation) {
-                Logger.log('[Warmup] Loading translation models...');
-                await TranslationService.ensureLocalModelReady().catch((e) => {
-                    Logger.warn('[Warmup] Translation warmup failed (non-critical):', e?.message || e);
-                });
-                Logger.log('[Warmup] Translation warmup complete');
-            }
-            if (warmEmbedding) {
-                Logger.log('[Warmup] Loading embedding model...');
-                await EmbeddingService.ensureReady().catch((e) => {
-                    Logger.warn('[Warmup] Embedding warmup failed (non-critical):', e?.message || e);
-                });
-                Logger.log('[Warmup] Embedding warmup complete');
-            }
-        } else if (!DeviceCapabilities.shouldWarmup && (warmTranslation || warmEmbedding)) {
+        if (DeviceCapabilities.shouldWarmup && warmEmbedding) {
+            Logger.log('[Warmup] Starting ML warmup (Embedding)');
+            Logger.log('[Warmup] Loading embedding model...');
+            await EmbeddingService.ensureReady().catch((e) => {
+                Logger.warn('[Warmup] Embedding warmup failed (non-critical):', e?.message || e);
+            });
+            Logger.log('[Warmup] Embedding warmup complete');
+        } else if (!DeviceCapabilities.shouldWarmup && warmEmbedding) {
             Logger.log('[Device] Skipping eager ML warmup — models load on first use');
         } else {
             Logger.log('[Warmup] No ML features enabled for warmup');

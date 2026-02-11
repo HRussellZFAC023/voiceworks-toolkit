@@ -63,8 +63,8 @@ function getCommentTranslationQueueKey(workId: string | null, scope: 'preload' |
 }
 
 function clearCommentTranslationQueues(workId: string | null): void {
-    TranslationService.cancelPendingLocal({ cancellableKey: getCommentTranslationQueueKey(workId, 'preload') });
-    TranslationService.cancelPendingLocal({ cancellableKey: getCommentTranslationQueueKey(workId, 'paragraphs') });
+    TranslationService.cancelPending({ cancellableKey: getCommentTranslationQueueKey(workId, 'preload') });
+    TranslationService.cancelPending({ cancellableKey: getCommentTranslationQueueKey(workId, 'paragraphs') });
 }
 
 // ---------------------------------------------------------------------------

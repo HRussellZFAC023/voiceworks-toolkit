@@ -217,7 +217,6 @@ export interface PluginConfig {
     transcriptSyncCollection: string;
 
     // Translation
-    preferLocalTranslation: boolean;
     translateCnToJp: boolean;
 
     // Folder Selection
@@ -428,8 +427,7 @@ export interface AppEvents {
     'whisper:fallback': { originalModel: string; fallbackModel: string; reason?: string };
     'whisper:cache-updated': { trackKey: string; cacheKey: string };
     'whisper:segment-translated': { count: number };
-    // Translation & embedding progress
-    'translation:progress': { percent: number; message: string; stage: string; model?: string };
+    // Embedding progress
     'embedding:progress': { percent: number; message: string; stage: string };
     // Fullscreen events
     'fullscreen:enter': void;
@@ -445,8 +443,8 @@ export interface AppEvents {
     'playlist:loopToggled': { enabled: boolean };
     // GPU coordination
     'webgpu:failed': { source: string };
-    'gpu:device-lost': { worker: 'translation' | 'embedding' | 'whisper' };
-    'gpu:device-lost-broadcast': { source: 'translation' | 'embedding' | 'whisper' };
+    'gpu:device-lost': { worker: 'embedding' | 'whisper' };
+    'gpu:device-lost-broadcast': { source: 'embedding' | 'whisper' };
     'whisper:transcribing': { active: boolean };
     'embedding:dead': {};
     'embedding:gpu-failed': {};

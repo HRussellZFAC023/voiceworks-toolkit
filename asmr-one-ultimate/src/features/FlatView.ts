@@ -84,7 +84,7 @@ export class FlatView {
             this.unwatchTrack();
             this.unwatchTrack = null;
         }
-        TranslationService.cancelPendingLocal({ cancellableKey: this.getTranslationQueueKey() });
+        TranslationService.cancelPending({ cancellableKey: this.getTranslationQueueKey() });
         EventBus.emit('flatview:toggle', { active: false });
     }
 
@@ -96,7 +96,7 @@ export class FlatView {
 
     public disable(): void {
         if (this.isActive) this.hide();
-        TranslationService.cancelPendingLocal({ cancellableKey: this.getTranslationQueueKey() });
+        TranslationService.cancelPending({ cancellableKey: this.getTranslationQueueKey() });
         if (this.unwatchWork) {
             this.unwatchWork();
             this.unwatchWork = null;
@@ -437,7 +437,7 @@ export class FlatView {
 
         try {
             const queueKey = this.getTranslationQueueKey();
-            TranslationService.cancelPendingLocal({ cancellableKey: queueKey });
+            TranslationService.cancelPending({ cancellableKey: queueKey });
             const translated = await TranslationService.translateBatch(textsToTranslate, 'en', {
                 priority: FlatView.TRANSLATION_PRIORITY,
                 cancellable: true,

@@ -1,6 +1,6 @@
 # Voiceworks Ultimate
 
-A comprehensive browser-based toolkit for Japanese language learning through immersion with native voiceworks. Runs as a [Tampermonkey](https://www.tampermonkey.net/) userscript on [asmr.one](https://asmr.one), enhancing the platform with on-device AI transcription, real-time neural translation, and dozens of study and quality-of-life features — all running locally in your browser with no external server dependencies.
+A comprehensive browser-based toolkit for Japanese language learning through immersion with native voiceworks. Runs as a [Tampermonkey](https://www.tampermonkey.net/) userscript on [asmr.one](https://asmr.one), enhancing the platform with on-device AI transcription, real-time translation, and dozens of study and quality-of-life features.
 
 ## Features
 
@@ -12,8 +12,8 @@ Real-time synced subtitles purpose-built for immersion-based Japanese study. Jap
 #### Live Transcription — On-Device Speech-to-Text
 Turns any voicework into study material by transcribing audio in real-time directly from the player element — no file downloads or uploads needed. Powered by [Transformers.js](https://huggingface.co/docs/transformers.js) running the `whisper-small` model inside a dedicated Web Worker with WebGPU acceleration. Transcripts are cached per-track with a 90-day TTL for instant reloads on revisit. Supports 8 language modes (Japanese, English, Chinese, Korean, etc.) and exports to LRC, VTT, and SRT subtitle formats for use in external tools like Anki or mpv.
 
-#### Neural Translation — Local Machine Translation
-Two dedicated neural translation models (`Xenova/opus-mt-ja-en` for Japanese→English and `Xenova/opus-mt-zh-en` for Chinese→English) running entirely in-browser via Web Workers. Uses greedy decoding for fast throughput on short CJK text segments. Local translation is WebGPU-only by policy; if GPU inference fails, requests fall back to remote translation instead of WASM to avoid severe latency on constrained devices. Includes scheduler-backed priority queues, cancellable stale-batch dropping, in-flight request deduplication, and shared translation caching. Translates player titles, content tags, and UI elements with low-latency updates.
+#### Neural Translation - Web Translation Pipeline
+Translations use a remote web pipeline (Google Translate endpoints) with host rotation, retry/backoff, rate-limit cooldowns, in-flight request deduplication, stale-batch cancellation, and shared caching. This keeps subtitle, title, tag, and UI translation low-latency without extra model downloads.
 
 #### Interface Translation
 Localizes the platform's Chinese and Japanese UI strings to English using a hardcoded translation map for static elements (sort options, buttons, menus) and pattern-based regex replacements for dynamic text. Combined with the neural tag translator, this makes the entire interface accessible to English-speaking learners.
@@ -123,7 +123,7 @@ Hides all images and thumbnails site-wide for discreet browsing in public or sha
 Export all settings and preferences to a JSON file. Import to restore configuration on a new browser or after a reinstall.
 
 #### Player Translator — Track Title Translation
-Translates Japanese and Chinese track titles in the player to English in real-time using local neural MT models.
+Translates Japanese and Chinese track titles in the player to English in real-time using the web translation pipeline.
 
 #### Translated Tags — CJK Tag Translation
 Translates CJK tags throughout the entire UI (work cards, search, filters) to English using cached translations stored in IndexedDB.
@@ -194,15 +194,15 @@ src/
 ### Key Technical Patterns
 
 - **CentralObserver** — Single MutationObserver on `document.body`; features register callbacks for efficient DOM watching instead of each creating their own observer
-- **Web Workers** — Translation models and Whisper transcription run off the main thread to keep the UI responsive during inference
+- **Web Workers** - Whisper transcription runs off the main thread to keep the UI responsive during inference
 - **GPU Scheduler** — Per-worker priority queues with serialized model-load leases, keyed cancellable tasks, and per-worker circuit breakers to prevent GPU queue flooding
-- **WebGPU Policy** — Translation and Whisper run in WebGPU-first mode; translation falls back to remote inference when local GPU is unavailable, while embedding can use WASM fallback when enabled by device tier
+- **WebGPU Policy** - Whisper runs in WebGPU-first mode, while embedding can use WASM fallback when enabled by device tier
 - **WebGPU Stability Guards** — Worker/device-lost signaling, stale-batch cancellation on route/path churn, and chunked translation streaming to keep UI latency low during heavy scroll/update bursts
-- **Worker Coalescing** — Translation requests are batched in an 8ms window; single-text requests are prioritized over batch arrays to minimize latency for interactive use
+- **Remote Translation Pipeline** - Host rotation, retry/backoff, rate-limit cooldown, keyed cancellation, and shared caching keep web translation stable during live playback and scrubbing
 - **IndexedDB** — Vector embeddings, audio cache, and transcript storage using the `idb` wrapper library
 - **GM Storage** — Tampermonkey's `GM_getValue`/`GM_setValue` for user preferences and feature state that persists across site updates
 - **FeatureController** — Base class pattern for Vue SFC mounting with injection point detection and lifecycle management
-- **EventBus** — Typed publish/subscribe system for cross-feature communication (track changes, transcription events, translation ready signals)
+- **EventBus** - Typed publish/subscribe system for cross-feature communication (track changes, transcription events, and playback state)
 
 ### Technology Stack
 
@@ -211,7 +211,7 @@ src/
 | Build | Vite + [vite-plugin-monkey](https://github.com/nicennnnnnnlee/tampermonkey-vite) |
 | Language | TypeScript |
 | UI Components | Vue 3 SFCs (mounted into Vue 2 host) |
-| ML Inference | [Transformers.js](https://huggingface.co/docs/transformers.js) (Whisper, opus-mt) |
+| ML Inference | [Transformers.js](https://huggingface.co/docs/transformers.js) (Whisper) |
 | GPU Acceleration | WebGPU API with WASM fallback |
 | Vector Search | Jina Embeddings v3 API + IndexedDB |
 | Audio Analysis | Web Audio API (AnalyserNode) |

@@ -62,7 +62,7 @@ export class LearnerMode {
     // Ticker translation throttle: prevents spamming translate() every 80ms for the same text
     private lastTickerTranslationText = '';
     private lastTickerTranslationAt = 0;
-    private readonly TICKER_TRANSLATION_COOLDOWN_MS = 250;
+    private readonly TICKER_TRANSLATION_COOLDOWN_MS = 50;
 
     // Playback Speed
     private playbackRate = 1.0;
@@ -161,13 +161,6 @@ export class LearnerMode {
                 }
             }));
 
-            // Retry translation when a model becomes ready (fixes stuck fallback if model loaded late)
-            this.eventCleanups.push(EventBus.on('translation:progress', (payload) => {
-                if (payload && payload.stage === 'ready') {
-                    Logger.debug('[LearnerMode] Translation model ready, refreshing lyrics...');
-                    this.updateLyrics();
-                }
-            }));
         }
 
         // Watch Vue route changes
@@ -1079,6 +1072,10 @@ export class LearnerMode {
                             TranslationService.translate(fullText, 'ja').catch(() => { });
                         }
                     }
+                    // Look-ahead: pre-translate next 10 upcoming lines so translations are
+                    // ready before playback reaches them. Uses fire-and-forget translate()
+                    // which deduplicates via translateInFlight map.
+                    this.translateLookahead(fullText, targetLang);
                 }
 
                 if (fullText && fullText !== this.lastDisplayedText) {
@@ -1230,7 +1227,7 @@ export class LearnerMode {
                 // and gets the GpuScheduler fast-path (worker idle → immediate execution).
                 if (newLyrics.length !== this.currentLyrics.length ||
                     (newLyrics.length > 0 && newLyrics[0]?.text !== this.currentLyrics[0]?.text)) {
-                    setTimeout(() => this.preTranslateAll(newLyrics), 100);
+                    setTimeout(() => this.preTranslateAll(newLyrics), 20);
                 }
 
                 this.currentLyrics = newLyrics;
@@ -1321,6 +1318,8 @@ export class LearnerMode {
                     }
                 }).catch(() => { /* fire-and-forget: CN fallback already shown */ });
             }
+            // Look-ahead in non-whisper path too
+            this.translateLookahead(fullText, targetLang);
         }
 
         this.updateVisibility();
@@ -1338,6 +1337,30 @@ export class LearnerMode {
         this.lastTickerTranslationText = text;
         this.lastTickerTranslationAt = now;
         return true;
+    }
+
+    /**
+     * Look-ahead: fire translations for the next N lines after the current one.
+     * translate() deduplicates via translateInFlight map, so repeated calls are cheap.
+     */
+    private lastLookaheadText = '';
+    private translateLookahead(currentText: string, targetLang: string): void {
+        if (currentText === this.lastLookaheadText) return;
+        this.lastLookaheadText = currentText;
+        const lines = this.whisperActive ? this.whisperLines : this.currentLyrics;
+        const idx = lines.findIndex(l => l.text?.trim() === currentText);
+        if (idx < 0) return;
+        const LOOKAHEAD = 10;
+        const end = Math.min(lines.length, idx + 1 + LOOKAHEAD);
+        for (let i = idx + 1; i < end; i++) {
+            const t = lines[i].text?.trim();
+            if (t && !TranslationService.peekCached(t, targetLang)) {
+                TranslationService.translate(t, targetLang).catch(() => {});
+            }
+            if (t && this.isChinese(t) && targetLang !== 'ja' && !TranslationService.peekCached(t, 'ja')) {
+                TranslationService.translate(t, 'ja').catch(() => {});
+            }
+        }
     }
 
     /**
@@ -1374,11 +1397,12 @@ export class LearnerMode {
             }));
             const newWhisperLines = splitSubtitleSegments(mapped);
 
-            // Pre-translate whisper segments in background — but only for cached loads.
-            // During live whisper, Whisper.translateNewSegments() handles delta translation
-            // and fires whisper:segment-translated so updateLyrics() picks up cached results.
-            if (!this.whisperLive && TranslationService.canPrefetch(newWhisperLines.length)) {
-                setTimeout(() => this.preTranslateAll(newWhisperLines), 100);
+            // Pre-translate whisper segments in background.
+            // For cached loads, all segments are available immediately.
+            // For live whisper, Whisper.translateAhead() handles delta translation but
+            // we also fire preTranslateAll to batch-fill the cache for segments already received.
+            if (newWhisperLines.length > 0) {
+                setTimeout(() => this.preTranslateAll(newWhisperLines), 20);
             }
             this.whisperLines = newWhisperLines;
             // Don't reset lastWhisperDisplayText here — let _updateWhisperDisplay()
@@ -1593,7 +1617,7 @@ export class LearnerMode {
                 const trackKey = this.getTrackKey();
                 if (trackKey) this.lastTrackKey = trackKey;
                 this.currentLyrics = lyrics;
-                setTimeout(() => this.preTranslateAll(lyrics), 100);
+                setTimeout(() => this.preTranslateAll(lyrics), 20);
                 this.updateLyrics();
                 return true;
             }
@@ -1629,7 +1653,7 @@ export class LearnerMode {
                 const trackKey = this.getTrackKey();
                 if (trackKey) this.lastTrackKey = trackKey;
                 this.currentLyrics = lyrics;
-                setTimeout(() => this.preTranslateAll(lyrics), 100);
+                setTimeout(() => this.preTranslateAll(lyrics), 20);
                 this.updateLyrics();
                 return true;
             }
@@ -1667,7 +1691,7 @@ export class LearnerMode {
 
         Logger.debug(`[LearnerMode] Pre-translating ${uncachedTexts.length}/${texts.length} uncached lines...`);
 
-        const PRIORITY_BATCH_SIZE = 50;
+        const PRIORITY_BATCH_SIZE = 150;
         const initialBatch = uncachedTexts.slice(0, PRIORITY_BATCH_SIZE);
         const backgroundBatch = uncachedTexts.slice(PRIORITY_BATCH_SIZE);
 
@@ -1711,7 +1735,7 @@ export class LearnerMode {
         if (backgroundBatch.length > 0) {
             setTimeout(() => {
                 processBatch(backgroundBatch, 'background');
-            }, 200); // Brief delay to let initial batch start on worker
+            }, 50); // Brief delay to let initial batch start on worker
         }
     }
 

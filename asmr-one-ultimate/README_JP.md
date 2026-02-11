@@ -1,22 +1,22 @@
 # ASMR.one Ultimate
 
-[asmr.one](https://asmr.one) のコミュニティ駆動型拡張スイート。[Tampermonkey](https://www.tampermonkey.net/) ユーザースクリプトとして動作し、ローカル AI 文字起こし、リアルタイムニューラル翻訳、セマンティック検索など 25 以上の機能を搭載。すべての AI はブラウザ内でローカル実行され、外部サーバーは不要です。
+[asmr.one](https://asmr.one) のコミュニティ駆動型拡張スイート。[Tampermonkey](https://www.tampermonkey.net/) ユーザースクリプトとして動作し、ローカル AI 文字起こし、リアルタイム翻訳、セマンティック検索など 25 以上の機能を搭載して学習体験を強化します。
 
 ## 機能
 
 ### 言語学習
 
 #### 学習モード — デュアル言語字幕
-没入型日本語学習向けのリアルタイム同期字幕。日本語をプライマリ行として表示し、ぼかし可能な英語翻訳を下に表示。LRC 歌詞ファイルの自動読み込みと Whisper リアルタイム文字起こしとの統合に対応。中国語字幕は Google Translate 経由で自動的に日本語に翻訳。再生速度制御とリードタイム調整をサポート。
+没入型学習向けのリアルタイム同期字幕。日本語を主行として表示し、英語訳をぼかし表示できます。LRC 歌詞の自動読み込みと Whisper ライブ文字起こしに対応。中国語字幕は Google Translate で自動的に日本語化され、学習の主表示を日本語で維持します。
 
 #### ライブ文字起こし — オンデバイス音声認識
-プレーヤー要素から直接オーディオをキャプチャしてリアルタイム文字起こし。ファイルのダウンロードは不要。[Transformers.js](https://huggingface.co/docs/transformers.js) の `whisper-small` モデルを Web Worker 内で実行し、WebGPU アクセラレーション対応（WASM 自動フォールバック）。トラックごとに 90 日 TTL でキャッシュ。8 言語モードをサポートし、LRC・VTT・SRT 形式でエクスポート可能。
+プレーヤー要素から直接音声を取得してリアルタイム文字起こし。ファイルのダウンロード不要。[Transformers.js](https://huggingface.co/docs/transformers.js) の whisper-small を Web Worker で実行し、WebGPU を活用します。結果はトラック単位でキャッシュ（90日 TTL）され、LRC/VTT/SRT に書き出せます。
 
-#### ニューラル翻訳 — ローカル機械翻訳
-2 つの専用ニューラル翻訳モデル（`opus-mt-ja-en` 日→英、`opus-mt-zh-en` 中→英）がブラウザ内で完全に動作。貪欲デコーディングによる高速スループット。WebGPU 優先で WASM 自動フォールバック。8ms 合体ウィンドウでのバッチ処理とインフライトリクエスト重複排除に対応。
+#### ニューラル翻訳 - Web 翻訳パイプライン
+翻訳はリモート Web パイプライン（Google Translate エンドポイント）で処理し、ホストローテーション、リトライ/バックオフ、レート制限クールダウン、リクエスト重複排除、古いバッチのキャンセル、共有キャッシュを備えます。追加モデルのダウンロードなしで、字幕・タイトル・タグ・UI 翻訳を低遅延で維持します。
 
 #### インターフェース翻訳
-プラットフォームの中国語・日本語 UI 文字列を英語に翻訳。静的要素には翻訳マップ、動的テキストには正規表現ベースの置換を使用。
+中国語/日本語 UI 文字列を英語化。静的マップと正規表現ベースの動的置換を組み合わせ、英語話者でも操作しやすい UI を提供します。
 
 ### 検索と発見
 
@@ -109,7 +109,7 @@ Whisper リアルタイム文字起こしと統合されたインタラクティ
 すべての設定と環境設定を JSON ファイルにエクスポート。新しいブラウザでインポートして設定を復元。
 
 #### プレーヤー翻訳 — トラックタイトル翻訳
-ローカルニューラル MT モデルを使用して、プレーヤー内の日本語・中国語トラックタイトルをリアルタイムで英語に翻訳。
+Web 翻訳パイプラインを使って、プレーヤー内の日本語・中国語トラックタイトルをリアルタイムで英語に翻訳。
 
 #### CJK タグ翻訳
 UI 全体の CJK タグ（作品カード、検索、フィルター）を IndexedDB にキャッシュされた翻訳を使用して英語に翻訳。
@@ -180,9 +180,9 @@ src/
 ### 主要な技術パターン
 
 - **CentralObserver** — `document.body` 上の単一 MutationObserver。機能モジュールがコールバックを登録して効率的に DOM を監視
-- **Web Workers** — 翻訳モデルと Whisper 文字起こしをメインスレッド外で実行し、UI の応答性を維持
-- **WebGPU + WASM** — ML モデル推論の GPU アクセラレーション。CPU/WASM への自動フォールバック
-- **Worker 合体** — 翻訳リクエストを 8ms ウィンドウでバッチ処理。単一テキストリクエストをバッチ配列より優先
+- **Web Workers** - Whisper 文字起こしをメインスレッド外で実行し、UI 応答性を維持
+- **WebGPU + WASM** - Whisper は WebGPU 優先、埋め込みモデルは端末能力に応じて WASM へフォールバック
+- **リモート翻訳パイプライン** - ホストローテーション、リトライ/バックオフ、レート制限クールダウン、キャンセル可能タスク、共有キャッシュで再生中やシーク時の翻訳を安定化
 - **IndexedDB** — `idb` ライブラリによるベクトル埋め込み、オーディオキャッシュ、文字起こしストレージ
 - **GM Storage** — Tampermonkey の `GM_getValue`/`GM_setValue` によるユーザー設定の永続化
 
@@ -193,7 +193,7 @@ src/
 | ビルド | Vite + [vite-plugin-monkey](https://github.com/nicennnnnnnlee/tampermonkey-vite) |
 | 言語 | TypeScript |
 | UI コンポーネント | Vue 3 SFC（Vue 2 ホストにマウント） |
-| ML 推論 | [Transformers.js](https://huggingface.co/docs/transformers.js)（Whisper、opus-mt） |
+| ML 推論 | [Transformers.js](https://huggingface.co/docs/transformers.js)（Whisper） |
 | GPU アクセラレーション | WebGPU API + WASM フォールバック |
 | ベクトル検索 | Jina Embeddings v3 API + IndexedDB |
 | オーディオ分析 | Web Audio API（AnalyserNode） |

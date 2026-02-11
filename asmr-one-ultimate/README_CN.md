@@ -1,19 +1,19 @@
 # ASMR.one 终极增强
 
-社区驱动的 [asmr.one](https://asmr.one) 增强套件，以 [Tampermonkey](https://www.tampermonkey.net/) 用户脚本形式运行。提供本地 AI 语音转录、实时神经网络翻译、语义搜索等 25+ 项功能，所有 AI 均在浏览器本地运行，无需外部服务器。
+社区驱动的 [asmr.one](https://asmr.one) 增强套件，以 [Tampermonkey](https://www.tampermonkey.net/) 用户脚本形式运行。提供本地 AI 语音转录、实时翻译、语义搜索等 25+ 项功能，兼顾性能与学习体验。
 
 ## 功能
 
 ### 语言学习
 
 #### 学习模式 — 双语字幕
-实时同步字幕，专为沉浸式日语学习设计。日文显示为主行，英文翻译可模糊显示在下方。自动加载 LRC 歌词文件，并与 Whisper 实时转录集成。中文字幕通过 Google Translate 自动翻译为日文。支持播放速度控制和可配置的字幕提前量。
+实时同步字幕，专为沉浸式日语学习设计。日文显示为主行，英文翻译可模糊显示在下方。自动加载 LRC 歌词文件，并与 Whisper 实时转录集成。中文字幕通过 Google Translate 自动翻译为日文，便于持续保持日语主线学习。
 
 #### 实时转录 — 本地语音转文字
-直接从播放器元素捕获音频进行实时转录，无需下载文件。基于 [Transformers.js](https://huggingface.co/docs/transformers.js) 的 `whisper-small` 模型，在 Web Worker 中运行，支持 WebGPU 加速（自动回退至 WASM）。转录结果按音轨缓存（90 天 TTL）。支持 8 种语言模式，可导出为 LRC、VTT 和 SRT 格式。
+直接从播放器元素捕获音频进行实时转录，无需下载文件。基于 [Transformers.js](https://huggingface.co/docs/transformers.js) 的 whisper-small 模型，在 Web Worker 中运行并支持 WebGPU 加速。转录结果按音轨缓存（90 天 TTL），支持导出 LRC、VTT、SRT。
 
-#### 神经翻译 — 本地机器翻译
-两个专用神经翻译模型（`opus-mt-ja-en` 日→英，`opus-mt-zh-en` 中→英）完全在浏览器内运行。贪心解码实现快速吞吐，WebGPU 优先并自动回退至 WASM。支持 8ms 合并窗口的批处理和请求去重。
+#### 神经翻译 - Web 翻译管线
+翻译走远程 Web 管线（Google Translate 端点），具备主机轮换、重试退避、限流冷却、请求去重、可取消的过期批次以及共享缓存。无需额外下载模型，也能保持字幕、标题、标签和 UI 翻译的低延迟。
 
 #### 界面翻译
 将平台的中日文 UI 字符串翻译为英文，使用静态翻译映射和基于正则的动态文本替换，使整个界面对英语学习者可访问。
@@ -109,7 +109,7 @@
 将所有设置和偏好导出为 JSON 文件，可在新浏览器上导入恢复。
 
 #### 播放器翻译 — 音轨标题翻译
-使用本地神经 MT 模型实时将播放器中的日文和中文音轨标题翻译为英文。
+通过 Web 翻译管线实时将播放器中的日文和中文音轨标题翻译为英文。
 
 #### CJK 标签翻译
 将整个 UI 中的 CJK 标签（作品卡片、搜索、过滤器）翻译为英文，使用 IndexedDB 缓存翻译结果。
@@ -180,9 +180,9 @@ src/
 ### 关键技术模式
 
 - **CentralObserver** — document.body 上的单一 MutationObserver，功能模块注册回调以高效监听 DOM 变化
-- **Web Workers** — 翻译模型和 Whisper 转录在主线程外运行，保持 UI 响应
-- **WebGPU + WASM** — ML 模型推理的 GPU 加速，自动回退至 CPU/WASM
-- **Worker 合并** — 翻译请求在 8ms 窗口内批处理，单文本请求优先于批量数组
+- **Web Workers** - Whisper 转录在主线程外运行，保证 UI 响应
+- **WebGPU + WASM** - Whisper 采用 WebGPU 优先；嵌入模型可按设备能力回退到 WASM
+- **远程翻译管线** - 主机轮换、重试退避、限流冷却、可取消任务与共享缓存，保证实时播放与拖动时的稳定翻译
 - **IndexedDB** — 使用 `idb` 库存储向量嵌入、音频缓存和转录
 - **GM Storage** — 通过 Tampermonkey 的 `GM_getValue`/`GM_setValue` 持久化用户偏好
 
@@ -193,7 +193,7 @@ src/
 | 构建 | Vite + [vite-plugin-monkey](https://github.com/nicennnnnnnlee/tampermonkey-vite) |
 | 语言 | TypeScript |
 | UI 组件 | Vue 3 SFC（挂载到 Vue 2 宿主） |
-| ML 推理 | [Transformers.js](https://huggingface.co/docs/transformers.js)（Whisper、opus-mt） |
+| ML 推理 | [Transformers.js](https://huggingface.co/docs/transformers.js)（Whisper） |
 | GPU 加速 | WebGPU API + WASM 回退 |
 | 向量搜索 | Jina Embeddings v3 API + IndexedDB |
 | 音频分析 | Web Audio API（AnalyserNode） |

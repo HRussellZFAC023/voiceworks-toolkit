@@ -65,8 +65,6 @@ function buildReason(profile: Omit<DeviceProfile, 'reason'>): string {
 
 /** Per-tier configuration for ML model loading and resource limits */
 export interface ModelBudget {
-    /** Preferred dtype candidates for translation worker (in order) */
-    translationDtypes: string[];
     /** Preferred dtype candidates for embedding worker */
     embeddingDtypes: string[];
     /** Whether embedding service should be enabled */
@@ -75,38 +73,30 @@ export interface ModelBudget {
     whisperEnabled: boolean;
     /** Audio cache size limit in bytes */
     audioCacheLimit: number;
-    /** Idle unload timeout for translation workers (ms) */
-    translationIdleMs: number;
     /** Idle unload timeout for whisper worker (ms) */
     whisperIdleMs: number;
 }
 
 const MODEL_BUDGETS: Record<DeviceTier, ModelBudget> = {
     full: {
-        translationDtypes: ['fp16', 'fp32'],
         embeddingDtypes: ['fp16', 'fp32'],
         embeddingEnabled: true,
         whisperEnabled: true,
         audioCacheLimit: 5 * 1024 * 1024 * 1024, // 5GB
-        translationIdleMs: 15 * 60 * 1000,       // 15 min
         whisperIdleMs: 10 * 60 * 1000,            // 10 min
     },
     limited: {
-        translationDtypes: ['q8', 'q4'],
         embeddingDtypes: ['q8', 'fp32'],
         embeddingEnabled: true,
         whisperEnabled: true,
         audioCacheLimit: 1024 * 1024 * 1024,      // 1GB
-        translationIdleMs: 5 * 60 * 1000,         // 5 min
         whisperIdleMs: 5 * 60 * 1000,             // 5 min
     },
     constrained: {
-        translationDtypes: ['q4'],
         embeddingDtypes: [],
         embeddingEnabled: false,
         whisperEnabled: false,
         audioCacheLimit: 256 * 1024 * 1024,        // 256MB
-        translationIdleMs: 2 * 60 * 1000,          // 2 min
         whisperIdleMs: 2 * 60 * 1000,              // 2 min
     },
 };

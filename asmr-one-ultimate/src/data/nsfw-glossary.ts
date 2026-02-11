@@ -665,7 +665,7 @@ const GLOSSARY_DATA: readonly GlossaryEntry[] = [
     ['好きな人', 'the person I like', '喜欢的人', 'e'],
 
     // ========================================================================
-    // COMMON CONVERSATIONAL (frequently hallucinated by opus-mt)
+    // COMMON CONVERSATIONAL (frequently hallucinated by MT systems)
     // ========================================================================
     ['どうぞ', 'please/go ahead', '请', 'e'],
     ['こっち', 'over here', '这边', 'e'],
@@ -704,7 +704,7 @@ const GLOSSARY_DATA: readonly GlossaryEntry[] = [
     ['背徳', 'immoral', '背德', 'e'],
 
     // ========================================================================
-    // DLSITE TITLE/TAG VOCABULARY — compound terms opus-mt hallucinates on.
+    // DLSITE TITLE/TAG VOCABULARY — compound terms MT systems often hallucinate.
     // Mode 'a' for unambiguous terms safe to substitute in any length text.
     // ========================================================================
 
@@ -741,7 +741,7 @@ const GLOSSARY_DATA: readonly GlossaryEntry[] = [
     ['快楽堕ち', 'pleasure corruption', '快乐堕落', 'a'],
     ['インモラル', 'immoral', '不道德', 'a'],
 
-    // Personality/character archetypes (katakana loanwords opus-mt garbles)
+    // Personality/character archetypes (katakana loanwords MT systems often garble)
     ['ダウナー', 'downer', '阴郁系', 'a'],
     ['ツンデレ', 'tsundere', '傲娇', 'a'],
     ['ヤンデレ', 'yandere', '病娇', 'a'],
@@ -864,3 +864,83 @@ export const alwaysReplacerMap = buildReplacerMap(alwaysEntries);
 
 export const preferRegex = buildReplacerRegex(preferEntries);
 export const preferReplacerMap = buildReplacerMap(preferEntries);
+
+// ========================================================================
+// Whisper ASR Hallucination Corrections
+//
+// Whisper's language model was trained on "clean" data and systematically
+// replaces NSFW terms with acoustically similar safe words. These are
+// text-level post-processing corrections: wrong transcription → correct JP.
+//
+// Unlike the translation glossary above (correct JP → EN/ZH), this fixes
+// the Japanese text itself before it reaches translation or display.
+//
+// Format: [hallucinated, correct]
+//   - Ordered longest-first automatically (like the glossary)
+//   - Applied as substring replacement within segments
+//
+// To add new entries: listen for recurring Whisper mistakes in your audio
+// and add the [wrong, correct] pair here.
+// ========================================================================
+
+const WHISPER_CORRECTIONS: readonly [hallucinated: string, correct: string][] = [
+    // Whisper hears safe kanji for explicit terms (same/similar reading)
+    ['写生', '射精'],          // shasei (sketching) → shasei (ejaculation) — identical reading
+    ['お寿司', 'おちんぽ'],    // osushi → ochinpo — acoustic substitution
+    ['同程', '童貞'],          // doucheng (CN company) → doutei (virgin) — kanji substitution
+    ['同定', '童貞'],          // doutei (identification) → doutei (virgin) — same reading
+    ['重生', '中性'],          // random CN hallucination in JP segments
+
+    // Whisper inserts random English in Japanese segments (training data bleed)
+    // These are full-word removals (the English word is pure noise, not code-switch)
+    // Using regex patterns handled separately below
+];
+
+/** Compiled regex for single-pass substring replacement of hallucinated text */
+const whisperCorrectionMap = new Map<string, string>();
+const whisperCorrectionPatterns: string[] = [];
+
+for (const [wrong, correct] of WHISPER_CORRECTIONS) {
+    whisperCorrectionMap.set(wrong, correct);
+    whisperCorrectionPatterns.push(escapeRegex(wrong));
+}
+
+// English words that Whisper hallucinates into Japanese-only segments.
+// Matched as whole words (\b boundaries) to avoid false positives.
+const ENGLISH_HALLUCINATION_WORDS = [
+    'archipelago', 'subscribe', 'ambassador', 'algorithm',
+];
+const englishHallucinationRe = new RegExp(
+    '\\b(' + ENGLISH_HALLUCINATION_WORDS.join('|') + ')\\b',
+    'gi',
+);
+
+const whisperCorrectionRe = whisperCorrectionPatterns.length
+    ? new RegExp(whisperCorrectionPatterns.join('|'), 'g')
+    : null;
+
+/**
+ * Correct known Whisper ASR hallucinations in a Japanese text segment.
+ * Returns the corrected text, or the original if no corrections apply.
+ */
+export function correctWhisperText(text: string): string {
+    if (!text) return text;
+    let result = text;
+
+    // 1. Fix Japanese hallucinated words (kanji/kana substitutions)
+    if (whisperCorrectionRe) {
+        result = result.replace(whisperCorrectionRe, (match) =>
+            whisperCorrectionMap.get(match) ?? match,
+        );
+    }
+
+    // 2. Remove stray English hallucination words from Japanese segments
+    // Only apply if the text is predominantly CJK (avoid stripping legit EN in mixed text)
+    const cjkCount = (result.match(/[\u3040-\u30ff\u3400-\u9fff\uff00-\uffef]/g) || []).length;
+    const totalChars = result.replace(/\s/g, '').length;
+    if (totalChars > 0 && cjkCount / totalChars > 0.5) {
+        result = result.replace(englishHallucinationRe, '').replace(/\s{2,}/g, ' ').trim();
+    }
+
+    return result;
+}

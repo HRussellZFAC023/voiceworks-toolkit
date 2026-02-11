@@ -20,6 +20,7 @@ import { AudioCache } from '../infrastructure/AudioCache';
 import { gmRequest } from '../infrastructure/HttpClient';
 import { GpuScheduler, Priority } from '../core/GpuScheduler';
 import { buildLrcFromSegments, buildVttFromSegments } from './transcriptFileUtils';
+import { correctWhisperText } from '../data/nsfw-glossary';
 
 // ============================================================================
 // Constants
@@ -35,7 +36,7 @@ const MODEL_READY_TTL_MS = 1000 * 60 * 60 * 24 * 30; // 30 days
 const INITIAL_BACKFILL_SEC = 30;
 const SEEK_BACKFILL_SEC = 15;
 const POLL_INTERVAL_MS = 250;
-const TRANSLATE_AHEAD_MAX_SEGMENTS_PER_RUN = 8;
+const TRANSLATE_AHEAD_MAX_SEGMENTS_PER_RUN = 50;
 
 // ============================================================================
 // Worker message types
@@ -482,6 +483,11 @@ export class Whisper {
                     });
                 } else {
                     Logger.debug('[Whisper] Using cached transcript:', { segments: cached.segments.length, complete: !!cached.complete });
+                    // Apply hallucination corrections to cached segments (new corrections retroactively fix old caches)
+                    for (const seg of cached.segments) {
+                        const corrected = correctWhisperText(seg.text);
+                        if (corrected !== seg.text) seg.text = corrected;
+                    }
                     this.segments = cached.segments;
                     this.lastSegmentEnd = cached.segments[cached.segments.length - 1]?.end || 0;
                     this.updateTranscriptIndex(this.currentCacheKey, cached);
@@ -1602,7 +1608,7 @@ export class Whisper {
         if (!raw) return [];
         const segments: WhisperSegment[] = [];
         for (const item of raw) {
-            const text = this.cleanText(item.text || '');
+            const text = correctWhisperText(this.cleanText(item.text || ''));
             const ts = item.timestamp || [null, null];
             const start = ts[0];
             const end = ts[1];
@@ -1854,13 +1860,18 @@ export class Whisper {
         const aheadKey = `whisper:ahead:${liveKey}:${targetLang}`;
         const jaAheadKey = `${aheadKey}:ja`;
 
-        // Drop stale queued translate-ahead jobs so the newest audio context wins.
-        GpuScheduler.clearCancellable('translation', aheadKey);
-        GpuScheduler.clearCancellable('translation', jaAheadKey);
+        // Drop stale queued/in-flight translate-ahead jobs so the newest audio context wins.
+        TranslationService.cancelPending({ cancellableKey: aheadKey });
+        TranslationService.cancelPending({ cancellableKey: jaAheadKey });
 
-        // Use HIGH priority for pre-translation so REALTIME subtitle translation can preempt it.
-        const promises = selected.map(seg =>
-            TranslationService.translate(seg.text, targetLang, {
+        // Use translateBatch() for bulk throughput — a single batch call is far faster than
+        // N individual translate() calls (one GpuScheduler task vs N serialized tasks for local;
+        // better request packing for remote).
+        const texts = selected.map(seg => seg.text);
+        const batchPromises: Promise<unknown>[] = [];
+
+        batchPromises.push(
+            TranslationService.translateBatch(texts, targetLang, {
                 priority: Priority.HIGH,
                 cancellable: true,
                 cancellableKey: aheadKey,
@@ -1870,19 +1881,21 @@ export class Whisper {
         // Also pre-translate Chinese segments to 'ja' for LearnerMode primary display
         // (LearnerMode shows JA as primary line when source is Chinese)
         if (targetLang !== 'ja') {
-            const cnSegs = selected.filter(seg =>
-                /[\u4e00-\u9fff]/.test(seg.text) && !/[\u3040-\u309f\u30a0-\u30ff]/.test(seg.text)
-            );
-            for (const seg of cnSegs) {
-                promises.push(TranslationService.translate(seg.text, 'ja', {
-                    priority: Priority.HIGH,
-                    cancellable: true,
-                    cancellableKey: jaAheadKey,
-                }).catch(() => null));
+            const cnTexts = selected
+                .filter(seg => /[\u4e00-\u9fff]/.test(seg.text) && !/[\u3040-\u309f\u30a0-\u30ff]/.test(seg.text))
+                .map(seg => seg.text);
+            if (cnTexts.length > 0) {
+                batchPromises.push(
+                    TranslationService.translateBatch(cnTexts, 'ja', {
+                        priority: Priority.HIGH,
+                        cancellable: true,
+                        cancellableKey: jaAheadKey,
+                    }).catch(() => null)
+                );
             }
         }
 
-        await Promise.allSettled(promises);
+        await Promise.allSettled(batchPromises);
         const furthest = selected[selected.length - 1];
         const furthestIdx = this.segments.indexOf(furthest);
         if (furthestIdx >= 0) {

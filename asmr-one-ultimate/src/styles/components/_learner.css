@@ -189,6 +189,7 @@ button.learner-en:focus-visible {
     height: 100%;
     padding: 0 4px;
     margin: 0 auto;
+    flex: 1;
 }
 
 .learner-collapsed-controls {

@@ -1187,7 +1187,7 @@ async function translateGridCells(
     const maxLines = options?.maxLines
         ? Math.min(options.maxLines, toTranslate.length)
         : toTranslate.length;
-    const concurrency = TranslationService.hasLocalTranslator() ? 4 : 2;
+    const concurrency = 4;
 
     let timedOut = false;
     if (options?.fastDeadlineMs && options.fastDeadlineMs > 0) {
@@ -1271,7 +1271,7 @@ async function extractPdfText(url: string): Promise<string | null> {
             if (currentLine.trim()) lines.push(currentLine.trim());
 
             // Split any remaining long lines at sentence boundaries (CJK: 。！？)
-            // so each grid cell stays within translation model limits
+            // so each grid cell stays within translation request limits
             const splitLines: string[] = [];
             for (const line of lines) {
                 if (line.length <= 300) {

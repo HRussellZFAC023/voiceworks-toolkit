@@ -355,7 +355,7 @@ function getMetadataTranslationQueueKey(workId: string, scope: typeof METADATA_T
 function clearMetadataTranslationQueue(workId: string): void {
     if (!workId) return;
     for (const scope of METADATA_TRANSLATION_SCOPES) {
-        TranslationService.cancelPendingLocal({ cancellableKey: getMetadataTranslationQueueKey(workId, scope) });
+        TranslationService.cancelPending({ cancellableKey: getMetadataTranslationQueueKey(workId, scope) });
     }
 }
 
@@ -401,8 +401,8 @@ async function handleRefresh(): Promise<void> {
     ];
     textsToInvalidate.forEach(text => {
         if (!text) return;
-        SharedCache.set(CacheKeys.translation(text, 'en', 'local'), null, 0);
         SharedCache.set(CacheKeys.translation(text, 'en', 'remote'), null, 0);
+        SharedCache.set(CacheKeys.translation(text, 'en', 'auto'), null, 0);
     });
 
     titleTranslationRequestVersion++;
@@ -607,7 +607,7 @@ async function translateTitle(originalTitle: string, expectedLoadVersion: number
 
     try {
         const queueKey = getMetadataTranslationQueueKey(expectedWorkId, 'title');
-        TranslationService.cancelPendingLocal({ cancellableKey: queueKey });
+        TranslationService.cancelPending({ cancellableKey: queueKey });
         const translated = cnOnlyMode.value
             ? await TranslationService.translate(originalTitle, 'ja', {
                 priority: METADATA_TRANSLATION_PRIORITY,
@@ -694,7 +694,7 @@ async function translateDescription(expectedLoadVersion: number, expectedWorkId:
 
     try {
         const queueKey = getMetadataTranslationQueueKey(expectedWorkId, 'description');
-        TranslationService.cancelPendingLocal({ cancellableKey: queueKey });
+        TranslationService.cancelPending({ cancellableKey: queueKey });
         const translated = await TranslationService.translate(source, targetLang, {
             priority: Priority.NORMAL,
             cancellable: true,
@@ -748,7 +748,7 @@ async function translateChips(expectedLoadVersion: number, expectedWorkId: strin
 
     try {
         const queueKey = getMetadataTranslationQueueKey(expectedWorkId, 'chips');
-        TranslationService.cancelPendingLocal({ cancellableKey: queueKey });
+        TranslationService.cancelPending({ cancellableKey: queueKey });
         const results = await TranslationService.translateBatch(labelsToTranslate.map(l => l.text), targetLang, {
             priority: METADATA_TRANSLATION_PRIORITY,
             cancellable: true,
@@ -795,7 +795,7 @@ async function translateBodyParagraphs(expectedLoadVersion: number, expectedWork
 
     try {
         const queueKey = getMetadataTranslationQueueKey(expectedWorkId, 'body');
-        TranslationService.cancelPendingLocal({ cancellableKey: queueKey });
+        TranslationService.cancelPending({ cancellableKey: queueKey });
 
         const applyChunkResults = (chunkTexts: string[], offset: number, translatedResults: string[]) => {
             const newMap = new Map(bodyTranslations.value);

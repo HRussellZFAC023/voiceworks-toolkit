@@ -18,11 +18,9 @@ export const hashString = (input: string): string => {
 export const CacheKeys = {
     dlsite: (rjCode: string) => `asmr-ult:dlsite:${rjCode}`,
     work: (workId: string | number) => `asmr-ult:work:${workId}`,
-    translation: (text: string, lang: string, source: 'local' | 'remote' | 'auto' = 'auto') =>
+    translation: (text: string, lang: string, source: 'remote' | 'auto' = 'remote') =>
         `asmr-ult:trans:${source}:${lang}:${hashString(text)}`,
     translationRateLimit: () => 'asmr-ult:trans:ratelimit',
-    translationModelReady: (model: string) => `asmr-ult:trans:model:${hashString(model)}`,
-    translationPreferredDtype: () => 'asmr-ult:trans:preferred-dtype',
     tagTranslation: (text: string, lang = 'en') => `asmr-ult:tag:${lang}:${hashString(text)}`,
     // Unified cache keys for consolidated caching
     entity: (name: string, lang = 'en') => `asmr-ult:entity:${lang}:${hashString(name)}`,

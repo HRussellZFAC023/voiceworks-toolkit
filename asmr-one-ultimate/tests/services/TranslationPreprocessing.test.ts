@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeAll } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 
 // Mock dependencies before importing
 vi.mock('../../src/core/Config', () => ({
@@ -13,16 +13,8 @@ vi.mock('../../src/core/Logger', () => ({
 }));
 vi.mock('../../src/core/Cache', () => ({
     SharedCache: { get: vi.fn().mockReturnValue(null), set: vi.fn(), delete: vi.fn() },
-    CacheKeys: { translation: (t: string, l: string, s: string) => `${s}:${l}:${t}`, translationPreferredDtype: () => 'dtype' },
+    CacheKeys: { translation: (t: string, l: string, s: string) => `${s}:${l}:${t}` },
 }));
-vi.mock('../../src/core/DeviceCapabilities', () => ({
-    DeviceCapabilities: { budget: { translationIdleMs: 900000 } },
-}));
-vi.mock('../../src/core/GpuScheduler', () => ({
-    GpuScheduler: { enqueue: vi.fn() },
-    Priority: { REALTIME: 0, HIGH: 1, NORMAL: 2, LOW: 3 },
-}));
-
 import { _testExports } from '../../src/services/TranslationService';
 const { normalizeForModel, splitForModel, joinTranslatedSegments, isLikelyGarbage, glossaryPreProcess } = _testExports;
 

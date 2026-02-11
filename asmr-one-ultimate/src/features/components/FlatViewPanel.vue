@@ -306,7 +306,7 @@ async function translateVisibleItems(): Promise<void> {
 
     try {
         const queueKey = `flatview:${bridge.currentWorkId || 'unknown'}`;
-        TranslationService.cancelPendingLocal({ cancellableKey: queueKey });
+        TranslationService.cancelPending({ cancellableKey: queueKey });
         const translated = await TranslationService.translateBatch(textsToTranslate, 'en', {
             priority: FLATVIEW_TRANSLATION_PRIORITY,
             cancellable: true,
@@ -596,7 +596,7 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
-    TranslationService.cancelPendingLocal({ cancellableKey: `flatview:${bridge.currentWorkId || 'unknown'}` });
+    TranslationService.cancelPending({ cancellableKey: `flatview:${bridge.currentWorkId || 'unknown'}` });
     if (isActive.value) hide();
     if (unwatchWork) {
         unwatchWork();

@@ -85,7 +85,6 @@ const CONFIG_DEFAULTS: PluginConfig = {
     transcriptSyncCollection: 'transcripts',
 
     // Translation
-    preferLocalTranslation: true,
     translateCnToJp: false,
 
     // Folder Selection
