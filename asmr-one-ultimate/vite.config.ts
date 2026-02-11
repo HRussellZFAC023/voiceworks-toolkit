@@ -17,7 +17,7 @@ export default defineConfig({
                     'ko': 'ASMR.one Ultimate — AI 음성인식・번역・30+ 기능',
                 },
                 namespace: 'http://tampermonkey.net/',
-                version: '121',
+                version: '122',
                 description: {
                     '': 'All-in-one enhancement suite for asmr.one. On-device Whisper speech-to-text, local neural JA/CN→EN translation, AI semantic search, radio mode, learner mode with dual-language subtitles, JPDB vocabulary mining, media viewer, audio visualizer, auto-progress tracking, keyboard shortcuts, playlist mode, offline caching, and more — all running locally in your browser with WebGPU acceleration.',
                     'zh-CN': 'asmr.one 全能增强套件。本地Whisper语音转文字、本地神经网络日/中→英翻译、AI语义向量搜索、电台模式、双语字幕学习模式、JPDB词汇挖掘、媒体查看器、音频可视化、自动进度追踪、键盘快捷键、播放列表模式、离线缓存等——全部在浏览器本地运行，支持WebGPU加速。',

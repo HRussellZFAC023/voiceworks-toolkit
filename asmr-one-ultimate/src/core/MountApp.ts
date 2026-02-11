@@ -6,7 +6,7 @@
  * via provide/inject.
  */
 
-import { createApp, type App, type Component } from 'vue';
+import { createApp, type App, type Component, type ComponentPublicInstance } from 'vue';
 import { KikoeruBridge } from '../infrastructure/KikoeruBridge';
 import { AppStore } from '../store/AppStore';
 import { EventBus } from './EventBus';
@@ -15,6 +15,8 @@ import { CentralObserver } from './CentralObserver';
 
 export interface MountedApp {
     app: App;
+    /** The component proxy returned by app.mount() — works in all builds (dev & prod). */
+    proxy: ComponentPublicInstance;
     unmount: () => void;
 }
 
@@ -47,16 +49,21 @@ export function mountApp(
     app.provide(INJECT_KEYS.eventBus, EventBus);
     app.provide(INJECT_KEYS.i18n, I18n);
 
-    // Mount within CentralObserver modification guard
+    // Mount within CentralObserver modification guard.
+    // IMPORTANT: app.mount() returns the component proxy (expose proxy if
+    // defineExpose was used, else component.proxy). This works in ALL builds.
+    // Do NOT use app._instance — it is only set in dev/devtools builds.
+    let proxy: ComponentPublicInstance;
     CentralObserver.beginModification();
     try {
-        app.mount(container);
+        proxy = app.mount(container);
     } finally {
         CentralObserver.endModification();
     }
 
     return {
         app,
+        proxy,
         unmount() {
             CentralObserver.beginModification();
             try {

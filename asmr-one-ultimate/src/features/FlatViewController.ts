@@ -101,9 +101,7 @@ export class FlatViewController extends FeatureController {
 
     private getExposed(): FlatViewPanelExposed | null {
         if (!this.mounted) return null;
-        // Vue 3 app instance exposes component methods via _instance.exposed
-        const appInstance = this.mounted.app;
-        const rootComponent = (appInstance as any)?._instance;
-        return rootComponent?.exposed as FlatViewPanelExposed | null;
+        // Use the proxy returned by app.mount() — works in both dev and prod builds.
+        return this.mounted.proxy as unknown as FlatViewPanelExposed;
     }
 }

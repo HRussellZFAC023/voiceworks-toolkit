@@ -61,14 +61,6 @@ interface PatchableWorkTree extends WorkTreeComponent {
     tree?: Array<TrackFolder | TrackItem>;
 }
 
-/** Vue 3 App internals for accessing exposed methods */
-interface Vue3AppInternal {
-    _instance?: {
-        exposed?: Record<string, unknown>;
-        proxy?: Record<string, unknown>;
-    };
-}
-
 /** Shape of the methods exposed by MediaLightbox.vue via defineExpose */
 interface MediaLightboxExposed {
     showMedia(item: MediaFile, type: 'image' | 'video' | 'pdf' | 'text', mediaList: MediaFile[], startIndex: number): Promise<void>;
@@ -217,19 +209,9 @@ export class MediaViewerController {
                 container
             );
 
-            // Get the component instance to call exposed methods.
-            // Vue 3's createApp()._instance.exposed holds the defineExpose() API.
-            const appInternal = this.mounted.app as unknown as Vue3AppInternal;
-            const exposed = appInternal._instance?.exposed;
-            if (exposed) {
-                this.lightboxRef = exposed as unknown as MediaLightboxExposed;
-            } else {
-                // Fallback: try the proxy (component instance itself)
-                const proxy = appInternal._instance?.proxy;
-                if (proxy) {
-                    this.lightboxRef = proxy as unknown as MediaLightboxExposed;
-                }
-            }
+            // Use the proxy returned by app.mount() — works in both dev and prod builds.
+            // (app._instance is only set in dev/devtools builds, so never use it.)
+            this.lightboxRef = this.mounted.proxy as unknown as MediaLightboxExposed;
 
             Logger.debug('[MediaViewerController] Vue lightbox mounted, ref:', !!this.lightboxRef);
         } catch (err) {
