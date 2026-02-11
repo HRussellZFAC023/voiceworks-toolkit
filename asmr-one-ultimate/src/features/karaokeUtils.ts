@@ -40,6 +40,8 @@ export interface KaraokeCharMap {
     hasSpaces: boolean;
 }
 
+const WORD_END_PAST_GRACE_SEC = 0.005;
+
 // ============================================================================
 // Build Character Map (once per line change)
 // ============================================================================
@@ -108,8 +110,8 @@ export function computeWordKaraokeIndices(
     for (let i = 0; i < entries.length; i++) {
         const e = entries[i];
 
-        if (e.wordEnd <= now + 0.05) {
-            // Word fully in the past (50ms tolerance for Whisper timing jitter)
+        if (e.wordEnd <= now - WORD_END_PAST_GRACE_SEC) {
+            // Word fully in the past (small grace avoids eager next-char highlighting).
             lastPastSplit = e.charStart + e.charCount;
             lastPastHl = e.charStart;
             foundPast = true;

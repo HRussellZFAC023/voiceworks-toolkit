@@ -9,8 +9,9 @@ export type SubtitleLine = {
 const DEFAULT_MAX_SUBTITLE_CHARS = 70;
 const DEFAULT_CJK_MAX_SUBTITLE_CHARS = 48;
 const PUNCT_SPLIT_MIN_RATIO = 0.6;
-const SPLIT_PUNCT = /[。！？.!?\n]/;
+const SPLIT_PUNCT = /[\u3002\uff01\uff1f.!?\n]/;
 const CJK_RE = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]/;
+const TRAILING_CLOSER_RE = /^[)\]}>\u00bb\u201d\u2019\u300d\u300f\uff09\u3011"']+$/;
 
 function charCount(text: string): number {
     return Array.from(text).length;
@@ -29,6 +30,10 @@ function trimCharSlice(chars: string[], start: number, end: number): { start: nu
     return { start: s, end: e, text: chars.slice(s, e).join('') };
 }
 
+function normalizeForCompare(text: string): string {
+    return (text || '').replace(/\s+/g, '').trim();
+}
+
 function splitTextByMax(text: string, maxChars: number): Array<{ text: string; start: number; end: number }> {
     const chars = Array.from(text);
     const chunks: Array<{ text: string; start: number; end: number }> = [];
@@ -43,6 +48,10 @@ function splitTextByMax(text: string, maxChars: number): Array<{ text: string; s
             for (let i = hardEnd - 1; i >= offset + minPunctIdx; i--) {
                 if (SPLIT_PUNCT.test(chars[i])) {
                     cut = i + 1;
+                    // Keep immediate trailing closers (quotes/brackets) with the same sentence.
+                    while (cut < chars.length && TRAILING_CLOSER_RE.test(chars[cut])) {
+                        cut++;
+                    }
                     break;
                 }
             }
@@ -66,13 +75,20 @@ function splitTextByMax(text: string, maxChars: number): Array<{ text: string; s
 function splitOversizeWord(word: SubtitleWordTiming, maxChars: number): SubtitleLine[] {
     const text = (word.text || '').trim();
     if (!text) return [];
+
     const totalChars = charCount(text);
+    const duration = Math.max(0, word.end - word.start);
+
+    // Without duration we cannot produce reliable child timings; keep as one line.
+    if (duration <= 0) {
+        return [{ time: word.start, endTime: undefined, text, words: [{ ...word, text }] }];
+    }
+
     if (totalChars <= maxChars) {
         return [{ time: word.start, endTime: word.end, text, words: [{ ...word, text }] }];
     }
 
     const pieces = splitTextByMax(text, maxChars);
-    const duration = Math.max(0, word.end - word.start);
     const result: SubtitleLine[] = [];
     for (const piece of pieces) {
         const startFrac = piece.start / totalChars;
@@ -81,12 +97,38 @@ function splitOversizeWord(word: SubtitleWordTiming, maxChars: number): Subtitle
         const end = word.start + duration * endFrac;
         result.push({
             time: start,
-            endTime: end,
+            endTime: end > start ? end : undefined,
             text: piece.text,
             words: [{ start, end, text: piece.text }],
         });
     }
     return result;
+}
+
+function appendTextChunks(
+    result: SubtitleLine[],
+    line: SubtitleLine,
+    text: string,
+    maxChars: number,
+): void {
+    // If timing is unknown/invalid, keep the line intact to avoid skipped subtitles.
+    if (!(typeof line.endTime === 'number' && line.endTime > line.time)) {
+        result.push({ ...line, text });
+        return;
+    }
+
+    const totalChars = charCount(text);
+    const duration = Math.max(0, (line.endTime ?? line.time) - line.time);
+    const chunks = splitTextByMax(text, maxChars);
+    for (const chunk of chunks) {
+        const startFrac = chunk.start / totalChars;
+        const endFrac = chunk.end / totalChars;
+        result.push({
+            time: line.time + duration * startFrac,
+            endTime: line.time + duration * endFrac,
+            text: chunk.text,
+        });
+    }
 }
 
 export function splitSubtitleSegments(lines: SubtitleLine[]): SubtitleLine[] {
@@ -103,14 +145,20 @@ export function splitSubtitleSegments(lines: SubtitleLine[]): SubtitleLine[] {
         }
 
         if (line.words?.length) {
+            const hasSpaces = /\s/.test(text);
+            const joiner = hasSpaces ? ' ' : '';
+            const lineChunks: SubtitleLine[] = [];
             let chunkWords: SubtitleWordTiming[] = [];
             let chunkText = '';
 
             const flushChunk = () => {
                 if (chunkWords.length === 0 || !chunkText.trim()) return;
-                result.push({
-                    time: chunkWords[0].start,
-                    endTime: chunkWords[chunkWords.length - 1].end,
+                const start = chunkWords[0].start;
+                const endCandidate = chunkWords[chunkWords.length - 1].end;
+                const endTime = Number.isFinite(endCandidate) && endCandidate > start ? endCandidate : undefined;
+                lineChunks.push({
+                    time: start,
+                    endTime,
                     text: chunkText.trim(),
                     words: chunkWords,
                 });
@@ -118,47 +166,51 @@ export function splitSubtitleSegments(lines: SubtitleLine[]): SubtitleLine[] {
                 chunkText = '';
             };
 
-            for (const word of line.words) {
+            for (let i = 0; i < line.words.length; i++) {
+                const word = line.words[i];
                 const wt = (word.text || '').trim();
                 if (!wt) continue;
 
                 if (charCount(wt) > maxChars) {
                     flushChunk();
-                    result.push(...splitOversizeWord(word, maxChars));
+                    lineChunks.push(...splitOversizeWord(word, maxChars));
                     continue;
                 }
 
-                const candidate = chunkText + wt;
+                const candidate = chunkText ? `${chunkText}${joiner}${wt}` : wt;
                 if (chunkText && charCount(candidate) > maxChars) {
                     flushChunk();
                 }
 
                 chunkWords.push(word);
-                chunkText += wt;
+                chunkText = chunkText ? `${chunkText}${joiner}${wt}` : wt;
 
-                if (charCount(chunkText) >= maxChars * PUNCT_SPLIT_MIN_RATIO && SPLIT_PUNCT.test(wt.slice(-1))) {
+                const nextText = i + 1 < line.words.length ? (line.words[i + 1].text || '').trim() : '';
+                const nextIsCloserOnly = !!nextText && TRAILING_CLOSER_RE.test(nextText);
+                if (
+                    charCount(chunkText) >= maxChars * PUNCT_SPLIT_MIN_RATIO
+                    && SPLIT_PUNCT.test(wt.slice(-1))
+                    && !nextIsCloserOnly
+                ) {
                     flushChunk();
                 }
             }
 
             flushChunk();
+
+            const expectedNorm = normalizeForCompare(text);
+            const actualNorm = normalizeForCompare(lineChunks.map((chunk) => chunk.text).join(''));
+            // Word tokens can be lossy for punctuation/quotes; fallback to raw text to avoid drops.
+            if (lineChunks.length === 0 || actualNorm !== expectedNorm) {
+                appendTextChunks(result, line, text, maxChars);
+            } else {
+                result.push(...lineChunks);
+            }
             continue;
         }
 
-        const totalChars = charCount(text);
-        const duration = Math.max(0, (line.endTime ?? line.time) - line.time);
-        const chunks = splitTextByMax(text, maxChars);
-        for (const chunk of chunks) {
-            const startFrac = chunk.start / totalChars;
-            const endFrac = chunk.end / totalChars;
-            result.push({
-                time: line.time + duration * startFrac,
-                endTime: line.time + duration * endFrac,
-                text: chunk.text,
-            });
-        }
+        appendTextChunks(result, line, text, maxChars);
     }
 
     return result;
 }
-

@@ -879,4 +879,22 @@ describe('Intra-word character interpolation', () => {
         expect(result.hlStart).toBe(6); // 'world' starts at char 6
         expect(result.splitIdx).toBe(9); // 6 + 3 = 9
     });
+
+    it('does not jump to the next word before boundary grace elapses', () => {
+        const fullText = 'ab';
+        const words = [
+            { start: 0, end: 1, text: 'a' },
+            { start: 1, end: 2, text: 'b' },
+        ];
+
+        // Slightly after boundary still keeps current word highlight (prevents eager next-char jump).
+        const nearBoundary = computeWordKaraokeIndices(fullText, words, 1.001);
+        expect(nearBoundary.hlStart).toBe(0);
+        expect(nearBoundary.splitIdx).toBe(1);
+
+        // After grace window, it can advance to the next word.
+        const afterGrace = computeWordKaraokeIndices(fullText, words, 1.01);
+        expect(afterGrace.hlStart).toBe(1);
+        expect(afterGrace.splitIdx).toBe(2);
+    });
 });
