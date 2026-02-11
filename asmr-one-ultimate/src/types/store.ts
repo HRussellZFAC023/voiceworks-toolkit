@@ -389,6 +389,7 @@ export interface AppEvents {
     'track:end': { track: PlayerTrack; workId: string };
     'work:change': { workId: string; work: WorkDetail };
     'radio:toggle': { isActive: boolean };
+    'radio:state': { state: RadioState; currentWorkId: string | null; recentWorkIds: string[] };
     'radio:skip': { fromWorkId: string; toWorkId: string };
     'whisper:toggle': void;
     'whisper:progress': { percent: number; message: string; stage: string };

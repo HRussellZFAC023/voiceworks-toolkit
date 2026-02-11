@@ -5,7 +5,9 @@ import { useConfig } from '../../composables/useConfig';
 import { useEventBus } from '../../composables/useEventBus';
 import { RadioMode } from '../../features/radio';
 import { PlaylistMode } from '../../features/playlist';
+import { KikoeruBridge } from '../../infrastructure/KikoeruBridge';
 import { Config, Logger } from '../../core/Utils';
+import type { RadioState } from '../../types';
 
 // ============================================================================
 // Props
@@ -28,14 +30,13 @@ const { on } = useEventBus();
 
 const sfwMode = useConfig('sfwMode');
 const translateMode = useConfig('translateMode');
-const shuffleEnabled = useConfig('playlistShuffle');
-const loopEnabled = useConfig('playlistLoopPlaylist');
 
 // ============================================================================
 // Local reactive state
 // ============================================================================
 
 const radioActive = ref(RadioMode.isActive);
+const radioState = ref<RadioState>(RadioMode.getInstance().state);
 const playlistActive = ref(false);
 const playlistCurrent = ref(1);
 const playlistTotal = ref(1);
@@ -88,130 +89,264 @@ function handleTranslateKeydown(e: KeyboardEvent) {
 }
 
 // ============================================================================
-// Playlist player bar controls (imperative DOM - separate injection point)
+// Player bar controls (mode-aware, imperative DOM)
 // ============================================================================
 
-let playlistControlsEl: HTMLElement | null = null;
+type PlayerControlsMode = 'playlist' | 'radio' | null;
+type PlayerToggleKey =
+    | 'playAllInFolder'
+    | 'autoFilterFolders'
+    | 'shuffle'
+    | 'loopPlaylist'
+    | 'radioUseFlatTracks'
+    | 'autoProgress'
+    | 'playlistPlayAllInFolder'
+    | 'playlistAutoFilterFolders'
+    | 'playlistShuffle'
+    | 'playlistLoopPlaylist'
+    | 'playlistUseFlatTracks'
+    | 'playlistAutoProgress';
 
-function ensurePlaylistControls() {
-    if (playlistControlsEl && playlistControlsEl.isConnected) {
-        playlistControlsEl.style.display = 'flex';
-        return;
+interface PlayerToggleDef {
+    key: PlayerToggleKey;
+    icon: string;
+    labelKey: string;
+    subLabelKey: string;
+}
+
+const PLAYER_TOGGLE_KEYS = new Set<PlayerToggleKey>([
+    'playAllInFolder',
+    'autoFilterFolders',
+    'shuffle',
+    'loopPlaylist',
+    'radioUseFlatTracks',
+    'autoProgress',
+    'playlistPlayAllInFolder',
+    'playlistAutoFilterFolders',
+    'playlistShuffle',
+    'playlistLoopPlaylist',
+    'playlistUseFlatTracks',
+    'playlistAutoProgress',
+]);
+
+let playerControlsEl: HTMLElement | null = null;
+let playerControlsMode: PlayerControlsMode = null;
+let radioStatusIntervalId: number | null = null;
+
+function getDesiredControlsMode(): PlayerControlsMode {
+    if (playlistActive.value) return 'playlist';
+    if (radioActive.value) return 'radio';
+    return null;
+}
+
+function getToggleDefs(mode: Exclude<PlayerControlsMode, null>): PlayerToggleDef[] {
+    if (mode === 'playlist') {
+        return [
+            { key: 'playlistPlayAllInFolder', icon: 'playlist_play', labelKey: 'playAll', subLabelKey: 'playAllSub' },
+            { key: 'playlistAutoFilterFolders', icon: 'folder_open', labelKey: 'autoFilterFolders', subLabelKey: 'autoFilterFoldersSub' },
+            { key: 'playlistShuffle', icon: 'shuffle', labelKey: 'shuffle', subLabelKey: 'shuffleSub' },
+            { key: 'playlistLoopPlaylist', icon: 'repeat', labelKey: 'loopPlaylist', subLabelKey: 'loopPlaylistSub' },
+            { key: 'playlistUseFlatTracks', icon: 'view_list', labelKey: 'radioFlatTracks', subLabelKey: 'radioFlatTracksSub' },
+            { key: 'playlistAutoProgress', icon: 'fast_forward', labelKey: 'autoProgress', subLabelKey: 'autoProgressSub' },
+        ];
     }
 
-    // Remove ALL stale instances (current ID, legacy ID, and any by class name)
+    return [
+        { key: 'playAllInFolder', icon: 'playlist_play', labelKey: 'playAll', subLabelKey: 'playAllSub' },
+        { key: 'autoFilterFolders', icon: 'folder_open', labelKey: 'autoFilterFolders', subLabelKey: 'autoFilterFoldersSub' },
+        { key: 'shuffle', icon: 'shuffle', labelKey: 'shuffle', subLabelKey: 'shuffleSub' },
+        { key: 'loopPlaylist', icon: 'repeat', labelKey: 'loopPlaylist', subLabelKey: 'loopPlaylistSub' },
+        { key: 'radioUseFlatTracks', icon: 'view_list', labelKey: 'radioFlatTracks', subLabelKey: 'radioFlatTracksSub' },
+        { key: 'autoProgress', icon: 'fast_forward', labelKey: 'autoProgress', subLabelKey: 'autoProgressSub' },
+    ];
+}
+
+function createIcon(iconName: string): HTMLElement {
+    const iconEl = document.createElement('i');
+    iconEl.className = 'material-icons';
+    iconEl.setAttribute('aria-hidden', 'true');
+    iconEl.textContent = iconName;
+    return iconEl;
+}
+
+function setPlayerButtonDisabled(btn: HTMLButtonElement | null, disabled: boolean): void {
+    if (!btn) return;
+    btn.disabled = disabled;
+    btn.classList.toggle('disabled', disabled);
+}
+
+function getRadioStatusLabel(): string {
+    if (!radioActive.value) return `${t('radioMode')}: ${t('off')}`;
+
+    if (radioState.value === 'idle') return `${t('radioMode')}: ${t('radioStatusIdle')}`;
+    if (radioState.value === 'skipping') return `${t('radioMode')}: ${t('radioStatusSkipping')}`;
+    if (radioState.value === 'loading') return `${t('radioMode')}: ${t('radioStatusLoading')}`;
+
+    let isPlaying = false;
+    try {
+        isPlaying = !!KikoeruBridge.getInstance().player?.playing;
+    } catch {
+        isPlaying = false;
+    }
+
+    return `${t('radioMode')}: ${isPlaying ? t('radioStatusPlaying') : t('radioStatusStarting')}`;
+}
+
+function removeStaleControls(): void {
     document.getElementById('asmr-playlist-player-controls')?.remove();
     document.getElementById('asmr-playlist-controls')?.remove();
     document.querySelectorAll('.asmr-playlist-player-controls').forEach(el => el.remove());
+}
 
+function createModeControls(mode: Exclude<PlayerControlsMode, null>): HTMLElement {
     const container = document.createElement('div');
-    container.className = 'asmr-playlist-player-controls';
+    container.className = `asmr-playlist-player-controls asmr-player-controls--${mode}`;
     container.id = 'asmr-playlist-player-controls';
 
-    container.innerHTML = `
-        <button class="asmr-playlist-player-btn asmr-playlist-prev" title="${t('playlistPrevWork')}" aria-label="${t('playlistPrevWork')}">
-            <i class="material-icons" aria-hidden="true">skip_previous</i>
-        </button>
-        <span class="asmr-playlist-player-progress" aria-live="polite">${playlistCurrent.value} / ${playlistTotal.value}</span>
-        <button class="asmr-playlist-player-btn asmr-playlist-next" title="${t('playlistNextWork')}" aria-label="${t('playlistNextWork')}">
-            <i class="material-icons" aria-hidden="true">skip_next</i>
-        </button>
-        <button class="asmr-playlist-player-btn asmr-playlist-shuffle" title="${t('shuffle') || 'Shuffle'}" aria-label="${t('shuffle') || 'Shuffle'}">
-            <i class="material-icons" aria-hidden="true">shuffle</i>
-        </button>
-        <button class="asmr-playlist-player-btn asmr-playlist-loop" title="${t('loopPlaylist') || 'Loop'}" aria-label="${t('loopPlaylist') || 'Loop'}">
-            <i class="material-icons" aria-hidden="true">repeat</i>
-        </button>
-    `;
+    const mainRow = document.createElement('div');
+    mainRow.className = 'asmr-playlist-player-main';
 
-    // Append to document.body instead of the player bar — the host app's Vue 2
-    // re-renders the player bar on playback state changes, which strips our
-    // injected children. Since we use position:fixed, body works fine.
-    document.body.appendChild(container);
-    playlistControlsEl = container;
-
-    // Bind click handlers
-    container.querySelector('.asmr-playlist-prev')?.addEventListener('click', (e) => {
+    const prevBtn = document.createElement('button');
+    prevBtn.className = 'asmr-playlist-player-btn asmr-playlist-prev';
+    prevBtn.title = t('playlistPrevWork');
+    prevBtn.setAttribute('aria-label', t('playlistPrevWork'));
+    prevBtn.appendChild(createIcon('skip_previous'));
+    prevBtn.addEventListener('click', (e) => {
         e.stopPropagation();
-        PlaylistMode.getInstance().previous();
-    });
-    container.querySelector('.asmr-playlist-next')?.addEventListener('click', (e) => {
-        e.stopPropagation();
-        PlaylistMode.getInstance().next();
-    });
-    container.querySelector('.asmr-playlist-shuffle')?.addEventListener('click', (e) => {
-        e.stopPropagation();
-        PlaylistMode.getInstance().shuffle();
-    });
-    container.querySelector('.asmr-playlist-loop')?.addEventListener('click', (e) => {
-        e.stopPropagation();
-        PlaylistMode.getInstance().toggleLoop();
+        if (mode === 'playlist') {
+            void PlaylistMode.getInstance().previous();
+        } else {
+            void RadioMode.getInstance().skipToPrevious();
+        }
     });
 
-    // Initialize shuffle and loop button active states
-    updateShuffleButton(container, shuffleEnabled.value);
-    updateLoopButton(container, loopEnabled.value);
+    const statusEl = document.createElement('span');
+    statusEl.className = 'asmr-playlist-player-status';
+    statusEl.setAttribute('aria-live', 'polite');
 
-    // Get current progress
-    const pm = PlaylistMode.getInstance();
-    if (pm.isActive) {
-        const progress = pm.getProgress();
-        updatePlayerBarProgress(progress.current, progress.total);
+    const nextBtn = document.createElement('button');
+    nextBtn.className = 'asmr-playlist-player-btn asmr-playlist-next';
+    nextBtn.title = t('playlistNextWork');
+    nextBtn.setAttribute('aria-label', t('playlistNextWork'));
+    nextBtn.appendChild(createIcon('skip_next'));
+    nextBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (mode === 'playlist') {
+            void PlaylistMode.getInstance().next();
+        } else {
+            void RadioMode.getInstance().skipToNext();
+        }
+    });
+
+    mainRow.append(prevBtn, statusEl, nextBtn);
+
+    const toggleRow = document.createElement('div');
+    toggleRow.className = 'asmr-playlist-player-toggles';
+    for (const def of getToggleDefs(mode)) {
+        const toggleBtn = document.createElement('button');
+        toggleBtn.className = 'asmr-playlist-player-toggle';
+        toggleBtn.dataset.configKey = def.key;
+        toggleBtn.title = `${t(def.labelKey)}: ${t(def.subLabelKey)}`;
+        toggleBtn.setAttribute('aria-label', t(def.labelKey));
+        toggleBtn.setAttribute('aria-pressed', 'false');
+        toggleBtn.appendChild(createIcon(def.icon));
+
+        const labelEl = document.createElement('span');
+        labelEl.className = 'asmr-playlist-player-toggle-label';
+        labelEl.textContent = t(def.labelKey);
+        toggleBtn.appendChild(labelEl);
+
+        toggleBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const key = def.key;
+            const currentValue = Boolean(Config.get(key));
+            Config.set(key, !currentValue);
+            syncPlayerControls();
+        });
+
+        toggleRow.appendChild(toggleBtn);
     }
 
-    Logger.debug('[SidebarMenu] Playlist controls injected into player bar');
+    container.append(mainRow, toggleRow);
+    return container;
 }
 
-function updateShuffleButton(container: HTMLElement, isActive: boolean) {
-    const btn = container.querySelector('.asmr-playlist-shuffle');
-    if (btn) {
-        btn.classList.toggle('asmr-playlist-shuffle-active', isActive);
+function ensurePlayerControls(mode: Exclude<PlayerControlsMode, null>): void {
+    if (playerControlsEl && playerControlsEl.isConnected && playerControlsMode === mode) {
+        playerControlsEl.style.display = 'flex';
+        return;
+    }
+
+    removeStaleControls();
+    playerControlsEl = createModeControls(mode);
+    playerControlsMode = mode;
+
+    // Append to body instead of host player bar: host Vue 2 re-renders would strip children.
+    document.body.appendChild(playerControlsEl);
+    Logger.debug('[SidebarMenu] Player controls injected', { mode });
+}
+
+function syncPlayerControls(): void {
+    const mode = getDesiredControlsMode();
+    if (!mode) return;
+
+    ensurePlayerControls(mode);
+    if (!playerControlsEl) return;
+
+    const statusEl = playerControlsEl.querySelector('.asmr-playlist-player-status');
+    if (statusEl) {
+        statusEl.textContent = mode === 'playlist'
+            ? `${playlistCurrent.value} / ${playlistTotal.value}`
+            : getRadioStatusLabel();
+    }
+
+    const prevBtn = playerControlsEl.querySelector('.asmr-playlist-prev') as HTMLButtonElement | null;
+    const nextBtn = playerControlsEl.querySelector('.asmr-playlist-next') as HTMLButtonElement | null;
+
+    if (mode === 'playlist') {
+        const loop = Boolean(Config.get('playlistLoopPlaylist'));
+        const shuffle = Boolean(Config.get('playlistShuffle'));
+
+        setPlayerButtonDisabled(prevBtn, !loop && !shuffle && playlistCurrent.value <= 1);
+        setPlayerButtonDisabled(nextBtn, !loop && !shuffle && playlistCurrent.value >= playlistTotal.value);
+    } else {
+        const navigating = radioState.value === 'skipping' || radioState.value === 'loading';
+        const canGoPrevious = RadioMode.getInstance().canSkipToPrevious();
+        setPlayerButtonDisabled(prevBtn, navigating || !canGoPrevious);
+        setPlayerButtonDisabled(nextBtn, navigating);
+    }
+
+    for (const def of getToggleDefs(mode)) {
+        const toggleBtn = playerControlsEl.querySelector(`[data-config-key="${def.key}"]`) as HTMLButtonElement | null;
+        if (!toggleBtn) continue;
+        const enabled = Boolean(Config.get(def.key));
+        toggleBtn.classList.toggle('active', enabled);
+        toggleBtn.setAttribute('aria-pressed', enabled ? 'true' : 'false');
     }
 }
 
-function updateLoopButton(container: HTMLElement, isActive: boolean) {
-    const btn = container.querySelector('.asmr-playlist-loop');
-    if (btn) {
-        btn.classList.toggle('asmr-playlist-loop-active', isActive);
-    }
+function startRadioStatusPolling(): void {
+    if (radioStatusIntervalId !== null) return;
+    radioStatusIntervalId = window.setInterval(() => {
+        if (getDesiredControlsMode() !== 'radio') return;
+        syncPlayerControls();
+    }, 400);
 }
 
-function updatePlayerBarProgress(current: number, total: number) {
-    // Reconnect controls if they were destroyed by host app re-render
-    if (playlistActive.value && (!playlistControlsEl || !playlistControlsEl.isConnected)) {
-        ensurePlaylistControls();
-    }
-    if (!playlistControlsEl) return;
-
-    const progressEl = playlistControlsEl.querySelector('.asmr-playlist-player-progress');
-    if (progressEl) {
-        progressEl.textContent = `${current} / ${total}`;
-    }
-
-    const loop = Config.get('playlistLoopPlaylist');
-    const shuffle = Config.get('playlistShuffle');
-
-    // When loop or shuffle is on, prev/next are never disabled
-    const prevBtn = playlistControlsEl.querySelector('.asmr-playlist-prev') as HTMLButtonElement | null;
-    if (prevBtn) {
-        const disabled = !loop && !shuffle && current <= 1;
-        prevBtn.disabled = disabled;
-        prevBtn.classList.toggle('disabled', disabled);
-    }
-
-    const nextBtn = playlistControlsEl.querySelector('.asmr-playlist-next') as HTMLButtonElement | null;
-    if (nextBtn) {
-        const disabled = !loop && !shuffle && current >= total;
-        nextBtn.disabled = disabled;
-        nextBtn.classList.toggle('disabled', disabled);
-    }
+function stopRadioStatusPolling(): void {
+    if (radioStatusIntervalId === null) return;
+    clearInterval(radioStatusIntervalId);
+    radioStatusIntervalId = null;
 }
 
-function updatePlaylistHostDOM(isActive: boolean) {
+function updatePlayerControlsHostDOM() {
+    const mode = getDesiredControlsMode();
+    const controlsActive = mode !== null;
+
     // Adjust page container padding to prevent overlap with player bar
     const pageContainer = document.querySelector('.q-page-container') as HTMLElement | null;
     if (pageContainer) {
-        pageContainer.style.paddingBottom = isActive
+        pageContainer.style.paddingBottom = controlsActive
             ? 'calc(var(--q-footer-height, 64px) + 40px)'
             : '';
     }
@@ -222,7 +357,7 @@ function updatePlaylistHostDOM(isActive: boolean) {
         document.querySelector('.q-drawer--left .q-scrollarea__content') ||
         document.querySelector('.q-drawer') as HTMLElement | null;
     if (sidebar) {
-        (sidebar as HTMLElement).style.paddingBottom = isActive
+        (sidebar as HTMLElement).style.paddingBottom = controlsActive
             ? 'calc(var(--q-footer-height, 64px) + 20px)'
             : '';
 
@@ -230,17 +365,24 @@ function updatePlaylistHostDOM(isActive: boolean) {
         const playlistItem = Array.from(sidebar.querySelectorAll('a.q-item'))
             .find(el => el.getAttribute('href') === '/playlists');
         if (playlistItem) {
-            playlistItem.classList.toggle('q-item--active', isActive);
-            playlistItem.classList.toggle('text-primary', isActive);
+            playlistItem.classList.toggle('q-item--active', playlistActive.value);
+            playlistItem.classList.toggle('text-primary', playlistActive.value);
         }
     }
 
-    // Show/hide playlist player bar controls
-    if (isActive) {
-        ensurePlaylistControls();
+    if (mode) {
+        ensurePlayerControls(mode);
+        syncPlayerControls();
     }
-    if (playlistControlsEl) {
-        playlistControlsEl.style.display = isActive ? 'flex' : 'none';
+
+    if (playerControlsEl) {
+        playerControlsEl.style.display = controlsActive ? 'flex' : 'none';
+    }
+
+    if (mode === 'radio') {
+        startRadioStatusPolling();
+    } else {
+        stopRadioStatusPolling();
     }
 }
 
@@ -250,6 +392,16 @@ function updatePlaylistHostDOM(isActive: boolean) {
 
 on('radio:toggle', (payload) => {
     radioActive.value = payload.isActive;
+    if (!payload.isActive) {
+        radioState.value = 'idle';
+    }
+    updatePlayerControlsHostDOM();
+    syncPlayerControls();
+});
+
+on('radio:state', (payload) => {
+    radioState.value = payload.state;
+    syncPlayerControls();
 });
 
 on('playlist:active', (payload) => {
@@ -258,25 +410,27 @@ on('playlist:active', (payload) => {
         playlistCurrent.value = 1;
         playlistTotal.value = payload.workIds.length;
     }
-    updatePlaylistHostDOM(payload.isActive);
-    updatePlayerBarProgress(playlistCurrent.value, playlistTotal.value);
+    updatePlayerControlsHostDOM();
+    syncPlayerControls();
 });
 
 on('playlist:progress', (payload) => {
     playlistCurrent.value = payload.current;
     playlistTotal.value = payload.total;
-    updatePlayerBarProgress(payload.current, payload.total);
+    syncPlayerControls();
 });
 
-on('playlist:shuffleToggled', (payload) => {
-    if (playlistControlsEl) {
-        updateShuffleButton(playlistControlsEl, payload.enabled);
-    }
+on('playlist:shuffleToggled', () => {
+    syncPlayerControls();
 });
 
-on('playlist:loopToggled', (payload) => {
-    if (playlistControlsEl) {
-        updateLoopButton(playlistControlsEl, payload.enabled);
+on('playlist:loopToggled', () => {
+    syncPlayerControls();
+});
+
+on('config:change', ({ key }) => {
+    if (PLAYER_TOGGLE_KEYS.has(key as PlayerToggleKey)) {
+        syncPlayerControls();
     }
 });
 
@@ -290,8 +444,10 @@ if (pmInit.isActive) {
     const progress = pmInit.getProgress();
     playlistCurrent.value = progress.current;
     playlistTotal.value = progress.total;
-    updatePlaylistHostDOM(true);
 }
+
+updatePlayerControlsHostDOM();
+syncPlayerControls();
 
 // ============================================================================
 // Lifecycle
@@ -303,9 +459,12 @@ onUnmounted(() => {
     if (pageContainer) {
         pageContainer.style.paddingBottom = '';
     }
+
     // Remove player bar controls
-    playlistControlsEl?.remove();
-    playlistControlsEl = null;
+    playerControlsEl?.remove();
+    playerControlsEl = null;
+    playerControlsMode = null;
+    stopRadioStatusPolling();
 });
 </script>
 

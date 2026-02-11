@@ -18,6 +18,12 @@ export function useAppStore() {
         state.radio.isActive = isActive;
     }));
 
+    cleanups.push(EventBus.on('radio:state', ({ state: radioState, currentWorkId, recentWorkIds }) => {
+        state.radio.state = radioState;
+        state.radio.currentWorkId = currentWorkId;
+        state.radio.recentWorkIds = [...recentWorkIds];
+    }));
+
     // Sync playlist state
     cleanups.push(EventBus.on('playlist:active', ({ isActive }) => {
         state.playlist.isActive = isActive;

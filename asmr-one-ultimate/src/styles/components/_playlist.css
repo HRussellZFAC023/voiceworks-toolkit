@@ -169,11 +169,13 @@
 
 .asmr-playlist-player-controls {
     display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 10px 16px;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+    padding: 10px 12px;
+    width: min(700px, calc(100vw - 90px));
+    max-width: calc(100vw - 90px);
     flex-shrink: 0;
-    /* P5 FIX: Use absolute positioning to stay clear of the floating player card */
     position: fixed;
     bottom: 74px;
     left: 74px;
@@ -183,6 +185,12 @@
     border-radius: 12px;
     z-index: 1000;
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.asmr-playlist-player-main {
+    display: flex;
+    align-items: center;
+    gap: 8px;
 }
 
 .asmr-playlist-player-btn {
@@ -226,17 +234,68 @@
     font-size: 20px;
 }
 
-.asmr-playlist-player-progress {
-    font-size: 0.75rem;
-    opacity: 0.85;
-    min-width: 36px;
-    text-align: center;
+.asmr-playlist-player-status {
+    font-size: 0.76rem;
+    opacity: 0.9;
+    flex: 1 1 auto;
+    text-align: left;
     user-select: none;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.asmr-playlist-player-toggles {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.asmr-playlist-player-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    border: 1px solid var(--asmr-border-color);
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.04);
+    color: inherit;
+    cursor: pointer;
+    padding: 4px 8px;
+    font-size: 0.72rem;
+    line-height: 1;
+    transition: background 0.2s, border-color 0.2s;
+}
+
+.asmr-playlist-player-toggle .material-icons {
+    font-size: 16px;
+}
+
+.asmr-playlist-player-toggle-label {
     white-space: nowrap;
 }
 
-.asmr-playlist-shuffle-active,
-.asmr-playlist-loop-active {
+@media (hover: hover) {
+    .asmr-playlist-player-toggle:hover {
+        background: rgba(255, 255, 255, 0.12);
+    }
+}
+
+@media (hover: none) {
+    .asmr-playlist-player-toggle:active {
+        background: rgba(255, 255, 255, 0.12);
+    }
+}
+
+.asmr-playlist-player-toggle.active {
     color: var(--asmr-accent);
-    background: rgba(var(--asmr-accent-rgb, 255, 152, 0), 0.15);
+    border-color: rgba(var(--asmr-accent-rgb, 255, 152, 0), 0.55);
+    background: rgba(var(--asmr-accent-rgb, 255, 152, 0), 0.16);
+}
+
+@media (max-width: 900px) {
+    .asmr-playlist-player-controls {
+        width: calc(100vw - 24px);
+        max-width: calc(100vw - 24px);
+        left: 12px;
+    }
 }

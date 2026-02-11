@@ -225,6 +225,22 @@ export class RadioMode {
         return this._state;
     }
 
+    canSkipToPrevious(): boolean {
+        return this.getPreviousWorkId() !== null;
+    }
+
+    private getPreviousWorkId(): string | null {
+        const history = this.workSelector.getRecentWorkIds();
+        if (!history.length) return null;
+
+        const current = this.currentWorkId;
+        if (!current) {
+            return history[0] || null;
+        }
+
+        return history.find(id => id !== current) || null;
+    }
+
     /**
      * Skip to next work
      */
@@ -285,6 +301,59 @@ export class RadioMode {
         } finally {
             this.isSkipping = false;
             // Only restore playing state if radio is still active
+            if (this._isActive) {
+                this._state = 'playing';
+                AppStore.setRadioState({ state: 'playing' });
+            }
+        }
+    }
+
+    async skipToPrevious(): Promise<void> {
+        if (!this._isActive) {
+            Logger.debug('[RadioMode] skipToPrevious ignored: mode inactive');
+            return;
+        }
+
+        if (this.isSkipping) {
+            Logger.debug('[RadioMode] Already skipping, ignoring previous request');
+            return;
+        }
+
+        const targetWorkId = this.getPreviousWorkId();
+        if (!targetWorkId) {
+            Logger.debug('[RadioMode] skipToPrevious ignored: no previous work in history');
+            return;
+        }
+
+        this.isSkipping = true;
+        this.manuallyPaused = false;
+        this._state = 'skipping';
+        this.lastQueueIndex = -1;
+        this.recordActivity();
+
+        AppStore.setRadioState({ state: 'skipping' });
+
+        try {
+            const fromWorkId = this.currentWorkId;
+
+            this.playbackController.stopPlayback();
+            this.folderDiver.reset();
+
+            Logger.debug('[RadioMode] Navigating to previous work', {
+                fromWorkId,
+                toWorkId: targetWorkId,
+            });
+
+            EventBus.emit('radio:skip', {
+                fromWorkId: fromWorkId || '',
+                toWorkId: targetWorkId,
+            });
+
+            this.bridge.navigateToWork(targetWorkId);
+        } catch (error) {
+            Logger.error('[RadioMode] skipToPrevious error:', error);
+        } finally {
+            this.isSkipping = false;
             if (this._isActive) {
                 this._state = 'playing';
                 AppStore.setRadioState({ state: 'playing' });
@@ -582,12 +651,19 @@ export class RadioMode {
 
         this.currentWorkId = workId;
 
-        AppStore.setRadioState({ currentWorkId: workId });
+        if (this._isActive) {
+            this.workSelector.rememberWork(workId);
+            AppStore.setRadioState({
+                currentWorkId: workId,
+                recentWorkIds: this.workSelector.getRecentWorkIds(),
+            });
+        } else {
+            AppStore.setRadioState({ currentWorkId: workId });
+        }
 
         this.folderDiver.reset();
 
         if (this._isActive) {
-            this.workSelector.rememberWork(workId);
             await this.loadWorkAndStartPlayback(workId);
         }
     }

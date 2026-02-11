@@ -361,6 +361,14 @@ class AppStoreImpl {
         if ('isActive' in updates) {
             EventBus.emit('radio:toggle', { isActive: updates.isActive! });
         }
+
+        if ('state' in updates || 'currentWorkId' in updates || 'recentWorkIds' in updates) {
+            EventBus.emit('radio:state', {
+                state: this._state.radio.state,
+                currentWorkId: this._state.radio.currentWorkId,
+                recentWorkIds: [...this._state.radio.recentWorkIds],
+            });
+        }
     }
 
     /**

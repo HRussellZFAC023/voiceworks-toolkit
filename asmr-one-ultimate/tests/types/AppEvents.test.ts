@@ -16,6 +16,7 @@ const EXPECTED_EVENTS = [
     'track:end',
     'work:change',
     'radio:toggle',
+    'radio:state',
     'radio:skip',
     // Whisper events
     'whisper:start',

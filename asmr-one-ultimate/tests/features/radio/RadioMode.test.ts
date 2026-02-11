@@ -99,6 +99,7 @@ describe('RadioMode', () => {
         mockWorkSelector = {
             selectRandomWork: vi.fn(),
             rememberWork: vi.fn(),
+            getRecentWorkIds: vi.fn(() => []),
         };
         (WorkSelector as any).mockImplementation(() => mockWorkSelector);
 
@@ -197,5 +198,27 @@ describe('RadioMode', () => {
         // Second disable should be ignored
         radioMode.disable();
         expect((AppStore.setRadioState as any).mock.calls.length).toBe(callCount2);
+    });
+
+    it('should navigate to previous work when history has one', async () => {
+        (radioMode as any)._isActive = true;
+        (radioMode as any).currentWorkId = 'RJ200000';
+        mockWorkSelector.getRecentWorkIds.mockReturnValue(['RJ200000', 'RJ100000']);
+
+        await radioMode.skipToPrevious();
+
+        expect(mockPlaybackController.stopPlayback).toHaveBeenCalled();
+        expect(mockBridge.navigateToWork).toHaveBeenCalledWith('RJ100000');
+    });
+
+    it('should disable previous skip when there is no prior history', async () => {
+        (radioMode as any)._isActive = true;
+        (radioMode as any).currentWorkId = 'RJ200000';
+        mockWorkSelector.getRecentWorkIds.mockReturnValue(['RJ200000']);
+
+        await radioMode.skipToPrevious();
+
+        expect(mockBridge.navigateToWork).not.toHaveBeenCalled();
+        expect(radioMode.canSkipToPrevious()).toBe(false);
     });
 });

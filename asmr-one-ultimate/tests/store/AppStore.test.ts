@@ -110,6 +110,20 @@ describe('AppStore', () => {
             expect(emitMock).toHaveBeenCalledWith('radio:toggle', { isActive: true });
         });
 
+        it('should emit radio:state when radio state payload changes', () => {
+            AppStore.setRadioState({
+                state: 'skipping',
+                currentWorkId: 'RJ123456',
+                recentWorkIds: ['RJ123456', 'RJ000001'],
+            });
+
+            expect(emitMock).toHaveBeenCalledWith('radio:state', {
+                state: 'skipping',
+                currentWorkId: 'RJ123456',
+                recentWorkIds: ['RJ123456', 'RJ000001'],
+            });
+        });
+
         it('should update learner state', () => {
             AppStore.setLearnerState({ isActive: true });
             expect(AppStore.state.learner.isActive).toBe(true);
