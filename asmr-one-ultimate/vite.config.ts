@@ -1,7 +1,7 @@
 /// <reference types="vitest" />
 import { defineConfig } from 'vite';
 import vue from '@vitejs/plugin-vue';
-import monkey from 'vite-plugin-monkey';
+import monkey, { cdn } from 'vite-plugin-monkey';
 
 export default defineConfig({
     plugins: [
@@ -59,6 +59,12 @@ export default defineConfig({
                 license: 'MIT',
                 downloadURL: 'https://update.greasyfork.org/scripts/563283/ASMRone%20Ultimate%20%28Radio%20%2B%20Learner%29.user.js',
                 updateURL: 'https://update.greasyfork.org/scripts/563283/ASMRone%20Ultimate%20%28Radio%20%2B%20Learner%29.meta.js'
+            },
+            build: {
+                externalGlobals: {
+                    vue: cdn.jsdelivr('Vue', 'dist/vue.global.prod.js'),
+                    'fuse.js': cdn.jsdelivr('Fuse', 'dist/fuse.min.js'),
+                },
             },
         }),
     ],

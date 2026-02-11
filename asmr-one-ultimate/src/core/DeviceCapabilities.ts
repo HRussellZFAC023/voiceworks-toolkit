@@ -36,7 +36,31 @@ const globalWindow = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : windo
     __ASMR_DEVICE_PROFILE__?: DeviceProfile;
 };
 
+/** iPhone/iPod — always constrained (strict per-tab memory limits) */
+function isIPhone(): boolean {
+    return /iPhone|iPod/i.test(navigator.userAgent || '');
+}
+
+/** iPad (including iPadOS 13+ which spoofs "Macintosh" UA) */
+function isIPad(): boolean {
+    const ua = navigator.userAgent || '';
+    return /iPad/i.test(ua)
+        || (navigator.maxTouchPoints > 1 && /Macintosh/i.test(ua));
+}
+
 function classify(hasGpu: boolean, memory: number, cores: number, isTouch: boolean, isMobile: boolean): DeviceTier {
+    // iPhone: always constrained — strict per-tab memory (~80-120MB),
+    // Safari WebGPU + ONNX unreliable, deviceMemory unavailable
+    if (isIPhone()) {
+        return 'constrained';
+    }
+
+    // iPad: limited — M-series iPads have enough RAM but Safari WebGPU
+    // is still flaky; let crash guard handle auto-disable if needed
+    if (isIPad()) {
+        return 'limited';
+    }
+
     // Constrained: mobile without GPU, or mobile with very low memory
     if (isMobile && (!hasGpu || (memory > 0 && memory < 4))) {
         return 'constrained';
@@ -57,6 +81,8 @@ function buildReason(profile: Omit<DeviceProfile, 'reason'>): string {
     parts.push(profile.hasGpu ? 'GPU' : 'no-GPU');
     if (profile.memory > 0) parts.push(`${profile.memory}GB`);
     if (profile.cores > 0) parts.push(`${profile.cores} cores`);
+    if (isIPhone()) parts.push('iPhone');
+    else if (isIPad()) parts.push('iPad');
     if (profile.isMobile) parts.push('mobile');
     else if (profile.isTouch) parts.push('touch');
     parts.push(`${profile.screenWidth}px`);
@@ -133,6 +159,11 @@ export const DeviceCapabilities = {
 
     get profile(): DeviceProfile {
         return cached ?? this.detect();
+    },
+
+    /** Is this an iPhone/iPod? (ML features should be force-disabled) */
+    get isIPhone(): boolean {
+        return isIPhone();
     },
 
     /** Should ML models be eagerly warmed up at startup? */

@@ -13,6 +13,7 @@ import { EventBus } from '../core/EventBus';
 import { createWhisperWorker } from './WhisperWorkerLoader';
 import { getAudioElement } from '../core/DomUtils';
 import { SharedCache, CacheKeys } from '../core/Cache';
+import { MLCrashGuard } from '../core/MLCrashGuard';
 import type { WhisperSegment, WhisperWord, KikoeruStoreState } from '../types';
 import { AppStore } from '../store/AppStore';
 import { TranslationService } from '../services/TranslationService';
@@ -1144,6 +1145,7 @@ export class Whisper {
             Logger.warn('[Whisper] initWorker blocked — GPU crashed this session');
             return;
         }
+        MLCrashGuard.initStarted('whisper');
         this.ensureWorker();
         this.modelReady = false;
         this.dispatchProgress(I18n.t('whisperLoading'), 5, 'model');
@@ -1224,6 +1226,7 @@ export class Whisper {
 
             case 'ready':
                 // Model ready - clear loading status and hide transcribing indicator
+                MLCrashGuard.initComplete('whisper');
                 this.releaseLoadLease();
                 this.clearModelLoadTimer();
                 this.modelReady = true;

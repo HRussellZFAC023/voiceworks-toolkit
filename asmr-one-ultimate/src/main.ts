@@ -38,6 +38,7 @@ import { GpuScheduler } from './core/GpuScheduler';
 import { EmbeddingService } from './services/EmbeddingService';
 import { CentralObserver } from './core/CentralObserver';
 import { EventBus } from './core/EventBus';
+import { MLCrashGuard } from './core/MLCrashGuard';
 import type { ConfigKey, PlayerTrack } from './types';
 
 // Features
@@ -231,6 +232,22 @@ async function initialize(): Promise<void> {
         const device = DeviceCapabilities.detect();
         Logger.log(`[Device] ${device.reason}`);
 
+        // iPhone: force-disable ML features — Safari memory limits are too strict
+        if (DeviceCapabilities.isIPhone) {
+            if (Config.get('enableWhisper')) {
+                Config.set('enableWhisper', false);
+                Logger.log('[Device] Whisper force-disabled on iPhone');
+            }
+            if (Config.get('enableVectorSearch')) {
+                Config.set('enableVectorSearch', false);
+                Logger.log('[Device] Vector search force-disabled on iPhone');
+            }
+        }
+
+        // Crash guard: if ML features crashed repeatedly in recent sessions,
+        // auto-disable them to prevent crash loops
+        MLCrashGuard.checkAndDisable();
+
         // Initialize GPU scheduler before any worker creation
         GpuScheduler.initialize();
 
@@ -353,6 +370,10 @@ function registerLazyFeature(
 
 function setupFeatureToggleListener(): void {
     EventBus.on('config:change', ({ key, value }: { key: string; value: unknown }) => {
+        // Reset crash guard when user manually re-enables an ML feature
+        if (value && key === 'enableWhisper') MLCrashGuard.reset('whisper');
+        if (value && key === 'enableVectorSearch') MLCrashGuard.reset('vectorSearch');
+
         // Eagerly-loaded features
         const feature = featureRegistry.get(key);
         if (feature) {

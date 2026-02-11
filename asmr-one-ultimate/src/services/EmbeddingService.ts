@@ -6,6 +6,7 @@ import { GpuScheduler, Priority, type WorkerName } from '../core/GpuScheduler';
 import { createEmbeddingWorker } from '../features/EmbeddingWorkerLoader';
 import { DeviceCapabilities } from '../core/DeviceCapabilities';
 import { CACHE_TTL } from '../core/Constants';
+import { MLCrashGuard } from '../core/MLCrashGuard';
 
 // ============================================================================
 // Constants
@@ -234,6 +235,8 @@ function initWorker(): Promise<void> {
     if (workerReady) return Promise.resolve();
     if (initPromise) return initPromise;
 
+    MLCrashGuard.initStarted('vectorSearch');
+
     // Acquire a load lease from GpuScheduler to prevent concurrent model loading.
     // Only one worker loads a model at a time (requestAdapter + requestDevice + ONNX compile).
     initPromise = GpuScheduler.acquireLoadLease('embedding').then(releaseLease => {
@@ -260,10 +263,12 @@ function initWorker(): Promise<void> {
 
                 const onReady = (e: MessageEvent) => {
                     if (e.data.status === 'ready') {
+                        MLCrashGuard.initComplete('vectorSearch');
                         handleMessage(e);
                         releaseLease();
                         resolve();
                     } else if (e.data.status === 'error' && !workerReady) {
+                        MLCrashGuard.initFailed('vectorSearch');
                         handleMessage(e);
                         releaseLease();
                         reject(new Error(e.data.data?.message || 'Worker init failed'));

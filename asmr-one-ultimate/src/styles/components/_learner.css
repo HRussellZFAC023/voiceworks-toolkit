@@ -447,7 +447,7 @@ button.learner-en:focus-visible {
     display: flex;
     flex-direction: column;
     gap: 4px;
-    z-index: var(--z-overflow-menu, 9995);
+    z-index: var(--z-overflow-menu, 10006);
     align-items: center;
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
 }
