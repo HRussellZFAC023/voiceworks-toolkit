@@ -12,8 +12,11 @@ import { TranslationService } from '../../services/TranslationService';
 import { CacheKeys, SharedCache } from '../../core/Cache';
 import { Logger } from '../../core/Utils';
 import { Whisper } from '../Whisper';
+import { DeviceCapabilities } from '../../core/DeviceCapabilities';
 // @ts-ignore – Vite ?raw import
 import PROXY_WORKER_CODE from '../../../dlsite-proxy-worker.js?raw';
+
+const isIPhone = DeviceCapabilities.isIPhone;
 
 const { t, format } = useI18n();
 const { on } = useEventBus();
@@ -366,9 +369,11 @@ const credits = [
             <hr class="q-separator q-separator--horizontal q-separator--dark">
             <SettingsToggle config-key="enableTagFilters" :label="t('enableTagFilters')" :sublabel="t('enableTagFiltersSub')" icon="label_off" />
             <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <template v-if="!isIPhone">
             <SettingsToggle config-key="enableVectorSearch" :label="t('enableVectorSearch')" :sublabel="t('enableVectorSearchSub')" icon="saved_search" />
             <hr class="q-separator q-separator--horizontal q-separator--dark">
             <SettingsToggle config-key="enableWhisper" :label="t('enableWhisper')" :sublabel="t('enableWhisperSub')" icon="record_voice_over" />
+            </template>
             <hr class="q-separator q-separator--horizontal q-separator--dark">
             <SettingsToggle config-key="enableFavicon" :label="t('enableFavicon')" :sublabel="t('enableFaviconSub')" icon="image" />
             <hr class="q-separator q-separator--horizontal q-separator--dark">

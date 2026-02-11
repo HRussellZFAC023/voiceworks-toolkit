@@ -35,6 +35,13 @@ export default defineConfig({
                 ],
                 connect: [
                     'translate.googleapis.com',
+                    'translate.google.com',
+                    'translate.google.co.jp',
+                    'translate.google.de',
+                    'translate.google.fr',
+                    'translate.google.es',
+                    'translate.google.co.kr',
+                    'translate.google.com.tw',
                     'www.dlsite.com',
                     'www.asmr.one',
                     'jpdb.io',
@@ -43,6 +50,7 @@ export default defineConfig({
                     'api.asmr-100.com',
                     'api.asmr-200.com',
                     'api.asmr-300.com',
+                    'raw.kiko-play-niptan.one',
                     '*'
                 ],
                 icon: 'https://images2.imgbox.com/c8/21/h1DhlGPW_o.png',
