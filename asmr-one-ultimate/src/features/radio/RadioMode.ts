@@ -14,9 +14,10 @@ import { Logger, Config } from '../../core/Utils';
 import { WorkSelector } from './WorkSelector';
 import { PlaybackController } from './PlaybackController';
 import { FolderDiver } from '../FolderDiver';
+import { AUDIO_EXTENSIONS, VIDEO_EXTENSIONS } from '../folderDiverTreeUtils';
 import { WorkService } from '../../services/WorkService';
 import type { PlayerTrack, RadioState, WorkDetail, AudioTrack } from '../../types';
-import type { TrackFolder, TracksResponse } from '../../types/api';
+import type { TrackFolder, TrackItem, TracksResponse } from '../../types/api';
 
 const PLAYBACK_START_TIMEOUT = 8000;
 const WORK_CHANGE_DEBOUNCE_MS = 500;
@@ -154,6 +155,9 @@ export class RadioMode {
         this.playAllInFolder = Config.get('playAllInFolder');
 
         AppStore.setRadioState({ isActive: true, state: 'playing' });
+        if (this.currentWorkId) {
+            this.syncRecentWorkHistory(this.currentWorkId);
+        }
 
         const player = this.bridge.player;
         const hasTrack = !!(player.currentTrack || player.currentPlayingFile);
@@ -241,6 +245,12 @@ export class RadioMode {
         return history.find(id => id !== current) || null;
     }
 
+    private syncRecentWorkHistory(workId: string): void {
+        if (!workId) return;
+        this.workSelector.rememberWork(workId);
+        AppStore.setRadioState({ recentWorkIds: this.workSelector.getRecentWorkIds() });
+    }
+
     /**
      * Skip to next work
      */
@@ -268,6 +278,9 @@ export class RadioMode {
             this.folderDiver.reset();
 
             const fromWorkId = this.currentWorkId;
+            if (fromWorkId) {
+                this.syncRecentWorkHistory(fromWorkId);
+            }
 
             Logger.debug('[RadioMode] Selecting next work...');
             const nextWork = await this.workSelector.selectRandomWork(this.currentWorkId || undefined);
@@ -291,7 +304,7 @@ export class RadioMode {
                     toWorkId,
                 });
 
-                this.workSelector.rememberWork(toWorkId);
+                this.syncRecentWorkHistory(toWorkId);
                 this.bridge.navigateToWork(toWorkId);
             } else {
                 Logger.warn('[RadioMode] Failed to select next work - no candidate returned');
@@ -652,7 +665,7 @@ export class RadioMode {
         this.currentWorkId = workId;
 
         if (this._isActive) {
-            this.workSelector.rememberWork(workId);
+            this.syncRecentWorkHistory(workId);
             AppStore.setRadioState({
                 currentWorkId: workId,
                 recentWorkIds: this.workSelector.getRecentWorkIds(),
@@ -720,10 +733,7 @@ export class RadioMode {
                 // Dive mode: navigate into best folder, then play its tracks
                 try {
                     const treeData = await WorkService.getTracks(workId);
-                    const autoFilter = Config.get('autoFilterFolders');
-                    if (!autoFilter) {
-                        Logger.debug('[RadioMode] autoFilterFolders disabled, skipping dive');
-                    } else if (treeData) {
+                    if (treeData) {
                         const startPath = this.folderDiver.getHostPath();
                         this.folderDiver.syncPath(startPath);
                         if (this.folderDiver.needsDiveFromPath(treeData, startPath)) {
@@ -825,13 +835,21 @@ export class RadioMode {
     private collectAllAudioFromTree(nodes: TracksResponse): AudioTrack[] {
         const audio: AudioTrack[] = [];
         for (const node of nodes) {
-            if (node.type === 'audio') {
-                audio.push(node as unknown as AudioTrack);
-            } else if (node.type === 'folder') {
+            if (node.type === 'folder') {
                 audio.push(...this.collectAllAudioFromTree((node as TrackFolder).children));
+            } else if (this.isPlayableTrackItem(node)) {
+                audio.push(node as unknown as AudioTrack);
             }
         }
         return audio;
+    }
+
+    private isPlayableTrackItem(node: TrackItem): boolean {
+        if (node.type === 'audio') return true;
+        const title = (node.title || '').toLowerCase();
+        const hasAudioExt = AUDIO_EXTENSIONS.some((ext) => title.endsWith(ext) || title.includes(ext));
+        const hasVideoExt = VIDEO_EXTENSIONS.some((ext) => title.endsWith(ext));
+        return hasAudioExt || hasVideoExt;
     }
 
     // =========================================================================

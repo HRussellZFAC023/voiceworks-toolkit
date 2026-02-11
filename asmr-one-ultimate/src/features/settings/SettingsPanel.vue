@@ -466,9 +466,9 @@ const credits = [
         <div id="asmr-radio-settings-section" class="asmr-settings-section rounded-borders q-list q-list--bordered q-list--dark bg-black" role="group" aria-labelledby="asmr-radio-settings-section-header">
             <SettingsToggle config-key="playAllInFolder" :label="t('playAll')" :sublabel="t('playAllSub')" icon="playlist_play" />
             <hr class="q-separator q-separator--horizontal q-separator--dark">
-            <SettingsToggle config-key="autoFilterFolders" :label="t('autoFilterFolders')" :sublabel="t('autoFilterFoldersSub')" icon="folder_open" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
             <SettingsToggle config-key="sePref" :label="t('sePref')" :sublabel="t('sePrefSub')" icon="surround_sound" />
+            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <SettingsToggle config-key="bgmPref" :label="t('bgmPref')" :sublabel="t('bgmPrefSub')" icon="music_note" />
             <hr class="q-separator q-separator--horizontal q-separator--dark">
             <SettingsToggle config-key="shuffle" :label="t('shuffle')" :sublabel="t('shuffleSub')" icon="shuffle" />
             <hr class="q-separator q-separator--horizontal q-separator--dark">
@@ -486,8 +486,6 @@ const credits = [
         <div id="asmr-playlist-settings-section" class="asmr-settings-section rounded-borders q-list q-list--bordered q-list--dark bg-black" role="group" aria-labelledby="asmr-playlist-settings-section-header">
             <SettingsToggle config-key="playlistPlayAllInFolder" :label="t('playAll')" :sublabel="t('playAllSub')" icon="playlist_play" />
             <hr class="q-separator q-separator--horizontal q-separator--dark">
-            <SettingsToggle config-key="playlistAutoFilterFolders" :label="t('autoFilterFolders')" :sublabel="t('autoFilterFoldersSub')" icon="folder_open" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
             <SettingsToggle config-key="playlistShuffle" :label="t('shuffle')" :sublabel="t('shuffleSub')" icon="shuffle" />
             <hr class="q-separator q-separator--horizontal q-separator--dark">
             <SettingsToggle config-key="playlistLoopPlaylist" :label="t('loopPlaylist')" :sublabel="t('loopPlaylistSub')" icon="repeat" />
@@ -495,6 +493,10 @@ const credits = [
             <SettingsToggle config-key="playlistUseFlatTracks" :label="t('radioFlatTracks')" :sublabel="t('radioFlatTracksSub')" icon="view_list" />
             <hr class="q-separator q-separator--horizontal q-separator--dark">
             <SettingsToggle config-key="playlistAutoProgress" :label="t('autoProgress')" :sublabel="t('autoProgressSub')" icon="fast_forward" />
+            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <SettingsToggle config-key="playlistSePref" :label="t('sePref')" :sublabel="t('sePrefSub')" icon="surround_sound" />
+            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <SettingsToggle config-key="playlistBgmPref" :label="t('bgmPref')" :sublabel="t('bgmPrefSub')" icon="music_note" />
         </div>
 
         <!-- ============================================================ -->

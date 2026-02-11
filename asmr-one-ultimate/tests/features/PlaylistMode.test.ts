@@ -172,6 +172,8 @@ describe('PlaylistMode', () => {
                 children: [
                     { type: 'audio', hash: 'track-1', title: 'Track 1', is_audio: true },
                     { type: 'audio', hash: 'track-2', title: 'Track 2', is_audio: true },
+                    { type: 'other', hash: 'track-3', title: 'Track 3.opus' },
+                    { type: 'other', hash: 'ignore-1', title: 'Readme.txt' },
                 ],
             },
         ]);
@@ -180,6 +182,6 @@ describe('PlaylistMode', () => {
 
         expect(WorkService.getTracks).toHaveBeenCalledWith('RJ00000001');
         expect(mockPlaybackController.setQueueAndPlay).toHaveBeenCalledTimes(1);
-        expect((mockPlaybackController.setQueueAndPlay as any).mock.calls[0][0]).toHaveLength(2);
+        expect((mockPlaybackController.setQueueAndPlay as any).mock.calls[0][0]).toHaveLength(3);
     });
 });

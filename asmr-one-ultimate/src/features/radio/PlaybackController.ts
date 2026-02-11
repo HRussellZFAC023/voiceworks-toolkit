@@ -31,9 +31,18 @@ export class PlaybackController {
      */
     stopPlayback(): void {
         const audio = getAudioElement();
-        if (audio && !audio.paused) {
-            audio.pause();
+        if (audio) {
+            if (!audio.paused) {
+                audio.pause();
+            }
             audio.currentTime = 0;
+
+            // Prevent stale source from resuming on the next play fallback.
+            if (audio.currentSrc || audio.getAttribute('src')) {
+                audio.removeAttribute('src');
+                audio.load();
+            }
+
             Logger.debug('[PlaybackController] Stopped audio playback');
         }
 
@@ -62,6 +71,10 @@ export class PlaybackController {
      * Try to start playback using multiple fallback strategies
      */
     async tryPlay(): Promise<boolean> {
+        const player = this.bridge.player;
+        const queueLength = (player.queue?.length || player.playlist?.length || 0);
+        const hasCurrentTrack = !!(player.currentTrack || player.currentPlayingFile);
+
         // Try store dispatch first
         if (this.bridge.hasAction('AudioPlayer/play')) {
             try {
@@ -74,7 +87,8 @@ export class PlaybackController {
 
         // Try direct audio element
         const audio = getAudioElement();
-        if (audio?.paused) {
+        const canUseDirectAudioFallback = queueLength > 0 || hasCurrentTrack;
+        if (audio?.paused && canUseDirectAudioFallback && (audio.currentSrc || audio.getAttribute('src'))) {
             try {
                 await audio.play();
                 return true;

@@ -95,13 +95,11 @@ function handleTranslateKeydown(e: KeyboardEvent) {
 type PlayerControlsMode = 'playlist' | 'radio' | null;
 type PlayerToggleKey =
     | 'playAllInFolder'
-    | 'autoFilterFolders'
     | 'shuffle'
     | 'loopPlaylist'
     | 'radioUseFlatTracks'
     | 'autoProgress'
     | 'playlistPlayAllInFolder'
-    | 'playlistAutoFilterFolders'
     | 'playlistShuffle'
     | 'playlistLoopPlaylist'
     | 'playlistUseFlatTracks'
@@ -116,13 +114,11 @@ interface PlayerToggleDef {
 
 const PLAYER_TOGGLE_KEYS = new Set<PlayerToggleKey>([
     'playAllInFolder',
-    'autoFilterFolders',
     'shuffle',
     'loopPlaylist',
     'radioUseFlatTracks',
     'autoProgress',
     'playlistPlayAllInFolder',
-    'playlistAutoFilterFolders',
     'playlistShuffle',
     'playlistLoopPlaylist',
     'playlistUseFlatTracks',
@@ -143,7 +139,6 @@ function getToggleDefs(mode: Exclude<PlayerControlsMode, null>): PlayerToggleDef
     if (mode === 'playlist') {
         return [
             { key: 'playlistPlayAllInFolder', icon: 'playlist_play', labelKey: 'playAll', subLabelKey: 'playAllSub' },
-            { key: 'playlistAutoFilterFolders', icon: 'folder_open', labelKey: 'autoFilterFolders', subLabelKey: 'autoFilterFoldersSub' },
             { key: 'playlistShuffle', icon: 'shuffle', labelKey: 'shuffle', subLabelKey: 'shuffleSub' },
             { key: 'playlistLoopPlaylist', icon: 'repeat', labelKey: 'loopPlaylist', subLabelKey: 'loopPlaylistSub' },
             { key: 'playlistUseFlatTracks', icon: 'view_list', labelKey: 'radioFlatTracks', subLabelKey: 'radioFlatTracksSub' },
@@ -153,7 +148,6 @@ function getToggleDefs(mode: Exclude<PlayerControlsMode, null>): PlayerToggleDef
 
     return [
         { key: 'playAllInFolder', icon: 'playlist_play', labelKey: 'playAll', subLabelKey: 'playAllSub' },
-        { key: 'autoFilterFolders', icon: 'folder_open', labelKey: 'autoFilterFolders', subLabelKey: 'autoFilterFoldersSub' },
         { key: 'shuffle', icon: 'shuffle', labelKey: 'shuffle', subLabelKey: 'shuffleSub' },
         { key: 'loopPlaylist', icon: 'repeat', labelKey: 'loopPlaylist', subLabelKey: 'loopPlaylistSub' },
         { key: 'radioUseFlatTracks', icon: 'view_list', labelKey: 'radioFlatTracks', subLabelKey: 'radioFlatTracksSub' },
@@ -192,6 +186,10 @@ function getRadioStatusLabel(): string {
     return `${t('radioMode')}: ${isPlaying ? t('radioStatusPlaying') : t('radioStatusStarting')}`;
 }
 
+function getPlaylistStatusLabel(): string {
+    return `${playlistCurrent.value} / ${playlistTotal.value}`;
+}
+
 function removeStaleControls(): void {
     document.getElementById('asmr-playlist-player-controls')?.remove();
     document.getElementById('asmr-playlist-controls')?.remove();
@@ -220,9 +218,17 @@ function createModeControls(mode: Exclude<PlayerControlsMode, null>): HTMLElemen
         }
     });
 
+    const centerEl = document.createElement('div');
+    centerEl.className = 'asmr-playlist-player-center';
+
+    const modeBadge = document.createElement('span');
+    modeBadge.className = 'asmr-playlist-player-mode';
+    modeBadge.textContent = mode === 'playlist' ? t('playlistsTitle') : t('radioMode');
+
     const statusEl = document.createElement('span');
     statusEl.className = 'asmr-playlist-player-status';
     statusEl.setAttribute('aria-live', 'polite');
+    centerEl.append(modeBadge, statusEl);
 
     const nextBtn = document.createElement('button');
     nextBtn.className = 'asmr-playlist-player-btn asmr-playlist-next';
@@ -238,7 +244,7 @@ function createModeControls(mode: Exclude<PlayerControlsMode, null>): HTMLElemen
         }
     });
 
-    mainRow.append(prevBtn, statusEl, nextBtn);
+    mainRow.append(prevBtn, centerEl, nextBtn);
 
     const toggleRow = document.createElement('div');
     toggleRow.className = 'asmr-playlist-player-toggles';
@@ -267,6 +273,25 @@ function createModeControls(mode: Exclude<PlayerControlsMode, null>): HTMLElemen
         toggleRow.appendChild(toggleBtn);
     }
 
+    // Collapse / expand button
+    const collapseBtn = document.createElement('button');
+    collapseBtn.className = 'asmr-playlist-player-btn asmr-playlist-collapse';
+    collapseBtn.title = 'Minimize';
+    collapseBtn.appendChild(createIcon('keyboard_arrow_down'));
+    collapseBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        container.classList.add('collapsed');
+    });
+    mainRow.appendChild(collapseBtn);
+
+    // Click collapsed blob to expand
+    container.addEventListener('click', (e) => {
+        if (container.classList.contains('collapsed')) {
+            e.stopPropagation();
+            container.classList.remove('collapsed');
+        }
+    });
+
     container.append(mainRow, toggleRow);
     return container;
 }
@@ -293,10 +318,15 @@ function syncPlayerControls(): void {
     ensurePlayerControls(mode);
     if (!playerControlsEl) return;
 
+    const modeBadgeEl = playerControlsEl.querySelector('.asmr-playlist-player-mode');
+    if (modeBadgeEl) {
+        modeBadgeEl.textContent = mode === 'playlist' ? t('playlistsTitle') : t('radioMode');
+    }
+
     const statusEl = playerControlsEl.querySelector('.asmr-playlist-player-status');
     if (statusEl) {
         statusEl.textContent = mode === 'playlist'
-            ? `${playlistCurrent.value} / ${playlistTotal.value}`
+            ? getPlaylistStatusLabel()
             : getRadioStatusLabel();
     }
 
@@ -314,6 +344,11 @@ function syncPlayerControls(): void {
         const canGoPrevious = RadioMode.getInstance().canSkipToPrevious();
         setPlayerButtonDisabled(prevBtn, navigating || !canGoPrevious);
         setPlayerButtonDisabled(nextBtn, navigating);
+        playerControlsEl.classList.toggle('asmr-player-controls-busy', navigating);
+    }
+
+    if (mode !== 'radio') {
+        playerControlsEl.classList.remove('asmr-player-controls-busy');
     }
 
     for (const def of getToggleDefs(mode)) {

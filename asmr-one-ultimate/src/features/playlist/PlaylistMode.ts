@@ -15,10 +15,11 @@ import { Logger, Config } from '../../core/Utils';
 import { RadioMode } from '../radio';
 import { PlaybackController } from '../radio/PlaybackController';
 import { FolderDiver } from '../FolderDiver';
+import { AUDIO_EXTENSIONS, VIDEO_EXTENSIONS } from '../folderDiverTreeUtils';
 import { PlaylistApi, PlaylistWorkItem } from '../../api/Playlist';
 import { WorkService } from '../../services/WorkService';
 import type { PlaylistModeState, WorkDetail, PlayerTrack, AudioTrack } from '../../types';
-import type { TrackFolder, TracksResponse } from '../../types/api';
+import type { TrackFolder, TrackItem, TracksResponse } from '../../types/api';
 
 const QUEUE_END_CHECK_INTERVAL = 1500;
 const WORK_CHANGE_DEBOUNCE_MS = 500;
@@ -704,10 +705,7 @@ export class PlaylistMode {
             } else {
                 try {
                     const treeData = await WorkService.getTracks(workId);
-                    const autoFilter = Config.get('playlistAutoFilterFolders');
-                    if (!autoFilter) {
-                        Logger.debug('[PlaylistMode] playlistAutoFilterFolders disabled, skipping dive');
-                    } else if (treeData) {
+                    if (treeData) {
                         const startPath = this.folderDiver.getHostPath();
                         this.folderDiver.syncPath(startPath);
                         if (this.folderDiver.needsDiveFromPath(treeData, startPath)) {
@@ -845,12 +843,20 @@ export class PlaylistMode {
     private collectAllAudioFromTree(nodes: TracksResponse): AudioTrack[] {
         const audio: AudioTrack[] = [];
         for (const node of nodes) {
-            if (node.type === 'audio') {
-                audio.push(node as unknown as AudioTrack);
-            } else if (node.type === 'folder') {
+            if (node.type === 'folder') {
                 audio.push(...this.collectAllAudioFromTree((node as TrackFolder).children));
+            } else if (this.isPlayableTrackItem(node)) {
+                audio.push(node as unknown as AudioTrack);
             }
         }
         return audio;
+    }
+
+    private isPlayableTrackItem(node: TrackItem): boolean {
+        if (node.type === 'audio') return true;
+        const title = (node.title || '').toLowerCase();
+        const hasAudioExt = AUDIO_EXTENSIONS.some((ext) => title.endsWith(ext) || title.includes(ext));
+        const hasVideoExt = VIDEO_EXTENSIONS.some((ext) => title.endsWith(ext));
+        return hasAudioExt || hasVideoExt;
     }
 }

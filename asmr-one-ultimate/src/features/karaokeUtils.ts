@@ -111,17 +111,18 @@ export function computeWordKaraokeIndices(
         const e = entries[i];
 
         if (e.wordEnd <= now - WORD_END_PAST_GRACE_SEC) {
-            // Word fully in the past (small grace avoids eager next-char highlighting).
+            // Word fully in the past (small grace avoids eager next-word jump).
             lastPastSplit = e.charStart + e.charCount;
             lastPastHl = e.charStart;
             foundPast = true;
         } else if (e.wordStart <= now) {
-            // Active word — interpolate through its characters
-            const dur = Math.max(0.01, e.wordEnd - e.wordStart);
-            const progress = Math.max(0, Math.min(1, (now - e.wordStart) / dur));
-            const filled = Math.max(1, Math.ceil(progress * e.charCount));
+            // Active word: interpolate inside this word so highlighting stays on the
+            // currently spoken character position.
+            const duration = Math.max(0.001, e.wordEnd - e.wordStart);
+            const progress = Math.max(0, Math.min(1, (now - e.wordStart) / duration));
+            const filled = Math.max(1, Math.min(e.charCount, Math.ceil(progress * e.charCount)));
             return {
-                splitIdx: e.charStart + Math.min(filled, e.charCount),
+                splitIdx: e.charStart + filled,
                 hlStart: e.charStart,
             };
         } else {

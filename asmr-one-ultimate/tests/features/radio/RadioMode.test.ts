@@ -200,6 +200,32 @@ describe('RadioMode', () => {
         expect((AppStore.setRadioState as any).mock.calls.length).toBe(callCount2);
     });
 
+    it('should keep enough history for radio back after first forward skip', async () => {
+        const history: string[] = [];
+        mockWorkSelector.rememberWork.mockImplementation((id: string) => {
+            const next = [id, ...history.filter(v => v !== id)];
+            history.splice(0, history.length, ...next);
+        });
+        mockWorkSelector.getRecentWorkIds.mockImplementation(() => [...history]);
+        mockWorkSelector.selectRandomWork.mockResolvedValue({ id: 'RJ654321', title: 'Next Work' });
+        mockBridge.player.currentTrack = { hash: 't1' };
+
+        radioMode.initialize();
+        radioMode.enable();
+        expect(history).toContain('RJ123456');
+
+        await radioMode.skipToNext();
+        expect(history).toContain('RJ654321');
+        expect(history).toContain('RJ123456');
+
+        // Simulate route/work update after navigation
+        (radioMode as any).currentWorkId = 'RJ654321';
+
+        expect(radioMode.canSkipToPrevious()).toBe(true);
+        await radioMode.skipToPrevious();
+        expect(mockBridge.navigateToWork).toHaveBeenCalledWith('RJ123456');
+    });
+
     it('should navigate to previous work when history has one', async () => {
         (radioMode as any)._isActive = true;
         (radioMode as any).currentWorkId = 'RJ200000';
@@ -220,5 +246,22 @@ describe('RadioMode', () => {
 
         expect(mockBridge.navigateToWork).not.toHaveBeenCalled();
         expect(radioMode.canSkipToPrevious()).toBe(false);
+    });
+
+    it('collects playable non-audio files in flat mode', () => {
+        const tracks = (radioMode as any).collectAllAudioFromTree([
+            {
+                type: 'folder',
+                title: 'Main',
+                children: [
+                    { type: 'audio', hash: 'audio-1', title: 'Track 1', is_audio: true },
+                    { type: 'other', hash: 'other-1', title: 'Movie.mp4' },
+                    { type: 'other', hash: 'other-2', title: 'Notes.txt' },
+                ],
+            },
+        ]);
+
+        expect(tracks).toHaveLength(2);
+        expect(tracks.map((t: any) => t.hash)).toEqual(['audio-1', 'other-1']);
     });
 });
