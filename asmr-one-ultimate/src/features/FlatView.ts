@@ -9,6 +9,7 @@
 import { KikoeruBridge } from '../infrastructure/KikoeruBridge';
 import { Logger } from '../core/Logger';
 import { CentralObserver } from '../core/CentralObserver';
+import { TIMING } from '../core/Constants';
 import { EventBus } from '../core/EventBus';
 import { isDarkMode } from '../core/DomUtils';
 import type { TrackFolder, TrackItem, TracksResponse } from '../types/api';
@@ -89,7 +90,7 @@ export class FlatView {
     }
 
     public enable(): void {
-        CentralObserver.register('FlatView', () => this.ensureToggle(), 500);
+        CentralObserver.register('FlatView', () => this.ensureToggle(), TIMING.OBSERVER_REGISTER_DEBOUNCE_MS);
         this.ensureToggle();
         this.watchWork();
     }

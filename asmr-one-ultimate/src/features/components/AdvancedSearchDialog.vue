@@ -31,6 +31,7 @@ import {
     type SortOption,
 } from '../advancedSearchSortUtils';
 
+import { LIMITS } from '../../core/Constants';
 import TagSelector from './TagSelector.vue';
 import EntitySelector from './EntitySelector.vue';
 import type { EntityItem } from './EntitySelector.vue';
@@ -805,7 +806,7 @@ function generatePlaylistDescription(requestedCount: number, poolSize: number): 
 async function fetchWorks(maxWorks: number): Promise<FetchedWork[]> {
     const results: FetchedWork[] = [];
     let page = 1;
-    const MAX_PAGES = 10;
+    const MAX_PAGES = LIMITS.MAX_REVIEW_PAGES;
 
     const minDurationSec = minDuration.value ? Number(minDuration.value) * 60 : 0;
     const maxDurationSec = maxDuration.value ? Number(maxDuration.value) * 60 : 0;

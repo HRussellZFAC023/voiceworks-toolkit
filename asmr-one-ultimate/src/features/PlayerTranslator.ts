@@ -1,13 +1,17 @@
 import { CentralObserver } from '../core/CentralObserver';
+import { TIMING } from '../core/Constants';
 import { TranslationService } from '../services/TranslationService';
 import { I18n } from '../core/Utils';
-import { PLAYER_BAR_SELECTOR, isChinese } from '../core/DomUtils';
+import { PLAYER_BAR_SELECTOR, isChinese, getCleanText, stripJpdbAnnotations } from '../core/DomUtils';
 import { AppStore } from '../store/AppStore';
 import { EventBus } from '../core/EventBus';
+import { KikoeruBridge } from '../infrastructure/KikoeruBridge';
 
 export class PlayerTranslator {
+    private bridge = KikoeruBridge.getInstance();
     private trackChangeCleanup?: () => void;
     private workChangeCleanup?: () => void;
+    private storeWatchCleanups: Array<() => void> = [];
     private _enabled = false;
     private retryTimers: ReturnType<typeof setTimeout>[] = [];
     /** Incremented on every track/work change to invalidate stale async callbacks */
@@ -17,17 +21,39 @@ export class PlayerTranslator {
         if (this._enabled) return;
         this._enabled = true;
         // Register with central observer instead of own MutationObserver
-        CentralObserver.register('PlayerTranslator', () => this.checkPlayer(), 500);
+        CentralObserver.register('PlayerTranslator', () => this.checkPlayer(), TIMING.OBSERVER_REGISTER_DEBOUNCE_MS);
 
         // Translate immediately on track change instead of waiting for observer debounce
         this.trackChangeCleanup = EventBus.on('track:change', ({ track }) => {
-            this.onTrackOrWorkChange(track?.title || '');
+            this.onTrackOrWorkChange(track?.title || '', this.getCurrentWorkTitle());
         });
 
-        // Also re-translate when the work itself changes (different RJ code)
-        this.workChangeCleanup = EventBus.on('work:change', () => {
-            this.onTrackOrWorkChange(this.getCurrentTrackTitle());
+        // Also re-translate when the work itself changes (different RJ code).
+        // Don't seed track title from work:change because currentTrack can still be stale.
+        this.workChangeCleanup = EventBus.on('work:change', ({ work }) => {
+            this.onTrackOrWorkChange('', work?.title || this.getCurrentWorkTitle());
         });
+
+        const store = this.bridge.store;
+        if (store?.watch) {
+            const unwatchTrack = store.watch(
+                (state) => state.AudioPlayer?.currentTrack?.hash
+                    || state.AudioPlayer?.currentPlayingFile?.hash
+                    || state.AudioPlayer?.currentTrack?.src
+                    || state.AudioPlayer?.currentPlayingFile?.src
+                    || state.AudioPlayer?.currentTrack?.title
+                    || state.AudioPlayer?.currentPlayingFile?.title
+                    || '',
+                () => this.onTrackOrWorkChange(this.getCurrentTrackTitle(), this.getCurrentWorkTitle()),
+            );
+            if (typeof unwatchTrack === 'function') this.storeWatchCleanups.push(unwatchTrack);
+
+            const unwatchWork = store.watch(
+                (state) => state.AudioPlayer?.work?.id || '',
+                () => this.onTrackOrWorkChange('', this.getCurrentWorkTitle()),
+            );
+            if (typeof unwatchWork === 'function') this.storeWatchCleanups.push(unwatchWork);
+        }
     }
 
     public disable(): void {
@@ -38,15 +64,21 @@ export class PlayerTranslator {
         this.workChangeCleanup?.();
         this.workChangeCleanup = undefined;
         this.clearRetryTimers();
+        for (const cleanup of this.storeWatchCleanups) cleanup();
+        this.storeWatchCleanups = [];
     }
 
     /**
      * Handle track or work change: clear stale translation state and
      * schedule multiple retry attempts to catch Vue re-renders.
      */
-    private onTrackOrWorkChange(nextTrackTitle = ''): void {
+    private onTrackOrWorkChange(nextTrackTitle = '', nextWorkTitle = ''): void {
         this._epoch++;
         this.clearRetryTimers();
+        // Strip jpdb ruby annotations BEFORE resetting translation state.
+        // jpdb replaces Vue's tracked text nodes with <span class="jpdb-word"><ruby>...</ruby></span>.
+        // Without stripping, Vue writes to detached text nodes on track change → stale DOM.
+        this.stripPlayerJpdb();
         // Clear stale translation attrs so the old translation doesn't cause
         // early-return in translateTrackName/translateElement when Vue hasn't
         // re-rendered the new title yet (rawText still === old translated text).
@@ -57,6 +89,9 @@ export class PlayerTranslator {
         // always runs against current content after a track change.
         if (nextTrackTitle) {
             this.seedTrackTitle(nextTrackTitle);
+        }
+        if (nextWorkTitle) {
+            this.seedWorkTitle(nextWorkTitle);
         }
         // Multiple attempts: Vue re-renders asynchronously and may take varying time.
         // rAF catches immediate renders, 200ms/500ms/1000ms catch slower transitions.
@@ -79,25 +114,53 @@ export class PlayerTranslator {
      * the CJK detection check sees the original text (not our English translation).
      */
     private resetTranslationState(): void {
-        const playerBar = document.querySelector(PLAYER_BAR_SELECTOR + ', .audio-player');
-        if (!playerBar) return;
+        // Cover all player surfaces: miniplayer bar, expanded player, and queue dialog
+        const containers = document.querySelectorAll<HTMLElement>(
+            `${PLAYER_BAR_SELECTOR}, .audio-player, .current-play-list`
+        );
 
-        const els = playerBar.querySelectorAll<HTMLElement>('[data-asmr-translated]');
-        for (const el of els) {
-            const source = el.dataset.asmrSource;
-            // Only restore source text if our translation spans are still in the DOM,
-            // meaning Vue hasn't re-rendered the element yet. Vue's component render
-            // watcher (lower ID) flushes before our store.watch watcher (higher ID),
-            // so by the time this runs Vue has usually already set textContent to the
-            // new track name. Overwriting it with the old source caused the stale-title bug.
-            if (source && el.querySelector('.asmr-translation-original')) {
-                el.textContent = source;
+        for (const container of containers) {
+            const els = container.querySelectorAll<HTMLElement>('[data-asmr-translated]');
+            for (const el of els) {
+                const source = el.dataset.asmrSource;
+                const translatedText = el.dataset.asmrTranslatedText || '';
+                // Only restore source text if our translation spans are still in the DOM,
+                // meaning Vue hasn't re-rendered the element yet. Vue's component render
+                // watcher (lower ID) flushes before our store.watch watcher (higher ID),
+                // so by the time this runs Vue has usually already set textContent to the
+                // new track name. Overwriting it with the old source caused the stale-title bug.
+                const hasInjectedPair =
+                    el.classList.contains('asmr-translation-pair')
+                    || !!el.querySelector('.asmr-translation-original, .asmr-translation-translated')
+                    || (!!translatedText && (el.textContent || '').includes(translatedText));
+                if (source && hasInjectedPair) {
+                    el.textContent = source;
+                }
+                el.title = '';
+                el.classList.remove('asmr-translation-pair');
+                delete el.dataset.asmrTranslated;
+                delete el.dataset.asmrSource;
+                delete el.dataset.asmrTranslatedText;
             }
-            el.title = '';
-            el.classList.remove('asmr-translation-pair');
-            delete el.dataset.asmrTranslated;
-            delete el.dataset.asmrSource;
-            delete el.dataset.asmrTranslatedText;
+
+            const marquees = container.querySelectorAll<HTMLElement>('.asmr-marquee-fix');
+            for (const marquee of marquees) {
+                marquee.classList.remove('asmr-marquee-fix');
+                marquee.style.removeProperty('--asmr-scroll-distance');
+                marquee.style.removeProperty('--asmr-scroll-duration');
+            }
+        }
+    }
+
+    /**
+     * Strip jpdb furigana annotations from all player containers.
+     * Called before Vue re-renders on track change to restore text nodes
+     * that jpdb detached by injecting <ruby>/<span> wrappers.
+     */
+    private stripPlayerJpdb(): void {
+        for (const sel of [PLAYER_BAR_SELECTOR, '.audio-player', '.current-play-list']) {
+            const el = document.querySelector(sel);
+            if (el) stripJpdbAnnotations(el);
         }
     }
 
@@ -105,19 +168,36 @@ export class PlayerTranslator {
         const translateMode = !!AppStore.getConfig('translateMode');
         const cnToJp = !!AppStore.getConfig('translateCnToJp');
         if (!translateMode && !cnToJp) return;
-        const playerBar = document.querySelector(PLAYER_BAR_SELECTOR + ', .audio-player');
-        if (!playerBar) return;
 
         const cnOnlyMode = !translateMode && cnToJp;
-        const titleEl = playerBar.querySelector('.q-toolbar__title, .text-h6, .text-weight-bold.text-body1') as HTMLElement;
-        const artistEl = playerBar.querySelector('.text-subtitle2, .text-caption, .text-grey-5') as HTMLElement;
-        const trackNameEl = this.findTrackNameElement(playerBar);
-
-        // Run all translations concurrently instead of sequentially
         const tasks: Promise<void>[] = [];
-        if (titleEl) tasks.push(this.translateElement(titleEl, 'title', cnOnlyMode));
-        if (artistEl) tasks.push(this.translateElement(artistEl, 'artist', cnOnlyMode));
-        if (trackNameEl) tasks.push(this.translateTrackName(trackNameEl, cnOnlyMode));
+
+        // Process all player surfaces (miniplayer bar + expanded player)
+        const containers = document.querySelectorAll<HTMLElement>(
+            `${PLAYER_BAR_SELECTOR}, .audio-player`
+        );
+        for (const playerBar of containers) {
+            const trackNameEl = this.findTrackNameElement(playerBar);
+            const titleEl = playerBar.querySelector('.q-toolbar__title, .text-h6, .text-weight-bold.text-body1') as HTMLElement;
+            const artistEl = this.findSubtitleElement(playerBar, trackNameEl);
+
+            if (titleEl) tasks.push(this.translateElement(titleEl, 'title', cnOnlyMode));
+            if (artistEl) tasks.push(this.translateElement(artistEl, 'artist', cnOnlyMode));
+            if (trackNameEl) tasks.push(this.translateTrackName(trackNameEl, cnOnlyMode));
+        }
+
+        // Queue dialog items (only when the dialog is visible/rendered)
+        const queueList = document.querySelector('.current-play-list .q-list');
+        if (queueList) {
+            const queueItems = queueList.querySelectorAll<HTMLElement>('.q-item');
+            for (const item of queueItems) {
+                const titleLabel = item.querySelector('.q-item__label:not(.q-item__label--caption)') as HTMLElement;
+                const captionLabel = item.querySelector('.q-item__label--caption') as HTMLElement;
+                if (titleLabel) tasks.push(this.translateTrackName(titleLabel, cnOnlyMode));
+                if (captionLabel) tasks.push(this.translateElement(captionLabel, 'title', cnOnlyMode));
+            }
+        }
+
         await Promise.all(tasks);
     }
 
@@ -138,7 +218,7 @@ export class PlayerTranslator {
 
         for (const el of candidates) {
             let score = 0;
-            const rawText = el.textContent?.trim() || '';
+            const rawText = getCleanText(el);
             const source = el.dataset.asmrSource?.trim() || '';
             const translated = el.dataset.asmrTranslatedText?.trim() || '';
 
@@ -181,22 +261,98 @@ export class PlayerTranslator {
         }
     }
 
+    private getCurrentWorkTitle(): string {
+        try {
+            return (AppStore.currentWork?.title || '').trim();
+        } catch {
+            return '';
+        }
+    }
+
     private seedTrackTitle(nextTrackTitle: string): void {
-        const playerBar = document.querySelector(PLAYER_BAR_SELECTOR + ', .audio-player');
-        if (!playerBar) return;
+        // Seed track title across all player surfaces
+        const containers = document.querySelectorAll<HTMLElement>(
+            `${PLAYER_BAR_SELECTOR}, .audio-player`
+        );
+        for (const playerBar of containers) {
+            const el = this.findTrackNameElement(playerBar);
+            if (!el) continue;
 
-        const el = this.findTrackNameElement(playerBar);
-        if (!el) return;
+            const rawText = getCleanText(el);
+            if (!rawText || rawText === nextTrackTitle) continue;
 
-        const rawText = el.textContent?.trim() || '';
-        if (!rawText || rawText === nextTrackTitle) return;
+            el.textContent = nextTrackTitle;
+            el.title = '';
+        }
+    }
 
-        el.textContent = nextTrackTitle;
-        el.title = '';
+    private seedWorkTitle(nextWorkTitle: string): void {
+        const containers = document.querySelectorAll<HTMLElement>(
+            `${PLAYER_BAR_SELECTOR}, .audio-player`
+        );
+        for (const playerBar of containers) {
+            const trackEl = this.findTrackNameElement(playerBar);
+            const subtitleEl = this.findSubtitleElement(playerBar, trackEl);
+            if (!subtitleEl) continue;
+            const rawText = getCleanText(subtitleEl);
+            if (!rawText || rawText === nextWorkTitle || rawText.includes(nextWorkTitle)) continue;
+            subtitleEl.textContent = nextWorkTitle;
+            subtitleEl.title = '';
+        }
+    }
+
+    private findSubtitleElement(playerBar: Element, trackNameEl: HTMLElement | null): HTMLElement | null {
+        const candidates = Array.from(
+            playerBar.querySelectorAll<HTMLElement>('.text-subtitle2, .text-caption, .text-grey-5')
+        ).filter((el) => !el.closest('.q-item'));
+        if (candidates.length === 0) return null;
+
+        const currentWorkTitle = this.getCurrentWorkTitle();
+        let best: HTMLElement | null = null;
+        let bestScore = Number.NEGATIVE_INFINITY;
+
+        for (const el of candidates) {
+            const text = getCleanText(el);
+            if (!text) continue;
+
+            let score = 0;
+            const source = el.dataset.asmrSource?.trim() || '';
+            if (el.dataset.asmrTranslated === 'true') score += 10;
+            if (/^\d{1,2}:\d{2}(?::\d{2})?$/.test(text)) score -= 60;
+            if (/^\d+(?:\.\d+)?\s*(?:MB|GB|KB|kHz|Hz|fps)?$/i.test(text)) score -= 30;
+
+            if (currentWorkTitle) {
+                if (text === currentWorkTitle || source === currentWorkTitle) {
+                    score += 130;
+                } else if (
+                    text.includes(currentWorkTitle) ||
+                    source.includes(currentWorkTitle) ||
+                    currentWorkTitle.includes(text)
+                ) {
+                    score += 70;
+                }
+            }
+
+            if (/[\u3040-\u30ff\u4e00-\u9faf]/.test(text)) score += 12;
+
+            if (trackNameEl) {
+                const sameGroup = trackNameEl.parentElement && el.parentElement === trackNameEl.parentElement;
+                if (sameGroup) score += 30;
+                const relation = trackNameEl.compareDocumentPosition(el);
+                if (relation & Node.DOCUMENT_POSITION_FOLLOWING) score += 12;
+            }
+
+            if (score > bestScore) {
+                bestScore = score;
+                best = el;
+            }
+        }
+
+        return best;
     }
 
     private async translateElement(el: HTMLElement, _type: 'title' | 'artist', cnOnlyMode = false) {
-        const rawText = el.textContent?.trim() || '';
+        const rawText = getCleanText(el);
         if (!rawText) return;
 
         // In CN-only mode, skip non-Chinese text
@@ -243,7 +399,7 @@ export class PlayerTranslator {
      * then displays as "Original (Translated)" using updateElement.
      */
     private async translateTrackName(el: HTMLElement, cnOnlyMode = false) {
-        const rawText = el.textContent?.trim() || '';
+        const rawText = getCleanText(el);
         if (!rawText) return;
 
         // Already translated — skip if showing our translation pair

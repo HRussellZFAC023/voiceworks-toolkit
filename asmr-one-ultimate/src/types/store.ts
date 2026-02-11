@@ -180,6 +180,8 @@ export interface PluginConfig {
     playlistAutoFilterFolders: boolean;
     playlistUseFlatTracks: boolean;
     playlistAutoProgress: boolean;
+    playlistSePref: boolean;
+    playlistBgmPref: boolean;
 
     // Learner Mode
     showJP: boolean;
@@ -221,6 +223,7 @@ export interface PluginConfig {
 
     // Folder Selection
     sePref: boolean;
+    bgmPref: boolean;
 
     // UI
     autoProgress: boolean;

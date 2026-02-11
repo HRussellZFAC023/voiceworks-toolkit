@@ -11,6 +11,7 @@
 import { Logger } from '../core/Utils';
 import { I18n } from '../core/Config';
 import { CentralObserver } from '../core/CentralObserver';
+import { TIMING } from '../core/Constants';
 import { EventBus } from '../core/EventBus';
 import { AppStore } from '../store/AppStore';
 
@@ -47,7 +48,7 @@ export class PlayerFullscreen {
     }
 
     public enable(): void {
-        CentralObserver.register('player-fullscreen', () => this.ensureButton(), 500);
+        CentralObserver.register('player-fullscreen', () => this.ensureButton(), TIMING.OBSERVER_REGISTER_DEBOUNCE_MS);
         Logger.log('[PlayerFullscreen] Enabled');
     }
 

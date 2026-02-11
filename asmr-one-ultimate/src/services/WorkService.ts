@@ -3,6 +3,7 @@ import { HttpClient } from '../infrastructure/HttpClient';
 import { KikoeruBridge } from '../infrastructure/KikoeruBridge';
 import { Work, WorkInfo, TracksResponse } from '../types/api';
 import { Logger } from '../core/Utils';
+import { DEFAULT_API_SERVER, CACHE_TTL, RETRY } from '../core/Constants';
 
 interface WorkCacheDB extends DBSchema {
     work: {
@@ -30,9 +31,8 @@ interface WorkCacheDB extends DBSchema {
 
 const DB_NAME = 'asmr-one-work-cache';
 const DB_VERSION = 2; // Bump version to fix schema
-const CACHE_TTL_MS =  24 * 60 * 60 * 1000; // 24 hours for metadata
-const TRACKS_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours for tracks 
-const DEFAULT_API_SERVER = 'https://api.asmr-200.com';
+const CACHE_TTL_MS = CACHE_TTL.TWENTY_FOUR_HOURS_MS;
+const TRACKS_TTL_MS = CACHE_TTL.TWENTY_FOUR_HOURS_MS;
 
 export class WorkServiceImpl {
     private dbPromise: Promise<IDBPDatabase<WorkCacheDB>>;
@@ -112,7 +112,7 @@ export class WorkServiceImpl {
         try {
             const baseUrl = this.getApiBaseUrl();
             const response = await HttpClient.getJsonViaCors<Work>(`${baseUrl}/api/work/${workId}`, {
-                retry: { attempts: 2, backoffMs: 500 },
+                retry: RETRY.BLOB,
             });
             await this.setCache('work', workId, response.data);
             return response.data;
@@ -146,7 +146,7 @@ export class WorkServiceImpl {
         try {
             const baseUrl = this.getApiBaseUrl();
             const response = await HttpClient.getJsonViaCors<WorkInfo>(`${baseUrl}/api/workInfo/${workId}`, {
-                retry: { attempts: 2, backoffMs: 500 },
+                retry: RETRY.BLOB,
             });
             await this.setCache('workInfo', workId, response.data);
             return response.data;
@@ -192,7 +192,7 @@ export class WorkServiceImpl {
         try {
             const baseUrl = this.getApiBaseUrl();
             const response = await HttpClient.getJsonViaCors<TracksResponse>(`${baseUrl}/api/tracks/${workId}?v=2`, {
-                retry: { attempts: 2, backoffMs: 500 },
+                retry: RETRY.BLOB,
             });
             const data = Array.isArray(response.data) ? response.data : [];
             await this.setCache('tracks', workId, data);

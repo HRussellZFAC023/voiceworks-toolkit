@@ -1,5 +1,6 @@
 import { CentralObserver } from '../core/CentralObserver';
 import { Logger } from '../core/Utils';
+import { TIMING } from '../core/Constants';
 import { AppStore } from '../store/AppStore';
 
 export class InterfaceTranslator {
@@ -101,7 +102,7 @@ export class InterfaceTranslator {
     public enable(): void {
         if (this._enabled) return;
         this._enabled = true;
-        CentralObserver.register('InterfaceTranslator', () => this.translate(), 500);
+        CentralObserver.register('InterfaceTranslator', () => this.translate(), TIMING.OBSERVER_REGISTER_DEBOUNCE_MS);
         this.translate();
         Logger.debug('[InterfaceTranslator] Enabled');
     }

@@ -1,11 +1,7 @@
 import { getAxios } from './Client';
 import { WorkDetails } from './Work';
 import { HttpClient } from '../infrastructure/HttpClient';
-
-/**
- * Default API server URL - used when axios is not yet initialized
- */
-const DEFAULT_API_SERVER = 'https://api.asmr-200.com';
+import { DEFAULT_API_SERVER, RETRY } from '../core/Constants';
 
 export interface WorksResponse {
     works: WorkDetails[];
@@ -66,7 +62,7 @@ export const WorksApi = {
         const url = `${baseUrl}/api/works`;
         const response = await HttpClient.getJsonViaCors<WorksResponse>(url, {
             params: params as Record<string, string | number | boolean | undefined>,
-            retry: { attempts: 2, backoffMs: 1000 },
+            retry: RETRY.API_JSON,
         });
         return response.data;
     },
@@ -76,7 +72,7 @@ export const WorksApi = {
         const url = `${baseUrl}/api/search/${encodeURIComponent(keyword)}`;
         const response = await HttpClient.getJsonViaCors<WorksResponse>(url, {
             params: params as Record<string, string | number | boolean | undefined>,
-            retry: { attempts: 2, backoffMs: 1000 },
+            retry: RETRY.API_JSON,
         });
         return response.data;
     },
@@ -89,7 +85,7 @@ export const WorksApi = {
         const url = `${baseUrl}/api/vas/${vaId}/works`;
         const response = await HttpClient.getJsonViaCors<WorksResponse>(url, {
             params: params as Record<string, string | number | boolean | undefined>,
-            retry: { attempts: 2, backoffMs: 1000 },
+            retry: RETRY.API_JSON,
         });
         return response.data;
     },
@@ -102,7 +98,7 @@ export const WorksApi = {
         const url = `${baseUrl}/api/circles/${circleId}/works`;
         const response = await HttpClient.getJsonViaCors<WorksResponse>(url, {
             params: params as Record<string, string | number | boolean | undefined>,
-            retry: { attempts: 2, backoffMs: 1000 },
+            retry: RETRY.API_JSON,
         });
         return response.data;
     },
@@ -115,7 +111,7 @@ export const WorksApi = {
         const url = `${baseUrl}/api/tags/${tagId}/works`;
         const response = await HttpClient.getJsonViaCors<WorksResponse>(url, {
             params: params as Record<string, string | number | boolean | undefined>,
-            retry: { attempts: 2, backoffMs: 1000 },
+            retry: RETRY.API_JSON,
         });
         return response.data;
     },

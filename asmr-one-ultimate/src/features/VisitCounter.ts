@@ -8,6 +8,7 @@
 import { GM_getValue, GM_setValue } from '$';
 import { KikoeruBridge } from '../infrastructure/KikoeruBridge';
 import { CentralObserver } from '../core/CentralObserver';
+import { TIMING } from '../core/Constants';
 import { Logger } from '../core/Utils';
 
 const STORAGE_KEY = 'asmr-ult:visitCounts';
@@ -35,7 +36,7 @@ export class VisitCounter {
         }
 
         // Register with CentralObserver to inject badges on DOM changes
-        CentralObserver.register('visit-counter', () => this.injectBadges(), 500);
+        CentralObserver.register('visit-counter', () => this.injectBadges(), TIMING.OBSERVER_REGISTER_DEBOUNCE_MS);
 
         // Initial injection
         this.injectBadges();

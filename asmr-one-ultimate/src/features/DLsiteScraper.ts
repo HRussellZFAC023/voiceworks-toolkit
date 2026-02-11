@@ -1,4 +1,5 @@
 import { Logger } from '../core/Utils';
+import { CACHE_TTL } from '../core/Constants';
 import { CacheKeys, SharedCache } from '../core/Cache';
 import { DLsiteService } from '../services/DLsiteService';
 import type { DLsiteProductApiResponse, DLsiteDynamicEntry, DLsiteUserReview } from '../types/dlsite';
@@ -9,7 +10,7 @@ import type { DLsiteMetadata } from '../types/dlsite';
 
 export class DLsiteScraper {
     private static instance: DLsiteScraper;
-    private cacheTtlMs = 1000 * 60 * 60 * 24 * 7;  // 7 days — use refresh button to force re-fetch
+    private cacheTtlMs = CACHE_TTL.SEVEN_DAYS_MS;
 
     public static getInstance(): DLsiteScraper {
         if (!this.instance) this.instance = new DLsiteScraper();

@@ -182,6 +182,7 @@ describe('PlaylistMode', () => {
 
         expect(WorkService.getTracks).toHaveBeenCalledWith('RJ00000001');
         expect(mockPlaybackController.setQueueAndPlay).toHaveBeenCalledTimes(1);
-        expect((mockPlaybackController.setQueueAndPlay as any).mock.calls[0][0]).toHaveLength(3);
+        expect((mockPlaybackController.setQueueAndPlay as any).mock.calls[0][0]).toHaveLength(1);
+        expect((mockPlaybackController.setQueueAndPlay as any).mock.calls[0][0][0]?.hash).toBe('track-1');
     });
 });

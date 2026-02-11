@@ -3,6 +3,7 @@ import { CacheKeys, SharedCache, hashString } from '../core/Cache';
 import { gmRequest, retryWithBackoff, HttpError } from '../infrastructure/HttpClient';
 import { I18n, Config } from '../core/Config';
 import { Logger } from '../core/Utils';
+import { CACHE_TTL } from '../core/Constants';
 import {
     glossaryMap,
     alwaysRegex,
@@ -18,6 +19,7 @@ import {
 export interface TranslationTaskOptions {
     // Kept for compatibility with existing call sites that pass scheduler priorities.
     priority?: number;
+    // Legacy no-op fields retained for call-site compatibility.
     cancellable?: boolean;
     cancellableKey?: string;
 }
@@ -26,11 +28,6 @@ interface GlossaryResult {
     full: string | null;
     preprocessed: string;
     modified: boolean;
-}
-
-interface SplitSegment {
-    text: string;
-    wrap: [string, string];
 }
 
 interface DegenerateSampleLog {
@@ -42,7 +39,7 @@ interface DegenerateSampleLog {
 // Constants
 // ============================================================================
 
-const CACHE_TTL_MS = 1000 * 60 * 60 * 24 * 30; // 30 days
+const CACHE_TTL_MS = CACHE_TTL.THIRTY_DAYS_MS;
 const TRANSLATION_CACHE_SCHEMA_VERSION = 'v3';
 const PREFETCH_MAX_LINES = 1000;
 
@@ -143,8 +140,20 @@ function detectSourceLanguage(text: string): 'ja' | 'zh' | 'en' {
     return 'ja';
 }
 
+function shouldPreferJapaneseForChinese(text: string, targetLang: string): boolean {
+    if (Config.get('translateCnToJp') !== true) return false;
+    const target = normalizeTargetLang(targetLang);
+    if (target === 'ja') return false;
+    return detectSourceLanguage(text) === 'zh';
+}
+
+function resolveEffectiveTargetLang(text: string, requestedTargetLang: string): string {
+    const normalized = normalizeTargetLang(requestedTargetLang);
+    return shouldPreferJapaneseForChinese(text, normalized) ? 'ja' : normalized;
+}
+
 const hallucinationFirstPerson = /^I['\u2019]?m\s|^I\s(don|can|won|didn|couldn|wouldn|shouldn)['\u2019]t\s|^I\s(have|want|need|think|know|like)\s/i;
-const firstPersonJa = /私|僕|俺|わたし|ぼく|おれ|あたし/;
+const firstPersonJa = /私|僕|俺|自分|わたし|ぼく|おれ|あたし|じぶん/;
 
 const degenerateStats: DegenerateSampleLog = {
     remoteRejected: 0,
@@ -203,7 +212,10 @@ function getGarbageReason(input: string, output: string): string | null {
         }
     }
 
-    if (!firstPersonJa.test(input) && hallucinationFirstPerson.test(trimmed)) {
+    // Only flag first-person hallucination for short inputs.  Japanese zero-pronoun
+    // (主語省略) is extremely common — long sentences routinely omit 私/僕 yet validly
+    // translate to "I …".  Short fragments are more likely to be actual hallucinations.
+    if (input.length < 50 && !firstPersonJa.test(input) && hallucinationFirstPerson.test(trimmed)) {
         return 'first-person-hallucination';
     }
 
@@ -278,59 +290,6 @@ function glossaryPreProcess(text: string, targetLang: string): [string, boolean]
     return [r.preprocessed, r.modified];
 }
 
-function splitForModel(text: string): SplitSegment[] | null {
-    const bracketRe = /([【（])((?:(?![【（】）]).)+)([】）])/g;
-    let segments: SplitSegment[] = [];
-    let lastEnd = 0;
-    let match: RegExpExecArray | null;
-
-    while ((match = bracketRe.exec(text)) !== null) {
-        const before = text.slice(lastEnd, match.index).trim();
-        if (before) segments.push({ text: before, wrap: ['', ''] });
-
-        const open = match[1];
-        const content = match[2].trim();
-        const close = match[3];
-        if (content) segments.push({ text: content, wrap: [open, close] });
-
-        lastEnd = match.index + match[0].length;
-    }
-
-    const trailing = text.slice(lastEnd).trim();
-    if (trailing) segments.push({ text: trailing, wrap: ['', ''] });
-
-    if (segments.length === 0) {
-        segments = [{ text: text.trim(), wrap: ['', ''] }];
-    }
-
-    const expanded: SplitSegment[] = [];
-    for (const seg of segments) {
-        const sentences = seg.text.split(/。/).filter(s => s.trim());
-        if (sentences.length > 1) {
-            for (const s of sentences) {
-                expanded.push({ text: s.trim(), wrap: seg.wrap });
-            }
-        } else {
-            expanded.push(seg);
-        }
-    }
-
-    return expanded.length > 1 ? expanded : null;
-}
-
-function joinTranslatedSegments(segments: SplitSegment[], translations: string[]): string {
-    const parts: string[] = [];
-    for (let i = 0; i < segments.length; i++) {
-        const [open, close] = segments[i].wrap;
-        const translated = translations[i] || '';
-        if (open && close) {
-            parts.push(`${open}${translated}${close}`);
-        } else {
-            parts.push(translated);
-        }
-    }
-    return parts.join(' ').replace(/\s{2,}/g, ' ').trim();
-}
 
 // ============================================================================
 // Cache helpers
@@ -347,49 +306,6 @@ function getCached(text: string, lang: string): string | null {
 
     // Legacy key fallback for older auto-source caches.
     return SharedCache.get<string>(CacheKeys.translation(cacheInput(text), lang, 'auto')) || null;
-}
-
-// ============================================================================
-// Cancellable queue-key bookkeeping
-// ============================================================================
-
-const queueVersions = new Map<string, number>();
-const queueInFlightCounts = new Map<string, number>();
-
-function getQueueVersion(key: string): number {
-    return queueVersions.get(key) || 0;
-}
-
-function bumpQueueVersion(key: string): void {
-    queueVersions.set(key, getQueueVersion(key) + 1);
-}
-
-function registerQueueInFlight(key: string): () => void {
-    const next = (queueInFlightCounts.get(key) || 0) + 1;
-    queueInFlightCounts.set(key, next);
-    return () => {
-        const current = queueInFlightCounts.get(key) || 0;
-        if (current <= 1) {
-            queueInFlightCounts.delete(key);
-        } else {
-            queueInFlightCounts.set(key, current - 1);
-        }
-    };
-}
-
-function shouldRespectCancellation(options?: TranslationTaskOptions): boolean {
-    return !!(options?.cancellable && options?.cancellableKey);
-}
-
-function isQueueCancelled(options: TranslationTaskOptions | undefined, startedVersion: number): boolean {
-    if (!shouldRespectCancellation(options)) return false;
-    return getQueueVersion(options!.cancellableKey!) !== startedVersion;
-}
-
-function throwIfQueueCancelled(options: TranslationTaskOptions | undefined, startedVersion: number): void {
-    if (isQueueCancelled(options, startedVersion)) {
-        throw new Error('Translation task cancelled');
-    }
 }
 
 // ============================================================================
@@ -491,56 +407,29 @@ export const TranslationService = {
     async translate(text: string, targetLang = 'en', options?: TranslationTaskOptions): Promise<string> {
         if (!text) return '';
 
-        targetLang = normalizeTargetLang(targetLang);
-        const startedVersion = shouldRespectCancellation(options)
-            ? getQueueVersion(options!.cancellableKey!)
-            : 0;
+        targetLang = resolveEffectiveTargetLang(text, targetLang);
 
-        const unregisterQueue = shouldRespectCancellation(options)
-            ? registerQueueInFlight(options!.cancellableKey!)
-            : null;
+        const cached = getCached(text, targetLang);
+        if (cached) return cached;
 
+        const laneKey = `${options?.priority ?? 0}`;
+        const flightKey = `${laneKey}:${targetLang}:${text}`;
+        const existing = translateInFlight.get(flightKey);
+        if (existing) return existing;
+
+        const promise = this._translateInner(text, targetLang);
+        translateInFlight.set(flightKey, promise);
         try {
-            throwIfQueueCancelled(options, startedVersion);
-
-            const cached = getCached(text, targetLang);
-            if (cached) return cached;
-
-            const laneKey = `${options?.priority ?? 0}:${options?.cancellableKey || 'global'}`;
-            const flightKey = `${laneKey}:${targetLang}:${text}`;
-            const existing = translateInFlight.get(flightKey);
-            if (existing) return existing;
-
-            const promise = this._translateInner(text, targetLang, options, startedVersion);
-            translateInFlight.set(flightKey, promise);
-            try {
-                return await promise;
-            } finally {
-                translateInFlight.delete(flightKey);
-            }
+            return await promise;
         } finally {
-            unregisterQueue?.();
+            translateInFlight.delete(flightKey);
         }
     },
 
     async _translateInner(
         text: string,
         targetLang: string,
-        options: TranslationTaskOptions | undefined,
-        startedVersion: number,
     ): Promise<string> {
-        throwIfQueueCancelled(options, startedVersion);
-
-        const segments = splitForModel(text);
-        if (segments) {
-            const results = await Promise.all(
-                segments.map(s => this.translate(s.text, targetLang, options)),
-            );
-            const joined = joinTranslatedSegments(segments, results);
-            SharedCache.set(cacheKey(text, targetLang), joined, CACHE_TTL_MS);
-            return joined;
-        }
-
         const glossary = processGlossary(text, targetLang);
         if (glossary.full) {
             SharedCache.set(cacheKey(text, targetLang), glossary.full, CACHE_TTL_MS);
@@ -549,8 +438,6 @@ export const TranslationService = {
 
         const input = normalizeForModel(glossary.preprocessed);
         const translated = await translateRemoteSingle(input, targetLang);
-
-        throwIfQueueCancelled(options, startedVersion);
 
         const cleaned = this.cleanQuotes(translated);
         const reason = getGarbageReason(text, cleaned);
@@ -569,12 +456,7 @@ export const TranslationService = {
     async translateBatch(texts: string[], targetLang = 'en', options?: TranslationTaskOptions): Promise<string[]> {
         if (texts.length === 0) return [];
 
-        targetLang = normalizeTargetLang(targetLang);
-        const startedVersion = shouldRespectCancellation(options)
-            ? getQueueVersion(options!.cancellableKey!)
-            : 0;
-
-        throwIfQueueCancelled(options, startedVersion);
+        const requestedTargetLang = normalizeTargetLang(targetLang);
 
         const results = new Array(texts.length).fill('');
         const seen = new Map<string, number[]>();
@@ -584,7 +466,8 @@ export const TranslationService = {
             const text = texts[i]?.trim();
             if (!text) continue;
 
-            const cached = getCached(text, targetLang);
+            const effectiveTargetLang = resolveEffectiveTargetLang(text, requestedTargetLang);
+            const cached = getCached(text, effectiveTargetLang);
             if (cached) {
                 results[i] = cached;
                 continue;
@@ -610,16 +493,12 @@ export const TranslationService = {
                 const idx = nextIndex++;
                 if (idx >= uniqueUncached.length) return;
 
-                throwIfQueueCancelled(options, startedVersion);
-
                 const text = uniqueUncached[idx];
                 let translated = text;
                 try {
-                    translated = await this.translate(text, targetLang, options);
+                    translated = await this.translate(text, requestedTargetLang, options);
                 } catch (err) {
-                    if (String((err as Error)?.message || '').includes('cancelled')) {
-                        throw err;
-                    }
+                    Logger.debug('[TranslationService] Batch item fallback to source after error:', err);
                     translated = text;
                 }
 
@@ -628,7 +507,6 @@ export const TranslationService = {
         };
 
         await Promise.all(Array.from({ length: workerCount }, () => run()));
-        throwIfQueueCancelled(options, startedVersion);
 
         for (const [text, indices] of seen.entries()) {
             const translated = translatedByText.get(text) || text;
@@ -652,19 +530,9 @@ export const TranslationService = {
     },
 
     cancelPending(options?: { cancellableKey?: string }): number {
-        if (options?.cancellableKey) {
-            const key = options.cancellableKey;
-            const count = queueInFlightCounts.get(key) || 0;
-            bumpQueueVersion(key);
-            return count;
-        }
-
-        let total = 0;
-        for (const [key, count] of queueInFlightCounts.entries()) {
-            total += count;
-            bumpQueueVersion(key);
-        }
-        return total;
+        // No hard-cancel behavior: callers should gate stale results via route/version guards.
+        void options;
+        return 0;
     },
 
     getDebugStats(): { degenerateRemoteRejected: number } {
@@ -675,7 +543,7 @@ export const TranslationService = {
 
     peekCached(text: string, targetLang = 'en'): string | null {
         if (!text) return null;
-        return getCached(text, normalizeTargetLang(targetLang));
+        return getCached(text, resolveEffectiveTargetLang(text, targetLang));
     },
 
     async autoTranslate(text: string, targetLang = 'en'): Promise<string> {
@@ -735,8 +603,6 @@ export const TranslationService = {
 
 export const _testExports = {
     normalizeForModel,
-    splitForModel,
-    joinTranslatedSegments,
     isLikelyGarbage,
     glossaryPreProcess,
 };

@@ -124,7 +124,7 @@ describe('WorksApi', () => {
             expect(mockGetJsonViaCors).toHaveBeenCalledWith(
                 expect.any(String),
                 expect.objectContaining({
-                    retry: { attempts: 2, backoffMs: 1000 },
+                    retry: { attempts: 2, backoffMs: 1000, multiplier: 2 },
                 }),
             );
         });

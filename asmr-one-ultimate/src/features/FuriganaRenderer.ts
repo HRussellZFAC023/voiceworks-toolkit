@@ -6,6 +6,7 @@
  */
 
 import { CentralObserver } from '../core/CentralObserver';
+import { TIMING } from '../core/Constants';
 import { Logger } from '../core/Logger';
 import { EventBus } from '../core/EventBus';
 import { AppStore } from '../store/AppStore';
@@ -25,13 +26,15 @@ const TARGET_SELECTORS = [
     '.ellipsis-3-lines a[href*="/work/"]',
     '.ellipsis-2-lines a[href*="/work/"]',
     // Circle / VA names
-    '.text-subtitle1 .text-grey.ellipsis',
+    '.text-subtitle1 .text-grey',
     // Tags & chips
     '.q-chip__content',
     '.asmr-chip-label',
     // Work tree
     '.work-tree-item span',
     '.q-item__label',
+    // Original title (shown below translated h1)
+    '.asmr-original-title',
     // Scraped metadata (descriptions, file names)
     '.asmr-meta-description-cell--original',
     '.asmr-meta-body-cell--original',
@@ -82,7 +85,7 @@ export class FuriganaRenderer {
             { rootMargin: '200px' }, // Pre-load 200px before viewport
         );
 
-        CentralObserver.register('FuriganaRenderer', () => this.scan(), 500);
+        CentralObserver.register('FuriganaRenderer', () => this.scan(), TIMING.OBSERVER_REGISTER_DEBOUNCE_MS);
 
         // Strip furigana from work tree items BEFORE Vue renders on path change.
         // FuriganaRenderer's innerHTML replacement detaches Vue's tracked text nodes;

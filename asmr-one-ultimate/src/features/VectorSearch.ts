@@ -10,9 +10,8 @@ import { EventBus } from '../core/EventBus';
 import { buildCoverUrl } from '../types/api';
 import type { WorkOrder, SortOrder, WorkDetail } from '../types/api';
 
-import { gmRequest, retryWithBackoff, HttpError } from '../infrastructure/HttpClient';
-
-const DEFAULT_API_SERVER = 'https://api.asmr-200.com';
+import { HttpError, gmRequest, retryWithBackoff } from '../infrastructure/HttpClient';
+import { DEFAULT_API_SERVER, TIMING } from '../core/Constants';
 
 /**
  * Get the API base URL from the host app's axios baseURL
@@ -63,12 +62,12 @@ export class VectorSearch {
     private embeddingInflight = new Map<string, Promise<number[] | null>>();
     private lastResults: Array<{ entry: VectorEntry; score: number }> = [];
     private currentPage = 1;
-    private embeddingMinIntervalMs = 1200;
-    private embeddingCooldownUntil = 0;
-    private embeddingRateLimited = false;
-    private embeddingNextAt = 0;
     private langCleanup: (() => void) | null = null;
     private boundKeyHandler: ((e: KeyboardEvent) => void) | null = null;
+    private embeddingRateLimited = false;
+    private embeddingCooldownUntil = 0;
+    private embeddingNextAt = 0;
+    private embeddingMinIntervalMs = 200;
 
     constructor() {
         this.bridge = KikoeruBridge.getInstance();
@@ -78,12 +77,11 @@ export class VectorSearch {
             }
         });
         this.bulkIndexCursor = Math.max(1, Number(Config.get('vectorIndexCursor') || 1));
-        this.checkPersistedRateLimit();
     }
 
     public enable(): void {
         // Register with central observer instead of own MutationObserver
-        CentralObserver.register('VectorSearch', () => this.attachButton(), 500);
+        CentralObserver.register('VectorSearch', () => this.attachButton(), TIMING.OBSERVER_REGISTER_DEBOUNCE_MS);
         this.attachButton();
         this.observeRoute();
         this.scheduleBackgroundIndex();
@@ -132,10 +130,6 @@ export class VectorSearch {
     private scheduleBackgroundIndex(): void {
         if (this.autoSeedTimer) return;
         this.autoSeedTimer = window.setTimeout(async () => {
-            if (!Config.get('vectorSearchApiKey')) {
-                Logger.warn('[VectorSearch] API key missing, background index skipped.');
-                return;
-            }
             Logger.log('[VectorSearch] Auto-indexing in background...');
             await this.scheduleAutoIndex();
             this.startIndexWatcher();
@@ -145,7 +139,6 @@ export class VectorSearch {
     private async indexCurrentWork(): Promise<void> {
         const work = this.bridge.store.state.AudioPlayer?.work;
         if (!work?.id) return;
-        if (!Config.get('vectorSearchApiKey')) return;
         const id = String(work.id);
 
         const db = await this.dbPromise;
@@ -206,19 +199,16 @@ export class VectorSearch {
         }
     }
 
-    private captureDialogState(): { query?: string; key?: string } {
+    private captureDialogState(): { query?: string } {
         if (!this.overlay) return {};
         const query = (this.overlay.querySelector('.asmr-vector-input') as HTMLInputElement | null)?.value;
-        const key = (this.overlay.querySelector('.asmr-vector-key') as HTMLInputElement | null)?.value;
-        return { query, key };
+        return { query };
     }
 
-    private applyDialogState(state: { query?: string; key?: string }): void {
+    private applyDialogState(state: { query?: string }): void {
         if (!this.overlay) return;
         const queryInput = this.overlay.querySelector('.asmr-vector-input') as HTMLInputElement | null;
         if (queryInput && state.query != null) queryInput.value = state.query;
-        const keyInput = this.overlay.querySelector('.asmr-vector-key') as HTMLInputElement | null;
-        if (keyInput && state.key != null) keyInput.value = state.key;
         this.updateIndexCount();
     }
 
@@ -229,15 +219,6 @@ export class VectorSearch {
         const card = document.createElement('div');
         card.className = 'q-card q-pa-md asmr-vector-dialog asmr-dialog-card column no-wrap';
 
-        const hasKey = !!Config.get('vectorSearchApiKey');
-        const keyWarning = hasKey ? '' : `<div class="text-caption text-negative q-mb-md">${I18n.t('magicSearchKeyMissing')}</div>`;
-        const keyInput = hasKey ? '' : `
-            <input class="q-input q-pa-sm rounded-borders full-width q-mb-xs asmr-vector-key" placeholder="${I18n.t('magicSearchKeyPlaceholder')}" />
-            <div class="text-caption text-grey-7 q-mb-md asmr-settings-hint-text">
-                ${I18n.t('magicSearchKeyHint')} <a href="https://jina.ai/" target="_blank" rel="noopener noreferrer" class="text-primary asmr-settings-link">jina.ai</a>
-            </div>
-        `;
-
         card.innerHTML = `
             <div class="row items-center justify-between q-mb-lg">
                 <div class="text-h6 text-weight-bold asmr-dialog-title">${I18n.t('magicSearch')}</div>
@@ -247,8 +228,6 @@ export class VectorSearch {
                     </span>
                 </button>
             </div>
-            ${keyWarning}
-            ${keyInput}
             <div class="row no-wrap items-center q-mb-sm rounded-borders asmr-search-bar">
                 <i class="material-icons q-mx-sm text-grey">search</i>
                 <input class="q-input full-width asmr-vector-input col text-body1" placeholder="${I18n.t('magicSearchPlaceholder')}" />
@@ -274,7 +253,6 @@ export class VectorSearch {
 
         const closeBtn = card.querySelector('.asmr-vector-close');
         const input = card.querySelector('.asmr-vector-input') as HTMLInputElement;
-        const keyField = card.querySelector('.asmr-vector-key') as HTMLInputElement | null;
         const searchBtn = card.querySelector('.asmr-vector-go');
 
         closeBtn?.addEventListener('click', () => this.closeDialog());
@@ -284,9 +262,6 @@ export class VectorSearch {
 
         const doSearch = () => {
             const val = input.value.trim();
-            if (keyField && keyField.value.trim()) {
-                Config.set('vectorSearchApiKey', keyField.value.trim());
-            }
             if (val) this.search(val);
         };
 
@@ -322,10 +297,6 @@ export class VectorSearch {
 
     private async bulkIndex(opts?: { maxPages?: number; maxWorks?: number; order?: string; sort?: string; startPage?: number }) {
         if (this.autoIndexRunning) return;
-        if (!Config.get('vectorSearchApiKey')) {
-            this.renderStatus(I18n.t('magicSearchKeyMissingSettings'), false);
-            return;
-        }
         this.autoIndexRunning = true;
         this.setStatus(I18n.t('magicSearchFetchingLatest'), true);
         try {
@@ -380,15 +351,6 @@ export class VectorSearch {
                 const pageWorks = works.slice(0, remaining);
                 this.setStatus(I18n.format('magicSearchIndexingPage', { page, count: pageWorks.length }), true);
                 indexed += await this.indexWorks(pageWorks);
-                if (this.embeddingRateLimited) {
-                    this.embeddingRateLimited = false;
-                    this.autoIndexExhausted = false;
-                    this.batchBackoffMs = Math.min(this.batchBackoffMs * 2, 120_000);
-                    const delay = Math.max(this.batchBackoffMs, this.embeddingCooldownUntil - Date.now());
-                    this.setStatus(I18n.t('magicSearchRateLimitedJinaCooldown'), false);
-                    this.scheduleNextBatch(delay);
-                    return;
-                }
                 if (indexed >= maxWorks) break;
             }
             if (exhausted) {
@@ -705,7 +667,7 @@ export class VectorSearch {
                     attempts: 3,
                     backoffMs: 1000,
                     multiplier: 2,
-                    shouldRetry: (err) => {
+                    shouldRetry: (err: unknown) => {
                         // On 429, apply persistent rate limit and stop retrying
                         if (err instanceof HttpError && err.status === 429) {
                             this.applyRateLimit(60000);

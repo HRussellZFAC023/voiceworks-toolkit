@@ -289,6 +289,9 @@ const IMAGE_REGEX = /画像|image file|images?$/i;
 const SE_REGEX = /\bSE\b|^SE[なな有無し]|Sound Effect|音効|効果音/;
 const SE_ARI_REGEX = /あり|有り|付き/;
 const SE_NASHI_REGEX = /無し|なし/;
+const BGM_REGEX = /\bBGM\b/i;
+const BGM_ARI_REGEX = /BGM[あ有]り|BGM付き|With\s*BGM/i;
+const BGM_NASHI_REGEX = /BGM[なな無]し|No\s*BGM/i;
 const FORMAT_PRIORITY = ['wav', 'mp3', 'flac', 'opus', 'm4a', 'aac'];
 
 export interface FolderCandidate {
@@ -307,7 +310,8 @@ export function calculateFolderScore(
     isSample: boolean,
     formatPriority: string[] = FORMAT_PRIORITY,
     childFormats: string[] = [],
-    sePreference?: boolean
+    sePreference?: boolean,
+    bgmPreference?: boolean
 ): number {
     let score = 0;
     const lowerName = (name || '').toLowerCase();
@@ -349,9 +353,15 @@ export function calculateFolderScore(
         score += SCORING.SE_FOLDER_PENALTY;
     }
 
-    // Boost folders with "BGM無し" / "No BGM" (clean audio preferred)
-    if (/BGM[なな無]し|No\s*BGM/i.test(name)) {
-        score += SCORING.BGM_BONUS;
+    // BGM preference: boost folders matching the user's BGM有り/無し preference
+    if (bgmPreference != null && BGM_REGEX.test(name) && (BGM_ARI_REGEX.test(name) || BGM_NASHI_REGEX.test(name))) {
+        if (bgmPreference && BGM_ARI_REGEX.test(name)) {
+            score += SCORING.BGM_PREF_BONUS;
+        } else if (!bgmPreference && BGM_NASHI_REGEX.test(name)) {
+            score += SCORING.BGM_PREF_BONUS;
+        } else {
+            score += SCORING.BGM_FOLDER_PENALTY;
+        }
     }
 
     // Format priority bonus (from folder name)
@@ -387,7 +397,7 @@ export function calculateFolderScore(
 /**
  * Select the best folder from a list based on scoring
  */
-export function selectBestFolder(folders: WorkFolder[], formatPriority: string[] = FORMAT_PRIORITY, sePreference?: boolean): WorkFolder | null {
+export function selectBestFolder(folders: WorkFolder[], formatPriority: string[] = FORMAT_PRIORITY, sePreference?: boolean, bgmPreference?: boolean): WorkFolder | null {
     if (!folders?.length) return null;
 
     const candidates: FolderCandidate[] = folders.map(folder => ({
@@ -399,7 +409,8 @@ export function selectBestFolder(folders: WorkFolder[], formatPriority: string[]
             false,
             formatPriority,
             [],
-            sePreference
+            sePreference,
+            bgmPreference
         ),
         original: folder,
     }));

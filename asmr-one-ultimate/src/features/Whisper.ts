@@ -102,13 +102,11 @@ interface WhisperSettings {
     model: string;
     subtask: string;
     language: string;
-    quantized: boolean;
     multilingual: boolean;
     chunkLengthS: number;
     strideLengthS: number;
     cacheTranscripts: boolean;
     autoWarmup: boolean;
-    allowWasm: boolean;
     silenceThreshold: number;
 }
 
@@ -1167,12 +1165,10 @@ export class Whisper {
                 type: 'init',
                 model: settings.model,
                 multilingual: settings.multilingual,
-                quantized: settings.quantized,
                 subtask: settings.subtask,
                 language: settings.language,
                 chunkLengthS: settings.chunkLengthS,
                 strideLengthS: settings.strideLengthS,
-                allowWasm: settings.allowWasm,
             });
         });
     }
@@ -1203,13 +1199,11 @@ export class Whisper {
             audio,
             model: settings.model,
             multilingual: settings.multilingual,
-            quantized: settings.quantized,
             subtask: settings.subtask,
             language: settings.language,
             timeOffset,
             chunkLengthS: settings.chunkLengthS,
             strideLengthS: settings.strideLengthS,
-            allowWasm: settings.allowWasm,
             chunkId,
             priority,
         });
@@ -1919,13 +1913,11 @@ export class Whisper {
             model: DEFAULT_MODEL,
             subtask: 'transcribe',
             language,
-            quantized: true,
             multilingual: true,
             chunkLengthS: 29,
             strideLengthS: 5,
             cacheTranscripts: true,
             autoWarmup: true,
-            allowWasm: false,
             silenceThreshold: 0,
         };
     }

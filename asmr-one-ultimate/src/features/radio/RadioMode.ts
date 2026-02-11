@@ -14,8 +14,8 @@ import { Logger, Config } from '../../core/Utils';
 import { WorkSelector } from './WorkSelector';
 import { PlaybackController } from './PlaybackController';
 import { FolderDiver } from '../FolderDiver';
-import { AUDIO_EXTENSIONS, VIDEO_EXTENSIONS } from '../folderDiverTreeUtils';
 import { WorkService } from '../../services/WorkService';
+import { getAudioElement } from '../../core/DomUtils';
 import type { PlayerTrack, RadioState, WorkDetail, AudioTrack } from '../../types';
 import type { TrackFolder, TrackItem, TracksResponse } from '../../types/api';
 
@@ -35,6 +35,8 @@ const globalWindow = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : windo
 
 export class RadioMode {
     private static _instance: RadioMode;
+    /** Tracks whether refreshDependencies() has already run in this script context */
+    private static _refreshed = false;
     private bridge: KikoeruBridge;
     private workSelector: WorkSelector;
     private playbackController: PlaybackController;
@@ -58,6 +60,7 @@ export class RadioMode {
     private pendingWorkChange: string | null = null;
     private playbackTimeoutId: number | null = null;
     private playbackRetryCount = 0;
+    private deferredSkipRequested = false;
     private eventCleanups: (() => void)[] = [];
 
     // Queue monitoring
@@ -67,6 +70,10 @@ export class RadioMode {
     // Health check / auto-healing
     private healthCheckInterval: number | null = null;
     private lastActivityTime = Date.now();
+
+    // Audio element tracking for reliable ended detection
+    private boundAudio: HTMLAudioElement | null = null;
+    private audioEndedHandler: (() => void) | null = null;
 
     /** Persisted to GM storage so it survives page refresh */
     private get manuallyPaused(): boolean {
@@ -87,21 +94,31 @@ export class RadioMode {
         // Check window first for persisted instance
         if (globalWindow.__ASMR_RADIO_MODE__) {
             RadioMode._instance = globalWindow.__ASMR_RADIO_MODE__;
-            RadioMode._instance.refreshDependencies();
-            Logger.debug('[RadioMode] Reusing persisted instance');
+            // Only refresh bridge refs once per script context — avoids wiping
+            // WorkSelector history (recentWorkIds) on every call
+            if (!RadioMode._refreshed) {
+                RadioMode._refreshed = true;
+                RadioMode._instance.refreshBridgeRefs();
+                Logger.debug('[RadioMode] Reusing persisted instance (refreshed bridge refs)');
+            }
             return RadioMode._instance;
         }
 
         if (!RadioMode._instance) {
             RadioMode._instance = new RadioMode();
             globalWindow.__ASMR_RADIO_MODE__ = RadioMode._instance;
+            RadioMode._refreshed = true;
         }
         return RadioMode._instance;
     }
 
-    private refreshDependencies(): void {
+    /**
+     * Refresh stale bridge references after script re-injection.
+     * Preserves WorkSelector (and its recentWorkIds history) across refreshes.
+     */
+    private refreshBridgeRefs(): void {
         this.bridge = KikoeruBridge.getInstance();
-        this.workSelector = new WorkSelector();
+        // DO NOT recreate workSelector — it holds recentWorkIds for back-button history
         this.playbackController = new PlaybackController();
         this.folderDiver = FolderDiver.getInstance();
     }
@@ -174,6 +191,7 @@ export class RadioMode {
         // Start monitoring systems
         this.startQueueMonitor();
         this.startHealthCheck();
+        this.bindAudioEndedListener();
         this.recordActivity();
 
         // If user had manually paused before refresh, stay paused on current work
@@ -252,7 +270,12 @@ export class RadioMode {
     }
 
     /**
-     * Skip to next work
+     * Skip to next work.
+     *
+     * Key design: after navigating, we DIRECTLY call handleWorkChange instead of
+     * relying on the route watcher → 500ms debounce chain. This eliminates the
+     * window where the host app can "revive" the old track or enter a stuck state.
+     * isSkipping stays true until loadWorkAndStartPlayback completes.
      */
     async skipToNext(): Promise<void> {
         if (this.isSkipping) {
@@ -306,6 +329,14 @@ export class RadioMode {
 
                 this.syncRecentWorkHistory(toWorkId);
                 this.bridge.navigateToWork(toWorkId);
+
+                // Cancel any pending debounced work change — we handle it directly below.
+                // This prevents the route watcher from double-triggering loadWorkAndStartPlayback.
+                this.cancelPendingWorkChange();
+
+                // Directly handle work change (bypass debounce).
+                // isSkipping stays true so queue monitor / health check won't interfere.
+                await this.handleWorkChange(toWorkId);
             } else {
                 Logger.warn('[RadioMode] Failed to select next work - no candidate returned');
             }
@@ -313,6 +344,11 @@ export class RadioMode {
             Logger.error('[RadioMode] Skip error:', error);
         } finally {
             this.isSkipping = false;
+            if (this._isActive && this.deferredSkipRequested) {
+                this.deferredSkipRequested = false;
+                void this.skipToNext();
+                return;
+            }
             // Only restore playing state if radio is still active
             if (this._isActive) {
                 this._state = 'playing';
@@ -363,10 +399,19 @@ export class RadioMode {
             });
 
             this.bridge.navigateToWork(targetWorkId);
+
+            // Cancel debounce and directly handle (same pattern as skipToNext)
+            this.cancelPendingWorkChange();
+            await this.handleWorkChange(targetWorkId);
         } catch (error) {
             Logger.error('[RadioMode] skipToPrevious error:', error);
         } finally {
             this.isSkipping = false;
+            if (this._isActive && this.deferredSkipRequested) {
+                this.deferredSkipRequested = false;
+                void this.skipToNext();
+                return;
+            }
             if (this._isActive) {
                 this._state = 'playing';
                 AppStore.setRadioState({ state: 'playing' });
@@ -392,6 +437,10 @@ export class RadioMode {
         }
         this.pendingWorkChange = null;
         this.playbackRetryCount = 0;
+        this.deferredSkipRequested = false;
+
+        // Detach audio ended listener
+        this.unbindAudioEndedListener();
 
         // Unsubscribe store watchers
         if (this._queueWatcher) { this._queueWatcher(); this._queueWatcher = null; }
@@ -433,7 +482,11 @@ export class RadioMode {
     }
 
     /**
-     * Check if we're at the end of the queue and should skip to next work
+     * Check if we're at the end of the queue and should skip to next work.
+     *
+     * Reads currentTime/duration from the HTML5 audio element as primary source
+     * (Vuex state may be stale or zero after a track ends). Also checks the
+     * audio element's `ended` property for immediate end-of-track detection.
      */
     private checkQueuePosition(): void {
         if (this.isSkipping) return;
@@ -445,10 +498,22 @@ export class RadioMode {
         const player = this.bridge.player;
         const queue = player.queue || player.playlist || [];
         const queueIndex = player.queueIndex ?? 0;
-        const currentTime = player.currentTime || 0;
-        const duration = player.duration || 0;
+        const hasNextPlayable = this.hasNextPlayableTrack(queue as PlayerTrack[], queueIndex);
 
-        const isLastTrack = queueIndex >= queue.length - 1;
+        // Prefer HTML5 audio element for accurate time info (Vuex may lag or reset)
+        const audio = getAudioElement();
+        const currentTime = audio?.currentTime ?? player.currentTime ?? 0;
+        const duration = (audio?.duration && isFinite(audio.duration))
+            ? audio.duration
+            : (player.duration || 0);
+        const audioEnded = audio?.ended ?? false;
+
+        // Re-bind ended listener if audio element changed (host app may recreate it)
+        if (audio && audio !== this.boundAudio) {
+            this.bindAudioEndedListener();
+        }
+
+        const isLastTrack = !hasNextPlayable;
         const nearEnd = duration > 0 && (duration - currentTime) < 5;
         const highProgress = duration > 0 && (currentTime / duration) > 0.95;
 
@@ -461,6 +526,7 @@ export class RadioMode {
                 progress: `${((currentTime / duration) * 100).toFixed(1)}%`,
                 nearEnd,
                 highProgress,
+                audioEnded,
             });
         }
 
@@ -477,10 +543,17 @@ export class RadioMode {
             return;
         }
 
-        // Last track in queue: skip to next work when near the end
-        if (isLastTrack && (nearEnd || highProgress) && !this.isSkipping) {
-            Logger.debug('[RadioMode] Near end of last track, trigger skip to next work', {
-                isLastTrack, nearEnd, highProgress,
+        // If playAllInFolder is enabled but host auto-advance stalls after ended,
+        // force-start the next playable track in the current queue.
+        if (this.playAllInFolder && hasNextPlayable && audioEnded && !player.playing) {
+            this.forcePlayNextTrackInQueue(queue as PlayerTrack[], queueIndex);
+            return;
+        }
+
+        // Last track in queue: skip to next work when near the end or when ended
+        if (isLastTrack && (nearEnd || highProgress || audioEnded) && !this.isSkipping) {
+            Logger.debug('[RadioMode] End of last track detected, trigger skip to next work', {
+                isLastTrack, nearEnd, highProgress, audioEnded,
             });
             this.recordActivity();
             this.skipToNext();
@@ -562,6 +635,64 @@ export class RadioMode {
     }
 
     // =========================================================================
+    // Private Methods - Audio Element Tracking
+    // =========================================================================
+
+    /**
+     * Attach an `ended` event listener to the HTML5 audio element.
+     * This provides immediate, reliable detection when a track finishes —
+     * unlike the 1.5s polling in checkQueuePosition which can miss the window
+     * if Vuex state resets after a track ends.
+     */
+    private bindAudioEndedListener(): void {
+        const audio = getAudioElement();
+        if (!audio) return;
+        if (audio === this.boundAudio) return; // Already bound to this element
+
+        // Detach from previous element
+        this.unbindAudioEndedListener();
+
+        this.boundAudio = audio;
+        this.audioEndedHandler = () => this.handleAudioEnded();
+        audio.addEventListener('ended', this.audioEndedHandler);
+        Logger.debug('[RadioMode] Bound audio ended listener');
+    }
+
+    private unbindAudioEndedListener(): void {
+        if (this.boundAudio && this.audioEndedHandler) {
+            this.boundAudio.removeEventListener('ended', this.audioEndedHandler);
+        }
+        this.boundAudio = null;
+        this.audioEndedHandler = null;
+    }
+
+    /**
+     * Called when the HTML5 audio element fires the `ended` event.
+     * Same logic as handleTrackEnd — checks if we should skip to next work.
+     */
+    private handleAudioEnded(): void {
+        if (!this._isActive) return;
+        if (this.isSkipping) return;
+
+        const player = this.bridge.player;
+        const queue = player.queue || player.playlist || [];
+        const queueIndex = player.queueIndex ?? 0;
+        const hasNextPlayable = this.hasNextPlayableTrack(queue as PlayerTrack[], queueIndex);
+
+        Logger.debug('[RadioMode] Audio ended event', { queueIndex, queueLength: queue.length });
+
+        // If playAllInFolder and more tracks remain, force-advance if needed.
+        if (this.playAllInFolder && hasNextPlayable) {
+            this.forcePlayNextTrackInQueue(queue as PlayerTrack[], queueIndex);
+            return;
+        }
+
+        Logger.debug('[RadioMode] Audio ended on last track, trigger skip to next work');
+        this.recordActivity();
+        this.skipToNext();
+    }
+
+    // =========================================================================
     // Private Methods - Watchers
     // =========================================================================
 
@@ -583,9 +714,17 @@ export class RadioMode {
             (playing: boolean) => {
                 if (!this._isActive) return;
                 if (!playing && !this.isSkipping) {
-                    // Player stopped while radio is active and we're not skipping — user paused manually
-                    this.manuallyPaused = true;
-                    Logger.debug('[RadioMode] Manual pause detected');
+                    // Distinguish "user clicked pause" from "track ended naturally".
+                    // If the audio element's `ended` property is true, the track finished
+                    // on its own — this is NOT a manual pause and should not block
+                    // health check recovery or queue advancement.
+                    const audio = getAudioElement();
+                    if (audio?.ended) {
+                        Logger.debug('[RadioMode] Track ended naturally, not marking as manual pause');
+                    } else {
+                        this.manuallyPaused = true;
+                        Logger.debug('[RadioMode] Manual pause detected');
+                    }
                 } else if (playing) {
                     this.manuallyPaused = false;
                 }
@@ -643,7 +782,19 @@ export class RadioMode {
     // Private Methods - Event Handlers
     // =========================================================================
 
+    private cancelPendingWorkChange(): void {
+        this.pendingWorkChange = null;
+        if (this.workChangeDebounceTimer !== null) {
+            clearTimeout(this.workChangeDebounceTimer);
+            this.workChangeDebounceTimer = null;
+        }
+    }
+
     private scheduleWorkChange(workId: string): void {
+        // If we already set currentWorkId via direct handleWorkChange (from skipToNext),
+        // the route watcher fires with the same workId — skip the redundant debounce.
+        if (workId === this.currentWorkId) return;
+
         this.pendingWorkChange = workId;
 
         if (this.workChangeDebounceTimer !== null) {
@@ -712,60 +863,59 @@ export class RadioMode {
                 hasTracks: !!(work.tracks?.length),
             });
 
-            // Decide track selection mode based on config
-            const useFlatTracks = Config.get('radioUseFlatTracks');
+            const useTrackPool = Boolean(Config.get('playlistUseFlatTracks') || Config.get('radioUseFlatTracks'));
             let tracks: AudioTrack[];
+            let treeData: TracksResponse | null = null;
 
-            if (useFlatTracks) {
-                // Flat mode: collect ALL audio from the entire tree
-                Logger.debug('[RadioMode] Using flat track selection (all files)');
-                try {
-                    const treeData = await WorkService.getTracks(workId);
-                    tracks = treeData ? this.collectAllAudioFromTree(treeData) : [];
-                } catch (e) {
-                    Logger.warn('[RadioMode] Flat track fetch failed, falling back:', e);
-                    tracks = [];
+            try {
+                treeData = await WorkService.getTracks(workId);
+                if (treeData) {
+                    const startPath = this.folderDiver.getHostPath();
+                    this.folderDiver.syncPath(startPath);
+                    if (this.folderDiver.needsDiveFromPath(treeData, startPath)) {
+                        Logger.debug('[RadioMode] Auto-diving into folder structure', {
+                            startPath: startPath.join('/') || '(root)',
+                        });
+                        const result = await this.folderDiver.diveFromPath(treeData, startPath);
+                        Logger.debug('[RadioMode] Dive result', {
+                            success: result.success,
+                            reason: result.reason,
+                            path: result.path.join('/') || '(root)',
+                            depth: result.depth,
+                        });
+
+                        if (!result.success) {
+                            Logger.warn('[RadioMode] Dive failed, proceeding with root tracks', {
+                                reason: result.reason,
+                            });
+                        }
+                    }
                 }
+
+                if (!this._isActive || workId !== this.currentWorkId) {
+                    Logger.debug('[RadioMode] State changed during dive, aborting');
+                    return;
+                }
+            } catch (diveErr) {
+                Logger.warn('[RadioMode] Failed to fetch tracks for dive:', diveErr);
+            }
+
+            if (useTrackPool) {
+                tracks = treeData ? this.collectTracksFromTree(treeData) : [];
                 if (tracks.length === 0) {
                     tracks = this.playbackController.getPlayableTracksFromWork(work);
                 }
             } else {
-                // Dive mode: navigate into best folder, then play its tracks
-                try {
-                    const treeData = await WorkService.getTracks(workId);
-                    if (treeData) {
-                        const startPath = this.folderDiver.getHostPath();
-                        this.folderDiver.syncPath(startPath);
-                        if (this.folderDiver.needsDiveFromPath(treeData, startPath)) {
-                            Logger.debug('[RadioMode] Auto-diving into folder structure', {
-                                startPath: startPath.join('/') || '(root)',
-                            });
-                            const result = await this.folderDiver.diveFromPath(treeData, startPath);
-                            Logger.debug('[RadioMode] Dive result', {
-                                success: result.success,
-                                reason: result.reason,
-                                path: result.path.join('/') || '(root)',
-                                depth: result.depth,
-                            });
-
-                            if (!result.success) {
-                                Logger.warn('[RadioMode] Dive failed, proceeding with root tracks', {
-                                    reason: result.reason,
-                                });
-                            }
-                        }
-                    }
-
-                    if (!this._isActive || workId !== this.currentWorkId) {
-                        Logger.debug('[RadioMode] State changed during dive, aborting');
-                        return;
-                    }
-                } catch (diveErr) {
-                    Logger.warn('[RadioMode] Failed to fetch tracks for dive:', diveErr);
-                }
-
                 tracks = this.playbackController.getPlayableTracksFromWork(work);
+
+                // Fallback: work metadata from /api/work/{id} often has no file tree.
+                // Extract tracks from treeData (/api/tracks/{id}) which always has them.
+                if (tracks.length === 0 && treeData) {
+                    Logger.debug('[RadioMode] Work metadata had no tracks, extracting from tree data');
+                    tracks = this.collectTracksFromTree(treeData);
+                }
             }
+
             Logger.debug('[RadioMode] Extracted playable tracks', {
                 count: tracks.length,
                 firstTrack: tracks[0]?.title || tracks[0]?.hash || '(none)',
@@ -787,11 +937,15 @@ export class RadioMode {
             Logger.debug('[RadioMode] Max retries reached, skipping to next work');
             this.playbackRetryCount = 0;
             this.clearPlaybackTimeout();
-            this.skipToNext();
+            if (this.isSkipping) {
+                this.deferredSkipRequested = true;
+                return;
+            }
+            void this.skipToNext();
         } else {
             setTimeout(() => {
                 if (this._isActive && this.currentWorkId) {
-                    this.loadWorkAndStartPlayback(this.currentWorkId);
+                    void this.loadWorkAndStartPlayback(this.currentWorkId);
                 }
             }, WORK_LOAD_RETRY_DELAY);
         }
@@ -817,10 +971,11 @@ export class RadioMode {
         const player = this.bridge.player;
         const queue = player.queue || player.playlist || [];
         const queueIndex = player.queueIndex ?? 0;
+        const hasNextPlayable = this.hasNextPlayableTrack(queue as PlayerTrack[], queueIndex);
 
         Logger.debug('[RadioMode] Track ended, queueIndex:', queueIndex, 'queueLength:', queue.length);
 
-        if (this.playAllInFolder && queueIndex < queue.length - 1) {
+        if (this.playAllInFolder && hasNextPlayable) {
             Logger.debug('[RadioMode] More tracks in queue, continuing');
             return;
         }
@@ -829,27 +984,37 @@ export class RadioMode {
         this.skipToNext();
     }
 
-    /**
-     * Collect ALL audio tracks recursively from a TracksResponse tree (flat mode).
-     */
-    private collectAllAudioFromTree(nodes: TracksResponse): AudioTrack[] {
-        const audio: AudioTrack[] = [];
-        for (const node of nodes) {
-            if (node.type === 'folder') {
-                audio.push(...this.collectAllAudioFromTree((node as TrackFolder).children));
-            } else if (this.isPlayableTrackItem(node)) {
-                audio.push(node as unknown as AudioTrack);
+    private getNextPlayableTrackIndex(queue: PlayerTrack[], currentIndex: number): number {
+        if (!Array.isArray(queue) || queue.length === 0) return -1;
+
+        const playableIndices: number[] = [];
+        for (let i = 0; i < queue.length; i++) {
+            const track = queue[i] as PlayerTrack & { is_audio?: boolean };
+            if (!track) continue;
+            if (track.type === 'audio' && track.is_audio !== false) {
+                playableIndices.push(i);
             }
         }
-        return audio;
+
+        if (playableIndices.length === 0) {
+            return currentIndex < queue.length - 1 ? currentIndex + 1 : -1;
+        }
+
+        const directNext = playableIndices.find(index => index > currentIndex);
+        return typeof directNext === 'number' ? directNext : -1;
     }
 
-    private isPlayableTrackItem(node: TrackItem): boolean {
-        if (node.type === 'audio') return true;
-        const title = (node.title || '').toLowerCase();
-        const hasAudioExt = AUDIO_EXTENSIONS.some((ext) => title.endsWith(ext) || title.includes(ext));
-        const hasVideoExt = VIDEO_EXTENSIONS.some((ext) => title.endsWith(ext));
-        return hasAudioExt || hasVideoExt;
+    private hasNextPlayableTrack(queue: PlayerTrack[], currentIndex: number): boolean {
+        return this.getNextPlayableTrackIndex(queue, currentIndex) >= 0;
+    }
+
+    private forcePlayNextTrackInQueue(queue: PlayerTrack[], currentIndex: number): void {
+        const nextIndex = this.getNextPlayableTrackIndex(queue, currentIndex);
+        if (nextIndex < 0) return;
+
+        Logger.debug('[RadioMode] Forcing next track playback', { from: currentIndex, to: nextIndex });
+        this.recordActivity();
+        void this.playbackController.forcePlayQueueTrack(queue, nextIndex);
     }
 
     // =========================================================================
@@ -863,9 +1028,11 @@ export class RadioMode {
         if (!this._isActive) return;
 
         const shuffle = Config.get('shuffle');
+        const playAll = this.playAllInFolder;
         Logger.debug('[RadioMode] beginPlayback', {
             trackCount: tracks.length,
             shuffle,
+            playAll,
             firstTrack: tracks[0]?.title || tracks[0]?.hash || '(none)',
         });
 
@@ -873,7 +1040,17 @@ export class RadioMode {
             this.manuallyPaused = false;
             this.recordActivity();
 
-            if (shuffle) {
+            if (!playAll && tracks.length > 1) {
+                const pickIndex = shuffle
+                    ? Math.floor(Math.random() * tracks.length)
+                    : 0;
+                const selected = tracks[pickIndex];
+                this.playbackController.setQueueAndPlay([selected as PlayerTrack], 0);
+                Logger.debug('[RadioMode] Play Entire Work disabled; selected a single track from pool', {
+                    pickIndex,
+                    title: selected?.title || selected?.hash || '(unknown)',
+                });
+            } else if (shuffle) {
                 const { queue, index } = this.playbackController.shuffleAndPlay(tracks);
                 Logger.debug('[RadioMode] Shuffled queue, starting at index', index);
                 this.playbackController.setQueueAndPlay(queue as PlayerTrack[], index);
@@ -886,14 +1063,8 @@ export class RadioMode {
             Logger.debug('[RadioMode] Playback started successfully');
             this.ensurePlaying();
         } else {
-            Logger.warn('[RadioMode] No tracks found, trying play button fallback');
-            const clicked = this.playbackController.clickPlayButton(shuffle);
-            if (clicked) {
-                this.recordActivity();
-                Logger.debug('[RadioMode] Play button fallback succeeded');
-            } else {
-                this.handlePlaybackFailure('No tracks and no play button');
-            }
+            Logger.warn('[RadioMode] No tracks found, triggering recovery');
+            this.handlePlaybackFailure('No playable tracks');
         }
     }
 
@@ -904,9 +1075,33 @@ export class RadioMode {
             const player = this.bridge.player;
             if (!player.playing) {
                 Logger.debug('[RadioMode] Ensuring playback starts...');
-                await this.playbackController.tryPlay();
+                const started = await this.playbackController.tryPlay();
+                if (!started && !this.isSkipping && !this.manuallyPaused) {
+                    this.handlePlaybackFailure('Playback did not start');
+                }
             }
         }, PLAYBACK_START_TIMEOUT);
+    }
+
+    /**
+     * Recursively collect audio tracks from a TracksResponse tree.
+     * The /api/tracks/{id} endpoint returns TrackFolder/TrackItem nodes
+     * (different structure from WorkFolder used in work metadata).
+     */
+    private collectTracksFromTree(nodes: TracksResponse): AudioTrack[] {
+        const tracks: AudioTrack[] = [];
+        const queue: Array<TrackFolder | TrackItem> = [...nodes];
+
+        while (queue.length) {
+            const node = queue.shift()!;
+            if (node.type === 'folder') {
+                queue.push(...(node as TrackFolder).children);
+            } else if (node.type === 'audio') {
+                tracks.push(node as AudioTrack);
+            }
+        }
+
+        return tracks;
     }
 
     // =========================================================================

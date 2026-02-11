@@ -38,8 +38,10 @@ vi.mock('../../../src/features/radio/WorkSelector');
 vi.mock('../../../src/features/radio/PlaybackController');
 vi.mock('../../../src/services/WorkService', () => ({
     WorkService: {
-        getWork: vi.fn(() => new Promise(() => {})), // Never resolves by default
-        getTracks: vi.fn(() => new Promise(() => {})),
+        // Resolve quickly so skipToNext/skipToPrevious (which now await
+        // handleWorkChange → loadWorkAndStartPlayback) don't hang in tests.
+        getWork: vi.fn(() => Promise.resolve({ id: 'mock', title: 'Mock Work', dirs: [], tracks: [] })),
+        getTracks: vi.fn(() => Promise.resolve([])),
     }
 }));
 
@@ -103,8 +105,9 @@ describe('RadioMode', () => {
         };
         (WorkSelector as any).mockImplementation(() => mockWorkSelector);
 
-        // Reset singleton
+        // Reset singleton and refresh tracking
         (RadioMode as any)._instance = null;
+        (RadioMode as any)._refreshed = false;
         Object.defineProperty(window, '__ASMR_RADIO_MODE__', { value: undefined, writable: true });
 
         radioMode = RadioMode.getInstance();
@@ -115,7 +118,7 @@ describe('RadioMode', () => {
         vi.useRealTimers();
     });
 
-    it('should wait for work data to load before diving/playing', async () => {
+    it('should load work and start playback after route change', async () => {
         // Initialize and Enable
         radioMode.initialize();
         radioMode.enable();
@@ -123,21 +126,16 @@ describe('RadioMode', () => {
         // Mock the route watcher callback capture
         const routeWatcherCallback = mockBridge.app.$watch.mock.calls[0][1];
 
-        // Trigger Route Change
+        // Trigger Route Change to a NEW work (different from initial RJ123456)
         routeWatcherCallback('/work/RJ999999');
 
-        // At this point, we are in the debounce period (500ms)
+        // Advance past debounce (500ms) — scheduleWorkChange fires handleWorkChange
         await vi.advanceTimersByTimeAsync(500);
+        // Allow async loadWorkAndStartPlayback to resolve
+        await vi.advanceTimersByTimeAsync(100);
 
-        // Verify we haven't tried to play yet (work data not loaded)
-        expect(mockFolderDiver.dive).not.toHaveBeenCalled();
-        expect(mockPlaybackController.getPlayableTracksFromWork).not.toHaveBeenCalled();
-
-        // Advance further - loadWorkAndStartPlayback fires but WorkApi is not mocked
-        // so it won't reach the playback stage
-        await vi.advanceTimersByTimeAsync(2000);
-
-        expect(mockPlaybackController.getPlayableTracksFromWork).not.toHaveBeenCalled();
+        // After debounce + work load, playback should have been attempted
+        expect(mockPlaybackController.getPlayableTracksFromWork).toHaveBeenCalled();
     });
 
     it('should react to work:change event', async () => {
@@ -214,12 +212,13 @@ describe('RadioMode', () => {
         radioMode.enable();
         expect(history).toContain('RJ123456');
 
+        // skipToNext now directly handles work change (no debounce race)
         await radioMode.skipToNext();
         expect(history).toContain('RJ654321');
         expect(history).toContain('RJ123456');
 
-        // Simulate route/work update after navigation
-        (radioMode as any).currentWorkId = 'RJ654321';
+        // handleWorkChange sets currentWorkId internally now
+        expect((radioMode as any).currentWorkId).toBe('RJ654321');
 
         expect(radioMode.canSkipToPrevious()).toBe(true);
         await radioMode.skipToPrevious();
@@ -248,20 +247,39 @@ describe('RadioMode', () => {
         expect(radioMode.canSkipToPrevious()).toBe(false);
     });
 
-    it('collects playable non-audio files in flat mode', () => {
-        const tracks = (radioMode as any).collectAllAudioFromTree([
-            {
-                type: 'folder',
-                title: 'Main',
-                children: [
-                    { type: 'audio', hash: 'audio-1', title: 'Track 1', is_audio: true },
-                    { type: 'other', hash: 'other-1', title: 'Movie.mp4' },
-                    { type: 'other', hash: 'other-2', title: 'Notes.txt' },
-                ],
-            },
-        ]);
+    it('advances when last playable audio ends even if non-audio items trail in queue', async () => {
+        (radioMode as any)._isActive = true;
+        (radioMode as any).playAllInFolder = true;
 
-        expect(tracks).toHaveLength(2);
-        expect(tracks.map((t: any) => t.hash)).toEqual(['audio-1', 'other-1']);
+        mockBridge.player.queue = [
+            { type: 'audio', hash: 'a1', title: 'Track 1' },
+            { type: 'text', hash: 'lrc-1', title: 'lyrics.lrc' },
+        ];
+        mockBridge.player.queueIndex = 0;
+
+        const skipSpy = vi.spyOn(radioMode, 'skipToNext').mockResolvedValue(undefined);
+
+        // Simulate host signaling track end
+        (radioMode as any).handleTrackEnd();
+
+        expect(skipSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not advance when another playable audio remains in queue', async () => {
+        (radioMode as any)._isActive = true;
+        (radioMode as any).playAllInFolder = true;
+
+        mockBridge.player.queue = [
+            { type: 'audio', hash: 'a1', title: 'Track 1' },
+            { type: 'audio', hash: 'a2', title: 'Track 2' },
+            { type: 'text', hash: 'lrc-1', title: 'lyrics.lrc' },
+        ];
+        mockBridge.player.queueIndex = 0;
+
+        const skipSpy = vi.spyOn(radioMode, 'skipToNext').mockResolvedValue(undefined);
+
+        (radioMode as any).handleTrackEnd();
+
+        expect(skipSpy).not.toHaveBeenCalled();
     });
 });

@@ -339,17 +339,23 @@ function buildTranslationQueueKey(scope: string, targetLang: string): string {
     return `${scope}:${getTrackKey() || 'unknown'}:${targetLang}`;
 }
 
-function resetLearnerTranslationQueues(): void {
+/** Cancel realtime + lookahead queues only (for seeks within the same track). */
+function resetRealtimeQueues(): void {
     cancelQueue(realtimeQueueKey);
     cancelQueue(realtimeJaQueueKey);
     cancelQueue(lookaheadQueueKey);
     cancelQueue(lookaheadJaQueueKey);
-    cancelQueue(pretranslateQueueKey);
-    cancelQueue(pretranslateJaQueueKey);
     realtimeQueueKey = '';
     realtimeJaQueueKey = '';
     lookaheadQueueKey = '';
     lookaheadJaQueueKey = '';
+}
+
+/** Cancel ALL translation queues (for track changes / navigation / cleanup). */
+function resetLearnerTranslationQueues(): void {
+    resetRealtimeQueues();
+    cancelQueue(pretranslateQueueKey);
+    cancelQueue(pretranslateJaQueueKey);
     pretranslateQueueKey = '';
     pretranslateJaQueueKey = '';
 }
@@ -522,7 +528,7 @@ function handleAudioSeeking() {
     lastSecondaryShown = '';
     lastWhisperDisplayText = '';
     translationToken += 1;
-    resetLearnerTranslationQueues();
+    resetRealtimeQueues();
     updateLyrics();
 }
 
@@ -534,7 +540,7 @@ function handleAudioSeeked() {
     lastSecondaryShown = '';
     lastWhisperDisplayText = '';
     translationToken += 1;
-    resetLearnerTranslationQueues();
+    resetRealtimeQueues();
     if (seekedDebounceTimer) clearTimeout(seekedDebounceTimer);
     seekedDebounceTimer = window.setTimeout(() => {
         seekedDebounceTimer = null;
@@ -1366,7 +1372,7 @@ function seek(offset: number) {
         lastSecondaryShown = '';
         lastWhisperDisplayText = '';
         translationToken += 1;
-        resetLearnerTranslationQueues();
+        resetRealtimeQueues();
         updateLyrics();
     }
 }

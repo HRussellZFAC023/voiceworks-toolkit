@@ -12,6 +12,7 @@
 import { monkeyWindow } from '$';
 import { SharedCache } from '../core/Cache';
 import { Logger } from '../core/Utils';
+import { TIMING, RETRY } from '../core/Constants';
 
 /**
  * Get GM_xmlhttpRequest at runtime (not at module load time).
@@ -178,7 +179,7 @@ export function gmRequest(config: GmRequestConfig): Promise<GmResponse> {
             headers: config.headers,
             data: config.data,
             responseType: config.responseType,
-            timeout: config.timeout ?? 30000,
+            timeout: config.timeout ?? TIMING.HTTP_TIMEOUT_MS,
             onprogress: config.onprogress ? (event: { loaded: number; total: number; lengthComputable: boolean }) => {
                 config.onprogress!(event);
             } : undefined,
@@ -284,7 +285,7 @@ class HttpClientImpl {
                 ? () => this.fetchBlobViaGM(url)
                 : () => this.fetchBlobViaFetch(url, 'omit');
 
-        return retryWithBackoff(fetchBlob, config?.retry ?? { attempts: 2, backoffMs: 500 });
+        return retryWithBackoff(fetchBlob, config?.retry ?? RETRY.BLOB);
     }
 
     // ----- Rate limit helpers ------------------------------------------------
@@ -424,7 +425,7 @@ class HttpClientImpl {
             url,
             headers: { Accept: 'application/json', ...config?.headers },
             responseType: 'json',
-            timeout: config?.timeout ?? 30000,
+            timeout: config?.timeout ?? TIMING.HTTP_TIMEOUT_MS,
         });
 
         return {
@@ -497,7 +498,7 @@ export class KikoeruApiClient {
 }
 
 /**
- * External API Client for third-party services (Jina, DLsite, etc.)
+ * External API Client for third-party services (DLsite, etc.)
  */
 export class ExternalApiClient {
     private baseUrl: string;

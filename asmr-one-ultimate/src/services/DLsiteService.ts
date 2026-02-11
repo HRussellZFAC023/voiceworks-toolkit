@@ -2,6 +2,7 @@ import { Logger, Config } from '../core/Utils';
 import { gmRequest, retryWithBackoff } from '../infrastructure/HttpClient';
 import type { GmRequestConfig } from '../infrastructure/HttpClient';
 import type { DLsiteProductApiResponse, DLsiteDynamicEntry, DLsiteUserReview } from '../types/dlsite';
+import { LIMITS } from '../core/Constants';
 
 const DLSITE_HEADERS = {
     Accept: 'application/json',
@@ -493,7 +494,7 @@ export class DLsiteServiceImpl {
      */
     private async fetchReviewsViaApi(rjCode: string): Promise<DLsiteUserReview[]> {
         const PAGE_SIZE = 30;
-        const MAX_PAGES = 10;
+        const MAX_PAGES = LIMITS.MAX_REVIEW_PAGES;
         const domains = ['maniax', 'home'] as const;
 
         for (const domain of domains) {

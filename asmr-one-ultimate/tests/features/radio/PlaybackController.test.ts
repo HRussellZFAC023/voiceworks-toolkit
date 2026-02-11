@@ -67,13 +67,14 @@ describe('PlaybackController', () => {
         (getAudioElement as any).mockReturnValue(mockAudio);
     });
 
-    it('clears audio source when stopping playback to prevent stale resume', () => {
+    it('pauses audio and clears queue when stopping playback (does not strip src)', () => {
         const controller = new PlaybackController();
         controller.stopPlayback();
 
         expect(mockAudio.pause).toHaveBeenCalledTimes(1);
-        expect(mockAudio.removeAttribute).toHaveBeenCalledWith('src');
-        expect(mockAudio.load).toHaveBeenCalledTimes(1);
+        // src should NOT be removed — stripping it breaks host app reactivity
+        expect(mockAudio.removeAttribute).not.toHaveBeenCalled();
+        expect(mockAudio.load).not.toHaveBeenCalled();
         expect(mockBridge.commit).toHaveBeenCalledWith('AudioPlayer/SET_QUEUE', { queue: [], index: 0 });
     });
 
@@ -96,5 +97,22 @@ describe('PlaybackController', () => {
         await controller.tryPlay();
 
         expect(mockAudio.play).toHaveBeenCalledTimes(1);
+    });
+
+    it('can force-play a specific queue track when auto-advance stalls', async () => {
+        const controller = new PlaybackController();
+        const queue = [
+            { hash: 'track-1', title: 'Track 1' },
+            { hash: 'track-2', title: 'Track 2' },
+        ] as any[];
+
+        mockBridge.hasAction = vi.fn((action: string) => action === 'AudioPlayer/playTrack');
+        mockBridge.dispatch = vi.fn(() => Promise.resolve());
+
+        const ok = await controller.forcePlayQueueTrack(queue as any, 1);
+
+        expect(ok).toBe(true);
+        expect(mockBridge.commit).toHaveBeenCalledWith('AudioPlayer/SET_TRACK', 1);
+        expect(mockBridge.dispatch).toHaveBeenCalledWith('AudioPlayer/playTrack', queue[1]);
     });
 });

@@ -48,6 +48,8 @@ const CONFIG_DEFAULTS: PluginConfig = {
     playlistAutoFilterFolders: true,
     playlistUseFlatTracks: false,
     playlistAutoProgress: false,
+    playlistSePref: true,
+    playlistBgmPref: true,
 
     // Learner Mode
     showJP: true,
@@ -89,6 +91,7 @@ const CONFIG_DEFAULTS: PluginConfig = {
 
     // Folder Selection
     sePref: true,
+    bgmPref: true,
 
     // UI
     autoProgress: false,
@@ -314,6 +317,8 @@ class AppStoreImpl {
             { next: 'playlistAutoFilterFolders', legacy: 'autoFilterFolders' },
             { next: 'playlistUseFlatTracks', legacy: 'radioUseFlatTracks' },
             { next: 'playlistAutoProgress', legacy: 'autoProgress' },
+            { next: 'playlistSePref', legacy: 'sePref' },
+            { next: 'playlistBgmPref', legacy: 'bgmPref' },
         ];
 
         for (const { next, legacy } of mirrorPairs) {

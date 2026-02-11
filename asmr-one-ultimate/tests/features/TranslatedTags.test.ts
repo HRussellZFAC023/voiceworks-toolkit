@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { TranslatedTags } from '../../src/features/TranslatedTags';
 import { KikoeruBridge } from '../../src/infrastructure/KikoeruBridge';
+import { Config } from '../../src/core/Config';
+import { TranslationService } from '../../src/services/TranslationService';
 
 // Mock TagDatabase
 vi.mock('../../src/infrastructure/TagDatabase', () => {
@@ -53,7 +55,10 @@ vi.mock('../../src/services/TranslationService', () => ({
         },
         autoTranslate: vi.fn().mockResolvedValue(null),
         translate: vi.fn().mockResolvedValue(null),
+        translateBatch: vi.fn().mockResolvedValue([]),
+        cancelPending: vi.fn(),
         cleanQuotes: (text: string) => text,
+        isUserLang: vi.fn().mockReturnValue(false),
         isRateLimited: vi.fn().mockReturnValue(false),
     }
 }));
@@ -93,6 +98,14 @@ describe('TranslatedTags', () => {
         if (qApp) (qApp as any).__vue__ = { $store: mockStore, $router: {}, $axios: {} };
 
         bridge = KikoeruBridge.getInstance();
+
+        vi.mocked(Config.get).mockReset();
+        vi.mocked(Config.get).mockReturnValue(true);
+        vi.mocked(TranslationService.translateBatch).mockReset();
+        vi.mocked(TranslationService.translateBatch).mockResolvedValue([]);
+        vi.mocked(TranslationService.cancelPending).mockClear();
+        vi.mocked(TranslationService.isUserLang).mockReset();
+        vi.mocked(TranslationService.isUserLang).mockReturnValue(false);
     });
 
     it('should suppress translation during keydown on input fields', async () => {
@@ -138,5 +151,60 @@ describe('TranslatedTags', () => {
 
         const chipContent = document.querySelector('.q-chip__content') as HTMLElement;
         expect(chipContent.textContent).toBe('耳かき (Ear Cleaning)');
+    });
+
+    it('should replace Chinese chip text with Japanese when translateMode is off and translateCnToJp is on', async () => {
+        await bridge.initialize();
+        vi.mocked(Config.get).mockImplementation((key: string) => {
+            if (key === 'translateMode') return false;
+            if (key === 'translateCnToJp') return true;
+            return true;
+        });
+        vi.mocked(TranslationService.translateBatch).mockResolvedValue(['日本語タグ']);
+
+        document.body.innerHTML += `
+            <div class="q-chip">
+                <div class="q-chip__content">中文标签</div>
+            </div>
+        `;
+
+        const translatedTags = TranslatedTags.getInstance();
+        (translatedTags as any).augmentTags();
+        for (let i = 0; i < 20; i++) {
+            const chipContent = document.querySelector('.q-chip__content') as HTMLElement;
+            if (chipContent.textContent === '日本語タグ') break;
+            await new Promise(resolve => setTimeout(resolve, 10));
+        }
+
+        expect(vi.mocked(TranslationService.translateBatch)).toHaveBeenCalledWith(
+            ['中文标签'],
+            'ja',
+            expect.objectContaining({ cancellable: true }),
+        );
+        const chipContent = document.querySelector('.q-chip__content') as HTMLElement;
+        expect(chipContent.textContent).toBe('日本語タグ');
+    });
+
+    it('should skip non-Chinese text in CN-only mode', async () => {
+        await bridge.initialize();
+        vi.mocked(Config.get).mockImplementation((key: string) => {
+            if (key === 'translateMode') return false;
+            if (key === 'translateCnToJp') return true;
+            return true;
+        });
+
+        document.body.innerHTML += `
+            <div class="q-chip">
+                <div class="q-chip__content">耳かき</div>
+            </div>
+        `;
+
+        const translatedTags = TranslatedTags.getInstance();
+        (translatedTags as any).augmentTags();
+        await Promise.resolve();
+
+        const chipContent = document.querySelector('.q-chip__content') as HTMLElement;
+        expect(chipContent.textContent).toBe('耳かき');
+        expect(vi.mocked(TranslationService.translateBatch)).not.toHaveBeenCalled();
     });
 });

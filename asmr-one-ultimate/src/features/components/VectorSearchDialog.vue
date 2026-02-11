@@ -10,6 +10,7 @@ import { Config, Logger, I18n } from '../../core/Utils';
 import { HttpError } from '../../infrastructure/HttpClient';
 import { EmbeddingService } from '../../services/EmbeddingService';
 import { GpuScheduler, Priority } from '../../core/GpuScheduler';
+import { DEFAULT_API_SERVER } from '../../core/Constants';
 import type { TagEntry, WorkTag, WorkSummary, WorkDetail, WorkOrder } from '../../types/api';
 
 // ============================================================================
@@ -57,7 +58,6 @@ interface ScoredResult {
 // Constants
 // ============================================================================
 
-const DEFAULT_API_SERVER = 'https://api.asmr-200.com';
 const EMBED_CONCURRENCY = 3;
 const RESULT_LIMIT = 40;
 const VECTOR_INDEX_VERSION = 4; // Force re-index: enriched metadata (dl_count, rating, age_category)

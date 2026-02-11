@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { FolderDiver } from '../../src/features/FolderDiver';
+import { Config } from '../../src/core/Config';
 
 vi.mock('../../src/core/Logger', () => ({
     Logger: { log: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn() },
@@ -31,6 +32,7 @@ describe('FolderDiver', () => {
     beforeEach(() => {
         // Reset singleton between tests
         (FolderDiver as any)._instance = null;
+        Config.set('sePref', true);
     });
 
     describe('needsDive', () => {
@@ -203,6 +205,33 @@ describe('FolderDiver', () => {
 
             expect(result.success).toBe(false);
             expect(result.reason).toBe('no_best_folder');
+        });
+
+        it('continues into SE split folders even if current folder also has direct audio', () => {
+            const diver = FolderDiver.getInstance();
+            (diver as any).currentPath = ['Scene'];
+            const nodes = [
+                { type: 'audio' as const, hash: 'mix', title: 'mix.wav' },
+                { type: 'folder' as const, title: 'SE有り (With SE)', children: [{ type: 'audio' as const, hash: 'a', title: 'a.wav' }] },
+                { type: 'folder' as const, title: 'SE無し (No SE)', children: [{ type: 'audio' as const, hash: 'b', title: 'b.wav' }] },
+            ];
+
+            const result = (diver as any).diveRecursive(nodes, 0);
+            expect(result.path).toEqual(['Scene', 'SE有り (With SE)']);
+            expect(result.success).toBe(true);
+        });
+
+        it('can choose SE preferred branch even when split folder children are not expanded yet', () => {
+            const diver = FolderDiver.getInstance();
+            (diver as any).currentPath = ['Scene'];
+            const nodes = [
+                { type: 'folder' as const, title: 'SE有り (With SE)', children: [] },
+                { type: 'folder' as const, title: 'SE無し (No SE)', children: [] },
+            ];
+
+            const result = (diver as any).diveRecursive(nodes, 0);
+            expect(result.path).toEqual(['Scene', 'SE有り (With SE)']);
+            expect(result.success).toBe(true);
         });
     });
 

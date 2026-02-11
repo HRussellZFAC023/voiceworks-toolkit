@@ -2,7 +2,7 @@ import { KikoeruBridge } from '../../infrastructure/KikoeruBridge';
 import { Logger } from '../../core/Utils';
 import { HttpClient, HttpError } from '../../infrastructure/HttpClient';
 
-const DEFAULT_API_SERVER = 'https://api.asmr-200.com';
+import { DEFAULT_API_SERVER } from '../../core/Constants';
 
 /**
  * Get the API base URL from the host app's axios baseURL (set by "Select server" setting)

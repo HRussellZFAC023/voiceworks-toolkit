@@ -887,6 +887,7 @@ const WHISPER_CORRECTIONS: readonly [hallucinated: string, correct: string][] = 
     // Whisper hears safe kanji for explicit terms (same/similar reading)
     ['写生', '射精'],          // shasei (sketching) → shasei (ejaculation) — identical reading
     ['お寿司', 'おちんぽ'],    // osushi → ochinpo — acoustic substitution
+    ['尋抱', 'ちんぽ'],        // xunbao-like CN hallucination heard in JP NSFW context
     ['同程', '童貞'],          // doucheng (CN company) → doutei (virgin) — kanji substitution
     ['同定', '童貞'],          // doutei (identification) → doutei (virgin) — same reading
     ['重生', '中性'],          // random CN hallucination in JP segments

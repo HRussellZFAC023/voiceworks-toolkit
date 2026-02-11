@@ -43,6 +43,8 @@ import {
 } from '../media/mediaFileUtils';
 import { buildMediaStreamUrl } from '../media/mediaStreamUrlUtils';
 
+declare const unsafeWindow: Window & typeof globalThis;
+
 // ── Constants ────────────────────────────────────────────────────────────────
 
 const ZOOM_MIN = 0.5;
@@ -52,8 +54,9 @@ const ZOOM_STEP = 0.05;
 const TRANSLATE_BATCH_MAX_CHARS = 0;
 const TRANSLATE_TOTAL_MAX_CHARS = 0;
 const PDF_TEXT_MAX_PAGES = Infinity;
-const PDFJS_CDN = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.min.js';
-const PDFJS_WORKER_CDN = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.worker.min.js';
+// v3.11.174 is the last release with UMD .js builds (v4+ only ships .mjs ESM)
+const PDFJS_CDN = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js';
+const PDFJS_WORKER_CDN = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
 
 /** Minimal pdf.js library shape */
 interface PdfjsLib {
@@ -75,6 +78,8 @@ interface PdfjsPage {
 const props = defineProps<{
     /** Whether the lightbox is visible */
     visible: boolean;
+    /** Optional callback so controller can sync native player when video changes in lightbox */
+    onVideoSelected?: (item: MediaFile) => void;
 }>();
 
 const emit = defineEmits<{
@@ -460,9 +465,16 @@ function goToLast(): void {
 function hideModal(): void {
     stopSlideshow();
 
-    // Stop any playing video
+    // Stop any playing video — detach handlers FIRST so video.pause()
+    // doesn't echo requestNativePause() to the native <audio>.
     const video = mediaWrapperRef.value?.querySelector('video');
     if (video) {
+        video.onplay = null;
+        video.onpause = null;
+        video.onseeking = null;
+        video.onseeked = null;
+        video.onratechange = null;
+        video.onended = null;
         video.pause();
         video.src = '';
     }
@@ -477,6 +489,12 @@ function hideModal(): void {
     resetZoom();
     document.body.classList.remove('media-viewer-open');
     document.body.style.overflow = '';
+
+    // Expand native player bar back (reverse of minimizePlayer)
+    const store = bridge.store;
+    if (store?.state?.AudioPlayer?.hide) {
+        try { store.commit?.('AudioPlayer/TOGGLE_HIDE'); } catch { /* optional */ }
+    }
 
     emit('update:visible', false);
     emit('closed');
@@ -769,29 +787,153 @@ function renderImage(wrapper: HTMLElement, item: MediaFile, url: string): void {
 }
 
 function renderVideo(wrapper: HTMLElement, item: MediaFile, url: string): void {
+    props.onVideoSelected?.(item);
+
     const video = document.createElement('video');
     video.src = url;
     video.controls = true;
-    video.autoplay = true;
+    video.autoplay = false;
+    video.preload = 'metadata';
     video.muted = true;
+    video.defaultMuted = true;
+    video.playsInline = true;
     video.className = 'media-viewer-video';
+    video.dataset.mediaHash = item.hash || '';
+    video.dataset.mediaTitle = item.title || '';
     video.onloadeddata = () => { isLoading.value = false; };
 
+    const store = bridge.store;
+    let syncTimer: number | null = null;
+    // Timestamp of the last user-initiated action on the video controls.
+    // The sync loop skips play/pause/seek adjustments for a grace period
+    // after user interaction, preventing the loop from fighting the user.
+    let lastUserAction = 0;
+    const USER_ACTION_GRACE_MS = 300;
+
+    const getAudio = (): HTMLAudioElement | null => {
+        return document.querySelector('audio');
+    };
+
+    const syncFromNativeToVideo = (): void => {
+        if (!video.isConnected) return;
+        const audio = getAudio();
+        const nativePlaying = !!store.state.AudioPlayer?.playing;
+        const nativeRate = Number(audio?.playbackRate ?? Config.get('playbackRate') ?? 1);
+
+        const audioReady = audio && audio.readyState >= 2;
+        const nativeTime = audioReady
+            ? Number(audio.currentTime)
+            : Number(store.state.AudioPlayer?.currentTime ?? 0);
+
+        // If the user recently interacted with the video controls, skip
+        // play/pause/seek sync entirely. This gives the PAUSE/PLAY mutations
+        // time to propagate through the host's Vue reactivity system.
+        const userActedRecently = (Date.now() - lastUserAction) < USER_ACTION_GRACE_MS;
+
+        // Time sync: only when audio has loaded and user hasn't just seeked
+        if (!userActedRecently && audioReady && Number.isFinite(nativeTime) && nativeTime >= 0 && Math.abs(video.currentTime - nativeTime) > 0.15) {
+            video.currentTime = nativeTime;
+        }
+        // Rate sync: always safe (no echo risk)
+        if (Number.isFinite(nativeRate) && nativeRate > 0 && Math.abs(video.playbackRate - nativeRate) > 0.01) {
+            video.playbackRate = nativeRate;
+        }
+        // Play/pause sync: only when user hasn't recently acted
+        if (!userActedRecently) {
+            if (nativePlaying && video.paused) {
+                video.play().catch(() => {});
+            } else if (!nativePlaying && !video.paused) {
+                video.pause();
+            }
+        }
+    };
+
+    const syncVideoToNativeTime = (): void => {
+        const audio = getAudio();
+        if (!audio) return;
+        if (Math.abs(audio.currentTime - video.currentTime) > 0.05) {
+            audio.currentTime = video.currentTime;
+        }
+    };
+
+    const syncVideoToNativeRate = (): void => {
+        const audio = getAudio();
+        if (audio && Math.abs(audio.playbackRate - video.playbackRate) > 0.01) {
+            audio.playbackRate = video.playbackRate;
+        }
+        Config.set('playbackRate', video.playbackRate);
+    };
+
+    const requestNativePlay = (): void => {
+        try { store.commit?.('AudioPlayer/PLAY'); } catch { /* host variant */ }
+        const audio = getAudio();
+        if (audio?.paused && (audio.currentSrc || audio.src || audio.getAttribute('src'))) {
+            audio.play().catch(() => {});
+        }
+    };
+
+    const requestNativePause = (): void => {
+        try { store.commit?.('AudioPlayer/PAUSE'); } catch { /* host variant */ }
+        const audio = getAudio();
+        if (audio && !audio.paused) {
+            audio.pause();
+        }
+    };
+
+    video.onloadedmetadata = () => {
+        const store = bridge.store;
+        const currentTime = Number(store.state.AudioPlayer?.currentTime || 0);
+        if (Number.isFinite(currentTime) && currentTime > 0 && Math.abs(video.currentTime - currentTime) > 1.2) {
+            video.currentTime = currentTime;
+        }
+        syncFromNativeToVideo();
+        if (syncTimer !== null) {
+            clearInterval(syncTimer);
+        }
+        syncTimer = window.setInterval(() => {
+            if (!video.isConnected) {
+                if (syncTimer !== null) {
+                    clearInterval(syncTimer);
+                    syncTimer = null;
+                }
+                return;
+            }
+            syncFromNativeToVideo();
+        }, 120);
+    };
+
     video.onplay = () => {
-        const store = bridge.store;
-        if (store.state.AudioPlayer && !store.state.AudioPlayer.playing) {
-            store.dispatch?.('AudioPlayer/play');
-        }
+        lastUserAction = Date.now();
+        syncVideoToNativeTime();
+        requestNativePlay();
     };
+
     video.onpause = () => {
-        const store = bridge.store;
-        if (store.state.AudioPlayer && store.state.AudioPlayer.playing) {
-            store.dispatch?.('AudioPlayer/pause');
-        }
+        lastUserAction = Date.now();
+        requestNativePause();
     };
+
     video.onseeking = () => {
-        const audio = document.querySelector('audio');
-        if (audio) audio.currentTime = video.currentTime;
+        lastUserAction = Date.now();
+        syncVideoToNativeTime();
+    };
+
+    video.onseeked = () => {
+        lastUserAction = Date.now();
+        syncVideoToNativeTime();
+    };
+
+    video.onratechange = () => {
+        lastUserAction = Date.now();
+        syncVideoToNativeRate();
+    };
+
+    video.onended = () => {
+        try {
+            store.commit?.('AudioPlayer/NEXT_TRACK');
+        } catch {
+            // Optional mutation across host versions
+        }
     };
 
     let retryCount = 0;
@@ -806,7 +948,7 @@ function renderVideo(wrapper: HTMLElement, item: MediaFile, url: string): void {
                     const separator = url.includes('?') ? '&' : '?';
                     video.src = `${url}${separator}_r=${retryCount}`;
                     video.load();
-                    video.play().catch(() => {});
+                    syncFromNativeToVideo();
                 }
             }, delay);
         } else {
@@ -816,6 +958,12 @@ function renderVideo(wrapper: HTMLElement, item: MediaFile, url: string): void {
         }
     };
     video.addEventListener('click', (e) => e.stopPropagation());
+    video.addEventListener('emptied', () => {
+        if (syncTimer !== null) {
+            clearInterval(syncTimer);
+            syncTimer = null;
+        }
+    });
 
     const savedRate = Number(Config.get('playbackRate')) || 1.0;
     if (savedRate !== 1.0) video.playbackRate = savedRate;
@@ -1217,28 +1365,59 @@ async function translateGridCells(
 }
 
 async function ensurePdfJs(): Promise<PdfjsLib | null> {
-    const win = globalThis as typeof globalThis & { pdfjsLib?: PdfjsLib };
-    if (win.pdfjsLib) return win.pdfjsLib;
+    type PdfjsWindow = typeof globalThis & { pdfjsLib?: PdfjsLib };
+    if ((globalThis as PdfjsWindow).pdfjsLib) return (globalThis as PdfjsWindow).pdfjsLib!;
 
     if (!pdfjsLoadPromise) {
-        pdfjsLoadPromise = new Promise((resolve) => {
-            const script = document.createElement('script');
-            script.src = PDFJS_CDN;
-            script.async = true;
-            script.onload = () => resolve((globalThis as typeof globalThis & { pdfjsLib?: PdfjsLib }).pdfjsLib || null);
-            script.onerror = () => resolve(null);
-            document.head.appendChild(script);
-        });
+        pdfjsLoadPromise = (async (): Promise<PdfjsLib | null> => {
+            // Primary: fetch via GM_xmlhttpRequest (bypasses CORS & page CSP)
+            // and evaluate in userscript sandbox where pdfjsLib lands on our globalThis
+            try {
+                const res = await gmRequest({ url: PDFJS_CDN, responseType: 'text' });
+                const scriptText = res.response as string;
+                if (scriptText) {
+                    new Function(scriptText)();
+                    const lib = (globalThis as PdfjsWindow).pdfjsLib;
+                    if (lib) {
+                        // Fetch worker source and create blob URL (avoids CSP for Worker too)
+                        try {
+                            const wRes = await gmRequest({ url: PDFJS_WORKER_CDN, responseType: 'text' });
+                            const wText = wRes.response as string;
+                            if (wText) {
+                                const blob = new Blob([wText], { type: 'application/javascript' });
+                                lib.GlobalWorkerOptions.workerSrc = URL.createObjectURL(blob);
+                            }
+                        } catch {
+                            try { lib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER_CDN; } catch { /* ignore */ }
+                        }
+                        return lib;
+                    }
+                }
+            } catch {
+                Logger.debug('[MediaLightbox] PDF.js fetch+eval failed, trying script tag');
+            }
+
+            // Fallback: script tag (works when CSP allows cdn.jsdelivr.net)
+            // Script executes in page context → check unsafeWindow for pdfjsLib
+            return new Promise<PdfjsLib | null>((resolve) => {
+                const script = document.createElement('script');
+                script.src = PDFJS_CDN;
+                script.async = true;
+                script.onload = () => {
+                    const pageWin = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window) as PdfjsWindow;
+                    const lib = pageWin.pdfjsLib || null;
+                    if (lib) {
+                        try { lib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER_CDN; } catch { /* ignore */ }
+                    }
+                    resolve(lib);
+                };
+                script.onerror = () => resolve(null);
+                document.head.appendChild(script);
+            });
+        })();
     }
 
-    const lib = await pdfjsLoadPromise as PdfjsLib | null;
-    if (!lib) return null;
-
-    try {
-        lib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER_CDN;
-    } catch { /* ignore */ }
-
-    return lib;
+    return pdfjsLoadPromise as Promise<PdfjsLib | null>;
 }
 
 async function extractPdfText(url: string): Promise<string | null> {
@@ -1333,7 +1512,11 @@ async function showMedia(
     document.body.classList.add('media-viewer-open');
     document.body.style.overflow = 'hidden';
 
-    if (type !== 'video' && !document.body.classList.contains('asmr-fullscreen-active')) minimizePlayer();
+    // For video, the controller calls minimizeNativePlayerIfExpanded() —
+    // calling minimizePlayer() here too would double-toggle TOGGLE_HIDE.
+    if (!document.body.classList.contains('asmr-fullscreen-active') && type !== 'video') {
+        minimizePlayer();
+    }
 
     // Wait for DOM to be ready before scrolling thumbnails
     await nextTick();

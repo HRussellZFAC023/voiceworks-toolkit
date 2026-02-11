@@ -18,6 +18,7 @@ import { FolderDiver } from '../FolderDiver';
 import { AUDIO_EXTENSIONS, VIDEO_EXTENSIONS } from '../folderDiverTreeUtils';
 import { PlaylistApi, PlaylistWorkItem } from '../../api/Playlist';
 import { WorkService } from '../../services/WorkService';
+import { getAudioElement } from '../../core/DomUtils';
 import type { PlaylistModeState, WorkDetail, PlayerTrack, AudioTrack } from '../../types';
 import type { TrackFolder, TrackItem, TracksResponse } from '../../types/api';
 
@@ -33,6 +34,8 @@ const globalWindow = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : windo
 
 export class PlaylistMode {
     private static _instance: PlaylistMode;
+    /** Tracks whether refreshDependencies() has already run in this script context */
+    private static _refreshed = false;
     private bridge: KikoeruBridge;
     private playbackController: PlaybackController;
     private folderDiver: FolderDiver;
@@ -70,22 +73,28 @@ export class PlaylistMode {
         // Check window first for persisted instance
         if (globalWindow.__ASMR_PLAYLIST_MODE__) {
             PlaylistMode._instance = globalWindow.__ASMR_PLAYLIST_MODE__;
-            PlaylistMode._instance.refreshDependencies();
-            Logger.debug('[PlaylistMode] Reusing persisted instance');
+            // Only refresh once per script context to preserve runtime state
+            if (!PlaylistMode._refreshed) {
+                PlaylistMode._refreshed = true;
+                PlaylistMode._instance.refreshBridgeRefs();
+                Logger.debug('[PlaylistMode] Reusing persisted instance (refreshed bridge refs)');
+            }
             return PlaylistMode._instance;
         }
 
         if (!PlaylistMode._instance) {
             PlaylistMode._instance = new PlaylistMode();
             globalWindow.__ASMR_PLAYLIST_MODE__ = PlaylistMode._instance;
+            PlaylistMode._refreshed = true;
         }
         return PlaylistMode._instance;
     }
 
     /**
-     * Refresh dependencies that may be stale after script re-injection
+     * Refresh stale bridge references after script re-injection.
+     * Preserves playlist state (workIds, currentWorkIndex, visitedIndices) across refreshes.
      */
-    private refreshDependencies(): void {
+    private refreshBridgeRefs(): void {
         this.bridge = KikoeruBridge.getInstance();
         this.playbackController = new PlaybackController();
         this.folderDiver = FolderDiver.getInstance();
@@ -519,7 +528,14 @@ export class PlaylistMode {
     // Private Methods
     // =========================================================================
 
-    private navigateToWork(index: number): void {
+    /**
+     * Navigate to a specific work index and start playback.
+     *
+     * Directly loads and starts playback after navigation instead of relying on
+     * a 1.5s timer. This eliminates the dead time where no audio plays and the
+     * host app might interfere.
+     */
+    private async navigateToWork(index: number): Promise<void> {
         if (this.isNavigating) {
             Logger.debug('[PlaylistMode] Already navigating, ignoring');
             return;
@@ -548,19 +564,26 @@ export class PlaylistMode {
             index,
         });
 
-        // Navigate
+        // Navigate host app
         Logger.debug('[PlaylistMode] Navigating to:', workId);
         this.bridge.navigateToWork(workId);
 
-        // Reset navigation flag after delay, then load and start playback
-        if (this.navigationTimer !== null) clearTimeout(this.navigationTimer);
-        this.navigationTimer = window.setTimeout(() => {
+        // Clear any stale timer from a previous navigation
+        if (this.navigationTimer !== null) {
+            clearTimeout(this.navigationTimer);
             this.navigationTimer = null;
+        }
+
+        try {
+            // Directly load and start playback (no timer delay — our API fetch
+            // is independent of the host app's page load).
+            await this.loadWorkAndStartPlayback(workId);
+        } catch (error) {
+            Logger.error('[PlaylistMode] Error during navigateToWork playback:', error);
+        } finally {
             this.isNavigating = false;
             this.hasAdvanced = false;
-            // Actively load and start playback for the new work
-            this.loadWorkAndStartPlayback(workId);
-        }, PLAYBACK_SETTLE_DELAY);
+        }
     }
 
     private setupRouteWatcher(): void {
@@ -688,11 +711,11 @@ export class PlaylistMode {
                 return;
             }
 
-            const useFlatTracks = Config.get('playlistUseFlatTracks');
+            const useTrackPool = Boolean(Config.get('playlistUseFlatTracks') || Config.get('radioUseFlatTracks'));
             let tracks: AudioTrack[] = [];
 
-            if (useFlatTracks) {
-                Logger.debug('[PlaylistMode] Using flat track selection (all files)');
+            if (useTrackPool) {
+                Logger.debug('[PlaylistMode] Using pooled track selection (all folders)');
                 try {
                     const treeData = await WorkService.getTracks(workId);
                     tracks = treeData ? this.collectAllAudioFromTree(treeData) : [];
@@ -703,8 +726,9 @@ export class PlaylistMode {
                     tracks = this.playbackController.getPlayableTracksFromWork(work);
                 }
             } else {
+                let treeData: TracksResponse | null = null;
                 try {
-                    const treeData = await WorkService.getTracks(workId);
+                    treeData = await WorkService.getTracks(workId);
                     if (treeData) {
                         const startPath = this.folderDiver.getHostPath();
                         this.folderDiver.syncPath(startPath);
@@ -727,6 +751,12 @@ export class PlaylistMode {
 
                 if (!this._isActive) return;
                 tracks = this.playbackController.getPlayableTracksFromWork(work);
+
+                // Fallback: work metadata often has no file tree — extract from treeData
+                if (tracks.length === 0 && treeData) {
+                    Logger.debug('[PlaylistMode] Work metadata had no tracks, extracting from tree data');
+                    tracks = this.collectAllAudioFromTree(treeData);
+                }
             }
 
             Logger.debug('[PlaylistMode] Extracted playable tracks', {
@@ -735,7 +765,24 @@ export class PlaylistMode {
             });
 
             if (tracks.length > 0) {
-                this.playbackController.setQueueAndPlay(tracks as PlayerTrack[]);
+                const shuffle = Config.get('playlistShuffle');
+                let queueToPlay = tracks as PlayerTrack[];
+                let startIndex = 0;
+
+                if (!this.playAllInFolder && queueToPlay.length > 1) {
+                    const pickIndex = shuffle ? Math.floor(Math.random() * queueToPlay.length) : 0;
+                    queueToPlay = [queueToPlay[pickIndex]];
+                    Logger.debug('[PlaylistMode] Play Entire Work disabled; selected single track from pool', {
+                        pickIndex,
+                        title: queueToPlay[0]?.title || queueToPlay[0]?.hash || '(unknown)',
+                    });
+                } else if (shuffle && queueToPlay.length > 1) {
+                    const shuffled = this.playbackController.shuffleAndPlay(tracks);
+                    queueToPlay = shuffled.queue as PlayerTrack[];
+                    startIndex = shuffled.index;
+                }
+
+                this.playbackController.setQueueAndPlay(queueToPlay, startIndex);
                 Logger.debug('[PlaylistMode] Playback started for work:', workId);
             } else {
                 // Fallback: try clicking the play button
@@ -777,9 +824,10 @@ export class PlaylistMode {
         const player = this.bridge.player;
         const queue = player.queue || player.playlist || [];
         const queueIndex = player.queueIndex ?? 0;
+        const hasNextPlayable = this.hasNextPlayableTrack(queue as PlayerTrack[], queueIndex);
 
         // Check if at end of current work's queue
-        if (queueIndex >= queue.length - 1) {
+        if (!hasNextPlayable) {
             Logger.debug('[PlaylistMode] Current work queue ended, triggering advance');
             this.next();
         }
@@ -809,10 +857,17 @@ export class PlaylistMode {
         const player = this.bridge.player;
         const queue = player.queue || player.playlist || [];
         const queueIndex = player.queueIndex ?? 0;
-        const currentTime = player.currentTime || 0;
-        const duration = player.duration || 0;
+        const hasNextPlayable = this.hasNextPlayableTrack(queue as PlayerTrack[], queueIndex);
 
-        const isLastTrack = queueIndex >= queue.length - 1;
+        // Prefer HTML5 audio element for accurate time info (Vuex may lag or reset)
+        const audio = getAudioElement();
+        const currentTime = audio?.currentTime ?? player.currentTime ?? 0;
+        const duration = (audio?.duration && isFinite(audio.duration))
+            ? audio.duration
+            : (player.duration || 0);
+        const audioEnded = audio?.ended ?? false;
+
+        const isLastTrack = !hasNextPlayable;
         // Only advance when within 3 seconds of the end - no premature highProgress check
         const nearEnd = duration > 0 && (duration - currentTime) < 3;
 
@@ -826,15 +881,53 @@ export class PlaylistMode {
             return;
         }
 
-        if (isLastTrack && nearEnd) {
+        if (this.playAllInFolder && hasNextPlayable && audioEnded && !player.playing) {
+            this.forcePlayNextTrackInQueue(queue as PlayerTrack[], queueIndex);
+            return;
+        }
+
+        if (isLastTrack && (nearEnd || audioEnded)) {
             Logger.debug('[PlaylistMode] Near end of last track, will advance playlist', {
                 isLastTrack,
                 remainingTime: (duration - currentTime).toFixed(1),
+                audioEnded,
             });
             this.next();
         }
 
         this.lastQueueIndex = queueIndex;
+    }
+
+    private getNextPlayableTrackIndex(queue: PlayerTrack[], currentIndex: number): number {
+        if (!Array.isArray(queue) || queue.length === 0) return -1;
+
+        const playableIndices: number[] = [];
+        for (let i = 0; i < queue.length; i++) {
+            const track = queue[i] as PlayerTrack & { is_audio?: boolean };
+            if (!track) continue;
+            if (track.type === 'audio' && track.is_audio !== false) {
+                playableIndices.push(i);
+            }
+        }
+
+        if (playableIndices.length === 0) {
+            return currentIndex < queue.length - 1 ? currentIndex + 1 : -1;
+        }
+
+        const directNext = playableIndices.find(index => index > currentIndex);
+        return typeof directNext === 'number' ? directNext : -1;
+    }
+
+    private hasNextPlayableTrack(queue: PlayerTrack[], currentIndex: number): boolean {
+        return this.getNextPlayableTrackIndex(queue, currentIndex) >= 0;
+    }
+
+    private forcePlayNextTrackInQueue(queue: PlayerTrack[], currentIndex: number): void {
+        const nextIndex = this.getNextPlayableTrackIndex(queue, currentIndex);
+        if (nextIndex < 0) return;
+
+        Logger.debug('[PlaylistMode] Forcing next track playback', { from: currentIndex, to: nextIndex });
+        void this.playbackController.forcePlayQueueTrack(queue, nextIndex);
     }
 
     /**

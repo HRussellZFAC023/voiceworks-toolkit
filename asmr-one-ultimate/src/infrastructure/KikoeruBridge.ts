@@ -22,6 +22,7 @@ import { AppStore } from '../store/AppStore';
 import { KikoeruApiClient } from './HttpClient';
 import { EventBus } from '../core/EventBus';
 import { Logger } from '../core/Utils';
+import { TIMING } from '../core/Constants';
 
 declare const unsafeWindow: Window & typeof globalThis;
 
@@ -589,7 +590,7 @@ export class KikoeruBridge {
     /**
      * Show a notification (toast) using Quasar's $q.notify
      */
-    public notify(message: string, type: 'positive' | 'negative' | 'warning' | 'info' = 'info', timeout = 3000): void {
+    public notify(message: string, type: 'positive' | 'negative' | 'warning' | 'info' = 'info', timeout = TIMING.NOTIFICATION_MS): void {
         const app = this._app;
         const q = app?.$q || (window as Window & { Quasar?: KikoeruApp['$q'] }).Quasar;
 

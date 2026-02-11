@@ -5,13 +5,14 @@ import { EventBus } from '../core/EventBus';
 import { GpuScheduler, Priority, type WorkerName } from '../core/GpuScheduler';
 import { createEmbeddingWorker } from '../features/EmbeddingWorkerLoader';
 import { DeviceCapabilities } from '../core/DeviceCapabilities';
+import { CACHE_TTL } from '../core/Constants';
 
 // ============================================================================
 // Constants
 // ============================================================================
 
 const EMBEDDING_MODEL = 'Xenova/multilingual-e5-small';
-const CACHE_TTL_MS = 1000 * 60 * 60 * 24 * 30; // 30 days
+const CACHE_TTL_MS = CACHE_TTL.THIRTY_DAYS_MS;
 const IDLE_UNLOAD_MS = 15 * 60 * 1000; // 15 minutes
 const SINGLE_TIMEOUT_MS = 30_000;
 const BATCH_TIMEOUT_BASE_MS = 30_000;

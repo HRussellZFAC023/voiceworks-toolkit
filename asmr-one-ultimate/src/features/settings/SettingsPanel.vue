@@ -466,15 +466,7 @@ const credits = [
         <div id="asmr-radio-settings-section" class="asmr-settings-section rounded-borders q-list q-list--bordered q-list--dark bg-black" role="group" aria-labelledby="asmr-radio-settings-section-header">
             <SettingsToggle config-key="playAllInFolder" :label="t('playAll')" :sublabel="t('playAllSub')" icon="playlist_play" />
             <hr class="q-separator q-separator--horizontal q-separator--dark">
-            <SettingsToggle config-key="sePref" :label="t('sePref')" :sublabel="t('sePrefSub')" icon="surround_sound" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
-            <SettingsToggle config-key="bgmPref" :label="t('bgmPref')" :sublabel="t('bgmPrefSub')" icon="music_note" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
             <SettingsToggle config-key="shuffle" :label="t('shuffle')" :sublabel="t('shuffleSub')" icon="shuffle" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
-            <SettingsToggle config-key="loopPlaylist" :label="t('loopPlaylist')" :sublabel="t('loopPlaylistSub')" icon="repeat" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
-            <SettingsToggle config-key="radioUseFlatTracks" :label="t('radioFlatTracks')" :sublabel="t('radioFlatTracksSub')" icon="view_list" />
             <hr class="q-separator q-separator--horizontal q-separator--dark">
             <SettingsToggle config-key="autoProgress" :label="t('autoProgress')" :sublabel="t('autoProgressSub')" icon="fast_forward" />
         </div>
@@ -490,13 +482,19 @@ const credits = [
             <hr class="q-separator q-separator--horizontal q-separator--dark">
             <SettingsToggle config-key="playlistLoopPlaylist" :label="t('loopPlaylist')" :sublabel="t('loopPlaylistSub')" icon="repeat" />
             <hr class="q-separator q-separator--horizontal q-separator--dark">
-            <SettingsToggle config-key="playlistUseFlatTracks" :label="t('radioFlatTracks')" :sublabel="t('radioFlatTracksSub')" icon="view_list" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
             <SettingsToggle config-key="playlistAutoProgress" :label="t('autoProgress')" :sublabel="t('autoProgressSub')" icon="fast_forward" />
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- Folder & Track Pool Settings                                -->
+        <!-- ============================================================ -->
+        <span class="text-weight-medium text-center flex q-my-md asmr-settings-header" id="asmr-folder-pool-settings-section-header">{{ t('folderPoolSettings') }}</span>
+        <div id="asmr-folder-pool-settings-section" class="asmr-settings-section rounded-borders q-list q-list--bordered q-list--dark bg-black" role="group" aria-labelledby="asmr-folder-pool-settings-section-header">
+            <SettingsToggle config-key="playlistUseFlatTracks" :label="t('trackPoolAllFolders')" :sublabel="t('trackPoolAllFoldersSub')" icon="view_list" />
             <hr class="q-separator q-separator--horizontal q-separator--dark">
-            <SettingsToggle config-key="playlistSePref" :label="t('sePref')" :sublabel="t('sePrefSub')" icon="surround_sound" />
+            <SettingsToggle config-key="sePref" :label="t('sePref')" :sublabel="t('sePrefSub')" icon="surround_sound" />
             <hr class="q-separator q-separator--horizontal q-separator--dark">
-            <SettingsToggle config-key="playlistBgmPref" :label="t('bgmPref')" :sublabel="t('bgmPrefSub')" icon="music_note" />
+            <SettingsToggle config-key="bgmPref" :label="t('bgmPref')" :sublabel="t('bgmPrefSub')" icon="music_note" />
         </div>
 
         <!-- ============================================================ -->
@@ -541,9 +539,6 @@ const credits = [
                 </div>
                 <div class="q-px-md q-pb-md asmr-settings-hint">
                     <div class="text-caption text-grey-7 asmr-settings-hint-text" :style="{ color: whisperModelStatusColor }">{{ whisperModelStatusText }}</div>
-                </div>
-                <div class="q-px-md q-pb-md asmr-settings-hint">
-                    <div class="text-caption text-grey-7 asmr-settings-hint-text">{{ t('whisperGpuHint') }}</div>
                 </div>
                 <hr class="q-separator q-separator--horizontal q-separator--dark">
                 <SettingsToggle config-key="alwaysTranscribe" :label="t('alwaysTranscribe')" :sublabel="t('alwaysTranscribeSub')" icon="auto_fix_high" />

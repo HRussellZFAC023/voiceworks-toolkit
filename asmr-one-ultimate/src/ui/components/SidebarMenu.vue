@@ -96,14 +96,9 @@ type PlayerControlsMode = 'playlist' | 'radio' | null;
 type PlayerToggleKey =
     | 'playAllInFolder'
     | 'shuffle'
-    | 'loopPlaylist'
-    | 'radioUseFlatTracks'
-    | 'autoProgress'
     | 'playlistPlayAllInFolder'
     | 'playlistShuffle'
-    | 'playlistLoopPlaylist'
-    | 'playlistUseFlatTracks'
-    | 'playlistAutoProgress';
+    | 'playlistLoopPlaylist';
 
 interface PlayerToggleDef {
     key: PlayerToggleKey;
@@ -115,14 +110,9 @@ interface PlayerToggleDef {
 const PLAYER_TOGGLE_KEYS = new Set<PlayerToggleKey>([
     'playAllInFolder',
     'shuffle',
-    'loopPlaylist',
-    'radioUseFlatTracks',
-    'autoProgress',
     'playlistPlayAllInFolder',
     'playlistShuffle',
     'playlistLoopPlaylist',
-    'playlistUseFlatTracks',
-    'playlistAutoProgress',
 ]);
 
 let playerControlsEl: HTMLElement | null = null;
@@ -141,17 +131,14 @@ function getToggleDefs(mode: Exclude<PlayerControlsMode, null>): PlayerToggleDef
             { key: 'playlistPlayAllInFolder', icon: 'playlist_play', labelKey: 'playAll', subLabelKey: 'playAllSub' },
             { key: 'playlistShuffle', icon: 'shuffle', labelKey: 'shuffle', subLabelKey: 'shuffleSub' },
             { key: 'playlistLoopPlaylist', icon: 'repeat', labelKey: 'loopPlaylist', subLabelKey: 'loopPlaylistSub' },
-            { key: 'playlistUseFlatTracks', icon: 'view_list', labelKey: 'radioFlatTracks', subLabelKey: 'radioFlatTracksSub' },
-            { key: 'playlistAutoProgress', icon: 'fast_forward', labelKey: 'autoProgress', subLabelKey: 'autoProgressSub' },
         ];
     }
 
+    // Radio mode keeps only quick playback controls in the player bar.
+    // Track-pool/folder preference settings live on the settings page.
     return [
         { key: 'playAllInFolder', icon: 'playlist_play', labelKey: 'playAll', subLabelKey: 'playAllSub' },
         { key: 'shuffle', icon: 'shuffle', labelKey: 'shuffle', subLabelKey: 'shuffleSub' },
-        { key: 'loopPlaylist', icon: 'repeat', labelKey: 'loopPlaylist', subLabelKey: 'loopPlaylistSub' },
-        { key: 'radioUseFlatTracks', icon: 'view_list', labelKey: 'radioFlatTracks', subLabelKey: 'radioFlatTracksSub' },
-        { key: 'autoProgress', icon: 'fast_forward', labelKey: 'autoProgress', subLabelKey: 'autoProgressSub' },
     ];
 }
 

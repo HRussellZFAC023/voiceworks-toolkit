@@ -60,6 +60,7 @@ export class TranscriptFileInjector {
         }));
 
         this.cleanups.push(EventBus.on('whisper:complete', () => this.scheduleRefresh()));
+        this.cleanups.push(EventBus.on('whisper:cache-updated', () => this.scheduleRefresh()));
         this.cleanups.push(EventBus.on('work:change', () => this.scheduleRefresh()));
         this.cleanups.push(EventBus.on('lang:change', () => this.scheduleRefresh()));
         this.cleanups.push(EventBus.on('config:change', ({ key }: { key: string }) => {
@@ -183,9 +184,12 @@ export class TranscriptFileInjector {
                 continue;
             }
 
-            // Check if badge already matches this cache entry
+            // Check if badge already matches this cache entry (including translation state)
+            const targetLang = ((Config.get('subtitleLang') as string | undefined) || '').toLowerCase();
+            const hasTranslation = !!(targetLang && cached.translations?.[targetLang]);
+            const badgeKey = `${entry.cacheKey}:${hasTranslation ? targetLang : ''}`;
             const existingBadge = li.querySelector<HTMLElement>(`[${BADGE_ATTR}]`);
-            if (existingBadge?.dataset.asmrTranscriptKey === entry.cacheKey) continue;
+            if (existingBadge?.dataset.asmrTranscriptKey === badgeKey) continue;
 
             // Remove stale badge
             existingBadge?.remove();
@@ -210,7 +214,11 @@ export class TranscriptFileInjector {
         const wrap = document.createElement('div');
         wrap.className = 'q-item__section column q-item__section--side justify-center asmr-transcript-actions';
         wrap.setAttribute(BADGE_ATTR, 'true');
-        wrap.dataset.asmrTranscriptKey = entry.cacheKey;
+
+        // Composite key includes translation state so badge invalidates when translations arrive
+        const targetLang = ((Config.get('subtitleLang') as string | undefined) || '').toLowerCase();
+        const hasTranslation = !!(targetLang && cached.translations?.[targetLang]);
+        wrap.dataset.asmrTranscriptKey = `${entry.cacheKey}:${hasTranslation ? targetLang : ''}`;
 
         // LRC download
         const lrc = cached.lrc || buildLrcFromSegments(cached.segments);
@@ -232,7 +240,6 @@ export class TranscriptFileInjector {
         }));
 
         // Translated variants
-        const targetLang = ((Config.get('subtitleLang') as string | undefined) || '').toLowerCase();
         const translated = targetLang ? cached.translations?.[targetLang] : undefined;
         if (translated) {
             if (translated.lrc) {

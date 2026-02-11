@@ -27,23 +27,19 @@ export class PlaybackController {
     }
 
     /**
-     * Stop current playback
+     * Stop current playback.
+     *
+     * Important: Do NOT strip the audio element's `src` or call `audio.load()`.
+     * Removing the src puts the element in a broken state that the host app's
+     * Vue reactivity tries to "fix" by restoring the old track source — causing
+     * the previous track to resume. Instead, just pause and clear the Vuex queue.
+     * Our setQueueAndPlay() will replace the queue + source cleanly.
      */
     stopPlayback(): void {
         const audio = getAudioElement();
-        if (audio) {
-            if (!audio.paused) {
-                audio.pause();
-            }
-            audio.currentTime = 0;
-
-            // Prevent stale source from resuming on the next play fallback.
-            if (audio.currentSrc || audio.getAttribute('src')) {
-                audio.removeAttribute('src');
-                audio.load();
-            }
-
-            Logger.debug('[PlaybackController] Stopped audio playback');
+        if (audio && !audio.paused) {
+            audio.pause();
+            Logger.debug('[PlaybackController] Paused audio playback');
         }
 
         // Update store state
@@ -130,6 +126,50 @@ export class PlaybackController {
         } else {
             this.bridge.commit('AudioPlayer/SET_TRACK', startIndex);
         }
+    }
+
+    /**
+     * Force-play a specific queue index. Used when host auto-advance stalls.
+     */
+    async forcePlayQueueTrack(queue: PlayerTrack[], targetIndex: number): Promise<boolean> {
+        const track = queue[targetIndex];
+        if (!track) return false;
+
+        try {
+            this.bridge.commit('AudioPlayer/SET_TRACK', targetIndex);
+        } catch (err) {
+            Logger.warn('[PlaybackController] Failed to set queue track index:', err);
+        }
+
+        if (this.bridge.hasAction('AudioPlayer/playTrack')) {
+            try {
+                await this.bridge.dispatch('AudioPlayer/playTrack', track);
+                return true;
+            } catch (err) {
+                Logger.warn('[PlaybackController] force playTrack dispatch failed:', err);
+            }
+        }
+
+        if (this.bridge.hasAction('AudioPlayer/play')) {
+            try {
+                await this.bridge.dispatch('AudioPlayer/play');
+                return true;
+            } catch (err) {
+                Logger.warn('[PlaybackController] force play dispatch failed:', err);
+            }
+        }
+
+        const audio = getAudioElement();
+        if (audio?.paused && (audio.currentSrc || audio.getAttribute('src'))) {
+            try {
+                await audio.play();
+                return true;
+            } catch (err) {
+                Logger.warn('[PlaybackController] force audio.play failed:', err);
+            }
+        }
+
+        return false;
     }
 
     /**
@@ -228,7 +268,12 @@ export class PlaybackController {
     private extractTracksFromWork(work: WorkDetail): AudioTrack[] {
         const dirs = work.dirs || work.children || [];
         if (Array.isArray(dirs) && dirs.length > 0) {
-            const bestFolder = selectBestFolder(dirs as WorkFolder[], undefined, Config.get('sePref'));
+            const bestFolder = selectBestFolder(
+                dirs as WorkFolder[],
+                undefined,
+                Config.get('sePref'),
+                Config.get('bgmPref'),
+            );
             if (bestFolder) {
                 const tracks = collectTracks(bestFolder);
                 if (tracks.length > 0) {

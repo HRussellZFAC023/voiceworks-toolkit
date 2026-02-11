@@ -24,7 +24,7 @@ import { WorkService } from '../services/WorkService';
 import { ThumbnailManager } from './media/ThumbnailManager';
 import type { MediaFile, WorkTreeComponent } from './media/types';
 import type { KikoeruApp } from '../types/store';
-import type { TrackFolder, TrackItem } from '../types/api';
+import type { TrackFolder, TrackItem, PlayerTrack } from '../types/api';
 import MediaLightboxVue from './components/MediaLightbox.vue';
 import {
     findMatchingMediaItem,
@@ -96,6 +96,7 @@ export class MediaViewerController {
     private thumbnailCache = new Map<string, string>();
     private thumbnailManager: ThumbnailManager;
     private patchedWorkTree: PatchableWorkTree | null = null;
+    private activeVideoMediaList: MediaFile[] = [];
 
     // Bound event handlers
     private boundDelegatedClick: (e: MouseEvent) => void;
@@ -185,6 +186,7 @@ export class MediaViewerController {
         this.folderWatcherSetup = false;
         this.activeRequestId++;
         this.thumbnailCache.clear();
+        this.activeVideoMediaList = [];
     }
 
     // =========================================================================
@@ -208,6 +210,9 @@ export class MediaViewerController {
                 markRaw(MediaLightboxVue as Component),
                 {
                     visible: false,
+                    onVideoSelected: (item: MediaFile) => {
+                        void this.handleLightboxVideoSelected(item);
+                    },
                 },
                 container
             );
@@ -483,27 +488,49 @@ export class MediaViewerController {
                 hide: state.AudioPlayer?.hide,
                 playing: state.AudioPlayer?.playing,
                 currentTime: state.AudioPlayer?.currentTime,
-                src: state.AudioPlayer?.currentTrack?.src || state.AudioPlayer?.currentPlayingFile?.src
+                trackHash: state.AudioPlayer?.currentTrack?.hash || state.AudioPlayer?.currentPlayingFile?.hash || '',
+                trackTitle: state.AudioPlayer?.currentTrack?.title || state.AudioPlayer?.currentPlayingFile?.title || '',
+                trackSrc: this.resolvePlayerTrackSource(state.AudioPlayer?.currentTrack as PlayerTrack | undefined)
+                    || this.resolvePlayerTrackSource(state.AudioPlayer?.currentPlayingFile as PlayerTrack | undefined)
+                    || state.AudioPlayer?.source
+                    || state.AudioPlayer?.src
+                    || state.AudioPlayer?.currentSrc
+                    || '',
             }),
             (val, oldVal) => {
                 if (val.hide === false && oldVal?.hide === true) {
                     if (this.lightboxRef?.getIsActive() && !document.body.classList.contains('asmr-fullscreen-active')) {
-                        Logger.debug('[MediaViewerController] Player expanded, closing lightbox');
-                        this.lightboxRef.hideModal();
+                        const modal = document.getElementById('asmr-media-viewer-modal');
+                        const isVideoModal = !!modal?.querySelector('video.media-viewer-video');
+                        if (!isVideoModal) {
+                            Logger.debug('[MediaViewerController] Player expanded, closing lightbox');
+                            this.lightboxRef.hideModal();
+                        }
                     }
                 }
 
                 // Sync video playback state
                 if (this.lightboxRef?.getIsActive()) {
                     const modal = document.getElementById('asmr-media-viewer-modal');
-                    const video = modal?.querySelector('video');
+                    const video = modal?.querySelector('video.media-viewer-video') as HTMLVideoElement | null;
                     if (video) {
+                        const trackChanged = val.trackHash !== oldVal?.trackHash
+                            || this.normalizeComparableUrl(val.trackSrc) !== this.normalizeComparableUrl(oldVal?.trackSrc);
+                        if (trackChanged) {
+                            this.syncLightboxVideoTrack(val.trackHash, val.trackSrc, val.trackTitle);
+                        }
+
+                        const isPlayerBoundVideo = this.isDisplayedVideoMatchingPlayer(video, val.trackHash, val.trackSrc, val.trackTitle);
+                        if (!isPlayerBoundVideo) {
+                            return;
+                        }
+
                         if (val.playing && video.paused) {
-                            video.play().catch(() => {});
+                            video.play().catch(() => { });
                         } else if (!val.playing && !video.paused) {
                             video.pause();
                         }
-                        if (typeof val.currentTime === 'number' && Math.abs(video.currentTime - val.currentTime) > 2) {
+                        if (typeof val.currentTime === 'number' && Math.abs(video.currentTime - val.currentTime) > 1.2) {
                             video.currentTime = val.currentTime;
                         }
                     }
@@ -522,6 +549,7 @@ export class MediaViewerController {
 
         // Clean up thumbnails before any store action
         this.thumbnailManager.clearStaleThumbnails();
+        this.activeVideoMediaList = type === 'video' ? [item] : [];
 
         const initialHash = item.hash;
         const hasFakeHash = !initialHash || initialHash.startsWith('__delegated_');
@@ -530,8 +558,8 @@ export class MediaViewerController {
         await this.lightboxRef.showMedia(item, type, [item], 0);
 
         // For videos, load the track into the native AudioPlayer so the mini player bar appears
-        if (type === 'video') {
-            this.playVideoInNativePlayer(item, workTreeContext);
+        if (type === 'video' && !hasFakeHash) {
+            await this.playVideoInNativePlayer(item, workTreeContext);
         }
 
         // Fetch full media list in the background
@@ -540,10 +568,15 @@ export class MediaViewerController {
 
         if (requestId !== this.activeRequestId || !this.lightboxRef) return;
 
+        let matchedItem: MediaFile | null = null;
+        let matchedIndex = 0;
         if (mediaList && mediaList.length > 0) {
-            const matchedItem = findMatchingMediaItem(item, mediaList);
-            const matchedIndex = matchedItem ? mediaList.indexOf(matchedItem) : 0;
+            matchedItem = findMatchingMediaItem(item, mediaList) || null;
+            matchedIndex = matchedItem ? mediaList.indexOf(matchedItem) : 0;
             this.lightboxRef.updateMediaList(mediaList, Math.max(0, matchedIndex));
+            if (type === 'video') {
+                this.activeVideoMediaList = mediaList;
+            }
 
             if (hasFakeHash) {
                 if (matchedItem && matchedItem.hash && !matchedItem.hash.startsWith('__delegated_')) {
@@ -566,6 +599,14 @@ export class MediaViewerController {
             }
         }
 
+        // Always rebuild the queue once the full media list is available, even
+        // if the current track matches — the initial call only had [item] so the
+        // queue had 1 entry. This gives next/prev track navigation.
+        if (type === 'video' && mediaList && mediaList.length > 0) {
+            const target = matchedItem || item;
+            await this.playVideoInNativePlayer(target, workTreeContext, mediaList);
+        }
+
         this.lightboxRef.startSlideshowAfterPopulation();
 
         // Re-inject thumbnails after close
@@ -575,15 +616,24 @@ export class MediaViewerController {
 
     /**
      * Load the video file into the native AudioPlayer so the mini player bar appears.
-     * The native <audio> element can play the audio track from .mp4 files.
-     * We build a queue that includes both audio and video files from the current folder.
+     * Uses a video-only queue from the current folder so lightbox navigation and player
+     * track changes stay synchronized.
      */
-    private playVideoInNativePlayer(item: MediaFile, workTreeContext?: WorkTreeComponent): void {
+    private async playVideoInNativePlayer(
+        item: MediaFile,
+        workTreeContext?: WorkTreeComponent,
+        resolvedMediaList?: MediaFile[]
+    ): Promise<void> {
         const store = this.bridge.store;
         if (!store.commit) return;
 
+        // Prefer resolvedMediaList (explicitly fetched) over work tree context
+        // (which may be stale or return items that don't filter to videos).
         let allItems: MediaFile[] = [];
-        if (workTreeContext) {
+        if (Array.isArray(resolvedMediaList) && resolvedMediaList.length > 0) {
+            allItems = resolvedMediaList;
+        }
+        if (allItems.length === 0 && workTreeContext) {
             const ctx = workTreeContext as PatchableWorkTree;
             allItems = (ctx.fatherFolder ?? ctx.$data?.fatherFolder ?? []) as MediaFile[];
         }
@@ -595,22 +645,62 @@ export class MediaViewerController {
         }
 
         const queue = allItems.filter((f: MediaFile) => {
-            if (f.type === 'audio') return true;
+            if (String(f.type || '').toLowerCase() === 'video') return true;
             const fExt = getFileExtension(f.title);
             return isVideoExtension(fExt);
-        }).map(f => ({ ...f, type: 'audio' as const }));
+        }).map(f => this.buildVideoQueueTrack(f));
 
-        const index = queue.findIndex(f => f.hash === item.hash);
-        if (index < 0) {
-            // Fallback: single-item queue
-            store.commit('AudioPlayer/SET_QUEUE', {
-                queue: [{ ...item, type: 'audio' }],
-                index: 0,
-            });
-        } else {
-            store.commit('AudioPlayer/SET_QUEUE', { queue, index });
+        if (queue.length === 0) {
+            queue.push(this.buildVideoQueueTrack(item));
         }
+
+        let index = queue.findIndex(f => f.hash && f.hash === item.hash);
+        if (index < 0) {
+            const targetSrc = this.normalizeComparableUrl(this.getMediaUrl(item.hash, item));
+            index = queue.findIndex(f => this.normalizeComparableUrl(this.resolvePlayerTrackSource(f)) === targetSrc);
+        }
+        if (index < 0 && item.title) {
+            index = queue.findIndex(f => f.title === item.title);
+        }
+        if (index < 0) {
+            queue.unshift(this.buildVideoQueueTrack(item));
+            index = 0;
+        }
+
+        // Match PlaylistController pattern: just SET_QUEUE + SET_TRACK.
+        // Do NOT call stopNativePlayback() — audio.pause() queues a DOM pause
+        // event that fires AFTER SET_TRACK, racing PAUSE vs PLAY and resetting
+        // playing=false. SET_TRACK sets playing=true and the source watcher in
+        // AudioElement.vue handles load() + canplay → play() naturally.
+        store.commit('AudioPlayer/SET_QUEUE', { queue, index });
+        try {
+            store.commit('AudioPlayer/SET_TRACK', index);
+        } catch { /* optional mutation across host versions */ }
+
+        // Always set currentPlayingFile directly on the reactive state.
+        // The deployed host's SET_QUEUE/SET_TRACK mutations may not copy it,
+        // leaving PlayerBar and AudioElement with undefined → crash.
+        const track = queue[index];
+        if (track && store.state.AudioPlayer) {
+            store.state.AudioPlayer.currentPlayingFile = { ...track };
+        }
+
+        this.minimizeNativePlayerIfExpanded();
+
         Logger.debug(`[MediaViewerController] Playing video in native player: ${item.title} (${index + 1}/${queue.length})`);
+    }
+
+    private async handleLightboxVideoSelected(item: MediaFile): Promise<void> {
+        if (!item || !matchesRequestedMediaType(item, 'video')) return;
+        if (!this.lightboxRef?.getIsActive()) return;
+        const hasRealHash = !!item.hash && !item.hash.startsWith('__delegated_');
+        const hasDirectSrc = !!(item.mediaStreamUrl || item.media_stream_url);
+        if (!hasRealHash && !hasDirectSrc) return;
+        if (this.isCurrentTrackMatchingMedia(item)) return;
+
+        const workTreeContext = this.findWorkTreeComponent() || undefined;
+        const resolvedList = this.activeVideoMediaList.length > 0 ? this.activeVideoMediaList : undefined;
+        await this.playVideoInNativePlayer(item, workTreeContext, resolvedList);
     }
 
     private async populateMediaList(
@@ -743,6 +833,171 @@ export class MediaViewerController {
     private getMediaUrl(hash: string, item?: MediaFile): string {
         const token = localStorage.getItem('jwt-token') || '';
         return buildMediaStreamUrl(hash, item, token);
+    }
+
+    private resolvePlayerTrackSource(track?: PlayerTrack | null): string {
+        if (!track) return '';
+        return String(
+            track.streamLowQualityUrl
+            || track.mediaStreamUrl
+            || track.media_stream_url
+            || track.src
+            || track.stream_url
+            || track.url
+            || '',
+        );
+    }
+
+    private normalizeComparableUrl(url?: string): string {
+        const raw = String(url || '').trim();
+        if (!raw) return '';
+
+        try {
+            const parsed = new URL(raw, window.location.origin);
+            parsed.searchParams.delete('token');
+            parsed.searchParams.delete('_r');
+            return `${parsed.origin}${parsed.pathname}`.toLowerCase();
+        } catch {
+            return raw.split('?')[0].toLowerCase();
+        }
+    }
+
+    private findMatchingVideoFromActiveList(trackHash?: string, trackSrc?: string, trackTitle?: string): { item: MediaFile; index: number } | null {
+        if (!this.activeVideoMediaList.length) return null;
+
+        const normalizedTrackSrc = this.normalizeComparableUrl(trackSrc);
+        const normalizedTrackTitle = String(trackTitle || '').trim().toLowerCase();
+        for (let i = 0; i < this.activeVideoMediaList.length; i++) {
+            const candidate = this.activeVideoMediaList[i];
+            if (!matchesRequestedMediaType(candidate, 'video')) continue;
+
+            if (trackHash && candidate.hash && candidate.hash === trackHash) {
+                return { item: candidate, index: i };
+            }
+
+            const candidateSrc = this.normalizeComparableUrl(this.getMediaUrl(candidate.hash, candidate));
+            if (normalizedTrackSrc && candidateSrc && normalizedTrackSrc === candidateSrc) {
+                return { item: candidate, index: i };
+            }
+
+            if (normalizedTrackTitle && String(candidate.title || '').trim().toLowerCase() === normalizedTrackTitle) {
+                return { item: candidate, index: i };
+            }
+        }
+
+        return null;
+    }
+
+    private syncLightboxVideoTrack(trackHash?: string, trackSrc?: string, trackTitle?: string): void {
+        if (!this.lightboxRef?.getIsActive()) return;
+        const modal = document.getElementById('asmr-media-viewer-modal');
+        const video = modal?.querySelector('video.media-viewer-video') as HTMLVideoElement | null;
+        if (!video) return;
+
+        const match = this.findMatchingVideoFromActiveList(trackHash, trackSrc, trackTitle);
+        if (match) {
+            this.lightboxRef.updateMediaList(this.activeVideoMediaList, match.index);
+            const currentHash = String(video.dataset.mediaHash || '');
+            const currentSrc = this.normalizeComparableUrl(video.currentSrc || video.src);
+            const nextSrc = this.normalizeComparableUrl(this.getMediaUrl(match.item.hash, match.item));
+            const isSameVideo = (currentHash && match.item.hash && currentHash === match.item.hash)
+                || (currentSrc && nextSrc && currentSrc === nextSrc);
+            if (!isSameVideo) {
+                this.lightboxRef.renderResolvedItem(match.item, 'video');
+            }
+            return;
+        }
+
+        if (trackSrc) {
+            const normalizedCurrent = this.normalizeComparableUrl(video.currentSrc || video.src);
+            const normalizedNext = this.normalizeComparableUrl(trackSrc);
+            if (normalizedNext && normalizedNext !== normalizedCurrent) {
+                video.src = trackSrc;
+                video.load();
+            }
+        }
+    }
+
+    private isDisplayedVideoMatchingPlayer(
+        video: HTMLVideoElement,
+        trackHash?: string,
+        trackSrc?: string,
+        trackTitle?: string,
+    ): boolean {
+        const displayedHash = String(video.dataset.mediaHash || '').trim();
+        const displayedTitle = String(video.dataset.mediaTitle || '').trim().toLowerCase();
+        const displayedSrc = this.normalizeComparableUrl(video.currentSrc || video.src);
+        const normalizedTrackSrc = this.normalizeComparableUrl(trackSrc);
+
+        if (trackHash && displayedHash && trackHash === displayedHash) {
+            return true;
+        }
+        if (normalizedTrackSrc && displayedSrc && normalizedTrackSrc === displayedSrc) {
+            return true;
+        }
+        if (trackTitle && displayedTitle && displayedTitle === String(trackTitle).trim().toLowerCase()) {
+            return true;
+        }
+
+        const match = this.findMatchingVideoFromActiveList(trackHash, trackSrc, trackTitle);
+        if (!match) return false;
+
+        if (displayedHash && match.item.hash && displayedHash === match.item.hash) {
+            return true;
+        }
+        const matchSrc = this.normalizeComparableUrl(this.getMediaUrl(match.item.hash, match.item));
+        if (matchSrc && displayedSrc && matchSrc === displayedSrc) {
+            return true;
+        }
+        return false;
+    }
+
+    private isCurrentTrackMatchingMedia(item: MediaFile): boolean {
+        const state = this.bridge.store.state?.AudioPlayer;
+        const currentTrack = (state?.currentTrack || state?.currentPlayingFile) as PlayerTrack | undefined;
+        if (!currentTrack) return false;
+
+        if (item.hash && currentTrack.hash && item.hash === currentTrack.hash) {
+            return true;
+        }
+
+        const currentSrc = this.resolvePlayerTrackSource(currentTrack) || state?.source || state?.src || state?.currentSrc || '';
+        const expectedSrc = this.getMediaUrl(item.hash, item);
+        return this.normalizeComparableUrl(currentSrc) === this.normalizeComparableUrl(expectedSrc);
+    }
+
+    private buildVideoQueueTrack(item: MediaFile): PlayerTrack {
+        const currentWork = this.bridge.store.state?.AudioPlayer?.work;
+        const mediaStreamUrl = this.getMediaUrl(item.hash, item);
+        const workTitle = currentWork?.title || '';
+        // Work ID from hash "1458220/subdir/file.mp4" → 1458220
+        const workIdNum = parseInt(item.hash?.split('/')[0] || '0', 10) || 0;
+
+        return {
+            type: 'audio',
+            hash: item.hash,
+            title: item.title,
+            workTitle,
+            mediaStreamUrl,
+            mediaDownloadUrl: mediaStreamUrl,
+            // The deployed host's AudioElement accesses currentPlayingFile.work.id
+            // in event handlers. Without this, work is undefined → .id crashes.
+            work: {
+                id: currentWork?.id ?? workIdNum,
+                source_id: currentWork?.source_id || `RJ${String(workIdNum).padStart(6, '0')}`,
+                source_type: currentWork?.source_type || 'DLSITE',
+            },
+        };
+    }
+
+    private minimizeNativePlayerIfExpanded(): void {
+        const player = this.bridge.store.state?.AudioPlayer;
+        if (!player || player.hide) return;
+        try {
+            this.bridge.commit('AudioPlayer/TOGGLE_HIDE');
+        } catch {
+            // Optional mutation across host versions
+        }
     }
 
     private getWorkIdFromUrl(): string | null {

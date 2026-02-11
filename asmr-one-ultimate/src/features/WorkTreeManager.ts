@@ -8,7 +8,7 @@
  */
 
 import { KikoeruBridge } from '../infrastructure/KikoeruBridge';
-import { Logger, Config } from '../core/Utils';
+import { Logger } from '../core/Utils';
 import { EventBus } from '../core/EventBus';
 import { CentralObserver } from '../core/CentralObserver';
 import { FolderDiver } from './FolderDiver';
@@ -46,7 +46,6 @@ export class WorkTreeManager {
     private autoDiveInProgress = false;
     private manualRouteKey = '';
     private manualRouteWorkId: string | null = null;
-    private lastHostPathKey = '';
     private hostPathWatcherCleanup: (() => void) | null = null;
     private routeWatcherCleanup: (() => void) | null = null;
     private manualNavCleanups: Array<() => void> = [];
@@ -117,7 +116,6 @@ export class WorkTreeManager {
         this.domDiveWorkId = null;
         this.domDiveAt = 0;
         this.lastPathKey = '';
-        this.lastHostPathKey = '';
         this.lastEnhancedPathKey = '';
         this.manualOverrideUntil = 0;
         this.autoDiveInProgress = false;
@@ -183,11 +181,7 @@ export class WorkTreeManager {
 
         this.flatView.prefetch(workId);
 
-        if (!Config.get('autoFilterFolders')) {
-            Logger.debug('[WorkTreeManager] autoFilterFolders disabled, skipping dive');
-            return;
-        }
-
+        // Auto-dive is always enabled (autoFilterFolders setting removed).
         this.maybeAutoDive(workId, this.diveToken).catch((err) => {
             Logger.warn('[WorkTreeManager] Auto-dive failed:', err);
         });
@@ -356,7 +350,6 @@ export class WorkTreeManager {
             treeVm.path = [...targetPath];
         }
 
-        this.lastHostPathKey = targetPath.join('\x00');
         this.folderDiver.syncPath(targetPath);
         Logger.debug('[WorkTreeManager] Synced WorkTree path with route', { path: targetPath.join('/') || '(root)' });
     }
@@ -377,11 +370,10 @@ export class WorkTreeManager {
             return treeVm.path.join('\x00');
         };
 
-        this.lastHostPathKey = getPathKey();
+        getPathKey();
 
         this.hostPathWatcherCleanup = app.$watch(getPathKey, (next: string, prev: string) => {
             if (next === prev) return;
-            this.lastHostPathKey = next;
             const newPath = next ? next.split('\x00') : [];
             this.folderDiver.syncPath(newPath);
             // Enhancement (markItemTypes, copy/transcript buttons, path-change event)
@@ -612,6 +604,11 @@ export class WorkTreeManager {
 
     /** Debounced handler for treeObserver mutations. */
     private processTreeMutation(): void {
+        // Skip re-triggering while an auto-dive is in progress — our own DOM clicks
+        // cause mutations that would otherwise start a competing maybeAutoDive,
+        // incrementing diveToken/diveGeneration and aborting the current click sequence.
+        if (this.autoDiveInProgress) return;
+
         // Lazily install hooks when WorkTree component becomes available
         if (!this.treeVmHooked) {
             const treeVm = this.bridge.findWorkTreeComponent() as WorkTreeComponent | null;
@@ -622,7 +619,7 @@ export class WorkTreeManager {
         const hasItems = !!document.querySelector('#work-tree .q-item');
         if (!hasItems) return;
 
-        if (!workId || !Config.get('autoFilterFolders')) return;
+        if (!workId) return;
 
         const pathKey = this.folderDiver.getHostPath().join('/');
         const now = Date.now();

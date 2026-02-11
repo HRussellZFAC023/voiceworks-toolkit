@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
+import { ref, computed, watch, onUnmounted } from 'vue';
 import { useBridge } from '../../composables/useBridge';
 import { useConfig } from '../../composables/useConfig';
 import { useI18n } from '../../composables/useI18n';
@@ -14,8 +14,8 @@ import { Priority } from '../../core/GpuScheduler';
 import { TranslatedTags } from '../TranslatedTags';
 import { MediaViewerController } from '../MediaViewerController';
 import { extractEmbeddedRjCode, extractPrimaryRjCode } from '../rjCodeUtils';
-import { Logger, SafeUtils } from '../../core/Utils';
-import { isChinese } from '../../core/DomUtils';
+import { Logger } from '../../core/Utils';
+import { isChinese, getCleanText } from '../../core/DomUtils';
 import { HttpClient } from '../../infrastructure/HttpClient';
 
 // ============================================================================
@@ -24,7 +24,7 @@ import { HttpClient } from '../../infrastructure/HttpClient';
 
 const bridge = useBridge();
 const { t, format } = useI18n();
-const { emit } = useEventBus();
+const { emit, on } = useEventBus();
 const route = useRoute();
 const translateMode = useConfig('translateMode');
 const cnToJpConfig = useConfig('translateCnToJp');
@@ -48,11 +48,12 @@ let titleTranslationRequestVersion = 0;
 const METADATA_BODY_FIRST_BATCH = 20;
 const METADATA_BODY_STREAM_BATCH = 40;
 const METADATA_BODY_STREAM_YIELD_MS = 0;
-const METADATA_TRANSLATION_SCOPES = ['title', 'description', 'chips', 'body'] as const;
 const METADATA_TRANSLATION_PRIORITY = Priority.NORMAL;
 const lastDescriptionSignature = ref('');
 const lastChipSignature = ref('');
 const lastBodySignature = ref('');
+const TITLE_REAPPLY_DELAYS_MS = [0, 180, 480, 900];
+let titleApplyTimers: Array<ReturnType<typeof setTimeout>> = [];
 
 /** Image retry counters keyed by URL */
 const imageRetries = ref<Map<string, number>>(new Map());
@@ -342,21 +343,114 @@ function resetImageState(): void {
 }
 
 function resetInjectedTitleElements(): void {
-    document.querySelector('.asmr-original-title')?.remove();
-    document.querySelector('.asmr-translated-title')?.remove();
+    document.querySelectorAll('.asmr-original-title, .asmr-translated-title').forEach(el => el.remove());
     const h1 = document.querySelector('h1.text-h6') as HTMLElement | null;
-    if (h1) h1.style.display = '';
+    if (h1) {
+        h1.style.display = '';
+        h1.removeAttribute('data-jpdb');
+        h1.removeAttribute('data-jpdb-original');
+    }
 }
 
-function getMetadataTranslationQueueKey(workId: string, scope: typeof METADATA_TRANSLATION_SCOPES[number]): string {
-    return `workmeta:${workId}:${scope}`;
+function clearTitleApplyTimers(): void {
+    for (const timer of titleApplyTimers) clearTimeout(timer);
+    titleApplyTimers = [];
+}
+
+function isTitleRequestCurrent(expectedLoadVersion: number, expectedWorkId: string, titleRequestId: number): boolean {
+    return expectedLoadVersion === loadRequestVersion
+        && currentWorkId.value === expectedWorkId
+        && titleRequestId === titleTranslationRequestVersion;
+}
+
+function normalizeTitle(text: string): string {
+    return text.replace(/\s+/g, ' ').trim();
+}
+
+function findWorkTitleElement(expectedTitle: string): HTMLElement | null {
+    const candidates = Array.from(document.querySelectorAll<HTMLElement>('h1.text-h6'));
+    if (candidates.length === 0) return null;
+    const normalizedExpected = normalizeTitle(expectedTitle);
+    if (!normalizedExpected) return candidates[0] || null;
+
+    let best: HTMLElement | null = null;
+    let bestScore = Number.NEGATIVE_INFINITY;
+
+    for (const h1 of candidates) {
+        const text = normalizeTitle(getCleanText(h1));
+        if (!text) continue;
+
+        let score = 0;
+        if (text === normalizedExpected) score += 300;
+        else if (text.includes(normalizedExpected) || normalizedExpected.includes(text)) score += 180;
+        if (h1.offsetParent !== null) score += 40;
+        if (h1.closest('.q-page')) score += 20;
+        if (h1.closest('#asmr-work-metadata-root')) score -= 80; // never target injected subtitle
+
+        if (score > bestScore) {
+            bestScore = score;
+            best = h1;
+        }
+    }
+
+    return best || candidates[0] || null;
+}
+
+function applyTranslatedTitleToDom(
+    originalTitle: string,
+    translatedTitle: string,
+    expectedLoadVersion: number,
+    expectedWorkId: string,
+    titleRequestId: number,
+): boolean {
+    if (!isTitleRequestCurrent(expectedLoadVersion, expectedWorkId, titleRequestId)) return false;
+
+    const h1 = findWorkTitleElement(originalTitle);
+    if (!h1 || !h1.parentElement) return false;
+
+    if (cnOnlyMode.value) {
+        h1.parentElement.querySelector('.asmr-original-title')?.remove();
+        let transEl = h1.parentElement.querySelector('.asmr-translated-title') as HTMLElement | null;
+        if (!transEl) {
+            transEl = document.createElement('div');
+            transEl.className = 'text-h6 asmr-translated-title';
+            h1.parentElement.insertBefore(transEl, h1.nextSibling);
+        }
+        transEl.removeAttribute('data-jpdb');
+        transEl.removeAttribute('data-jpdb-original');
+        transEl.textContent = translatedTitle;
+        h1.removeAttribute('data-jpdb');
+        h1.removeAttribute('data-jpdb-original');
+        h1.style.display = 'none';
+        return true;
+    }
+
+    let originalSpan = h1.parentElement.querySelector('.asmr-original-title') as HTMLElement | null;
+    if (!originalSpan) {
+        originalSpan = document.createElement('div');
+        originalSpan.className = 'text-caption text-grey-5 q-mb-xs asmr-original-title';
+        h1.parentElement.insertBefore(originalSpan, h1);
+    }
+    originalSpan.textContent = originalTitle;
+
+    let transEl = h1.parentElement.querySelector('.asmr-translated-title') as HTMLElement | null;
+    if (!transEl) {
+        transEl = document.createElement('div');
+        transEl.className = 'text-h6 asmr-translated-title';
+        h1.parentElement.insertBefore(transEl, h1.nextSibling);
+    }
+    transEl.removeAttribute('data-jpdb');
+    transEl.removeAttribute('data-jpdb-original');
+    transEl.textContent = translatedTitle;
+    h1.removeAttribute('data-jpdb');
+    h1.removeAttribute('data-jpdb-original');
+    h1.style.display = 'none';
+    return true;
 }
 
 function clearMetadataTranslationQueue(workId: string): void {
-    if (!workId) return;
-    for (const scope of METADATA_TRANSLATION_SCOPES) {
-        TranslationService.cancelPending({ cancellableKey: getMetadataTranslationQueueKey(workId, scope) });
-    }
+    // Metadata translation now relies on load/version guards instead of hard cancellation.
+    void workId;
 }
 
 // ============================================================================
@@ -405,6 +499,7 @@ async function handleRefresh(): Promise<void> {
         SharedCache.set(CacheKeys.translation(text, 'en', 'auto'), null, 0);
     });
 
+    clearTitleApplyTimers();
     titleTranslationRequestVersion++;
     resetInjectedTitleElements();
 
@@ -589,16 +684,12 @@ async function translateTitle(originalTitle: string, expectedLoadVersion: number
     if (!originalTitle) return;
 
     const titleRequestId = ++titleTranslationRequestVersion;
+    clearTitleApplyTimers();
     const shouldSkipTranslation =
         (!shouldTranslate.value && !cnToJp.value) ||
-        (cnOnlyMode.value && !isChinese(originalTitle)) ||
-        (!cnOnlyMode.value && TranslationService.isUserLang(originalTitle));
+        (cnOnlyMode.value && !isChinese(originalTitle));
     if (shouldSkipTranslation) {
-        if (
-            expectedLoadVersion === loadRequestVersion &&
-            currentWorkId.value === expectedWorkId &&
-            titleRequestId === titleTranslationRequestVersion
-        ) {
+        if (isTitleRequestCurrent(expectedLoadVersion, expectedWorkId, titleRequestId)) {
             resetInjectedTitleElements();
             emit('title:update', { title: originalTitle });
         }
@@ -606,24 +697,14 @@ async function translateTitle(originalTitle: string, expectedLoadVersion: number
     }
 
     try {
-        const queueKey = getMetadataTranslationQueueKey(expectedWorkId, 'title');
-        TranslationService.cancelPending({ cancellableKey: queueKey });
         const translated = cnOnlyMode.value
             ? await TranslationService.translate(originalTitle, 'ja', {
                 priority: METADATA_TRANSLATION_PRIORITY,
-                cancellable: true,
-                cancellableKey: queueKey,
             })
             : await TranslationService.translate(originalTitle, 'en', {
                 priority: METADATA_TRANSLATION_PRIORITY,
-                cancellable: true,
-                cancellableKey: queueKey,
             });
-        if (
-            expectedLoadVersion !== loadRequestVersion ||
-            currentWorkId.value !== expectedWorkId ||
-            titleRequestId !== titleTranslationRequestVersion
-        ) {
+        if (!isTitleRequestCurrent(expectedLoadVersion, expectedWorkId, titleRequestId)) {
             return;
         }
         if (!translated || translated === originalTitle) {
@@ -632,47 +713,17 @@ async function translateTitle(originalTitle: string, expectedLoadVersion: number
             return;
         }
 
-        const h1 = await SafeUtils.waitForElement('h1.text-h6') as HTMLElement | null;
-        if (
-            !h1 ||
-            expectedLoadVersion !== loadRequestVersion ||
-            currentWorkId.value !== expectedWorkId ||
-            titleRequestId !== titleTranslationRequestVersion
-        ) {
-            return;
-        }
-
-        if (cnOnlyMode.value) {
-            // CN->JP: silently replace with Japanese
-            h1.parentElement?.querySelector('.asmr-original-title')?.remove();
-            let transEl = h1.parentElement?.querySelector('.asmr-translated-title') as HTMLElement;
-            if (!transEl) {
-                transEl = document.createElement('div');
-                transEl.className = 'text-h6 asmr-translated-title';
-                h1.parentElement?.insertBefore(transEl, h1.nextSibling);
+        for (const delay of TITLE_REAPPLY_DELAYS_MS) {
+            const run = () => {
+                if (!isTitleRequestCurrent(expectedLoadVersion, expectedWorkId, titleRequestId)) return;
+                applyTranslatedTitleToDom(originalTitle, translated, expectedLoadVersion, expectedWorkId, titleRequestId);
+            };
+            if (delay === 0) {
+                run();
+            } else {
+                titleApplyTimers.push(setTimeout(run, delay));
             }
-            transEl.textContent = translated;
-            h1.style.display = 'none';
-            emit('title:update', { title: translated });
-            return;
         }
-
-        let originalSpan = h1.parentElement?.querySelector('.asmr-original-title') as HTMLElement;
-        if (!originalSpan) {
-            originalSpan = document.createElement('div');
-            originalSpan.className = 'text-caption text-grey-5 q-mb-xs asmr-original-title';
-            h1.parentElement?.insertBefore(originalSpan, h1);
-        }
-        originalSpan.textContent = originalTitle;
-
-        let transEl = h1.parentElement?.querySelector('.asmr-translated-title') as HTMLElement;
-        if (!transEl) {
-            transEl = document.createElement('div');
-            transEl.className = 'text-h6 asmr-translated-title';
-            h1.parentElement?.insertBefore(transEl, h1.nextSibling);
-        }
-        transEl.textContent = translated;
-        h1.style.display = 'none';
         emit('title:update', { title: translated });
     } catch (e) {
         Logger.warn('[WorkMetadataPanel] Title translation failed', e);
@@ -693,12 +744,8 @@ async function translateDescription(expectedLoadVersion: number, expectedWorkId:
     lastDescriptionSignature.value = signature;
 
     try {
-        const queueKey = getMetadataTranslationQueueKey(expectedWorkId, 'description');
-        TranslationService.cancelPending({ cancellableKey: queueKey });
         const translated = await TranslationService.translate(source, targetLang, {
             priority: Priority.NORMAL,
-            cancellable: true,
-            cancellableKey: queueKey,
         });
         if (
             expectedLoadVersion !== loadRequestVersion ||
@@ -747,12 +794,8 @@ async function translateChips(expectedLoadVersion: number, expectedWorkId: strin
     if (labelsToTranslate.length === 0) return;
 
     try {
-        const queueKey = getMetadataTranslationQueueKey(expectedWorkId, 'chips');
-        TranslationService.cancelPending({ cancellableKey: queueKey });
         const results = await TranslationService.translateBatch(labelsToTranslate.map(l => l.text), targetLang, {
             priority: METADATA_TRANSLATION_PRIORITY,
-            cancellable: true,
-            cancellableKey: queueKey,
         });
         if (
             expectedLoadVersion !== loadRequestVersion ||
@@ -794,9 +837,6 @@ async function translateBodyParagraphs(expectedLoadVersion: number, expectedWork
     lastBodySignature.value = bodySignature;
 
     try {
-        const queueKey = getMetadataTranslationQueueKey(expectedWorkId, 'body');
-        TranslationService.cancelPending({ cancellableKey: queueKey });
-
         const applyChunkResults = (chunkTexts: string[], offset: number, translatedResults: string[]) => {
             const newMap = new Map(bodyTranslations.value);
             translatedResults.forEach((translated, idx) => {
@@ -813,8 +853,6 @@ async function translateBodyParagraphs(expectedLoadVersion: number, expectedWork
             const firstChunk = texts.slice(0, firstCount);
             const firstResults = await TranslationService.translateBatch(firstChunk, targetLang, {
                 priority: METADATA_TRANSLATION_PRIORITY,
-                cancellable: true,
-                cancellableKey: queueKey,
             });
             if (
                 expectedLoadVersion !== loadRequestVersion ||
@@ -829,8 +867,6 @@ async function translateBodyParagraphs(expectedLoadVersion: number, expectedWork
             const chunk = texts.slice(start, start + METADATA_BODY_STREAM_BATCH);
             const chunkResults = await TranslationService.translateBatch(chunk, targetLang, {
                 priority: METADATA_TRANSLATION_PRIORITY,
-                cancellable: true,
-                cancellableKey: queueKey,
             });
             if (
                 expectedLoadVersion !== loadRequestVersion ||
@@ -872,6 +908,7 @@ async function getPageWorkDetails(id: string): Promise<(Work | WorkDetail) & Rec
 async function loadMetadata(id: string): Promise<void> {
     const version = ++loadRequestVersion;
     clearMetadataTranslationQueue(id);
+    clearTitleApplyTimers();
     titleTranslationRequestVersion++;
     resetInjectedTitleElements();
     const work = await getPageWorkDetails(id);
@@ -963,36 +1000,58 @@ async function loadMetadata(id: string): Promise<void> {
 // Lifecycle
 // ============================================================================
 
+function applyWorkChange(newId: string, oldId = ''): void {
+    if (!newId || newId === oldId) return;
+    if (oldId) clearMetadataTranslationQueue(oldId);
+    clearMetadataTranslationQueue(newId);
+    clearTitleApplyTimers();
+    titleTranslationRequestVersion++;
+    resetInjectedTitleElements();
+    // Reset state for new work
+    meta.value = null;
+    descriptionTranslated.value = '';
+    bodyTranslations.value = new Map();
+    chipTranslations.value = new Map();
+    lastDescriptionSignature.value = '';
+    lastChipSignature.value = '';
+    lastBodySignature.value = '';
+    detailsExpanded.value = false;
+    resetImageState();
+    currentWorkId.value = newId;
+    loadMetadata(newId);
+}
+
 watch(workId, (newId, oldId) => {
-    if (newId && newId !== oldId) {
-        if (oldId) clearMetadataTranslationQueue(oldId);
-        clearMetadataTranslationQueue(newId);
-        titleTranslationRequestVersion++;
-        resetInjectedTitleElements();
-        // Reset state for new work
-        meta.value = null;
-        descriptionTranslated.value = '';
-        bodyTranslations.value = new Map();
-        chipTranslations.value = new Map();
-        lastDescriptionSignature.value = '';
-        lastChipSignature.value = '';
-        lastBodySignature.value = '';
-        detailsExpanded.value = false;
-        resetImageState();
-        currentWorkId.value = newId;
-        loadMetadata(newId);
-    }
+    applyWorkChange(newId, oldId);
 }, { immediate: true });
 
-onMounted(() => {
-    if (workId.value && !meta.value) {
-        currentWorkId.value = workId.value;
-        loadMetadata(workId.value);
+on('work:change', ({ workId: nextWorkId, work }) => {
+    const id = String(nextWorkId || '');
+    if (!id) return;
+    const onWorkPage = route.value?.name === 'work' || String(route.value?.path || '').startsWith('/work/');
+    if (!onWorkPage) return;
+
+    if (id !== currentWorkId.value) {
+        applyWorkChange(id, currentWorkId.value);
+        return;
+    }
+
+    // Same work id, but host replaced work payload/title; refresh translated title.
+    const title = work?.title || meta.value?.title || '';
+    if (title) {
+        translateTitle(title, loadRequestVersion, id);
     }
 });
 
+// NOTE: no onMounted loadMetadata — the watch({ immediate: true }) above
+// already handles the initial load.  Having both caused a double-call race
+// (onMounted fires while the first async loadMetadata is still awaiting
+// getPageWorkDetails, bumping loadRequestVersion and creating overlapping
+// translation passes).
+
 onUnmounted(() => {
     clearMetadataTranslationQueue(currentWorkId.value);
+    clearTitleApplyTimers();
     loadRequestVersion++;
     titleTranslationRequestVersion++;
     resetImageState();

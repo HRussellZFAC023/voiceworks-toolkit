@@ -4,9 +4,9 @@ import { Config, Logger } from '../core/Utils';
 import { buildCoverUrl } from '../types/api';
 import { watchConfig } from '../store/ReactiveConfig';
 import { gmRequest, retryWithBackoff } from '../infrastructure/HttpClient';
+import { DEFAULT_API_SERVER, RETRY } from '../core/Constants';
 
 const DEFAULT_FAVICON = 'https://images2.imgbox.com/c8/21/h1DhlGPW_o.png';
-const DEFAULT_API_SERVER = 'https://api.asmr-200.com';
 
 /**
  * Get the API base URL from the host app's axios baseURL
@@ -242,7 +242,7 @@ export class FaviconNowPlaying {
         try {
             const res = await retryWithBackoff(
                 () => gmRequest({ url, responseType: 'blob' }),
-                { attempts: 2, backoffMs: 500 },
+                RETRY.BLOB,
             );
             return (res.response as Blob) ?? null;
         } catch {

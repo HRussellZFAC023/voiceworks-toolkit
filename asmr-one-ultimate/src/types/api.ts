@@ -13,6 +13,8 @@
  * - GET /api/cover/{id}.jpg?type=main|sam|240x240 - Cover images
  */
 
+import { DEFAULT_API_SERVER } from '../core/Constants';
+
 // ============================================================================
 // Base Response Types
 // ============================================================================
@@ -511,7 +513,7 @@ export function buildCoverUrl(workId: number | string, type: CoverType = 'main',
     if (!id || id === '' || id === '0') {
         return '';
     }
-    const baseUrl = (server || 'https://api.asmr-200.com').replace(/\/$/, '');
+    const baseUrl = (server || DEFAULT_API_SERVER).replace(/\/$/, '');
     return `${baseUrl}/api/cover/${id}.jpg?type=${type}`;
 }
 

@@ -332,6 +332,21 @@ export function getCleanText(el: Element): string {
     return el.textContent?.trim() || '';
 }
 
+/**
+ * Strip JPDB furigana annotations within a root element, restoring plain text.
+ * For each annotated descendant, restores the original text from data-jpdb-original
+ * and removes jpdb tracking attributes so Vue can patch text nodes correctly.
+ */
+export function stripJpdbAnnotations(root: Element): void {
+    const annotated = root.querySelectorAll<HTMLElement>('[data-jpdb]');
+    for (const el of annotated) {
+        const original = el.getAttribute('data-jpdb-original');
+        if (original) el.textContent = original;
+        el.removeAttribute('data-jpdb');
+        el.removeAttribute('data-jpdb-original');
+    }
+}
+
 /** CJK ideographs present but no Japanese kana → likely Chinese */
 export function isChinese(text: string): boolean {
     return /[\u4e00-\u9fff]/.test(text) && !/[\u3040-\u309f\u30a0-\u30ff]/.test(text);

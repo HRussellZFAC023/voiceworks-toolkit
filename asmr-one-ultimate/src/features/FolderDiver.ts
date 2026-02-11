@@ -13,7 +13,7 @@
 import { KikoeruBridge } from '../infrastructure/KikoeruBridge';
 import { Logger } from '../core/Logger';
 import { calculateFolderScore } from '../core/WorkUtils';
-import { LIMITS, SCORING } from '../core/Constants';
+import { LIMITS, SCORING, TIMING } from '../core/Constants';
 import { Config } from '../core/Config';
 import type { TrackFolder, TrackItem, TracksResponse, WorkDetail, WorkFolder } from '../types/api';
 import type { WorkTreeComponent } from '../types/store';
@@ -26,9 +26,8 @@ import {
     isExactOrPrefixMatch,
 } from './folderDiverDomUtils';
 
-const DOM_CLICK_DELAY = 16;
-const DOM_CLICK_RETRY_DELAY = 16;
-const DOM_CLICK_MAX_ATTEMPTS = 4;
+const DOM_CLICK_DELAY = TIMING.DOM_FRAME_MS;
+const DOM_CLICK_RETRY_DELAY = TIMING.DOM_FRAME_MS;
 
 export interface DiveResult {
     success: boolean;
@@ -348,24 +347,39 @@ export class FolderDiver {
     /**
      * Click a folder and wait for it to actually become active or the tree to update.
      * This prevents "jumping" over folders when the DOM is slow.
+     *
+     * Confirmation uses two signals:
+     * 1. Vue path state (treeVm.path last element === title) — reliable, unaffected by translations
+     * 2. Breadcrumb DOM text — fallback for edge cases where path structure differs
      */
     private async clickAndConfirm(title: string): Promise<boolean> {
-        for (let attempt = 1; attempt <= DOM_CLICK_MAX_ATTEMPTS; attempt++) {
+        for (let attempt = 1; attempt <= LIMITS.DOM_CLICK_MAX_ATTEMPTS; attempt++) {
             const clicked = await this.clickFolderByTitle(title);
             if (clicked) {
-                // Wait for breadcrumbs or active item to reflect the change
-                for (let j = 0; j < 5; j++) {
+                // Wait for Vue state or breadcrumbs to reflect the change
+                for (let j = 0; j < 10; j++) {
                     await this.delay(DOM_CLICK_RETRY_DELAY);
+
+                    // Primary: check Vue path state (not affected by TranslatedTags)
+                    const treeVm = this.bridge.findWorkTreeComponent() as WorkTreeComponent | null;
+                    if (treeVm?.path && Array.isArray(treeVm.path) && treeVm.path.length > 0) {
+                        if (treeVm.path[treeVm.path.length - 1] === title) {
+                            // Wait one more frame for Vue to finish rendering new items
+                            await this.delay(DOM_CLICK_RETRY_DELAY);
+                            return true;
+                        }
+                    }
+
+                    // Secondary: check breadcrumbs
                     const workTree = document.getElementById('work-tree');
                     if (!workTree) continue;
-
                     const breadcrumbText = getActiveBreadcrumbTitle(workTree);
                     if (isExactOrPrefixMatch(breadcrumbText, title)) {
                         return true;
                     }
                 }
             }
-            Logger.debug(`[FolderDiver] Click retry ${attempt}/${DOM_CLICK_MAX_ATTEMPTS} for "${title}"`);
+            Logger.debug(`[FolderDiver] Click retry ${attempt}/${LIMITS.DOM_CLICK_MAX_ATTEMPTS} for "${title}"`);
             await this.delay(DOM_CLICK_DELAY);
         }
         return false;
@@ -434,13 +448,33 @@ export class FolderDiver {
     }
 
     /**
-     * fatherFolder is a COMPUTED property in the host WorkTree component,
-     * derived from tree + path. Do NOT mutate it directly — only update `path`.
-     * The computed will automatically derive the correct fatherFolder.
+     * Sync fatherFolder to match the given path by resolving from tree data.
+     *
+     * fatherFolder may be computed OR data depending on the host app version.
+     * If computed, setting path alone suffices (the sync watcher's _vnode=null +
+     * $forceUpdate handles re-render). If data, we need to set it explicitly.
+     * We try both — $set in a try/catch covers either case safely.
      */
-    private syncParentFolder(_treeVm: WorkTreeComponent, _pathSegments: string[]): void {
-        // No-op: fatherFolder is computed from tree+path.
-        // Setting path (done by callers) is sufficient.
+    private syncParentFolder(treeVm: WorkTreeComponent, pathSegments: string[]): void {
+        try {
+            const tree = treeVm.tree as TracksResponse | undefined;
+            if (!Array.isArray(tree)) return;
+
+            const nodes = resolveNodesAtPath(tree, pathSegments, false);
+            if (!nodes.length && pathSegments.length > 0) return;
+
+            // Use root items when path is empty
+            const items = pathSegments.length === 0 ? tree : nodes;
+
+            if (typeof treeVm.$set === 'function') {
+                treeVm.$set(treeVm, 'fatherFolder', [...items]);
+            } else {
+                (treeVm as Record<string, unknown>).fatherFolder = [...items];
+            }
+        } catch {
+            // fatherFolder may be a read-only computed — that's OK,
+            // the sync watcher's _vnode=null + $forceUpdate handles it.
+        }
     }
 
     // =========================================================================
@@ -466,18 +500,23 @@ export class FolderDiver {
         this.currentPath.push(bestFolder.title);
         Logger.debug(`[FolderDiver] Dived into: ${bestFolder.title} (depth: ${this.currentPath.length})`);
 
-        const directAudio = bestFolder.children.filter(n => n.type === 'audio');
+        const hasDirectPlayable = hasDirectPlayableMedia(bestFolder.children);
         const subFolders = this.getFolders(bestFolder.children);
+        const shouldPreferSplitDive = this.shouldPreferSplitFolders(subFolders);
 
-        if (directAudio.length > 0 && subFolders.length === 0) {
+        if (hasDirectPlayable && subFolders.length === 0) {
             return { success: true, path: [...this.currentPath], depth: this.currentPath.length, reason: 'found_tracks' };
         }
 
-        if (subFolders.length > 0 && directAudio.length === 0) {
+        if (subFolders.length > 0 && !hasDirectPlayable) {
             return this.diveRecursive(bestFolder.children, depth + 1);
         }
 
-        if (directAudio.length > 0 && subFolders.length > 0) {
+        if (hasDirectPlayable && subFolders.length > 0) {
+            if (shouldPreferSplitDive) {
+                Logger.debug('[FolderDiver] Split folders detected, continuing dive despite direct playable media');
+                return this.diveRecursive(bestFolder.children, depth + 1);
+            }
             return { success: true, path: [...this.currentPath], depth: this.currentPath.length, reason: 'found_tracks' };
         }
 
@@ -498,17 +537,33 @@ export class FolderDiver {
         for (const node of nodes) {
             if (node.type === 'folder') {
                 audio.push(...this.collectAudioFromTree((node as TrackFolder).children));
-            } else if (node.type === 'audio') {
+            } else if (node.type === 'audio' || hasDirectPlayableMedia([node])) {
                 audio.push(node as TrackItem);
             }
         }
         return audio;
     }
 
+    private isPreferenceSplitFolder(title: string): boolean {
+        const name = (title || '').trim();
+        if (!name) return false;
+
+        const hasSE = /\bSE\b|Sound\s*Effect|音效|効果音/i.test(name);
+        const hasBGM = /\bBGM\b|With\s*BGM|No\s*BGM|BGM有り|BGM無し/i.test(name);
+        const hasVariant = /With|No|有り|無し|あり|なし|付|無/i.test(name);
+        return (hasSE || hasBGM) && hasVariant;
+    }
+
+    private shouldPreferSplitFolders(folders: TrackFolder[]): boolean {
+        if (folders.length < 2) return false;
+        return folders.some(folder => this.isPreferenceSplitFolder(folder.title));
+    }
+
     private selectBestTreeFolder(folders: TrackFolder[]): TrackFolder | null {
         if (!folders.length) return null;
 
         const sePref = Config.get('sePref');
+        const bgmPref = Config.get('bgmPref');
 
         const scored = folders.map(folder => {
             const audioChildren = this.collectAudioFromTree(folder.children);
@@ -528,10 +583,14 @@ export class FolderDiver {
                 false,
                 this.formatPriority,
                 childFormats,
-                sePref
+                sePref,
+                bgmPref
             );
 
-            if (audioCount === 0) score += SCORING.NO_AUDIO_PENALTY;
+            const isPreferenceSplit = this.isPreferenceSplitFolder(folder.title);
+            if (audioCount === 0 && !isPreferenceSplit) {
+                score += SCORING.NO_AUDIO_PENALTY;
+            }
 
             return { folder, score };
         });

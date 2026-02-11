@@ -3,7 +3,7 @@ import { ReviewApi } from '../api';
 import { EventBus } from '../core/EventBus';
 import { CentralObserver } from '../core/CentralObserver';
 import { Logger, Config } from '../core/Utils';
-import { THRESHOLDS } from '../core/Constants';
+import { THRESHOLDS, TIMING } from '../core/Constants';
 import { RadioMode } from './radio';
 import { PlaylistMode } from './playlist';
 import { getAudioElement, getVueItem } from '../core/DomUtils';
@@ -92,7 +92,7 @@ export class AutoProgress {
         this.setupRouteWatcher();
         this.setupEventListeners();
         this.injectCheckmarks();
-        CentralObserver.register('auto-progress-checkmarks', () => this.injectCheckmarks(), 500);
+        CentralObserver.register('auto-progress-checkmarks', () => this.injectCheckmarks(), TIMING.OBSERVER_REGISTER_DEBOUNCE_MS);
     }
 
     public disable(): void {

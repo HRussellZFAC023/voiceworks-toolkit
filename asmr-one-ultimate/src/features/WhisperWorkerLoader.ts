@@ -143,7 +143,6 @@ async function releaseGpuResources() {
 
 let pipelinePromise = null;
 let currentModel = null;
-let currentQuantized = null;
 let currentMultilingual = null;
 
 async function ensurePipeline(settings, progressCb) {
@@ -151,7 +150,7 @@ async function ensurePipeline(settings, progressCb) {
 
     const modelName = resolveModelName(settings.model, settings.multilingual);
 
-    if (pipelinePromise && currentModel === modelName && currentQuantized === settings.quantized && currentMultilingual === settings.multilingual) {
+    if (pipelinePromise && currentModel === modelName && currentMultilingual === settings.multilingual) {
         return pipelinePromise;
     }
 
@@ -189,7 +188,6 @@ async function ensurePipeline(settings, progressCb) {
                     try {
                         await pipelinePromise;
                         currentModel = modelName;
-                        currentQuantized = settings.quantized;
                         currentMultilingual = settings.multilingual;
                         currentDtype = JSON.stringify(dtype);
                         console.log('[Whisper Worker] Model loaded on webgpu [' + currentDtype + ']:', modelName);
@@ -229,15 +227,11 @@ async function ensurePipeline(settings, progressCb) {
     }
 
     // --- WASM path ---
-    if (!settings.allowWasm) {
-        throw new Error('WebGPU is required for Whisper on this device.');
-    }
-
     const wasmOpts = {
         progress_callback: progressCb,
         revision,
         device: 'wasm',
-        quantized: settings.quantized,
+        dtype: 'q8',
     };
 
     let lastErr = null;
@@ -250,9 +244,8 @@ async function ensurePipeline(settings, progressCb) {
         try {
             await pipelinePromise;
             currentModel = modelName;
-            currentQuantized = settings.quantized;
             currentMultilingual = settings.multilingual;
-            currentDtype = 'wasm';
+            currentDtype = 'q8';
             console.log('[Whisper Worker] Model loaded on wasm:', modelName);
             return pipelinePromise;
         } catch (err) {
@@ -434,7 +427,7 @@ async function transcribe(msg) {
         const errMsg = error.message || String(error);
         const isGpuError = /createBuffer|RangeError|out of memory|OOM|allocation|device lost|GPUDevice|createComputePipeline|createShaderModule|mapAsync|Instance reference|AbortError|release session|invalid session/i.test(errMsg);
 
-        if (isGpuError && currentBackend !== 'wasm' && msg.allowWasm) {
+        if (isGpuError && currentBackend !== 'wasm') {
             console.warn('[Whisper Worker] GPU inference failed, falling back to WASM:', errMsg);
             skipWebgpu = true;
             if (pipelinePromise) {
@@ -571,7 +564,6 @@ self.addEventListener('message', async (event) => {
             pipelinePromise = null;
         }
         currentModel = null;
-        currentQuantized = null;
         currentMultilingual = null;
         return;
     }
