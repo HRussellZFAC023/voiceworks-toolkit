@@ -118,7 +118,7 @@ const CONFIG_DEFAULTS: PluginConfig = {
     enableJpdb: false,
     jpdbApiToken: '',
     jpdbShowFurigana: true,
-    jpdbShowPitchAccent: true,
+    jpdbShowPitchAccent: false,
     jpdbPitchStyle: 'underline',
     jpdbSubtitleFurigana: true,
     jpdbSiteFurigana: true,

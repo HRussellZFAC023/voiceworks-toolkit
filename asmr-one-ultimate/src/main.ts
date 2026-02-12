@@ -344,6 +344,7 @@ const featureRegistry = new Map<string, ToggleableFeature>();
 const lazyFeatures = new Map<string, {
     loader: () => Promise<ToggleableFeature>;
     instance: ToggleableFeature | null;
+    extraGuard?: () => boolean;
 }>();
 
 function registerFeature(configKey: ConfigKey, feature: ToggleableFeature): void {
@@ -357,9 +358,10 @@ function registerFeature(configKey: ConfigKey, feature: ToggleableFeature): void
 function registerLazyFeature(
     configKey: ConfigKey,
     loader: () => Promise<ToggleableFeature>,
+    extraGuard?: () => boolean,
 ): void {
-    lazyFeatures.set(configKey, { loader, instance: null });
-    if (Config.get(configKey)) {
+    lazyFeatures.set(configKey, { loader, instance: null, extraGuard });
+    if (Config.get(configKey) && (!extraGuard || extraGuard())) {
         loader().then((instance) => {
             lazyFeatures.get(configKey)!.instance = instance;
             instance.enable();
@@ -389,7 +391,7 @@ function setupFeatureToggleListener(): void {
         // Lazily-loaded features
         const lazy = lazyFeatures.get(key);
         if (lazy) {
-            if (value) {
+            if (value && (!lazy.extraGuard || lazy.extraGuard())) {
                 if (lazy.instance) {
                     lazy.instance.enable();
                 } else {
@@ -402,6 +404,27 @@ function setupFeatureToggleListener(): void {
             } else if (lazy.instance) {
                 lazy.instance.disable();
                 Logger.debug(`[Toggle] ${key} disabled (lazy)`);
+            }
+        }
+
+        // When jpdbApiToken changes, re-evaluate JPDB feature state
+        if (key === 'jpdbApiToken') {
+            const jpdb = lazyFeatures.get('enableJpdb');
+            if (!jpdb) return;
+            const shouldEnable = !!Config.get('enableJpdb') && !!value;
+            if (shouldEnable) {
+                if (jpdb.instance) {
+                    jpdb.instance.enable();
+                } else {
+                    jpdb.loader().then((instance) => {
+                        jpdb.instance = instance;
+                        instance.enable();
+                    });
+                }
+                Logger.debug('[Toggle] enableJpdb enabled (API key set)');
+            } else if (jpdb.instance) {
+                jpdb.instance.disable();
+                Logger.debug('[Toggle] enableJpdb disabled (API key cleared)');
             }
         }
     });
@@ -491,10 +514,11 @@ async function initializeAIFeatures(): Promise<void> {
     });
 
     // JPDB Integration (furigana, vocabulary tracking, pitch accent)
+    // Requires both the toggle AND an API key to be set
     registerLazyFeature('enableJpdb', async () => {
         const { JpdbController } = await import('./features/JpdbController');
         return new JpdbController();
-    });
+    }, () => !!Config.get('jpdbApiToken'));
 
     Logger.debug('[Init] All AI features initialized');
 }
