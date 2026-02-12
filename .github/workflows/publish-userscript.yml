@@ -1,0 +1,56 @@
+name: Build & Publish Userscript
+
+on:
+  release:
+    types: [published]
+
+  # Allow manual trigger from Actions tab
+  workflow_dispatch:
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: asmr-one-ultimate/package-lock.json
+
+      - name: Install dependencies
+        working-directory: asmr-one-ultimate
+        run: npm ci
+
+      - name: Run tests
+        working-directory: asmr-one-ultimate
+        run: npm run test:run
+
+      - name: Build userscript
+        working-directory: asmr-one-ultimate
+        run: npm run build
+
+      - name: Read version
+        id: version
+        working-directory: asmr-one-ultimate
+        run: echo "version=$(node -p 'require("./package.json").version')" >> "$GITHUB_OUTPUT"
+
+      - name: Upload release asset
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ github.event.release.tag_name }}" asmr-one-ultimate/dist/asmr-one-ultimate.user.js --clobber
+
+      - name: Summary
+        run: |
+          echo "### Userscript Published" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Version**: ${{ steps.version.outputs.version }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Tag**: ${{ github.event.release.tag_name || 'manual' }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Download**: \`https://github.com/${{ github.repository }}/releases/latest/download/asmr-one-ultimate.user.js\`" >> "$GITHUB_STEP_SUMMARY"
