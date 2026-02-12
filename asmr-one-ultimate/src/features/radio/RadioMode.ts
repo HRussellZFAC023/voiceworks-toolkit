@@ -19,7 +19,7 @@ import { getAudioElement } from '../../core/DomUtils';
 import type { PlayerTrack, RadioState, WorkDetail, AudioTrack } from '../../types';
 import type { TrackFolder, TrackItem, TracksResponse } from '../../types/api';
 
-const PLAYBACK_START_TIMEOUT = 8000;
+const PLAYBACK_START_TIMEOUT = 3000;
 const WORK_CHANGE_DEBOUNCE_MS = 500;
 const WORK_LOAD_RETRY_DELAY = 1500;
 const MAX_PLAYBACK_RETRIES = 3;
@@ -74,6 +74,14 @@ export class RadioMode {
     // Audio element tracking for reliable ended detection
     private boundAudio: HTMLAudioElement | null = null;
     private audioEndedHandler: (() => void) | null = null;
+
+    // Grace period: suppress false-positive "manual pause" detection right after
+    // beginPlayback(), where the host app may briefly report playing=false while
+    // the audio element is still loading.
+    private playbackGraceUntil = 0;
+
+    // Cancellable ensurePlaying timeout
+    private ensurePlayingTimeoutId: number | null = null;
 
     /** Persisted to GM storage so it survives page refresh */
     private get manuallyPaused(): boolean {
@@ -194,10 +202,16 @@ export class RadioMode {
         this.bindAudioEndedListener();
         this.recordActivity();
 
-        // If user had manually paused before refresh, stay paused on current work
-        if (wasPaused) {
+        // If user had manually paused before refresh, stay paused on current work —
+        // but only if there IS a current work. On the home screen (no track/queue),
+        // clear the stale flag and proceed to select a new work.
+        if (wasPaused && (hasTrack || hasQueue)) {
             Logger.debug('[RadioMode] Restored manually-paused state, staying paused on current work');
             return;
+        }
+        if (wasPaused) {
+            this.manuallyPaused = false;
+            Logger.debug('[RadioMode] Cleared stale manuallyPaused (nothing to stay paused on)');
         }
 
         if (!hasTrack && !hasQueue) {
@@ -430,6 +444,7 @@ export class RadioMode {
         this.stopQueueMonitor();
         this.stopHealthCheck();
         this.clearPlaybackTimeout();
+        this.cancelEnsurePlaying();
 
         if (this.workChangeDebounceTimer !== null) {
             clearTimeout(this.workChangeDebounceTimer);
@@ -490,6 +505,7 @@ export class RadioMode {
      */
     private checkQueuePosition(): void {
         if (this.isSkipping) return;
+        if (this.manuallyPaused) return;
         // Sentinel: lastQueueIndex = -1 means we're between skipToNext() completing
         // and beginPlayback() starting the new work. Old queue may still be active
         // so we must ignore all queue position changes until playback resets us.
@@ -721,12 +737,18 @@ export class RadioMode {
                     const audio = getAudioElement();
                     if (audio?.ended) {
                         Logger.debug('[RadioMode] Track ended naturally, not marking as manual pause');
+                    } else if (Date.now() < this.playbackGraceUntil) {
+                        // After beginPlayback(), the host app may briefly report
+                        // playing=false while the audio element loads. Ignore it.
+                        Logger.debug('[RadioMode] Ignoring playing=false during playback grace period');
                     } else {
                         this.manuallyPaused = true;
                         Logger.debug('[RadioMode] Manual pause detected');
                     }
                 } else if (playing) {
                     this.manuallyPaused = false;
+                    this.playbackGraceUntil = 0;
+                    this.cancelEnsurePlaying();
                 }
             }
         ) ?? null;
@@ -840,7 +862,6 @@ export class RadioMode {
         }
 
         Logger.debug('[RadioMode] loadWorkAndStartPlayback starting', { workId });
-        this.startPlaybackTimeout();
 
         try {
             const work = await WorkService.getWork(workId) as WorkDetail;
@@ -1038,6 +1059,7 @@ export class RadioMode {
 
         if (tracks.length > 0) {
             this.manuallyPaused = false;
+            this.playbackGraceUntil = Date.now() + PLAYBACK_START_TIMEOUT;
             this.recordActivity();
 
             if (!playAll && tracks.length > 1) {
@@ -1069,8 +1091,17 @@ export class RadioMode {
     }
 
     private ensurePlaying(): void {
-        setTimeout(async () => {
+        this.cancelEnsurePlaying();
+        this.ensurePlayingTimeoutId = window.setTimeout(async () => {
+            this.ensurePlayingTimeoutId = null;
             if (!this._isActive) return;
+            if (this.manuallyPaused) return;
+
+            // Trust the actual audio element over Vuex state — the host app's
+            // SET_QUEUE watcher can crash, leaving player.playing=false even
+            // though audio is actually playing at the DOM level.
+            const audio = getAudioElement();
+            if (audio && !audio.paused) return;
 
             const player = this.bridge.player;
             if (!player.playing) {
@@ -1081,6 +1112,13 @@ export class RadioMode {
                 }
             }
         }, PLAYBACK_START_TIMEOUT);
+    }
+
+    private cancelEnsurePlaying(): void {
+        if (this.ensurePlayingTimeoutId !== null) {
+            clearTimeout(this.ensurePlayingTimeoutId);
+            this.ensurePlayingTimeoutId = null;
+        }
     }
 
     /**
@@ -1107,23 +1145,6 @@ export class RadioMode {
     // =========================================================================
     // Private Methods - Playback Timeout
     // =========================================================================
-
-    private startPlaybackTimeout(): void {
-        this.clearPlaybackTimeout();
-
-        this.playbackTimeoutId = window.setTimeout(() => {
-            if (!this._isActive) return;
-
-            const player = this.bridge.player;
-            if (!player.playing) {
-                Logger.warn('[RadioMode] Playback timeout - no audio playing after', PLAYBACK_START_TIMEOUT, 'ms');
-                this.handlePlaybackFailure('Timeout');
-            } else {
-                Logger.debug('[RadioMode] Playback timeout check passed - audio is playing');
-                this.playbackRetryCount = 0;
-            }
-        }, PLAYBACK_START_TIMEOUT);
-    }
 
     private clearPlaybackTimeout(): void {
         if (this.playbackTimeoutId !== null) {

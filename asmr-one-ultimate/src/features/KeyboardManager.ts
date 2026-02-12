@@ -334,8 +334,7 @@ export class KeyboardManager {
     }
 
     private toggleBlur(): void {
-        const current = Config.get('learnerBlur');
-        Config.set('learnerBlur', !current);
+        EventBus.emit('blur:toggle', undefined);
     }
 
     private toggleJP(): void {

@@ -61,11 +61,10 @@ export class ListSearchEnhancer {
         );
 
         // Guard: strip English translations that formatPair() added to item.name
-        // when the host site constructs $circle:...$ / $va:...$ search URLs
+        // from $circle:...$ / $va:...$ / $tag:...$ search keywords on ANY page
         const router = this.bridge.router;
         if (router?.beforeEach) {
             this.routeGuardCleanup = router.beforeEach((to, _from, next) => {
-                if (!this.currentListVm) { next(); return; }
                 const keyword = to.query?.keyword;
                 if (typeof keyword === 'string' && keyword.includes('$')) {
                     const cleaned = this.stripTranslationsFromKeyword(keyword);

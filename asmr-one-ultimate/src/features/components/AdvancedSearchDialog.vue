@@ -429,7 +429,8 @@ function ensureHostSortWatcher(): void {
         sortWatcherVm = vm;
         sortWatcherCleanup = vm.$watch(
             'sortOption',
-            (next: { order?: WorkOrder; sort?: 'asc' | 'desc' } | undefined) => {
+            (val: unknown) => {
+                const next = val as { order?: WorkOrder; sort?: 'asc' | 'desc' } | undefined;
                 if (!next?.order) return;
                 const order = next.order as WorkOrder;
                 const sort = (next.sort || 'desc') as 'asc' | 'desc';
@@ -452,6 +453,11 @@ let metadataLoadingPromise: Promise<void> | null = null;
 
 function looksTranslatable(text: string): boolean {
     return /[\u3040-\u30ff\u4e00-\u9faf\uac00-\ud7af]/.test(text);
+}
+
+/** Strip " (English text)" suffix added by TranslationService.formatPair() */
+function stripTranslationSuffix(name: string): string {
+    return name.replace(/\s+\([A-Za-z][-A-Za-z\s.,!?;:'"…()]*\)$/, '');
 }
 
 async function translateInBackground<T extends { name?: string; ja?: string }>(
@@ -673,12 +679,13 @@ async function performSearch(): Promise<void> {
         keywordParts.push(`-$tag:${tag.ja}$`);
     });
 
-    // VA / Circle
+    // VA / Circle — strip any English translations that formatPair() may have
+    // appended to .name (e.g. "ホワイトピンク (white pink)" → "ホワイトピンク")
     if (selectedVA.value) {
-        keywordParts.push(`$va:${selectedVA.value.name}$`);
+        keywordParts.push(`$va:${stripTranslationSuffix(selectedVA.value.name)}$`);
     }
     if (selectedCircle.value) {
-        keywordParts.push(`$circle:${selectedCircle.value.name}$`);
+        keywordParts.push(`$circle:${stripTranslationSuffix(selectedCircle.value.name)}$`);
     }
 
     // Duration
@@ -904,7 +911,7 @@ async function createPlaylist(): Promise<void> {
             return;
         }
 
-        const recentIds = new Set(history.map(h => h.work_id));
+        const recentIds = new Set<unknown>(history.map(h => h.work_id));
         let candidates = works.filter(w => !recentIds.has(w.id || w.source_id));
 
         if (candidates.length === 0) {
@@ -921,7 +928,7 @@ async function createPlaylist(): Promise<void> {
         const workIds = finalWorks.map(w => {
             const id = w.id || w.source_id;
             return typeof id === 'number' ? `RJ${String(id).padStart(6, '0')}` : id;
-        }).filter(Boolean);
+        }).filter((id): id is string => !!id);
 
         const playlistName = generatePlaylistName();
         const playlistDesc = generatePlaylistDescription(workIds.length, works.length);

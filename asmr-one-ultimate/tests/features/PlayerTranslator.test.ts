@@ -84,7 +84,8 @@ describe('PlayerTranslator', () => {
         (translator as any).resetTranslationState();
 
         const el = document.querySelector('.audio-player .text-caption') as HTMLElement;
-        expect(el.textContent).toBe('王子様系ふたなり獣人にナンパされ');
+        // With ::after approach, resetTranslationState no longer modifies textContent
+        // — it only clears data attributes and classes. Text stays as-is.
         expect(el.classList.contains('asmr-translation-pair')).toBe(false);
         expect(el.hasAttribute('data-asmr-translated')).toBe(false);
         expect(el.hasAttribute('data-asmr-source')).toBe(false);

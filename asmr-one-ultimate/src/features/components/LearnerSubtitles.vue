@@ -419,10 +419,12 @@ function translateLookahead(currentText: string, targetLang: string): void {
 
 function toggleBlur() {
     isBlurred.value = !isBlurred.value;
-    learnerBlur.value = isBlurred.value;
 }
 
-// Sync blur from external config changes
+// Blur toggle from keyboard shortcut (ephemeral, does not persist to config)
+on('blur:toggle', () => toggleBlur());
+
+// Sync blur from config changes (e.g. from settings panel)
 on('config:change', ({ key, value }) => {
     if (key === 'learnerBlur') {
         isBlurred.value = !!value;
@@ -482,7 +484,6 @@ function onJpdbCardGraded(e: Event): void {
 function updateSecondaryLine(text: string, fallback: boolean) {
     secondaryText.value = text;
     isFallback.value = fallback;
-    isBlurred.value = !!learnerBlur.value && !!text;
 }
 
 function clearDisplay() {
@@ -1301,6 +1302,9 @@ function clearWhisperTicker() {
 // ---------------------------------------------------------------------------
 
 function onTrackOrWorkChange() {
+    // Reset blur to default from settings
+    isBlurred.value = !!learnerBlur.value;
+
     lastText = '';
     lastDisplayedText = '';
     lastSecondaryShown = '';

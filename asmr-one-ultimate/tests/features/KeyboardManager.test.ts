@@ -479,16 +479,12 @@ describe('KeyboardManager', () => {
     // =========================================================================
 
     describe('feature toggles', () => {
-        it('toggles blur off when currently on', () => {
-            setConfig({ learnerBlur: true });
+        it('emits blur:toggle event on b key', () => {
+            const spy = vi.fn();
+            EventBus.on('blur:toggle', spy);
             fireKey('b');
-            expect(Config.set).toHaveBeenCalledWith('learnerBlur', false);
-        });
-
-        it('toggles blur on when currently off', () => {
-            setConfig({ learnerBlur: false });
-            fireKey('b');
-            expect(Config.set).toHaveBeenCalledWith('learnerBlur', true);
+            expect(spy).toHaveBeenCalledOnce();
+            EventBus.removeAllListeners();
         });
 
         it('toggles JP display', () => {

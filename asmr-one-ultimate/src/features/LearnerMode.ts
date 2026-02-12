@@ -145,7 +145,12 @@ export class LearnerMode {
                 this.syncSpeedUI();
             }));
 
-            // Sync blur from config changes (e.g. from KeyboardManager)
+            // Blur toggle from keyboard shortcut (ephemeral, does not persist to config)
+            this.eventCleanups.push(EventBus.on('blur:toggle', () => {
+                this.toggleBlur();
+            }));
+
+            // Sync blur from config changes (e.g. from settings panel)
             this.eventCleanups.push(EventBus.on('config:change', ({ key, value }) => {
                 if (key === 'learnerBlur') {
                     this.isBlurEnabled = !!value;
@@ -244,7 +249,7 @@ export class LearnerMode {
             if (this.rafPlayerObserver) return;
             this.rafPlayerObserver = requestAnimationFrame(() => {
                 this.rafPlayerObserver = 0;
-                if (!this.expanded || !this.collapsed) {
+                if (!this.expanded || !this.expanded.isConnected || !this.collapsed || !this.collapsed.isConnected) {
                     this.ensureUIInjected();
                 } else if (this.cachedJpEls.length > 0 && !this.cachedJpEls[0]?.isConnected) {
                     // Cached subtitle elements detached (DOM rebuilt) — force re-query
@@ -388,6 +393,10 @@ export class LearnerMode {
      * Handle track or work change events
      */
     private onTrackOrWorkChange(): void {
+        // Reset blur to default from settings
+        this.isBlurEnabled = !!Config.get('learnerBlur');
+        this.applyBlurState();
+
         this.lastText = '';
         this.lastDisplayedText = '';
         this.lastSecondaryShown = '';
@@ -940,7 +949,6 @@ export class LearnerMode {
 
     private toggleBlur() {
         this.isBlurEnabled = !this.isBlurEnabled;
-        Config.set('learnerBlur', this.isBlurEnabled);
         this.applyBlurState();
     }
 

@@ -122,20 +122,8 @@ export class PlayerTranslator {
         for (const container of containers) {
             const els = container.querySelectorAll<HTMLElement>('[data-asmr-translated]');
             for (const el of els) {
-                const source = el.dataset.asmrSource;
-                const translatedText = el.dataset.asmrTranslatedText || '';
-                // Only restore source text if our translation spans are still in the DOM,
-                // meaning Vue hasn't re-rendered the element yet. Vue's component render
-                // watcher (lower ID) flushes before our store.watch watcher (higher ID),
-                // so by the time this runs Vue has usually already set textContent to the
-                // new track name. Overwriting it with the old source caused the stale-title bug.
-                const hasInjectedPair =
-                    el.classList.contains('asmr-translation-pair')
-                    || !!el.querySelector('.asmr-translation-original, .asmr-translation-translated')
-                    || (!!translatedText && (el.textContent || '').includes(translatedText));
-                if (source && hasInjectedPair) {
-                    el.textContent = source;
-                }
+                // With ::after approach we never modify textContent for translations,
+                // so no need to restore — just clear our data attributes and class.
                 el.title = '';
                 el.classList.remove('asmr-translation-pair');
                 delete el.dataset.asmrTranslated;
@@ -360,13 +348,13 @@ export class PlayerTranslator {
 
         const source = el.dataset.asmrSource;
         const translatedText = el.dataset.asmrTranslatedText;
+        // With ::after, translated text is in CSS pseudo-element, not in textContent.
+        // If the source text still matches, the translation is still valid.
         if (el.dataset.asmrTranslated === 'true' && source && translatedText) {
-            if (rawText.includes(source) && rawText.includes(translatedText)) {
-                return;
-            }
+            if (rawText === source) return;
         }
 
-        const text = source && rawText.includes(source) ? source : rawText;
+        const text = source && rawText === source ? source : rawText;
         if (!text) return;
 
         const epoch = this._epoch;
@@ -402,21 +390,15 @@ export class PlayerTranslator {
         const rawText = getCleanText(el);
         if (!rawText) return;
 
-        // Already translated — skip if showing our translation pair
+        // Already translated — skip if source text unchanged (::after handles display)
         if (el.dataset.asmrTranslated === 'true') {
             const source = el.dataset.asmrSource;
             const translated = el.dataset.asmrTranslatedText;
-            // Vue may re-render the original text over our translation — re-apply
-            if (source && rawText === source && translated) {
-                if (cnOnlyMode) {
-                    el.textContent = translated;
-                } else {
-                    this.updateElement(el, source, translated);
-                }
+            if (source && translated && rawText === source) {
+                // CN→JP: Vue may re-render original CN text, re-apply substitution
+                if (cnOnlyMode) el.textContent = translated;
                 return;
             }
-            // Still showing our translation pair (textContent contains both)
-            if (source && translated && rawText.includes(source) && rawText.includes(translated)) return;
         }
 
         // Detect CJK content
@@ -469,28 +451,9 @@ export class PlayerTranslator {
         el.dataset.asmrSource = original;
         el.dataset.asmrTranslatedText = translated;
         el.classList.add('asmr-translation-pair');
+        el.title = `${original} (${translated})`;
 
-        // Build all children in a DocumentFragment (single DOM mutation instead of 5)
-        const frag = document.createDocumentFragment();
-        const originalSpan = document.createElement('span');
-        originalSpan.className = 'asmr-translation-original';
-        originalSpan.textContent = original;
-        const openParen = document.createElement('span');
-        openParen.className = 'asmr-translation-sep';
-        openParen.textContent = ' (';
-        const translatedSpan = document.createElement('span');
-        translatedSpan.className = 'asmr-translation-translated';
-        translatedSpan.textContent = translated;
-        const closeParen = document.createElement('span');
-        closeParen.className = 'asmr-translation-sep';
-        closeParen.textContent = ')';
-        frag.append(originalSpan, openParen, translatedSpan, closeParen);
-
-        el.textContent = '';
-        el.appendChild(frag); // single reflow
-        el.title = original;
-
-        // Recalculate marquee animation after text change
+        // Recalculate marquee — ::after content changes effective text length
         this.recalculateMarquee(el);
     }
 

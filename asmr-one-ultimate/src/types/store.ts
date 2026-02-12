@@ -423,6 +423,8 @@ export interface AppEvents {
     'progress:update': { workId: string; progress: string; oldProgress: string | null };
     'flatview:toggle': { active: boolean };
     'lang:change': { lang: 'en' | 'zh' | 'ja' | string };
+    // Ephemeral blur toggle (playback only, does not persist to config)
+    'blur:toggle': void;
     // Toggle events from overflow menu
     'joi:toggle': void;
     'joi:trigger': { state: string; keyword: string; source: string };

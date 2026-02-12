@@ -1238,23 +1238,20 @@
 }
 
 /* ========================================
-   Translation Pair (Side-by-side)
+   Translation Pair (CSS ::after approach)
+   Shows translation via pseudo-element so Vue's
+   text nodes are never detached from reactivity.
+   Only fires when our data attribute is present.
    ======================================== */
-.asmr-translation-pair:not(.media-viewer-text-grid) {
-  display: inline;
+.asmr-translation-pair[data-asmr-translated-text]::after {
+  content: " (" attr(data-asmr-translated-text) ")";
+  opacity: 0.85;
 }
 
-.asmr-translation-original {
-  opacity: 0.78;
-}
-
-.asmr-translation-sep {
-  opacity: 0.6;
-}
-
-.asmr-translation-translated {
-  opacity: 1;
-}
+/* Lightbox title still uses span-based approach (Vue 3 managed) */
+.asmr-translation-original { opacity: 0.78; }
+.asmr-translation-sep { opacity: 0.6; }
+.asmr-translation-translated { opacity: 1; }
 
 /* Card translation subtitle (shown below original title on work cards) */
 .asmr-card-translation {
