@@ -61,8 +61,11 @@ export class PlaylistController {
     }
 
     private setQueueViaCommit(store: KikoeruStore, tracks: PlayerTrack[], index: number): void {
+        // Ensure every track has `subtitles` — the deployed host's AudioPlayer
+        // watcher accesses track.subtitles.length and crashes on undefined.
+        const queue = tracks.map(t => ({ ...t, subtitles: (t as any).subtitles || [] }));
         try {
-            store.commit!('AudioPlayer/SET_QUEUE', { queue: tracks, index });
+            store.commit!('AudioPlayer/SET_QUEUE', { queue, index });
             store.commit!('AudioPlayer/SET_TRACK', index);
             Logger.debug('[PlaylistController] Started playback via commit');
         } catch (e) {

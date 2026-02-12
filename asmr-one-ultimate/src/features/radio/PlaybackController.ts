@@ -103,14 +103,18 @@ export class PlaybackController {
     async setQueueAndPlay(tracks: PlayerTrack[], startIndex = 0): Promise<void> {
         Logger.debug('[PlaybackController] setQueueAndPlay:', tracks.length, 'tracks, startIndex:', startIndex);
 
+        // Ensure every track has `subtitles` — the deployed host's AudioPlayer
+        // watcher accesses track.subtitles.length and crashes on undefined.
+        const queue = tracks.map(t => ({ ...t, subtitles: (t as any).subtitles || [] }));
+
         try {
-            this.bridge.commit('AudioPlayer/SET_QUEUE', { queue: tracks, index: startIndex });
+            this.bridge.commit('AudioPlayer/SET_QUEUE', { queue, index: startIndex });
         } catch (err) {
             Logger.error('[PlaybackController] Failed to set queue:', err);
             return;
         }
 
-        const track = tracks[startIndex];
+        const track = queue[startIndex];
         if (!track) {
             Logger.warn('[PlaybackController] No track at startIndex');
             return;

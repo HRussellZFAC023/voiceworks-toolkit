@@ -969,7 +969,9 @@ export class MediaViewerController {
                 source_id: currentWork?.source_id || `RJ${String(workIdNum).padStart(6, '0')}`,
                 source_type: currentWork?.source_type || 'DLSITE',
             },
-        };
+            // Host watcher accesses track.subtitles.length — must not be undefined
+            subtitles: [],
+        } as PlayerTrack;
     }
 
     private minimizeNativePlayerIfExpanded(): void {

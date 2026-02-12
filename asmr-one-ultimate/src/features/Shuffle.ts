@@ -108,7 +108,10 @@ export class ShuffleFeature {
             return;
         }
         if (store.commit) {
-            store.commit('AudioPlayer/SET_QUEUE', { queue: tracks, index: 0 });
+            // Ensure every track has `subtitles` — the deployed host's AudioPlayer
+            // watcher accesses track.subtitles.length and crashes on undefined.
+            const queue = tracks.map(t => ({ ...t, subtitles: (t as any).subtitles || [] }));
+            store.commit('AudioPlayer/SET_QUEUE', { queue, index: 0 });
         }
     }
 
