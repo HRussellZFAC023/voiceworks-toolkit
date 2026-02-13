@@ -57,30 +57,65 @@ export function buildInfiniteScrollApiUrl(input: BuildInfiniteScrollApiUrlInput)
     const page = input.page;
 
     if (isWorksListingPath(path)) {
+        const keyword = pickFirstQueryValue(query.keyword);
+
         const params = new URLSearchParams();
         params.set('page', String(page));
+        params.set('pageSize', String(input.pageSize));
         params.set('order', pickFirstQueryValue(query.order) || 'release');
         params.set('sort', pickFirstQueryValue(query.sort) || 'desc');
         params.set('subtitle', pickFirstQueryValue(query.subtitle) || '0');
-        setQueryParamIfPresent(params, 'keyword', query.keyword);
         setQueryParamIfPresent(params, 'seed', query.seed);
 
+        // Forward remaining query params (includeTranslationWorks, withPlaylistStatus[], etc.)
         Object.entries(query).forEach(([key, value]) => {
-            if (params.has(key)) return;
-            setQueryParamIfPresent(params, key, value);
+            if (params.has(key) || key === 'keyword') return;
+            if (Array.isArray(value)) {
+                for (const item of value) {
+                    const normalized = normalizeQueryToken(item);
+                    if (normalized !== null) params.append(key, normalized);
+                }
+            } else {
+                setQueryParamIfPresent(params, key, value);
+            }
         });
 
+        // When a keyword is present, the API uses /api/search/<keyword>
+        // instead of /api/works (keyword becomes a path segment, not a query param)
+        if (keyword) {
+            return `/api/search/${encodeURIComponent(keyword)}?${params.toString()}`;
+        }
         return `/api/works?${params.toString()}`;
     }
 
-    if (path === '/search') {
+    if (path === '/search' || path.startsWith('/search/')) {
+        // The site encodes the search term as a path segment:
+        //   /search/ $va:伊ヶ崎綾香$  →  /api/search/%20%24va%3A...
+        const searchTerm = path.startsWith('/search/')
+            ? path.slice('/search/'.length)
+            : '';
+
         const params = new URLSearchParams();
         params.set('page', String(page));
+        params.set('pageSize', String(input.pageSize));
+
         Object.entries(query).forEach(([key, value]) => {
-            if (key === 'page') return;
-            setQueryParamIfPresent(params, key, value);
+            if (key === 'page' || key === 'pageSize') return;
+            // Preserve all values for array params (e.g. withPlaylistStatus[])
+            if (Array.isArray(value)) {
+                for (const item of value) {
+                    const normalized = normalizeQueryToken(item);
+                    if (normalized !== null) params.append(key, normalized);
+                }
+            } else {
+                setQueryParamIfPresent(params, key, value);
+            }
         });
-        return `/api/search?${params.toString()}`;
+
+        const encodedTerm = searchTerm
+            ? `/${encodeURIComponent(searchTerm)}`
+            : '';
+        return `/api/search${encodedTerm}?${params.toString()}`;
     }
 
     const circleId = getPathEntityId(path, 'circle');

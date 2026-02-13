@@ -1,168 +1,3 @@
-/* Playlist Generator & Advanced Search Styling */
-
-.asmr-playlist-card {
-    background: var(--asmr-bg-primary);
-    color: var(--asmr-text-primary);
-    width: min(500px, 95vw);
-    display: flex;
-    flex-direction: column;
-}
-
-.asmr-playlist-card input,
-.asmr-playlist-card select {
-    color: inherit;
-    background: var(--asmr-input-bg);
-    border: none;
-    border-radius: 4px;
-    padding: 8px;
-}
-
-.asmr-playlist-card select {
-    width: 100%;
-    border: 1px solid var(--asmr-border-color);
-}
-
-/* ============================================================
-   Playlist Discovery Controls
-   ============================================================ */
-
-.asmr-playlist-controls {
-    gap: 8px;
-    flex-wrap: wrap;
-}
-
-.asmr-playlist-controls .asmr-playlist-controls-spacer {
-    flex: 1 1 auto;
-}
-
-.asmr-playlist-filter-select {
-    min-width: 90px;
-    max-width: 160px;
-    padding: 4px 8px;
-    border-radius: 6px;
-    border: 1px solid var(--asmr-border-color);
-    background: var(--asmr-bg-secondary);
-    color: var(--asmr-text-primary);
-    font-size: 0.85rem;
-    cursor: pointer;
-}
-
-.asmr-playlist-filter-select option {
-    background: var(--asmr-bg-secondary);
-    color: var(--asmr-text-primary);
-}
-
-.asmr-playlist-controls .asmr-playlist-count {
-    opacity: 0.7;
-    white-space: nowrap;
-}
-
-.asmr-playlist-controls .asmr-playlist-action {
-    padding: 4px 10px;
-    min-height: 30px;
-    border-radius: 6px;
-    border: 1px solid var(--asmr-border-color);
-    background: var(--asmr-bg-secondary);
-    color: var(--asmr-text-primary);
-}
-
-@media (hover: hover) {
-    .asmr-playlist-controls .asmr-playlist-action:hover {
-        background: var(--asmr-bg-tertiary);
-    }
-}
-
-@media (hover: none) {
-    .asmr-playlist-controls .asmr-playlist-action:active {
-        background: var(--asmr-bg-tertiary);
-    }
-}
-
-.asmr-playlist-controls .q-btn__content {
-    gap: 4px;
-    flex-wrap: nowrap;
-}
-
-.asmr-playlist-controls .q-icon {
-    font-size: 18px;
-}
-
-/* Tag Suggestions Dropdown */
-.asmr-tag-suggestions {
-    position: absolute;
-    top: 100%;
-    left: 0;
-    right: 0;
-    background: var(--asmr-bg-primary);
-    color: var(--asmr-text-primary);
-    border: 1px solid var(--asmr-border-color);
-    max-height: 250px;
-    overflow-y: auto;
-    z-index: var(--q-z-top, 6000);
-    box-shadow: 0 8px 16px rgba(0, 0, 0, 0.3);
-    border-radius: 4px;
-}
-
-.asmr-tag-suggestion-item {
-    padding: 10px 14px;
-    cursor: pointer;
-    border-bottom: 1px solid var(--asmr-border-color);
-    display: flex;
-    justify-content: space-between;
-}
-
-@media (hover: hover) {
-    .asmr-tag-suggestion-item:hover {
-        background: var(--asmr-accent);
-        color: #fff;
-    }
-}
-
-@media (hover: none) {
-    .asmr-tag-suggestion-item:active {
-        background: var(--asmr-accent);
-        color: #fff;
-    }
-}
-
-.asmr-tag-suggestion-item .text-caption {
-    opacity: 0.7;
-}
-
-@media (hover: hover) {
-    .asmr-playlist-card .q-btn:hover {
-        background: var(--asmr-bg-tertiary);
-        color: var(--asmr-text-primary);
-    }
-}
-
-@media (hover: none) {
-    .asmr-playlist-card .q-btn:active {
-        background: var(--asmr-bg-tertiary);
-        color: var(--asmr-text-primary);
-    }
-}
-
-/* Chips in Playlist Builder */
-.asmr-tag-chip {
-    background: var(--asmr-bg-secondary);
-    color: var(--asmr-text-primary);
-    border-radius: 16px;
-    padding: 4px 8px;
-    margin: 2px;
-    font-size: 0.85rem;
-    display: inline-flex;
-    align-items: center;
-    transition: background 0.15s, color 0.15s;
-    cursor: default;
-}
-
-@media (hover: hover) {
-    .asmr-tag-chip:hover {
-        background: var(--asmr-hover-bg);
-    }
-}
-
 /* ============================================================
    Playlist Controls in Player Bar
    ============================================================ */
@@ -341,55 +176,54 @@
     }
 }
 
-/* Collapsed blob state */
+/* Collapsed state — icon-only glassmorphic circle */
 .asmr-playlist-player-controls.collapsed {
-    max-width: 160px;
-    padding: 4px 10px;
+    width: 36px;
+    height: 36px;
+    max-width: 36px;
+    padding: 0;
     gap: 0;
     cursor: pointer;
-    border-radius: 999px;
-    flex-direction: row;
+    border-radius: 50%;
     align-items: center;
-    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.25);
+    justify-content: center;
+    background: rgba(18, 18, 18, 0.55);
+    border-color: rgba(255, 255, 255, 0.06);
+    backdrop-filter: blur(24px) saturate(1.3);
+    -webkit-backdrop-filter: blur(24px) saturate(1.3);
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.18);
+    transition: background 0.2s, border-color 0.2s, box-shadow 0.2s,
+                padding 0.2s ease, border-radius 0.2s ease, max-width 0.2s ease;
 }
 
-.asmr-playlist-player-controls.collapsed .asmr-playlist-prev,
-.asmr-playlist-player-controls.collapsed .asmr-playlist-next,
-.asmr-playlist-player-controls.collapsed .asmr-playlist-collapse,
-.asmr-playlist-player-controls.collapsed .asmr-playlist-player-status,
+.asmr-playlist-player-controls.collapsed .asmr-playlist-player-main,
 .asmr-playlist-player-controls.collapsed .asmr-playlist-player-toggles {
     display: none;
 }
 
-.asmr-playlist-player-controls.collapsed .asmr-playlist-player-main {
-    gap: 0;
-}
-
-.asmr-playlist-player-controls.collapsed .asmr-playlist-player-center {
-    flex: none;
-}
-
-.asmr-playlist-player-controls.collapsed .asmr-playlist-player-mode {
-    opacity: 0.9;
-    pointer-events: none;
-}
-
+/* Mode icon — playlist default */
 .asmr-playlist-player-controls.collapsed::after {
-    content: 'keyboard_arrow_up';
+    content: 'queue_music';
     font-family: 'Material Icons';
-    font-size: 16px;
-    margin-left: 4px;
-    opacity: 0.4;
+    font-size: 18px;
+    opacity: 0.55;
+    transition: opacity 0.15s;
+}
+
+/* Radio mode icon override */
+.asmr-player-controls--radio.collapsed::after {
+    content: 'radio';
 }
 
 @media (hover: hover) {
     .asmr-playlist-player-controls.collapsed:hover {
-        border-color: rgba(255, 255, 255, 0.18);
-        box-shadow: 0 2px 12px rgba(0, 0, 0, 0.35);
+        background: rgba(18, 18, 18, 0.72);
+        border-color: rgba(255, 255, 255, 0.14);
+        box-shadow: 0 2px 14px rgba(0, 0, 0, 0.28);
     }
 
     .asmr-playlist-player-controls.collapsed:hover::after {
-        opacity: 0.7;
+        opacity: 0.85;
     }
 }
 

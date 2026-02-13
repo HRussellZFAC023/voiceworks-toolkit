@@ -1,13 +1,30 @@
 import { KikoeruBridge } from '../infrastructure/KikoeruBridge';
 import { Logger } from '../core/Utils';
 import { getAudioElement } from '../core/DomUtils';
-import type { KikoeruStoreState, AudioPlayerState } from '../types';
+import { buildCoverUrl } from '../types/api';
+import type { KikoeruStoreState } from '../types';
 import type { PlayerTrack, WorkDetail } from '../types';
+
+/**
+ * Ensure a URL is absolute.  Relative paths (e.g. `/api/cover/…`) are
+ * resolved against the current page origin so the Media Session API
+ * (and lock-screen artwork on mobile) can fetch them.
+ */
+function toAbsoluteUrl(url: string): string {
+    if (!url) return url;
+    if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('data:')) {
+        return url;
+    }
+    // Relative path — resolve against origin
+    return new URL(url, window.location.origin).href;
+}
 
 export class MediaSessionManager {
     private bridge: KikoeruBridge;
     private unwatch: (() => void) | null = null;
     private lastMetadata: string | null = null;
+    private timeupdateHandler: (() => void) | null = null;
+    private connectedAudio: HTMLAudioElement | null = null;
 
     constructor() {
         this.bridge = KikoeruBridge.getInstance();
@@ -34,6 +51,7 @@ export class MediaSessionManager {
         }
 
         this.setHandlers();
+        this.attachPositionSync();
 
         // Initial sync
         const state = store.state.AudioPlayer;
@@ -48,6 +66,8 @@ export class MediaSessionManager {
     private update(state: { track: PlayerTrack | undefined; playing: boolean | undefined; work: WorkDetail | undefined }): void {
         this.updateMetadata(state.track, state.work);
         this.updatePlaybackState(!!state.playing);
+        // Re-attach position sync in case the audio element changed (new track)
+        this.attachPositionSync();
     }
 
     private updateMetadata(track: PlayerTrack | undefined, work: WorkDetail | undefined): void {
@@ -56,24 +76,25 @@ export class MediaSessionManager {
         const album = work?.title || 'Unknown Album';
 
         // Try to find the best cover (comprehensive fallback chain)
-        let artwork: MediaImage[] = [];
         const w = work as (WorkDetail & Record<string, unknown>) | undefined;
-        const coverUrl =
-            track?.cover ||
+        let coverUrl =
             w?.mainCoverUrl ||
+            track?.cover ||
             (w?.main_cover as string | undefined) ||
             (w?.cover as string | undefined) ||
             (w?.thumbnail as string | undefined) ||
             ((w?.image_main as { url?: string } | undefined)?.url) ||
             ((w?.image_thum as { url?: string } | undefined)?.url);
 
+        // Last-resort fallback: build cover URL from work ID
+        if (!coverUrl && w?.id) {
+            coverUrl = buildCoverUrl(w.id, 'main');
+        }
+
+        // Ensure the URL is absolute — Media Session requires absolute URLs
+        // for lock-screen artwork to load correctly on mobile
         if (coverUrl) {
-            // Provide multiple sizes for better quality on different devices
-            artwork = [
-                { src: coverUrl, sizes: '512x512', type: 'image/jpeg' },
-                { src: coverUrl, sizes: '256x256', type: 'image/jpeg' },
-                { src: coverUrl, sizes: '128x128', type: 'image/jpeg' }
-            ];
+            coverUrl = toAbsoluteUrl(coverUrl);
         }
 
         // Avoid spamming updates if metadata hasn't changed
@@ -81,12 +102,21 @@ export class MediaSessionManager {
         if (this.lastMetadata === key) return;
         this.lastMetadata = key;
 
+        let artwork: MediaImage[] = [];
+        if (coverUrl) {
+            artwork = [
+                { src: coverUrl, sizes: '512x512', type: 'image/jpeg' },
+                { src: coverUrl, sizes: '256x256', type: 'image/jpeg' },
+                { src: coverUrl, sizes: '128x128', type: 'image/jpeg' },
+            ];
+        }
+
         if (navigator.mediaSession) {
             navigator.mediaSession.metadata = new MediaMetadata({
-                title: title,
-                artist: artist,
-                album: album,
-                artwork: artwork
+                title,
+                artist,
+                album,
+                artwork,
             });
             Logger.debug('[MediaSession] Updated metadata:', { title, artist, hasCover: !!coverUrl });
         }
@@ -97,6 +127,55 @@ export class MediaSessionManager {
             navigator.mediaSession.playbackState = playing ? 'playing' : 'paused';
         }
     }
+
+    // ------------------------------------------------------------------
+    // Position state — enables the lock-screen progress bar / scrubber
+    // ------------------------------------------------------------------
+
+    private attachPositionSync(): void {
+        const audio = getAudioElement();
+        if (!audio || audio === this.connectedAudio) return;
+
+        // Detach from previous element
+        this.detachPositionSync();
+
+        this.connectedAudio = audio;
+        this.timeupdateHandler = () => this.syncPositionState(audio);
+        audio.addEventListener('timeupdate', this.timeupdateHandler);
+
+        // Also sync on seeked so the scrubber jumps immediately
+        audio.addEventListener('seeked', this.timeupdateHandler);
+    }
+
+    private detachPositionSync(): void {
+        if (this.connectedAudio && this.timeupdateHandler) {
+            this.connectedAudio.removeEventListener('timeupdate', this.timeupdateHandler);
+            this.connectedAudio.removeEventListener('seeked', this.timeupdateHandler);
+        }
+        this.connectedAudio = null;
+        this.timeupdateHandler = null;
+    }
+
+    private syncPositionState(audio: HTMLAudioElement): void {
+        if (!navigator.mediaSession) return;
+        const duration = audio.duration;
+        // duration must be a valid positive finite number
+        if (!duration || !isFinite(duration) || duration <= 0) return;
+
+        try {
+            navigator.mediaSession.setPositionState({
+                duration,
+                playbackRate: audio.playbackRate || 1,
+                position: Math.min(audio.currentTime, duration),
+            });
+        } catch {
+            // Some browsers throw if position > duration (race condition)
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Action handlers (lock-screen / headphone buttons)
+    // ------------------------------------------------------------------
 
     private setHandlers(): void {
         if (!navigator.mediaSession) return;
@@ -165,7 +244,11 @@ export class MediaSessionManager {
     }
 
     public disable(): void {
-        if (this.unwatch) this.unwatch();
+        if (this.unwatch) {
+            this.unwatch();
+            this.unwatch = null;
+        }
+        this.detachPositionSync();
         if (navigator.mediaSession) {
             navigator.mediaSession.metadata = null;
             navigator.mediaSession.setActionHandler('play', null);

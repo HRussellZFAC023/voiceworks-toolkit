@@ -1387,6 +1387,11 @@ body:not(.body--dark) .asmr-card-translation {
   z-index: var(--z-menu, 10002) !important;
 }
 
+/* Ensure Quasar native dialogs (e.g. Create playlist) appear above menus */
+.q-dialog {
+  z-index: calc(var(--z-menu, 10002) + 1) !important;
+}
+
 /* ========================================
    Fix: Remove default Quasar image overlay padding
    ======================================== */

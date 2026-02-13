@@ -711,7 +711,7 @@ export class InfiniteScrollManager {
         col.id = rjCode;
 
         col.innerHTML = `
-            <div class="q-intersection fit work-card-intersection" style="min-height: 200px;">
+            <div class="fit work-card-intersection" style="min-height: 200px;">
                 <div>
                     <div class="fit q-card q-card--dark q-dark">
                         <a href="/work/${rjCode}" class="">

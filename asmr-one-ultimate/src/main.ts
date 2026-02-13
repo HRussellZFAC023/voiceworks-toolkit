@@ -25,6 +25,7 @@ import './styles/components/_cards.css';
 
 import { KikoeruBridge } from './infrastructure/KikoeruBridge';
 import { getAudioElement, hasPlayerBar, startStackedBottomHeightWatch } from './core/DomUtils';
+import { resumeAudioContext } from './core/AudioAnalysis';
 import { AudioCache } from './infrastructure/AudioCache';
 import { StorageManager } from './infrastructure/StorageManager';
 import { WorkTreeCopy } from './features/WorkTreeCopy';
@@ -68,7 +69,7 @@ import { PageTitleManager } from './features/PageTitleManager';
 import { SidebarMenuController } from './ui/SidebarMenuController';
 import { KeyboardManager } from './features/KeyboardManager';
 import { RouteStateSync } from './features/RouteStateSync';
-import { PlaylistDiscoveryController } from './features/PlaylistDiscoveryController';
+import { PlaylistDiscoverController } from './features/PlaylistDiscoverController';
 import { InfiniteScrollController } from './features/InfiniteScrollController';
 import { PlayerFullscreenController } from './features/PlayerFullscreenController';
 import { PlayerGalleryController } from './features/PlayerGalleryController';
@@ -187,10 +188,10 @@ async function initialize(): Promise<void> {
         playlistMode.initialize();
         Logger.debug('[Init] PlaylistMode initialized');
 
-        Logger.debug('[Init] Initializing PlaylistDiscoveryController...');
-        const playlistDiscovery = new PlaylistDiscoveryController();
+        Logger.debug('[Init] Initializing PlaylistDiscoverController...');
+        const playlistDiscovery = new PlaylistDiscoverController();
         playlistDiscovery.enable();
-        Logger.debug('[Init] PlaylistDiscoveryController enabled');
+        Logger.debug('[Init] PlaylistDiscoverController enabled');
 
         Logger.debug('[Init] Initializing InfiniteScrollController...');
         const infiniteScrollController = InfiniteScrollController.getInstance();
@@ -680,6 +681,16 @@ function setupAudioRecovery(): void {
 
     audio.addEventListener('pause', () => {
         Logger.debug('[AudioRecovery] Audio pause', { src: audio.src, currentTime: audio.currentTime });
+    });
+
+    // Resume AudioContext when page becomes visible again.
+    // On desktop, the browser may suspend the AudioContext when the tab is
+    // backgrounded; resuming it when the user returns prevents silent playback
+    // if the Visualizer/JoiTool had connected via createMediaElementSource().
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') {
+            resumeAudioContext(audio);
+        }
     });
 }
 

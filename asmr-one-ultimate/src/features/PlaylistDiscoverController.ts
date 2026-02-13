@@ -1,21 +1,23 @@
 /**
- * PlaylistDiscoveryController - FeatureController for the PlaylistDiscovery Vue SFC
+ * PlaylistDiscoverController — FeatureController for the collapsible
+ * "Discover Public Playlists" section on the /playlists page.
  *
- * Handles lifecycle: mounts PlaylistDiscoveryPanel.vue into the playlists page
- * when the user navigates to /playlists, unmounts on route change.
+ * Appends BELOW the native grid so native search, filter, and pagination
+ * remain fully functional.
  */
 
 import { type Component } from 'vue';
 import { FeatureController } from './FeatureController';
-import PlaylistDiscoveryPanel from './components/PlaylistDiscoveryPanel.vue';
+import { AppStore } from '../store/AppStore';
+import PlaylistDiscoverSection from './components/PlaylistDiscoverSection.vue';
 
-export class PlaylistDiscoveryController extends FeatureController {
+export class PlaylistDiscoverController extends FeatureController {
     constructor() {
-        super('asmr-playlist-discovery-root');
+        super('asmr-playlist-discover-root');
     }
 
     get component(): Component {
-        return PlaylistDiscoveryPanel;
+        return PlaylistDiscoverSection;
     }
 
     protected get debounceMs(): number {
@@ -27,17 +29,15 @@ export class PlaylistDiscoveryController extends FeatureController {
     }
 
     protected shouldBeActive(): boolean {
+        if (!AppStore.getConfig('enablePlaylistDiscovery')) return false;
         const route = this.bridge.route;
         return route?.path === '/playlists';
     }
 
     findInjectionPoint(): HTMLElement | null {
-        // Look for the q-page container which holds the playlists page content.
-        // We inject after the native layout padding area.
+        // Append to the q-page so we appear below all native content
         const qPage = document.querySelector('.q-page') as HTMLElement | null;
         if (!qPage) return null;
-
-        // Prefer the layout padding wrapper if it exists
         const layoutPadding = qPage.querySelector('.q-layout-padding') as HTMLElement;
         return layoutPadding || qPage;
     }

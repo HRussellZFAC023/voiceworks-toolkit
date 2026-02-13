@@ -45,6 +45,7 @@ export class TranslatedTags {
     private configCleanup?: () => void;
     private pathChangeCleanup?: () => void;
     private routeKeyCleanup?: () => void;
+    private jpdbGuardCleanup?: () => void;
     private activeQueueKey = '';
 
     private constructor() {
@@ -146,6 +147,18 @@ export class TranslatedTags {
             this.routeKeyCleanup = unwatch;
         }
 
+        // Strip JPDB annotations from elements with chips before each route change.
+        // JPDB wraps text in spans that break Vue's DOM patching, causing stale
+        // search text to persist. Cleaning in beforeEach ensures Vue finds clean
+        // text nodes before it patches the DOM for the new route.
+        const router = this.bridge.router;
+        if (router?.beforeEach) {
+            this.jpdbGuardCleanup = router.beforeEach((_to: unknown, _from: unknown, next: () => void) => {
+                this.stripJpdbFromChipContainers();
+                next();
+            });
+        }
+
         this.augmentTags();
         this.isEnabled = true;
         Logger.info('[TranslatedTags] Enabled with CentralObserver');
@@ -163,6 +176,10 @@ export class TranslatedTags {
         if (this.pathChangeCleanup) {
             this.pathChangeCleanup();
             this.pathChangeCleanup = undefined;
+        }
+        if (this.jpdbGuardCleanup) {
+            this.jpdbGuardCleanup();
+            this.jpdbGuardCleanup = undefined;
         }
         if (this.routeKeyCleanup) {
             this.routeKeyCleanup();
@@ -239,7 +256,12 @@ export class TranslatedTags {
         const state = el.dataset.asmrtagState;
         const tracked = el.dataset.asmrtag;
 
-        if (state === 'pending' && tracked === currentText) return true;
+        // Don't skip pending items: batchTranslatePending() cancels the previous
+        // in-flight batch via cancelPending(). If we skip pending items here, they
+        // won't be re-queued in the new batch and stay stuck in 'pending' forever.
+        // This race is triggered by external DOM mutations (e.g. JPDB annotations)
+        // causing CentralObserver to re-run augmentTags() while a batch is in flight.
+        if (state === 'pending' && tracked === currentText) return false;
 
         if (state === 'done' && tracked) {
             if (currentText === tracked || currentText.includes(tracked)) {
@@ -312,6 +334,11 @@ export class TranslatedTags {
             // 1. Chips (Tags) — known tag matches applied immediately, rest queued
             const chips = Array.from(document.querySelectorAll('.q-chip:not(.asmr-ignore)')) as HTMLElement[];
             for (const chip of chips) {
+                // Skip chips in the header search bar — they show raw keyword syntax
+                // ($va:NAME$, $tag:NAME$) and modifying their DOM causes duplication
+                // and stale text bugs because Vue's vDOM gets out of sync.
+                if (chip.closest('.q-header')) continue;
+
                 const content = (chip.querySelector('.q-chip__content') as HTMLElement) || chip;
                 const text = this.extractBaseText(content);
                 if (!text) continue;
@@ -675,6 +702,38 @@ export class TranslatedTags {
         const clone = el.cloneNode(true) as HTMLElement;
         for (const node of clone.querySelectorAll('rt, rp, i.material-icons, .q-chip__icon')) node.remove();
         return (clone.textContent || '').trim();
+    }
+
+    /**
+     * Strip JPDB browser extension's DOM annotations from elements containing
+     * Vue-managed chips. JPDB wraps CJK text in
+     * `<span class="jpdb-word"><ruby>...<rt>furigana</rt></ruby></span>`,
+     * which breaks Vue's virtual DOM patching — Vue can't diff through foreign
+     * DOM nodes, causing stale text from previous searches to persist across
+     * route changes.
+     *
+     * Must run BEFORE Vue patches (e.g. in a beforeEach guard) so Vue finds
+     * clean text nodes to reconcile against its virtual DOM.
+     */
+    private stripJpdbFromChipContainers(): void {
+        const containers = document.querySelectorAll<HTMLElement>('[data-jpdb]');
+        for (const el of containers) {
+            if (!el.querySelector('.q-chip')) continue;
+            const jpdbWords = el.querySelectorAll<HTMLElement>('.jpdb-word');
+            if (jpdbWords.length === 0) continue;
+
+            this.beginDOMModification();
+            try {
+                for (const span of jpdbWords) {
+                    const text = this.extractBaseText(span);
+                    span.replaceWith(text);
+                }
+                el.removeAttribute('data-jpdb');
+                el.removeAttribute('data-jpdb-original');
+            } finally {
+                this.endDOMModification();
+            }
+        }
     }
 
     /**

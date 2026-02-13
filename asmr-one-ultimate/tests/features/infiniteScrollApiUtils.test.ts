@@ -29,7 +29,6 @@ describe('infiniteScrollApiUtils', () => {
                     sort: undefined,
                     subtitle: ['1'],
                     seed: ['', 'abc-seed'],
-                    keyword: 'ear cleaning',
                     page: '99',
                     minPrice: '0',
                 },
@@ -43,8 +42,26 @@ describe('infiniteScrollApiUtils', () => {
             expect(parsed.searchParams.get('sort')).toBe('desc');
             expect(parsed.searchParams.get('subtitle')).toBe('1');
             expect(parsed.searchParams.get('seed')).toBe('abc-seed');
-            expect(parsed.searchParams.get('keyword')).toBe('ear cleaning');
             expect(parsed.searchParams.get('minPrice')).toBe('0');
+        });
+
+        it('routes /works with keyword to /api/search/<keyword>', () => {
+            const url = buildInfiniteScrollApiUrl({
+                path: '/works',
+                page: 3,
+                pageSize: 20,
+                query: {
+                    keyword: 'ear cleaning',
+                    subtitle: ['1'],
+                },
+            });
+
+            expect(url).not.toBeNull();
+            const parsed = parseRelativeUrl(url!);
+            expect(parsed.pathname).toBe('/api/search/ear%20cleaning');
+            expect(parsed.searchParams.get('page')).toBe('3');
+            expect(parsed.searchParams.get('subtitle')).toBe('1');
+            expect(parsed.searchParams.has('keyword')).toBe(false);
         });
 
         it('builds search URL and ignores incoming page query', () => {

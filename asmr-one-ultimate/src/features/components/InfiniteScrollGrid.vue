@@ -282,7 +282,7 @@ function appendWorksToHostGrid(newWorks: WorkItem[]): string[] {
         col.className = 'col-xs-12 col-sm-4 col-md-3 col-lg-2 col-xl-2';
         col.id = rjCode;
         col.innerHTML = `
-            <div class="q-intersection fit work-card-intersection" style="min-height: 200px;">
+            <div class="fit work-card-intersection" style="min-height: 200px;">
                 <div>
                     <div class="fit q-card q-card--dark q-dark">
                         <a href="/work/${rjCode}">
@@ -778,13 +778,34 @@ async function triggerNextPage(): Promise<void> {
         }
         Logger.error('[InfiniteScrollGrid] Failed to load next page:', error);
         currentPage.value--;
-        resetBackoff();
+        // Retry with backoff for ANY error (server, CORS, network).
+        // The IntersectionObserver won't re-fire on its own because the
+        // sentinel hasn't changed visibility state after an error.
+        if (retryCount < MAX_RETRIES) {
+            retryCount++;
+            const delay = INITIAL_BACKOFF_MS * Math.pow(BACKOFF_MULTIPLIER, retryCount - 1);
+            Logger.warn(`[InfiniteScrollGrid] Error ${status || 'network'}, retry ${retryCount}/${MAX_RETRIES} in ${delay}ms`);
+            sentinelState.value = 'loading';
+            retryTimer = window.setTimeout(() => {
+                retryTimer = null;
+                isLoading.value = false;
+                sentinelState.value = 'idle';
+                void triggerNextPage();
+            }, delay);
+        } else {
+            Logger.error('[InfiniteScrollGrid] Max retries exceeded');
+            sentinelState.value = 'rate-limit-error';
+            resetBackoff();
+        }
     } finally {
+        // Only reset loading state if no retry timer is pending.
+        // When a retry is scheduled, keep isLoading=true and sentinelState
+        // as-is (loading spinner or rate-limit indicator) until the retry fires.
         if (retryTimer === null) {
             isLoading.value = false;
-        }
-        if (sentinelState.value === 'loading' || sentinelState.value === 'loading-images') {
-            sentinelState.value = reachedEnd.value ? 'end' : 'idle';
+            if (sentinelState.value === 'loading' || sentinelState.value === 'loading-images') {
+                sentinelState.value = reachedEnd.value ? 'end' : 'idle';
+            }
         }
     }
 }
@@ -822,8 +843,20 @@ function attachToCurrentPage(): void {
         parsePaginationState();
     } else {
         // Playlist page without standard pagination — use unknown mode
-        // so we keep fetching until the API returns empty results
+        // so we keep fetching until the API returns empty results.
         paginationUnknown.value = true;
+        // Match host app's playlist pageSize (100) to avoid duplicate fetches.
+        // With the default 20, pages 2-5 would all return works already shown.
+        pageSize.value = 100;
+        // Detect works already loaded by host and start from the next page
+        const grid = findHostGrid();
+        if (grid) {
+            const existingCount = grid.children.length;
+            if (existingCount > 0) {
+                currentPage.value = Math.ceil(existingCount / pageSize.value);
+                Logger.info(`[InfiniteScrollGrid] Playlist: ${existingCount} existing works, starting from page ${currentPage.value + 1}`);
+            }
+        }
     }
 
     Logger.info(`[InfiniteScrollGrid] Attaching to ${path} (page ${currentPage.value}/${totalPages.value})`);
@@ -895,14 +928,17 @@ function cleanup(): void {
 // Lifecycle
 // ============================================================================
 
-// Watch route changes
-watch(() => route.value.path, () => {
-    if (!enabled.value) return;
-    if (debounceTimer) clearTimeout(debounceTimer);
-    debounceTimer = window.setTimeout(() => {
-        attachToCurrentPage();
-    }, 500);
-});
+// Watch route changes (path OR query — filter/sort toggles only change query)
+watch(
+    [() => route.value.path, () => JSON.stringify(route.value.query)],
+    () => {
+        if (!enabled.value) return;
+        if (debounceTimer) clearTimeout(debounceTimer);
+        debounceTimer = window.setTimeout(() => {
+            attachToCurrentPage();
+        }, 500);
+    }
+);
 
 // Watch config toggle
 watch(enabled, (val) => {
@@ -952,9 +988,13 @@ onUnmounted(() => {
         </div>
 
         <!-- Rate limit retry -->
-        <div v-if="sentinelState === 'rate-limit'" class="text-center q-pa-md text-warning">
-            <i class="q-icon notranslate material-icons" style="font-size: 24px;">hourglass_empty</i>
-            <div>{{ format('infScrollRateLimitRetry', { seconds: retryCountdownSeconds }) }}</div>
+        <div v-if="sentinelState === 'rate-limit'" class="text-center q-pa-md">
+            <svg focusable="false" fill="currentColor" width="40px" height="40px" viewBox="0 0 120 30" xmlns="http://www.w3.org/2000/svg" class="q-spinner text-primary">
+                <circle cx="15" cy="15" r="15"><animate attributeName="r" from="15" to="15" begin="0s" dur="0.8s" values="15;9;15" calcMode="linear" repeatCount="indefinite" /></circle>
+                <circle cx="60" cy="15" r="9" fill-opacity=".3"><animate attributeName="r" from="9" to="9" begin="0s" dur="0.8s" values="9;15;9" calcMode="linear" repeatCount="indefinite" /></circle>
+                <circle cx="105" cy="15" r="15"><animate attributeName="r" from="15" to="15" begin="0s" dur="0.8s" values="15;9;15" calcMode="linear" repeatCount="indefinite" /></circle>
+            </svg>
+            <div class="text-grey">{{ format('infScrollRateLimitRetry', { seconds: retryCountdownSeconds }) }}</div>
         </div>
 
         <!-- Rate limit error -->
