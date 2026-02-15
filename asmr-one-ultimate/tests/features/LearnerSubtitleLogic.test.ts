@@ -21,12 +21,26 @@ function findActiveLine(
     now: number,
 ): { time: number; endTime?: number; text: string } | null {
     if (lines.length === 0) return null;
-    let activeLine: { time: number; endTime?: number; text: string } | null = null;
+    let activeIdx = -1;
     for (let i = lines.length - 1; i >= 0; i--) {
-        if (lines[i].time <= now) { activeLine = lines[i]; break; }
+        if (lines[i].time <= now) { activeIdx = i; break; }
     }
-    if (!activeLine) return null;
-    if (activeLine.endTime && now >= activeLine.endTime) return null;
+    if (activeIdx < 0) return null;
+    const activeLine = lines[activeIdx];
+    if (activeLine.endTime && now >= activeLine.endTime) {
+        // Check for a longer overlapping segment that still covers `now`
+        for (let i = activeIdx - 1; i >= 0; i--) {
+            const earlier = lines[i];
+            if (earlier.endTime && earlier.endTime > now && earlier.time <= now) {
+                return earlier;
+            }
+            if (now - earlier.time > 60) break;
+        }
+        const nextLine = lines[activeIdx + 1];
+        if (!nextLine) return activeLine;
+        if ((nextLine.time - activeLine.endTime) < 2.0) return activeLine;
+        return null;
+    }
     return activeLine;
 }
 
@@ -271,19 +285,20 @@ describe('findActiveLine', () => {
         expect(findActiveLine(lines, -1)).toBeNull();
     });
 
-    it('returns null after last segment ends', () => {
-        expect(findActiveLine(lines, 16)).toBeNull();
+    it('holds last segment after it ends (live transcription catch-up)', () => {
+        expect(findActiveLine(lines, 16)?.text).toBe('C');
     });
 
     it('returns segment at exact start time', () => {
         expect(findActiveLine(lines, 5)?.text).toBe('B');
     });
 
-    it('returns null at exact end time', () => {
+    it('handles exact end time correctly', () => {
+        // With B starting at time=5, findActiveLine picks B (not expired A)
         expect(findActiveLine(lines, 5)?.text).toBe('B');
-        // endTime=5 for 'A', now=5 → now >= endTime → null for A, but B starts at 5
+        // Single segment past endTime — held visible (no next line to transition to)
         const lineA = findActiveLine([{ time: 0, endTime: 5, text: 'A' }], 5);
-        expect(lineA).toBeNull();
+        expect(lineA?.text).toBe('A');
     });
 
     it('returns segment without endTime (LRC-style)', () => {
@@ -298,6 +313,37 @@ describe('findActiveLine', () => {
 
     it('returns empty array → null', () => {
         expect(findActiveLine([], 5)).toBeNull();
+    });
+
+    it('holds current segment in short gap (< 2s)', () => {
+        const gapped = [
+            { time: 0, endTime: 3, text: 'A' },
+            { time: 4.5, endTime: 8, text: 'B' },
+        ];
+        // Gap is 4.5 - 3 = 1.5 < 2.0, so A is held
+        expect(findActiveLine(gapped, 3.5)?.text).toBe('A');
+    });
+
+    it('prefers longer overlapping segment over expired fragment', () => {
+        // Simulates residual fragment from chunk-boundary overlap:
+        // Long segment at 10-18, short fragment at 10.05-10.5
+        const lines = [
+            { time: 10, endTime: 18, text: 'はい頑張りすぎないくらいがちょうどいい' },
+            { time: 10.05, endTime: 10.5, text: 'はい' },
+        ];
+        // At time 12, fragment is expired (12 > 10.5). Should fall back
+        // to the longer segment that still covers time 12.
+        expect(findActiveLine(lines, 12)?.text).toBe('はい頑張りすぎないくらいがちょうどいい');
+    });
+
+    it('prefers longer overlapping segment even with more lines after', () => {
+        const lines = [
+            { time: 10, endTime: 18, text: 'full sentence' },
+            { time: 10.05, endTime: 10.5, text: 'fragment' },
+            { time: 20, endTime: 25, text: 'next sentence' },
+        ];
+        // At time 15, fragment expired, but full sentence still covers it
+        expect(findActiveLine(lines, 15)?.text).toBe('full sentence');
     });
 });
 

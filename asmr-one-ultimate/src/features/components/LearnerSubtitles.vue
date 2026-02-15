@@ -604,11 +604,18 @@ function findActiveLine(
     }
     if (activeIdx < 0) return null;
     const activeLine = lines[activeIdx];
-    // If we're past this line's endTime, check if there's a next line coming soon.
-    // If the gap to the next line is short (< 2s), hold the current line visible
-    // to prevent blank flashes between sentences. For longer gaps, return null
-    // so the display can clear (genuine silence/pause).
+    // If we're past this line's endTime, check for a longer overlapping segment
+    // that still covers `now` (defense against residual fragments from chunk
+    // boundary overlap in mergeSegments).
     if (activeLine.endTime && now >= activeLine.endTime) {
+        for (let i = activeIdx - 1; i >= 0; i--) {
+            const earlier = lines[i];
+            if (earlier.endTime && earlier.endTime > now && earlier.time <= now) {
+                return earlier;
+            }
+            // Stop scanning once we're too far back (segments are sorted by time)
+            if (now - earlier.time > 60) break;
+        }
         const nextLine = lines[activeIdx + 1];
         // No next line — hold the last segment visible (during live transcription
         // the worker hasn't caught up; at end of transcript it's the final line)

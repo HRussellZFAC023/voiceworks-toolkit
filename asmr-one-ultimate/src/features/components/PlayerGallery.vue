@@ -430,15 +430,25 @@ async function loadImages(workId: string): Promise<void> {
     currentIndex.value = 0;
     imageSeen.value.clear();
 
+    // Clear stale cover backdrop immediately (DOM still shows previous work's cover)
+    const playerEl = document.querySelector('.audio-player') as HTMLElement;
+    if (playerEl) playerEl.style.removeProperty('--cover-url');
+
     const add = (url: string) => {
         if (!url || imageSeen.value.has(url) || excludedUrls.value.has(url)) return;
         imageSeen.value.add(url);
         images.value.push(url);
     };
 
-    // Ensure cover is present
+    // Scrape cover from DOM, but validate it belongs to this work
+    // (the host q-img may still show the previous work's cover during transitions)
     const cover = scrapeCoverUrl();
-    if (cover) add(cover);
+    if (cover) {
+        const coverWorkId = parseWorkIdFromCoverUrl(cover);
+        if (!coverWorkId || coverWorkId === normalizedWorkId) {
+            add(cover);
+        }
+    }
 
     // Show cover immediately if in fullscreen (don't wait for async)
     if (isFullscreen.value && images.value.length > 0) {
@@ -489,9 +499,14 @@ async function onEnterFullscreen(): Promise<void> {
     // Step 1: Immediately show the cover image (scraped from DOM)
     const coverUrl = scrapeCoverUrl();
     if (coverUrl && images.value.length === 0) {
-        images.value = [coverUrl];
-        imageSeen.value.add(coverUrl);
-        currentIndex.value = 0;
+        // Validate it belongs to the current work (DOM may still show previous work)
+        const currentWork = detectWorkId();
+        const coverWork = parseWorkIdFromCoverUrl(coverUrl);
+        if (!coverWork || !currentWork || coverWork === currentWork) {
+            images.value = [coverUrl];
+            imageSeen.value.add(coverUrl);
+            currentIndex.value = 0;
+        }
     }
     if (images.value.length > 0) {
         syncCoverUrl();
@@ -590,6 +605,10 @@ function refreshGalleryForTrackChange(workIdFromEvent?: string): void {
     const cover = scrapeCoverUrl();
     if (!cover) return;
     if (excludedUrls.value.has(cover)) return;
+
+    // Validate cover belongs to the loaded work (DOM may lag behind store on work change)
+    const coverWorkId = parseWorkIdFromCoverUrl(cover);
+    if (coverWorkId && loadedWorkId.value && coverWorkId !== loadedWorkId.value) return;
 
     // Fallback for states where work ID isn't available yet (playlist/miniplayer transitions):
     // keep the full gallery but ensure the live cover is shown first.

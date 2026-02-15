@@ -106,13 +106,14 @@ describe('PlaybackController', () => {
             { hash: 'track-2', title: 'Track 2' },
         ] as any[];
 
-        mockBridge.hasAction = vi.fn((action: string) => action === 'AudioPlayer/playTrack');
-        mockBridge.dispatch = vi.fn(() => Promise.resolve());
+        // Audio is paused so the fallback play() path fires
+        mockAudio.paused = true;
 
         const ok = await controller.forcePlayQueueTrack(queue as any, 1);
 
         expect(ok).toBe(true);
         expect(mockBridge.commit).toHaveBeenCalledWith('AudioPlayer/SET_TRACK', 1);
-        expect(mockBridge.dispatch).toHaveBeenCalledWith('AudioPlayer/playTrack', queue[1]);
+        expect(mockBridge.commit).toHaveBeenCalledWith('AudioPlayer/SET_PLAYING', true);
+        expect(mockAudio.play).toHaveBeenCalledTimes(1);
     });
 });

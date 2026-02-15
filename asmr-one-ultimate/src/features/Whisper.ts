@@ -1538,9 +1538,16 @@ export class Whisper {
         for (const seg of newSegments) {
             if (!seg.text || this.isNoiseOnly(seg.text)) continue;
 
-            const matchIdx = this.segments.findIndex(existing =>
-                Math.abs(existing.start - seg.start) < 0.3
-            );
+            // Match by start time, but guard against duration mismatch:
+            // A short chunk-boundary fragment (e.g. 0.5s "はい") must not match
+            // and replace a long cached segment (e.g. 8s full sentence).
+            const matchIdx = this.segments.findIndex(existing => {
+                if (Math.abs(existing.start - seg.start) >= 0.3) return false;
+                const eDur = existing.end - existing.start;
+                const nDur = seg.end - seg.start;
+                if (eDur > 1 && nDur > 0 && nDur / eDur < 0.3) return false;
+                return true;
+            });
 
             if (matchIdx >= 0) {
                 const existing = this.segments[matchIdx];
@@ -1550,6 +1557,20 @@ export class Whisper {
                     this.segments[matchIdx] = seg;
                 }
                 this.lastSegmentEnd = Math.max(this.lastSegmentEnd, seg.end, existing.end);
+                continue;
+            }
+
+            // Don't push fragments that are temporally contained within a
+            // much longer existing segment (chunk-boundary overlap artifacts).
+            const isContained = this.segments.some(existing => {
+                const eDur = existing.end - existing.start;
+                const nDur = seg.end - seg.start;
+                return eDur > nDur * 2
+                    && seg.start >= existing.start - 0.5
+                    && seg.end <= existing.end + 0.5;
+            });
+            if (isContained) {
+                this.lastSegmentEnd = Math.max(this.lastSegmentEnd, seg.end);
                 continue;
             }
 
@@ -1566,6 +1587,16 @@ export class Whisper {
             for (const seg of this.segments) {
                 const prev = deduped[deduped.length - 1];
                 if (prev && Math.abs(prev.start - seg.start) < 0.25) {
+                    const prevDur = prev.end - prev.start;
+                    const segDur = seg.end - seg.start;
+                    // Duration mismatch: keep the longer segment (drop the fragment)
+                    if (prevDur > 1 && segDur > 0 && segDur / prevDur < 0.3) {
+                        continue; // drop seg (fragment), keep prev
+                    }
+                    if (segDur > 1 && prevDur > 0 && prevDur / segDur < 0.3) {
+                        deduped[deduped.length - 1] = seg; // replace prev (fragment) with seg
+                        continue;
+                    }
                     const prevText = prev.text.trim();
                     const segText = seg.text.trim();
                     if (this.isSignificantUpdate(prevText, segText) && (segText.length > prevText.length || preferNew)) {

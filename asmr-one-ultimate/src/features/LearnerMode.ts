@@ -2063,7 +2063,17 @@ export class LearnerMode {
         if (activeIdx < 0) return null;
         const activeLine = lines[activeIdx];
 
+        // If we're past this line's endTime, check for a longer overlapping
+        // segment that still covers `now` (defense against residual fragments
+        // from chunk boundary overlap in mergeSegments).
         if (activeLine.endTime && now >= activeLine.endTime) {
+            for (let i = activeIdx - 1; i >= 0; i--) {
+                const earlier = lines[i];
+                if (earlier.endTime && earlier.endTime > now && earlier.time <= now) {
+                    return earlier;
+                }
+                if (now - earlier.time > 60) break;
+            }
             const nextLine = lines[activeIdx + 1];
             // No next line — hold the last segment visible (during live transcription
             // the worker hasn't caught up; at end of transcript it's the final line)

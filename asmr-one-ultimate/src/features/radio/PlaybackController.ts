@@ -122,13 +122,19 @@ export class PlaybackController {
 
         Logger.debug('[PlaybackController] Playing track:', track.title || track.hash);
 
-        if (this.bridge.hasAction('AudioPlayer/playTrack')) {
-            await this.bridge.dispatch('AudioPlayer/playTrack', track).catch((err) => {
-                Logger.warn('[PlaybackController] playTrack dispatch failed:', err);
-                this.bridge.commit('AudioPlayer/SET_TRACK', startIndex);
-            });
-        } else {
+        // Use mutations only — do NOT dispatch the host's playTrack action.
+        // That action may internally re-commit SET_QUEUE with its own track
+        // objects (missing `subtitles`), overwriting our patched queue and
+        // crashing the host's AudioPlayer watcher on track.subtitles.length.
+        try {
             this.bridge.commit('AudioPlayer/SET_TRACK', startIndex);
+        } catch {
+            Logger.debug('[PlaybackController] SET_TRACK mutation not available');
+        }
+        try {
+            this.bridge.commit('AudioPlayer/SET_PLAYING', true);
+        } catch {
+            Logger.debug('[PlaybackController] SET_PLAYING mutation not available');
         }
     }
 
@@ -139,30 +145,19 @@ export class PlaybackController {
         const track = queue[targetIndex];
         if (!track) return false;
 
+        // Use mutations only — avoid playTrack action (see setQueueAndPlay comment).
         try {
             this.bridge.commit('AudioPlayer/SET_TRACK', targetIndex);
         } catch (err) {
             Logger.warn('[PlaybackController] Failed to set queue track index:', err);
         }
-
-        if (this.bridge.hasAction('AudioPlayer/playTrack')) {
-            try {
-                await this.bridge.dispatch('AudioPlayer/playTrack', track);
-                return true;
-            } catch (err) {
-                Logger.warn('[PlaybackController] force playTrack dispatch failed:', err);
-            }
+        try {
+            this.bridge.commit('AudioPlayer/SET_PLAYING', true);
+        } catch {
+            // not critical — fallback below
         }
 
-        if (this.bridge.hasAction('AudioPlayer/play')) {
-            try {
-                await this.bridge.dispatch('AudioPlayer/play');
-                return true;
-            } catch (err) {
-                Logger.warn('[PlaybackController] force play dispatch failed:', err);
-            }
-        }
-
+        // Fallback: direct audio element play if mutations alone didn't start playback
         const audio = getAudioElement();
         if (audio?.paused && (audio.currentSrc || audio.getAttribute('src'))) {
             try {

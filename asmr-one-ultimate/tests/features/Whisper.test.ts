@@ -122,6 +122,85 @@ describe('Whisper', () => {
             (whisper as any).mergeSegments([], { preferNew: false });
             expect((whisper as any).segments).toHaveLength(0);
         });
+
+        it('does not replace long segment with short fragment (duration guard)', () => {
+            const whisper = new Whisper();
+            // Cached long segment: full sentence spanning 8 seconds
+            (whisper as any).segments = [
+                { start: 10.0, end: 18.0, text: 'はい頑張りすぎないくらいがちょうどいい' },
+            ];
+            (whisper as any).lastSegmentEnd = 18.0;
+            // Chunk boundary fragment: only 0.5s, similar start time
+            const fragment = [
+                { start: 10.05, end: 10.5, text: 'はい' },
+            ];
+            (whisper as any).mergeSegments(fragment, { preferNew: true });
+            // The long segment should be preserved
+            expect((whisper as any).segments).toHaveLength(1);
+            expect((whisper as any).segments[0].text).toBe('はい頑張りすぎないくらいがちょうどいい');
+        });
+
+        it('does not add fragment contained within existing longer segment', () => {
+            const whisper = new Whisper();
+            (whisper as any).segments = [
+                { start: 10.0, end: 18.0, text: 'full sentence here' },
+            ];
+            (whisper as any).lastSegmentEnd = 18.0;
+            // Fragment with start time too far for match (>0.3) but within existing range
+            const fragment = [
+                { start: 10.4, end: 10.8, text: 'frag' },
+            ];
+            (whisper as any).mergeSegments(fragment, { preferNew: true });
+            // Fragment should be dropped (contained within existing)
+            expect((whisper as any).segments).toHaveLength(1);
+            expect((whisper as any).segments[0].text).toBe('full sentence here');
+        });
+
+        it('replaces short fragment with longer segment (correct direction)', () => {
+            const whisper = new Whisper();
+            // Short fragment exists from a partial update
+            (whisper as any).segments = [
+                { start: 10.0, end: 10.5, text: 'はい' },
+            ];
+            (whisper as any).lastSegmentEnd = 10.5;
+            // Complete transcription arrives with full sentence
+            const full = [
+                { start: 10.05, end: 18.0, text: 'はい頑張りすぎないくらいがちょうどいい' },
+            ];
+            (whisper as any).mergeSegments(full, { preferNew: true });
+            // Fragment should be replaced by the longer segment
+            expect((whisper as any).segments).toHaveLength(1);
+            expect((whisper as any).segments[0].text).toBe('はい頑張りすぎないくらいがちょうどいい');
+        });
+
+        it('normal overlap with similar durations still works', () => {
+            const whisper = new Whisper();
+            (whisper as any).segments = [
+                { start: 25.0, end: 32.0, text: 'old transcription' },
+            ];
+            (whisper as any).lastSegmentEnd = 32.0;
+            const updated = [
+                { start: 24.9, end: 31.5, text: 'corrected transcription' },
+            ];
+            (whisper as any).mergeSegments(updated, { preferNew: true });
+            expect((whisper as any).segments).toHaveLength(1);
+            expect((whisper as any).segments[0].text).toBe('corrected transcription');
+        });
+
+        it('dedup keeps longer segment when starts are near-identical', () => {
+            const whisper = new Whisper();
+            (whisper as any).segments = [];
+            (whisper as any).lastSegmentEnd = 0;
+            // Both pushed (different enough to not match, but will collide in dedup)
+            const segs = [
+                { start: 10.0, end: 18.0, text: 'full sentence' },
+                { start: 10.1, end: 10.5, text: 'fragment' },
+            ];
+            (whisper as any).mergeSegments(segs, { preferNew: true });
+            // Dedup should keep the longer segment
+            expect((whisper as any).segments).toHaveLength(1);
+            expect((whisper as any).segments[0].text).toBe('full sentence');
+        });
     });
 
     describe('isNoiseOnly', () => {
