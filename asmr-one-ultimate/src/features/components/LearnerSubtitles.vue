@@ -1842,13 +1842,13 @@ function setupStoreWatchers() {
     const ap = (state: KikoeruStoreState) => state.AudioPlayer as APExtended;
 
     // Lyrics watchers — debounced so multiple field changes in one tick trigger a single updateLyrics()
-    add(store.watch((state: KikoeruStoreState) => ap(state).lrcLines, () => scheduleUpdateLyrics(), { immediate: true }));
-    add(store.watch((state: KikoeruStoreState) => ap(state).lyrics, () => scheduleUpdateLyrics(), { immediate: true }));
-    add(store.watch((state: KikoeruStoreState) => ap(state).lyricLines, () => scheduleUpdateLyrics(), { immediate: true }));
-    add(store.watch((state: KikoeruStoreState) => ap(state).subtitleLines, () => scheduleUpdateLyrics(), { immediate: true }));
-    add(store.watch((state: KikoeruStoreState) => ap(state).subtitles, () => scheduleUpdateLyrics(), { immediate: true }));
-    add(store.watch((state: KikoeruStoreState) => (ap(state).subtitle as Record<string, unknown> | undefined)?.lines, () => scheduleUpdateLyrics(), { immediate: true }));
-    add(store.watch((state: KikoeruStoreState) => ap(state).currentLyric, (lyric: unknown) => { if (lyric) scheduleUpdateLyrics(); }));
+    add(store.watch((state: KikoeruStoreState) => ap(state)?.lrcLines, () => scheduleUpdateLyrics(), { immediate: true }));
+    add(store.watch((state: KikoeruStoreState) => ap(state)?.lyrics, () => scheduleUpdateLyrics(), { immediate: true }));
+    add(store.watch((state: KikoeruStoreState) => ap(state)?.lyricLines, () => scheduleUpdateLyrics(), { immediate: true }));
+    add(store.watch((state: KikoeruStoreState) => ap(state)?.subtitleLines, () => scheduleUpdateLyrics(), { immediate: true }));
+    add(store.watch((state: KikoeruStoreState) => ap(state)?.subtitles, () => scheduleUpdateLyrics(), { immediate: true }));
+    add(store.watch((state: KikoeruStoreState) => (ap(state)?.subtitle as Record<string, unknown> | undefined)?.lines, () => scheduleUpdateLyrics(), { immediate: true }));
+    add(store.watch((state: KikoeruStoreState) => ap(state)?.currentLyric, (lyric: unknown) => { if (lyric) scheduleUpdateLyrics(); }));
 
     // Track change via queue[queueIndex]
     add(store.watch((state: KikoeruStoreState) => {

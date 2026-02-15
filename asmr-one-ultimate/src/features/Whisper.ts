@@ -188,7 +188,9 @@ export class Whisper {
     private static gpuRecoveryAttempts = 0;
     private static readonly MAX_GPU_RECOVERY = 3;
     private static webgpuFailed = false;
-    private gpuCrashed = false; // Fatal GPU device loss — persistent crash state
+    private gpuCrashed = false; // GPU device loss — cleared on next transcription attempt
+    private static crashRecoveries = 0;
+    private static readonly MAX_CRASH_RECOVERIES = 10;
     private gpuRecoveryTimer: number | null = null;
     private idleUnloadTimer: number | null = null;
     private loadLeaseRelease: (() => void) | null = null; // GpuScheduler load lease
@@ -419,8 +421,14 @@ export class Whisper {
     private async startTranscription(): Promise<void> {
         if (this.transcribing) return;
         if (this.gpuCrashed) {
-            Logger.warn('[Whisper] startTranscription blocked — GPU crashed this session');
-            return;
+            if (Whisper.crashRecoveries >= Whisper.MAX_CRASH_RECOVERIES) {
+                Logger.warn('[Whisper] startTranscription blocked — too many GPU crash recoveries this session');
+                return;
+            }
+            Whisper.crashRecoveries++;
+            Logger.warn(`[Whisper] Clearing GPU crash state for WASM recovery (attempt ${Whisper.crashRecoveries}/${Whisper.MAX_CRASH_RECOVERIES})`);
+            this.gpuCrashed = false;
+            Whisper.webgpuFailed = true; // Ensure new worker uses WASM
         }
         this.clearIdleUnloadTimer();
 
@@ -1142,8 +1150,14 @@ export class Whisper {
 
     private initWorker(settings: WhisperSettings): void {
         if (this.gpuCrashed) {
-            Logger.warn('[Whisper] initWorker blocked — GPU crashed this session');
-            return;
+            if (Whisper.crashRecoveries >= Whisper.MAX_CRASH_RECOVERIES) {
+                Logger.warn('[Whisper] initWorker blocked — too many GPU crash recoveries this session');
+                return;
+            }
+            Whisper.crashRecoveries++;
+            Logger.warn(`[Whisper] Clearing GPU crash state for WASM worker init (attempt ${Whisper.crashRecoveries}/${Whisper.MAX_CRASH_RECOVERIES})`);
+            this.gpuCrashed = false;
+            Whisper.webgpuFailed = true;
         }
         MLCrashGuard.initStarted('whisper');
         this.ensureWorker();
@@ -1281,6 +1295,7 @@ export class Whisper {
             case 'update': {
                 if (!this.transcribing) return;
                 Whisper.gpuRecoveryAttempts = 0; // GPU is working — reset recovery counter
+                Whisper.crashRecoveries = 0;
                 GpuScheduler.onGpuSuccess('whisper');
                 const update = message as WorkerUpdateMessage;
                 if (typeof update.chunkId === 'number') {
