@@ -68,6 +68,7 @@ export interface KikoeruStore {
     dispatch?: <T = unknown>(type: string, payload?: unknown, options?: unknown) => Promise<T>;
     commit?: (type: string, payload?: unknown, options?: unknown) => void;
     watch?: <T>(getter: (state: KikoeruStoreState) => T, callback: (value: T, oldValue: T) => void, options?: { immediate?: boolean }) => () => void;
+    subscribe?: (fn: (mutation: { type: string; payload?: unknown }, state: KikoeruStoreState) => void) => () => void;
     _actions?: Record<string, unknown>;
 }
 

@@ -10,6 +10,7 @@
 
 import type {
     KikoeruStore,
+    KikoeruStoreState,
     KikoeruApp,
     VueRouter,
     VueRoute,
@@ -143,6 +144,24 @@ export class KikoeruBridge {
         this._unwatchers = [];
 
         const store = this.store;
+
+        // Patch queue tracks after SET_QUEUE — the host's AudioPlayer watcher
+        // accesses track.subtitles.length synchronously during render. Vue 2
+        // queues watchers for nextTick (microtask), so subscribe (synchronous
+        // after mutation) runs BEFORE watchers evaluate, giving us a window
+        // to ensure subtitles exist on every track object.
+        const unsub = store.subscribe?.((mutation: { type: string }, state: KikoeruStoreState) => {
+            if (mutation.type === 'AudioPlayer/SET_QUEUE') {
+                const queue = state.AudioPlayer?.queue;
+                if (Array.isArray(queue)) {
+                    for (const track of queue) {
+                        const t = track as unknown as Record<string, unknown>;
+                        if (t && !t.subtitles) t.subtitles = [];
+                    }
+                }
+            }
+        });
+        if (unsub) this._unwatchers.push(unsub);
 
         // Watch for track changes
         const unwatch1 = store.watch?.(
