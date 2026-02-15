@@ -107,13 +107,6 @@ export class PlaybackController {
         // watcher accesses track.subtitles.length and crashes on undefined.
         const queue = tracks.map(t => ({ ...t, subtitles: (t as any).subtitles || [] }));
 
-        try {
-            this.bridge.commit('AudioPlayer/SET_QUEUE', { queue, index: startIndex });
-        } catch (err) {
-            Logger.error('[PlaybackController] Failed to set queue:', err);
-            return;
-        }
-
         const track = queue[startIndex];
         if (!track) {
             Logger.warn('[PlaybackController] No track at startIndex');
@@ -122,15 +115,23 @@ export class PlaybackController {
 
         Logger.debug('[PlaybackController] Playing track:', track.title || track.hash);
 
-        // Use mutations only — do NOT dispatch the host's playTrack action.
-        // That action may internally re-commit SET_QUEUE with its own track
-        // objects (missing `subtitles`), overwriting our patched queue and
-        // crashing the host's AudioPlayer watcher on track.subtitles.length.
+        // Set queueIndex BEFORE queue — the host's SET_QUEUE mutation sets
+        // state.queue first, triggering watchers synchronously while queueIndex
+        // is still stale. If the old index is out-of-bounds for the new (smaller)
+        // queue, the watcher crashes on queue[staleIndex].subtitles.length.
         try {
             this.bridge.commit('AudioPlayer/SET_TRACK', startIndex);
         } catch {
             Logger.debug('[PlaybackController] SET_TRACK mutation not available');
         }
+
+        try {
+            this.bridge.commit('AudioPlayer/SET_QUEUE', { queue, index: startIndex });
+        } catch (err) {
+            Logger.error('[PlaybackController] Failed to set queue:', err);
+            return;
+        }
+
         try {
             this.bridge.commit('AudioPlayer/SET_PLAYING', true);
         } catch {
