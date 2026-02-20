@@ -973,16 +973,10 @@ function updateLyrics() {
     const fullText = display.fullText;
     const progressiveText = display.displayText;
     if (!fullText) {
-        // Between timed segments or before first line — clear stale text/translation
+        // Between timed segments or before first line — clear stale text
         if (lastWhisperDisplayText) {
             updatePrimaryLine('');
             lastWhisperDisplayText = '';
-        }
-        if (lastDisplayedText || lastSecondaryShown) {
-            updateSecondaryLine('');
-            lastDisplayedText = '';
-            lastSecondaryShown = '';
-            lastText = '';
         }
         refreshVisibility();
         return;
@@ -1177,15 +1171,9 @@ function _updateWhisperDisplay() {
                 }
             }
         } else if (!display.displayText) {
-            // No active segment: clear stale subtitle/translation so timing stays truthful.
-            if (lastWhisperDisplayText || lastDisplayedText || lastSecondaryShown) {
-                updatePrimaryLine('');
-                updateSecondaryLine('');
-                lastWhisperDisplayText = '';
-                lastDisplayedText = '';
-                lastSecondaryShown = '';
-                lastText = '';
-            }
+            // Between segments (gap/silence) — hold previous text visible.
+            // Clearing causes blank flashes and content shift. The next segment
+            // will naturally replace the text when it arrives.
         }
         refreshVisibility();
         return;

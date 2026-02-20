@@ -1149,15 +1149,9 @@ export class LearnerMode {
                         }
                     }
                 } else if (!display.displayText) {
-                    // No active segment: clear stale subtitle/translation.
-                    if (this.lastWhisperDisplayText || this.lastDisplayedText || this.lastSecondaryShown) {
-                        this.updatePrimaryLine('');
-                        this.updateSecondaryLine('', false);
-                        this.lastWhisperDisplayText = '';
-                        this.lastDisplayedText = '';
-                        this.lastSecondaryShown = '';
-                        this.lastText = '';
-                    }
+                    // Between segments (gap/silence) — hold previous text visible.
+                    // Clearing causes blank flashes and content shift. The next segment
+                    // will naturally replace the text when it arrives.
                 }
                 this.updateVisibility();
                 return;
@@ -1261,15 +1255,9 @@ export class LearnerMode {
         const progressiveText = display.displayText;
 
         if (!fullText) {
-            // Between segments or before first line — clear stale text/translation.
-            if (this.lastWhisperDisplayText || this.lastDisplayedText || this.lastSecondaryShown) {
-                this.updatePrimaryLine('');
-                this.updateSecondaryLine('', false);
-                this.lastWhisperDisplayText = '';
-                this.lastDisplayedText = '';
-                this.lastSecondaryShown = '';
-                this.lastText = '';
-            }
+            // Don't clear between subtitle lines — keep last text visible
+            // to avoid text -> empty -> text content shift.
+            // Display is cleared on track change (line ~891) and disable.
             this.updateVisibility();
             return;
         }
