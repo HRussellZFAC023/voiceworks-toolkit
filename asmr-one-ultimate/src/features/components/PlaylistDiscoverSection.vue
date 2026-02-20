@@ -157,13 +157,7 @@ async function loadNextBatch() {
     if (isLoading.value) return;
     if (service.isRateLimitedNow()) return;
 
-    const remaining = allIds.value.filter((id) => {
-        const normalized = id.toLowerCase();
-        if (fetchedIds.has(normalized)) return false;
-        if (service.isFailed(normalized)) return false;
-        if (service.isTransientFailed(normalized)) return false;
-        return true;
-    });
+    const remaining = allIds.value.filter((id) => isFetchableMetadataId(id));
     if (remaining.length === 0) return;
 
     isLoading.value = true;
@@ -191,8 +185,26 @@ async function loadNextBatch() {
     }
 }
 
-function hasRemainingMetadata(): boolean {
-    return allIds.value.some(id => !fetchedIds.has(id.toLowerCase()) && !service.isFailed(id));
+function isFetchableMetadataId(id: string): boolean {
+    const normalized = id.toLowerCase();
+    if (fetchedIds.has(normalized)) return false;
+    if (service.isFailed(normalized)) return false;
+    if (service.isTransientFailed(normalized)) return false;
+    return true;
+}
+
+function hasRemainingMetadata(includeTransientCooldown = true): boolean {
+    return allIds.value.some((id) => {
+        const normalized = id.toLowerCase();
+        if (fetchedIds.has(normalized)) return false;
+        if (service.isFailed(normalized)) return false;
+        if (!includeTransientCooldown && service.isTransientFailed(normalized)) return false;
+        return true;
+    });
+}
+
+function sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 async function warmFilterCoverage() {
@@ -200,11 +212,16 @@ async function warmFilterCoverage() {
     while (token === filterWarmupToken && !collapsed.value && textFilter.value.trim()) {
         if (!hasRemainingMetadata()) return;
         if (service.isRateLimitedNow()) {
-            await new Promise(resolve => setTimeout(resolve, 1200));
+            await sleep(1200);
+            continue;
+        }
+        if (!hasRemainingMetadata(false)) {
+            // Remaining IDs are all under transient cooldown; wait for retry window.
+            await sleep(1200);
             continue;
         }
         if (isLoading.value) {
-            await new Promise(resolve => setTimeout(resolve, 200));
+            await sleep(200);
             continue;
         }
         await loadNextBatch();
