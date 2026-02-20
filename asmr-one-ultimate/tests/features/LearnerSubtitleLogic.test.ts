@@ -12,6 +12,8 @@ import {
     computeTimeFallbackKaraokeIndices as computeTimeFallbackKaraokeIndicesImpl,
 } from '../../src/features/karaokeUtils';
 
+const WORD_REVEAL_DELAY_SEC = 0.002;
+
 // ---------------------------------------------------------------------------
 // Extracted pure functions (mirroring LearnerSubtitles.vue logic)
 // ---------------------------------------------------------------------------
@@ -53,7 +55,8 @@ function getProgressiveText(
 
     const words = line.words;
     if (Array.isArray(words) && words.length > 0) {
-        const visible = words.filter(w => w.start <= now + 0.01).map(w => (w.text || '').trim()).filter(Boolean);
+        const revealCutoff = Math.max(0, now - WORD_REVEAL_DELAY_SEC);
+        const visible = words.filter(w => w.start <= revealCutoff).map(w => (w.text || '').trim()).filter(Boolean);
         if (visible.length === 0) return '';
         return /\s/.test(text) ? visible.join(' ') : visible.join('');
     }
@@ -257,6 +260,21 @@ describe('Progressive text (getProgressiveText)', () => {
             words: [{ start: 5.5, end: 10, text: 'test' }],
         };
         expect(getProgressiveText(line, 5)).toBe('');
+    });
+
+    it('does not reveal next word before its start boundary', () => {
+        const line = {
+            time: 0, endTime: 5, text: 'hello world',
+            words: [
+                { start: 1.0, end: 2.0, text: 'hello' },
+                { start: 2.0, end: 3.5, text: 'world' },
+            ],
+        };
+
+        // Just before boundary (including jitter margin) should still show only first word.
+        expect(getProgressiveText(line, 2.001)).toBe('hello');
+        // After boundary + reveal delay, next word may appear.
+        expect(getProgressiveText(line, 2.003)).toBe('hello world');
     });
 });
 

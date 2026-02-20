@@ -102,6 +102,7 @@ let whisperTickerInterval = 80;
 const subtitleLeadSec = 1.2;
 const subtitleAppendWindowSec = 1.5;
 const subtitleAppendMaxChars = 140;
+const WORD_REVEAL_DELAY_SEC = 0.002;
 
 /** Adjust lead time for playback rate: at 2x, need 2x audio-seconds of lead for same real-world reaction time */
 function effectiveLead(baseLead: number): number {
@@ -639,7 +640,10 @@ function getProgressiveText(
 
     const words = (line as { words?: Array<{ start: number; end: number; text: string }> }).words;
     if (Array.isArray(words) && words.length > 0) {
-        const visible = words.filter(w => w.start <= now + 0.01).map(w => (w.text || '').trim()).filter(Boolean);
+        // Never reveal the next word early: use a tiny negative cutoff so
+        // float jitter doesn't advance highlighting before speech starts.
+        const revealCutoff = Math.max(0, now - WORD_REVEAL_DELAY_SEC);
+        const visible = words.filter(w => w.start <= revealCutoff).map(w => (w.text || '').trim()).filter(Boolean);
         if (visible.length === 0) return '';
         return /\s/.test(text) ? visible.join(' ') : visible.join('');
     }

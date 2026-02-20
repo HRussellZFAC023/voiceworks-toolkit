@@ -28,6 +28,7 @@ interface LyricLine {
 }
 
 export class LearnerMode {
+    private static readonly WORD_REVEAL_DELAY_SEC = 0.002;
     private bridge: KikoeruBridge;
     private expanded: HTMLElement | null = null;
     private collapsed: HTMLElement | null = null;
@@ -2182,8 +2183,10 @@ export class LearnerMode {
         if (Config.get('segmentMode')) return text;
         const words = (line as { words?: Array<{ start: number; end: number; text: string }> }).words;
         if (Array.isArray(words) && words.length > 0) {
-            // Trim leading spaces from Whisper word outputs (e.g., " hello" → "hello")
-            const visible = words.filter((w) => w.start <= now + 0.01).map((w) => (w.text || '').trim()).filter(Boolean);
+            // Never reveal the next word early: use a tiny negative cutoff so
+            // float jitter doesn't advance highlighting before speech starts.
+            const revealCutoff = Math.max(0, now - LearnerMode.WORD_REVEAL_DELAY_SEC);
+            const visible = words.filter((w) => w.start <= revealCutoff).map((w) => (w.text || '').trim()).filter(Boolean);
             if (visible.length === 0) return '';
             return /\s/.test(text) ? visible.join(' ') : visible.join('');
         }
