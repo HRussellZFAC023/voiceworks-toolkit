@@ -28,6 +28,11 @@ describe('Whisper', () => {
     beforeEach(() => {
         vi.restoreAllMocks();
         document.body.innerHTML = '';
+        (Whisper as any).instance = null;
+        (Whisper as any).webgpuFailed = false;
+        (Whisper as any).webgpuRetryNotBefore = 0;
+        (Whisper as any).gpuRecoveryAttempts = 0;
+        (Whisper as any).crashRecoveries = 0;
     });
 
     describe('getWhisperSettings', () => {
@@ -182,6 +187,61 @@ describe('Whisper', () => {
             const whisper = new Whisper();
             const isGpuError = (whisper as any).isGpuErrorMessage('Mapping WebGPU buffer failed: Invalid buffer');
             expect(isGpuError).toBe(true);
+        });
+    });
+
+    describe('webgpu retry gate', () => {
+        it('re-enables WebGPU once the cooldown has elapsed', () => {
+            vi.spyOn(Config, 'get').mockImplementation((key) => {
+                if (key === 'forceWhisperWasm') return false;
+                return false;
+            });
+            vi.spyOn(DeviceCapabilities, 'profile', 'get').mockReturnValue({
+                tier: 'full',
+                hasGpu: true,
+                memory: 16,
+                cores: 8,
+                isTouch: false,
+                isMobile: false,
+                screenWidth: 1920,
+                reason: 'full-tier test profile',
+            } as any);
+
+            const whisper = new Whisper();
+            (Whisper as any).webgpuFailed = true;
+            (Whisper as any).webgpuRetryNotBefore = Date.now() - 1;
+            (whisper as any).gpuCrashed = true;
+
+            (whisper as any).maybeReenableWebgpu('test');
+
+            expect((Whisper as any).webgpuFailed).toBe(false);
+            expect((Whisper as any).webgpuRetryNotBefore).toBe(0);
+            expect((whisper as any).gpuCrashed).toBe(false);
+        });
+
+        it('keeps WebGPU disabled while cooldown is still active', () => {
+            vi.spyOn(Config, 'get').mockImplementation((key) => {
+                if (key === 'forceWhisperWasm') return false;
+                return false;
+            });
+            vi.spyOn(DeviceCapabilities, 'profile', 'get').mockReturnValue({
+                tier: 'full',
+                hasGpu: true,
+                memory: 16,
+                cores: 8,
+                isTouch: false,
+                isMobile: false,
+                screenWidth: 1920,
+                reason: 'full-tier test profile',
+            } as any);
+
+            const whisper = new Whisper();
+            (Whisper as any).webgpuFailed = true;
+            (Whisper as any).webgpuRetryNotBefore = Date.now() + 30_000;
+
+            (whisper as any).maybeReenableWebgpu('test');
+
+            expect((Whisper as any).webgpuFailed).toBe(true);
         });
     });
 

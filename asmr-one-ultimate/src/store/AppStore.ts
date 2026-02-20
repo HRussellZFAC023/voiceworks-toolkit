@@ -55,8 +55,8 @@ const CONFIG_DEFAULTS: PluginConfig = {
     showJP: true,
     subtitleLang: 'en',
     primarySubtitleLang: 'ja',
-    karaokeMode: false,
-    segmentMode: false,
+    karaokeMode: true,
+    segmentMode: true,
 
     // AI Features
     whisperModel: 'onnx-community/kotoba-whisper-v2.2-ONNX',

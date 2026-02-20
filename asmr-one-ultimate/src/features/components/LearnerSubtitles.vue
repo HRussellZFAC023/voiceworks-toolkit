@@ -973,10 +973,16 @@ function updateLyrics() {
     const fullText = display.fullText;
     const progressiveText = display.displayText;
     if (!fullText) {
-        // Between timed segments or before first line — clear stale text
+        // Between timed segments or before first line — clear stale text/translation
         if (lastWhisperDisplayText) {
             updatePrimaryLine('');
             lastWhisperDisplayText = '';
+        }
+        if (lastDisplayedText || lastSecondaryShown) {
+            updateSecondaryLine('');
+            lastDisplayedText = '';
+            lastSecondaryShown = '';
+            lastText = '';
         }
         refreshVisibility();
         return;
@@ -1171,9 +1177,15 @@ function _updateWhisperDisplay() {
                 }
             }
         } else if (!display.displayText) {
-            // Between segments (gap/silence) — hold previous text visible.
-            // Clearing causes blank flashes and content shift. The next segment
-            // will naturally replace the text when it arrives.
+            // No active segment: clear stale subtitle/translation so timing stays truthful.
+            if (lastWhisperDisplayText || lastDisplayedText || lastSecondaryShown) {
+                updatePrimaryLine('');
+                updateSecondaryLine('');
+                lastWhisperDisplayText = '';
+                lastDisplayedText = '';
+                lastSecondaryShown = '';
+                lastText = '';
+            }
         }
         refreshVisibility();
         return;
@@ -1261,7 +1273,9 @@ function handleWhisperUpdate(payload: WhisperUpdatePayload) {
     whisperText = payload.text || '';
     ensureWhisperTicker(whisperLive ? 80 : 200);
     if (Array.isArray(payload.segments) && payload.segments.length > 0) {
-        const mapped = payload.segments.map(s => ({ time: s.start, endTime: s.end, text: s.text, words: s.words }));
+        const mapped = payload.segments
+            .map(s => ({ time: s.start, endTime: s.end, text: s.text, words: s.words }))
+            .sort((a, b) => a.time - b.time);
         const newLines = splitSubtitleSegments(mapped);
         if (newLines.length > 0) setTimeout(() => preTranslateAll(newLines), 20);
         whisperLines = newLines;

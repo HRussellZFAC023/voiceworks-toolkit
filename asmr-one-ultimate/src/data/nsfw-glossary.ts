@@ -887,37 +887,33 @@ const WHISPER_CORRECTIONS: readonly [hallucinated: string, correct: string][] = 
     // Whisper hears safe kanji for explicit terms (same/similar reading)
     ['写生', '射精'],          // shasei (sketching) → shasei (ejaculation) — identical reading
     ['お寿司', 'おちんぽ'],    // osushi → ochinpo — acoustic substitution
+    ['寿司', 'ちんぽ'],        // sushi → chinpo — shorter variant
     ['尋抱', 'ちんぽ'],        // xunbao-like CN hallucination heard in JP NSFW context
     ['同程', '童貞'],          // doucheng (CN company) → doutei (virgin) — kanji substitution
     ['同定', '童貞'],          // doutei (identification) → doutei (virgin) — same reading
     ['重生', '中性'],          // random CN hallucination in JP segments
+    ['おやつ', 'おちんぽ'],    // oyatsu (snack) -> ochinpo in explicit context
+    ['スナック', 'ちんぽ'],    // katakana snack hallucination
+    ['sushi', 'ちんぽ'],      // romanized hallucination in JP segments
+    ['snack', 'ちんぽ'],      // romanized hallucination in JP segments
+    ['virgin', '童貞'],       // English hallucination for doutei
+    ['dotei', '童貞'],        // romanized Japanese term
 
-    // Whisper inserts random English in Japanese segments (training data bleed)
-    // These are full-word removals (the English word is pure noise, not code-switch)
-    // Using regex patterns handled separately below
 ];
 
 /** Compiled regex for single-pass substring replacement of hallucinated text */
 const whisperCorrectionMap = new Map<string, string>();
 const whisperCorrectionPatterns: string[] = [];
+const sortedWhisperCorrections = [...WHISPER_CORRECTIONS]
+    .sort((a, b) => b[0].length - a[0].length);
 
-for (const [wrong, correct] of WHISPER_CORRECTIONS) {
-    whisperCorrectionMap.set(wrong, correct);
+for (const [wrong, correct] of sortedWhisperCorrections) {
+    whisperCorrectionMap.set(wrong.toLowerCase(), correct);
     whisperCorrectionPatterns.push(escapeRegex(wrong));
 }
 
-// English words that Whisper hallucinates into Japanese-only segments.
-// Matched as whole words (\b boundaries) to avoid false positives.
-const ENGLISH_HALLUCINATION_WORDS = [
-    'archipelago', 'subscribe', 'ambassador', 'algorithm',
-];
-const englishHallucinationRe = new RegExp(
-    '\\b(' + ENGLISH_HALLUCINATION_WORDS.join('|') + ')\\b',
-    'gi',
-);
-
 const whisperCorrectionRe = whisperCorrectionPatterns.length
-    ? new RegExp(whisperCorrectionPatterns.join('|'), 'g')
+    ? new RegExp(whisperCorrectionPatterns.join('|'), 'gi')
     : null;
 
 /**
@@ -931,16 +927,8 @@ export function correctWhisperText(text: string): string {
     // 1. Fix Japanese hallucinated words (kanji/kana substitutions)
     if (whisperCorrectionRe) {
         result = result.replace(whisperCorrectionRe, (match) =>
-            whisperCorrectionMap.get(match) ?? match,
+            whisperCorrectionMap.get(match.toLowerCase()) ?? match,
         );
-    }
-
-    // 2. Remove stray English hallucination words from Japanese segments
-    // Only apply if the text is predominantly CJK (avoid stripping legit EN in mixed text)
-    const cjkCount = (result.match(/[\u3040-\u30ff\u3400-\u9fff\uff00-\uffef]/g) || []).length;
-    const totalChars = result.replace(/\s/g, '').length;
-    if (totalChars > 0 && cjkCount / totalChars > 0.5) {
-        result = result.replace(englishHallucinationRe, '').replace(/\s{2,}/g, ' ').trim();
     }
 
     return result;

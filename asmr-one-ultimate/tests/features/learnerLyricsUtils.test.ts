@@ -106,14 +106,16 @@ describe('learnerLyricsUtils', () => {
     });
 
     describe('normalizeLyricLines', () => {
-        it('normalizes mixed seconds/milliseconds and end time aliases', () => {
+        it('normalizes mixed seconds/milliseconds, end-time aliases, and sorts chronologically', () => {
             const normalized = normalizeLyricLines([
+                { time: 3.2, endTime: 4.5, content: 'late line' },
                 { time: 1500, end: 2500, text: 'ms line' },
-                { startTime: '3.2', endTime: '4.5', content: 's line' },
+                { startTime: '2.1', endTime: '2.9', content: 'middle line' },
             ]);
             expect(normalized).toEqual([
-                { time: 1.5, endTime: 2500, text: 'ms line' },
-                { time: 3.2, endTime: 4.5, text: 's line' },
+                { time: 1.5, endTime: 2.5, text: 'ms line', words: undefined },
+                { time: 2.1, endTime: 2.9, text: 'middle line', words: undefined },
+                { time: 3.2, endTime: 4.5, text: 'late line', words: undefined },
             ]);
         });
     });

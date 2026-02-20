@@ -201,6 +201,8 @@ export class Whisper {
     private static gpuRecoveryAttempts = 0;
     private static readonly MAX_GPU_RECOVERY = 3;
     private static webgpuFailed = false;
+    private static webgpuRetryNotBefore = 0;
+    private static readonly WEBGPU_RETRY_COOLDOWN_MS = 60 * 1000;
     private gpuCrashed = false; // GPU device loss — cleared on next transcription attempt
     private static crashRecoveries = 0;
     private static readonly MAX_CRASH_RECOVERIES = 10;
@@ -330,7 +332,7 @@ export class Whisper {
             if (source === 'whisper') return; // Already handled by our own error path
             if (Whisper.webgpuFailed) return; // Already on WASM
             Logger.warn(`[Whisper] GPU device lost in ${source} worker — switching to WASM`);
-            Whisper.webgpuFailed = true;
+            this.markWebgpuFailed(`device-lost-broadcast:${source}`);
             if (this.worker) {
                 this.worker.postMessage({ type: 'skip-webgpu' });
             }
@@ -340,6 +342,9 @@ export class Whisper {
             if (key !== 'forceWhisperWasm') return;
             const enabled = value === true;
             Logger.log(`[Whisper] Force WASM ${enabled ? 'enabled' : 'disabled'} via settings`);
+            if (!enabled) {
+                this.clearWebgpuFailure('force-wasm-disabled');
+            }
 
             if (!this.worker) return;
             const wasTranscribing = this.transcribing;
@@ -448,6 +453,35 @@ export class Whisper {
         return Config.get('forceWhisperWasm') === true;
     }
 
+    private markWebgpuFailed(reason: string): void {
+        Whisper.webgpuFailed = true;
+        if (this.shouldForceWasm() || !DeviceCapabilities.profile.hasGpu) {
+            Whisper.webgpuRetryNotBefore = 0;
+            return;
+        }
+        Whisper.webgpuRetryNotBefore = Date.now() + Whisper.WEBGPU_RETRY_COOLDOWN_MS;
+        Logger.warn(`[Whisper] WebGPU disabled (${reason}); retry scheduled in ${Math.round(Whisper.WEBGPU_RETRY_COOLDOWN_MS / 1000)}s`);
+    }
+
+    private maybeReenableWebgpu(reason: string): boolean {
+        if (this.shouldForceWasm()) return false;
+        if (!Whisper.webgpuFailed) return false;
+        if (!DeviceCapabilities.profile.hasGpu) return false;
+        if (Whisper.webgpuRetryNotBefore > Date.now()) return false;
+        Whisper.webgpuFailed = false;
+        Whisper.webgpuRetryNotBefore = 0;
+        this.gpuCrashed = false;
+        Logger.warn(`[Whisper] Retrying WebGPU after cooldown (${reason})`);
+        return true;
+    }
+
+    private clearWebgpuFailure(reason: string): void {
+        Whisper.webgpuFailed = false;
+        Whisper.webgpuRetryNotBefore = 0;
+        this.gpuCrashed = false;
+        Logger.debug(`[Whisper] Cleared WebGPU failure lock (${reason})`);
+    }
+
     // ------------------------------------------------------------------------
     // Transcription control
     // ------------------------------------------------------------------------
@@ -464,15 +498,18 @@ export class Whisper {
 
     private async startTranscription(): Promise<void> {
         if (this.transcribing) return;
+        const reopenedWebgpu = this.maybeReenableWebgpu('start-transcription');
+        if (reopenedWebgpu && this.worker) {
+            this.resetWorker('webgpu-retry');
+        }
         if (this.gpuCrashed) {
             if (Whisper.crashRecoveries >= Whisper.MAX_CRASH_RECOVERIES) {
                 Logger.warn('[Whisper] startTranscription blocked — too many GPU crash recoveries this session');
                 return;
             }
             Whisper.crashRecoveries++;
-            Logger.warn(`[Whisper] Clearing GPU crash state for WASM recovery (attempt ${Whisper.crashRecoveries}/${Whisper.MAX_CRASH_RECOVERIES})`);
+            Logger.warn(`[Whisper] Clearing GPU crash state for recovery (attempt ${Whisper.crashRecoveries}/${Whisper.MAX_CRASH_RECOVERIES})`);
             this.gpuCrashed = false;
-            Whisper.webgpuFailed = true; // Ensure new worker uses WASM
         }
         this.clearIdleUnloadTimer();
 
@@ -1099,6 +1136,7 @@ export class Whisper {
         if (this.worker) return;
         this.worker = createWhisperWorker();
         this.worker.onmessage = (e: MessageEvent<WorkerMessage>) => this.handleWorkerMessage(e);
+        this.maybeReenableWebgpu('ensure-worker');
 
         // Only skip WebGPU if it failed THIS session — don't inherit from translation's
         // cached dtype, as the issue may have been transient (driver/Chrome update).
@@ -1122,9 +1160,12 @@ export class Whisper {
                 error: errObj ? String(errObj) : undefined,
             };
             Logger.error('[Whisper] Worker error:', details);
-            if ((isGpuError || isTerminalGpuFailure) && !Whisper.webgpuFailed) {
-                Whisper.webgpuFailed = true;
-                EventBus.emit('webgpu:failed', { source: 'whisper' });
+            if (isGpuError || isTerminalGpuFailure) {
+                const firstFailure = !Whisper.webgpuFailed;
+                this.markWebgpuFailed(isTerminalGpuFailure ? 'terminal-worker-error' : 'worker-error');
+                if (firstFailure) {
+                    EventBus.emit('webgpu:failed', { source: 'whisper' });
+                }
                 Logger.warn('[Whisper] GPU worker error — broadcasting failure:', errorMsg);
             }
             this.clearModelLoadTimer();
@@ -1203,9 +1244,9 @@ export class Whisper {
                 return;
             }
             Whisper.crashRecoveries++;
-            Logger.warn(`[Whisper] Clearing GPU crash state for WASM worker init (attempt ${Whisper.crashRecoveries}/${Whisper.MAX_CRASH_RECOVERIES})`);
+            Logger.warn(`[Whisper] Clearing GPU crash state for worker init (attempt ${Whisper.crashRecoveries}/${Whisper.MAX_CRASH_RECOVERIES})`);
             this.gpuCrashed = false;
-            Whisper.webgpuFailed = true;
+            this.maybeReenableWebgpu('init-worker');
         }
         MLCrashGuard.initStarted('whisper');
         this.ensureWorker();
@@ -1410,8 +1451,11 @@ export class Whisper {
                 Logger.error('[Whisper] Fatal GPU device loss:', deviceLostMsg);
                 this.gpuCrashed = true;
                 EventBus.emit('gpu:device-lost', { worker: 'whisper' as const });
-                Whisper.webgpuFailed = true;
-                EventBus.emit('webgpu:failed', { source: 'whisper' });
+                const firstFailure = !Whisper.webgpuFailed;
+                this.markWebgpuFailed('gpu-device-lost');
+                if (firstFailure) {
+                    EventBus.emit('webgpu:failed', { source: 'whisper' });
+                }
 
                 // Stop transcription if running
                 if (this.transcribing) {
@@ -1462,9 +1506,12 @@ export class Whisper {
                 const isTerminalGpuFailure = isWebgpuRequiredError || isAllGpuFailed;
                 const isExplicitDeviceLoss = this.isExplicitDeviceLossMessage(errMsg);
 
-                if ((isGpuError || isTerminalGpuFailure) && !Whisper.webgpuFailed) {
-                    Whisper.webgpuFailed = true;
-                    EventBus.emit('webgpu:failed', { source: 'whisper' });
+                if (isGpuError || isTerminalGpuFailure) {
+                    const firstFailure = !Whisper.webgpuFailed;
+                    this.markWebgpuFailed(isTerminalGpuFailure ? 'terminal-worker-message' : 'worker-message');
+                    if (firstFailure) {
+                        EventBus.emit('webgpu:failed', { source: 'whisper' });
+                    }
                     if (isExplicitDeviceLoss || isTerminalGpuFailure) {
                         // Broadcast only on explicit/terminal device-loss class failures.
                         EventBus.emit('gpu:device-lost', { worker: 'whisper' as const });

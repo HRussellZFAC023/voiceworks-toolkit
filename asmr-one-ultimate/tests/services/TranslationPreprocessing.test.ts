@@ -240,4 +240,23 @@ describe('correctWhisperText', () => {
     it('fixes known NSFW mishearing 尋抱 -> ちんぽ', () => {
         expect(correctWhisperText('尋抱して')).toBe('ちんぽして');
     });
+
+    it.each([
+        ['写生したい', '射精したい'],
+        ['お寿司が好き', 'おちんぽが好き'],
+        ['寿司って言うな', 'ちんぽって言うな'],
+        ['Sushiって言うな', 'ちんぽって言うな'],
+        ['Snack じゃない', 'ちんぽ じゃない'],
+        ['同程です', '童貞です'],
+        ['同定です', '童貞です'],
+        ['virginじゃない', '童貞じゃない'],
+        ['doteiじゃない', '童貞じゃない'],
+    ])('applies whisper correction %s -> %s', (input, expected) => {
+        expect(correctWhisperText(input)).toBe(expected);
+    });
+
+    it('does not strip plain English words unless explicitly corrected', () => {
+        expect(correctWhisperText('archipelago')).toBe('archipelago');
+        expect(correctWhisperText('algorithm')).toBe('algorithm');
+    });
 });

@@ -56,6 +56,11 @@ describe('AppStore', () => {
             expect(value).toBe(false);
         });
 
+        it('enables karaoke + segment mode by default', () => {
+            expect(AppStore.getConfig('karaokeMode')).toBe(true);
+            expect(AppStore.getConfig('segmentMode')).toBe(true);
+        });
+
         it('should set and get config value', () => {
             AppStore.setConfig('shuffle', true);
             expect(AppStore.getConfig('shuffle')).toBe(true);

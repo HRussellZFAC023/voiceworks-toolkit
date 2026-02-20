@@ -1149,9 +1149,15 @@ export class LearnerMode {
                         }
                     }
                 } else if (!display.displayText) {
-                    // Between segments (gap/silence) — hold previous text visible.
-                    // Clearing causes blank flashes and content shift. The next segment
-                    // will naturally replace the text when it arrives.
+                    // No active segment: clear stale subtitle/translation.
+                    if (this.lastWhisperDisplayText || this.lastDisplayedText || this.lastSecondaryShown) {
+                        this.updatePrimaryLine('');
+                        this.updateSecondaryLine('', false);
+                        this.lastWhisperDisplayText = '';
+                        this.lastDisplayedText = '';
+                        this.lastSecondaryShown = '';
+                        this.lastText = '';
+                    }
                 }
                 this.updateVisibility();
                 return;
@@ -1255,9 +1261,15 @@ export class LearnerMode {
         const progressiveText = display.displayText;
 
         if (!fullText) {
-            // Don't clear between subtitle lines — keep last text visible
-            // to avoid text → empty → text content shift.
-            // Display is cleared on track change (line ~891) and disable.
+            // Between segments or before first line — clear stale text/translation.
+            if (this.lastWhisperDisplayText || this.lastDisplayedText || this.lastSecondaryShown) {
+                this.updatePrimaryLine('');
+                this.updateSecondaryLine('', false);
+                this.lastWhisperDisplayText = '';
+                this.lastDisplayedText = '';
+                this.lastSecondaryShown = '';
+                this.lastText = '';
+            }
             this.updateVisibility();
             return;
         }
@@ -1397,12 +1409,14 @@ export class LearnerMode {
         this.whisperText = payload.text || '';
         this.ensureWhisperTicker(this.whisperLive ? 80 : 200);
         if (Array.isArray(payload.segments) && payload.segments.length > 0) {
-            const mapped = payload.segments.map((segment) => ({
-                time: segment.start,
-                endTime: segment.end,
-                text: segment.text,
-                words: segment.words,
-            }));
+            const mapped = payload.segments
+                .map((segment) => ({
+                    time: segment.start,
+                    endTime: segment.end,
+                    text: segment.text,
+                    words: segment.words,
+                }))
+                .sort((a, b) => a.time - b.time);
             const newWhisperLines = splitSubtitleSegments(mapped);
 
             // Pre-translate whisper segments in background.

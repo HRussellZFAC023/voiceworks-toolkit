@@ -269,12 +269,30 @@ export function parseSubtitleContent(content: string): LyricLine[] {
     return fromVtt.length > 0 ? fromVtt : parseLrcContent(content);
 }
 
+function normalizeTimeValue(value: unknown, fallback: number): number {
+    const parsed = typeof value === 'number' ? value : parseFloat(String(value ?? fallback));
+    if (!Number.isFinite(parsed)) return fallback;
+    // Some host payloads report milliseconds, others report seconds.
+    return parsed > 1000 ? parsed / 1000 : parsed;
+}
+
+function normalizeOptionalTimeValue(value: unknown): number | undefined {
+    if (value == null) return undefined;
+    const parsed = normalizeTimeValue(value, NaN);
+    return Number.isFinite(parsed) ? parsed : undefined;
+}
+
 export function normalizeLyricLines(lines: Array<Record<string, unknown>>): LyricLine[] {
-    return lines.map((line) => ({
-        time: typeof line.time === 'number'
-            ? (line.time > 1000 ? line.time / 1000 : line.time)
-            : parseFloat(String(line.time ?? line.start ?? line.startTime ?? 0)),
-        endTime: line.end != null || line.endTime != null ? parseFloat(String(line.end ?? line.endTime)) : undefined,
-        text: String(line.text ?? line.content ?? ''),
-    }));
+    const normalized = lines.map((line) => {
+        const time = normalizeTimeValue(line.time ?? line.start ?? line.startTime, 0);
+        const endTime = normalizeOptionalTimeValue(line.end ?? line.endTime);
+        return {
+            time,
+            endTime: endTime != null && endTime > time ? endTime : undefined,
+            text: String(line.text ?? line.content ?? line.lyric ?? ''),
+            words: Array.isArray(line.words) ? line.words as LyricWord[] : undefined,
+        } satisfies LyricLine;
+    });
+    normalized.sort((a, b) => a.time - b.time);
+    return normalized;
 }
