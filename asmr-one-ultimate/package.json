@@ -1,8 +1,8 @@
 {
   "name": "asmr-one-ultimate",
-  "description": "All-in-one enhancement suite for asmr.one — on-device Whisper transcription, local neural translation, AI semantic search, radio mode, learner mode, JPDB vocabulary mining, media viewer, and 30+ features running locally with WebGPU acceleration.",
+  "description": "Upgrade asmr.one with an all-in-one power suite: on-device Whisper transcription, local neural JA/CN→EN translation, AI semantic search, radio mode, learner mode with dual-language subtitles, JPDB vocabulary mining, media viewer, audio visualizer, auto-progress tracking, keyboard shortcuts, playlist mode, offline caching, and more. Everything runs locally in your browser with WebGPU acceleration.",
   "private": false,
-  "version": "131",
+  "version": "132",
   "type": "module",
   "scripts": {
     "dev": "vite",
