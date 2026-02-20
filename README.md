@@ -1,6 +1,6 @@
 # Voiceworks Toolkit
 
-Tools for Japanese language learning and library management with native voiceworks from DLsite and [asmr.one](https://asmr.one).
+Tools for Japanese language learning and library management with native voiceworks from DLsite and [asmr.one](https://as.mr).
 
 ## [Voiceworks Ultimate](asmr-one-ultimate/) — Browser Enhancement Suite
 
