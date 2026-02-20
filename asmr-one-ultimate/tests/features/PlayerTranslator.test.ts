@@ -120,4 +120,31 @@ describe('PlayerTranslator', () => {
         expect(trackEl.textContent).toBe('old-track.mp4');
         expect(subtitleEl.textContent).toBe('New Work Title');
     });
+
+    it('clears stale translated-tags attributes/classes in reused player nodes', () => {
+        document.body.innerHTML = `
+            <div class="audio-player">
+                <div
+                    class="q-item__label asmr-translated asmr-worktree-translation"
+                    data-asmrtag="n20_07_安眠用耳かき（左）.wav"
+                    data-asmrtag-state="done"
+                    data-asmrtag-scope="01534375|/work/RJ01534375?path=%5B%22WAV%22%5D"
+                    data-asmrtag-translation="Track 1: Extra-large elf's sweet embrace, hug kiss & ear licking.mp3"
+                >
+                    n20_07_安眠用耳かき（左）.wav
+                </div>
+            </div>
+        `;
+
+        const translator = new PlayerTranslator();
+        (translator as any).resetTranslationState();
+
+        const el = document.querySelector('.audio-player .q-item__label') as HTMLElement;
+        expect(el.hasAttribute('data-asmrtag')).toBe(false);
+        expect(el.hasAttribute('data-asmrtag-state')).toBe(false);
+        expect(el.hasAttribute('data-asmrtag-scope')).toBe(false);
+        expect(el.hasAttribute('data-asmrtag-translation')).toBe(false);
+        expect(el.classList.contains('asmr-translated')).toBe(false);
+        expect(el.classList.contains('asmr-worktree-translation')).toBe(false);
+    });
 });

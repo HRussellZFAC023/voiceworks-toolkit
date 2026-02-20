@@ -131,6 +131,29 @@ export class PlayerTranslator {
                 delete el.dataset.asmrTranslatedText;
             }
 
+            // Also clear TranslatedTags state in player surfaces.
+            // Footer/player rows can be DOM-reused between track changes, and stale
+            // data-asmrtag* attributes keep old translated titles visible via ::after.
+            const translatedTagEls = container.querySelectorAll<HTMLElement>(
+                '[data-asmrtag], [data-asmrtag-state], [data-asmrtag-scope], [data-asmrtag-translation], .asmr-translated, .asmr-worktree-translation'
+            );
+            for (const el of translatedTagEls) {
+                const original = el.dataset.asmrtag;
+                if (original && el.classList.contains('asmr-translated')) {
+                    const currentText = (el.textContent || '').trim();
+                    if (currentText !== original && currentText.includes(original)) {
+                        el.textContent = original;
+                    }
+                }
+                delete el.dataset.asmrtag;
+                delete el.dataset.asmrtagState;
+                delete el.dataset.asmrtagUntil;
+                delete el.dataset.asmrtagScope;
+                delete el.dataset.asmrtagTranslation;
+                el.classList.remove('asmr-translated');
+                el.classList.remove('asmr-worktree-translation');
+            }
+
             const marquees = container.querySelectorAll<HTMLElement>('.asmr-marquee-fix');
             for (const marquee of marquees) {
                 marquee.classList.remove('asmr-marquee-fix');
