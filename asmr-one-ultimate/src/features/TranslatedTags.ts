@@ -16,7 +16,7 @@ interface RawTag extends TagEntry {
 
 declare const unsafeWindow: Window & typeof globalThis;
 
-const TRANSLATED_TAGS_VERSION = '2026-02-03.5';
+const TRANSLATED_TAGS_VERSION = '2026-02-03.6';
 const TAG_TRANSLATION_PRIORITY = Priority.NORMAL;
 const globalWindow = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window) as Window & {
     __ASMR_TRANSLATED_TAGS__?: TranslatedTags;
@@ -413,7 +413,14 @@ export class TranslatedTags {
             // 3. Breadcrumbs
             const breadcrumbs = Array.from(document.querySelectorAll('#work-tree .q-breadcrumbs__el span, .work-tree .q-breadcrumbs__el span')) as HTMLElement[];
             for (const span of breadcrumbs) {
-                const text = this.extractBaseText(span);
+                const rawText = this.extractBaseText(span);
+                const text = this.stripLegacyInlineTranslationSuffix(rawText);
+                if (text !== rawText) {
+                    // Legacy behavior translated breadcrumb text inline.
+                    // Restore clean base text before applying worktree-style suffix translation.
+                    this.clearTranslationPending(span);
+                    span.textContent = text;
+                }
                 if (!text || !this.looksJapanese(text)) continue;
                 if (cnOnlyMode && !isChinese(text)) continue;
                 const scopeKey = this.getCurrentWorkTreeKey();
@@ -421,7 +428,11 @@ export class TranslatedTags {
                 if (this.shouldSkipAutoTranslate(text, targetLang)) continue;
 
                 this.markTranslationPending(span, text, scopeKey);
-                pending.push({ el: span, originalText: text, translateKey: text, format: cnOnlyMode ? 'raw' : 'pair', scopeKey, apply: (v) => { span.textContent = v; } });
+                if (cnOnlyMode) {
+                    pending.push({ el: span, originalText: text, translateKey: text, format: 'raw', scopeKey, apply: (v) => { span.textContent = v; } });
+                } else {
+                    pending.push({ el: span, originalText: text, translateKey: text, format: 'worktree', scopeKey, apply: (v) => { this.applyWorkTreeTranslation(span, text, v); } });
+                }
             }
 
             // 4. Anchors
@@ -742,6 +753,27 @@ export class TranslatedTags {
      */
     private hasExistingRomanization(text: string): boolean {
         return /\([A-Za-z][-A-Za-z\s.,!?;:'"…()]*\)\s*$/.test(text);
+    }
+
+    /**
+     * Removes trailing inline translation payloads from legacy pair format:
+     * "Japanese (...English...)" => "Japanese".
+     *
+     * This is intentionally conservative:
+     * - Only strips trailing parenthesized chunks that contain Latin letters.
+     * - Leaves chunks that still contain CJK (e.g. "(CV: 田中)") untouched.
+     */
+    private stripLegacyInlineTranslationSuffix(text: string): string {
+        let next = text.trim();
+        while (next.length > 0) {
+            const match = next.match(/^(.*)\s+\(([^()]*)\)\s*$/);
+            if (!match) break;
+            const body = match[2].trim();
+            if (!body || !/[A-Za-z]/.test(body)) break;
+            if (/[\u3040-\u30ff\u4e00-\u9faf]/.test(body)) break;
+            next = match[1].trim();
+        }
+        return next;
     }
 
     private getFileTranslationInfo(text: string): { original: string; input: string; ext: string } | null {

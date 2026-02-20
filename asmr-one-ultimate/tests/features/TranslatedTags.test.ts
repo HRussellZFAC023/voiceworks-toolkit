@@ -207,4 +207,56 @@ describe('TranslatedTags', () => {
         expect(chipContent.textContent).toBe('耳かき');
         expect(vi.mocked(TranslationService.translateBatch)).not.toHaveBeenCalled();
     });
+
+    it('should keep breadcrumb base text stable and apply translation as worktree suffix', async () => {
+        await bridge.initialize();
+        vi.mocked(TranslationService.translateBatch).mockResolvedValue(['Main story']);
+
+        document.body.innerHTML += `
+            <div id="work-tree">
+                <span class="q-breadcrumbs__el"><span>【本編】長乳エルフお姉さん</span></span>
+            </div>
+        `;
+
+        const translatedTags = TranslatedTags.getInstance();
+        (translatedTags as any).augmentTags();
+
+        const crumb = document.querySelector('#work-tree .q-breadcrumbs__el span') as HTMLElement;
+        for (let i = 0; i < 20; i++) {
+            if (crumb.dataset.asmrtagState === 'done') break;
+            await new Promise(resolve => setTimeout(resolve, 10));
+        }
+
+        expect(crumb.textContent).toBe('【本編】長乳エルフお姉さん');
+        expect(crumb.classList.contains('asmr-worktree-translation')).toBe(true);
+        expect(crumb.dataset.asmrtagTranslation).toBe('Main story');
+    });
+
+    it('should strip legacy inline breadcrumb translation before re-translating', async () => {
+        await bridge.initialize();
+        vi.mocked(TranslationService.translateBatch).mockResolvedValue(['Main story']);
+
+        document.body.innerHTML += `
+            <div id="work-tree">
+                <span class="q-breadcrumbs__el">
+                    <span class="asmr-translated" data-asmrtag="【本編】長乳エルフお姉さん" data-asmrtag-state="done">
+                        【本編】長乳エルフお姉さん (Main story)
+                    </span>
+                </span>
+            </div>
+        `;
+
+        const translatedTags = TranslatedTags.getInstance();
+        (translatedTags as any).augmentTags();
+
+        const crumb = document.querySelector('#work-tree .q-breadcrumbs__el span') as HTMLElement;
+        for (let i = 0; i < 20; i++) {
+            if (crumb.dataset.asmrtagState === 'done' && crumb.classList.contains('asmr-worktree-translation')) break;
+            await new Promise(resolve => setTimeout(resolve, 10));
+        }
+
+        expect(crumb.textContent).toBe('【本編】長乳エルフお姉さん');
+        expect(crumb.classList.contains('asmr-worktree-translation')).toBe(true);
+        expect(crumb.dataset.asmrtagTranslation).toBe('Main story');
+    });
 });
