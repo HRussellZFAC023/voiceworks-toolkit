@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Features — Voiceworks Toolkit</title>
-  <meta name="description" content="Full feature list for Voiceworks Toolkit: learner mode, live transcription, neural translation, semantic search, radio mode, and 30+ quality-of-life features.">
+  <title>Features - Voiceworks Toolkit</title>
+  <meta name="description" content="Full feature list for Voiceworks Toolkit: learner mode, live transcription, web-assisted translation, semantic search, radio mode, and 30+ quality-of-life features.">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -35,7 +35,7 @@
     <section class="content" style="padding-top: calc(var(--nav-height) + 48px);">
       <div class="container">
         <h1>Features</h1>
-        <p class="lead">A comprehensive breakdown of every feature in Voiceworks Toolkit, organized by category.</p>
+        <p class="lead">A complete, practical breakdown of Voiceworks Toolkit features by category.</p>
 
         <!-- Language Learning -->
         <div class="feature-section">
@@ -46,18 +46,18 @@
 
           <div class="feature-list">
             <div class="feature-item">
-              <h3>Learner Mode &mdash; Dual-Language Subtitles</h3>
-              <p>Real-time synced subtitles purpose-built for immersion-based Japanese study. Japanese text is displayed as the primary line with blurrable English translations underneath &mdash; hover or press <code>B</code> to reveal. Automatically loads LRC lyric files when available and integrates with live Whisper transcriptions for unstudied content. Chinese-language subtitles are auto-translated to Japanese so learners always see kana and kanji as the primary line. Playback speed controls and configurable lead-time let you study at your own pace.</p>
+              <h3>Learner Mode - Dual-Language Subtitles</h3>
+              <p>Real-time synced subtitles built for immersion-based Japanese study. Japanese stays as the primary line with blurrable English underneath. Hover or press <code>B</code> to reveal. LRC files load automatically when available, and live Whisper transcription fills the gaps for uncaptioned content. Chinese subtitles can be translated to Japanese so your target language stays on top.</p>
             </div>
 
             <div class="feature-item">
-              <h3>Live Transcription &mdash; On-Device Speech-to-Text</h3>
-              <p>Turns any voicework into study material by transcribing audio in real-time directly from the player element &mdash; no file downloads or uploads needed. Powered by Transformers.js running the Whisper model inside a dedicated Web Worker with WebGPU acceleration (automatic WASM fallback for older hardware). Transcripts are cached per-track with a 90-day TTL for instant reloads on revisit. Supports 8 language modes (Japanese, English, Chinese, Korean, etc.) and exports to LRC, VTT, and SRT subtitle formats.</p>
+              <h3>Live Transcription - On-Device Speech-to-Text</h3>
+              <p>Turns any voicework into study material by transcribing audio in real time from the player. No manual file handling required. Powered by Transformers.js Whisper in a dedicated Web Worker with WebGPU acceleration and automatic WASM fallback. Transcripts are cached per track with a 90-day TTL and export to LRC, VTT, and SRT.</p>
             </div>
 
             <div class="feature-item">
-              <h3>Neural Translation &mdash; Local Machine Translation</h3>
-              <p>Neural translation models running entirely in-browser via Web Workers. Uses greedy decoding for fast throughput on short text segments. WebGPU preferred with automatic WASM fallback and preferred-dtype caching. Features batch processing with an 8ms coalescing window, in-flight request deduplication, and a shared translation cache. Translates player titles, content tags, and UI elements in real-time.</p>
+              <h3>Neural Translation - Web Translation Pipeline</h3>
+              <p>Translation runs through a web pipeline with retry/backoff, host rotation, in-flight deduplication, stale-batch cancellation, and shared caching. This keeps subtitle, tag, title, and UI translation responsive without requiring a local translation model download.</p>
             </div>
 
             <div class="feature-item">
@@ -73,17 +73,17 @@
           <p>AI-powered tools for finding content by meaning and metadata.</p>
 
           <div class="placeholder-img" style="margin-bottom: 32px;">
-            <span>Screenshot &mdash; Semantic Search Dialog</span>
+            <span>Screenshot - Semantic Search Dialog</span>
           </div>
 
           <div class="feature-list">
             <div class="feature-item">
-              <h3>Semantic Search &mdash; AI-Powered Discovery</h3>
+              <h3>Semantic Search - AI-Powered Discovery</h3>
               <p>Find voiceworks by meaning rather than exact keyword matches. Embeds titles and descriptions using the Jina v3 embeddings API, with vectors stored locally in IndexedDB. Supports multilingual queries with tag-based hints and paginated results. Rate-limited to respect free tier limits. Ideal for finding content by topic or theme when you don't know the exact Japanese title.</p>
             </div>
 
             <div class="feature-item">
-              <h3>Advanced Search &mdash; Multi-Filter Query Builder</h3>
+              <h3>Advanced Search - Multi-Filter Query Builder</h3>
               <p>Structured search with filters for tags, circles (creators), voice actors, date range, rating, and price. Supports AND/OR logic for combining multiple filters. Includes saved search history for quick re-use of frequent queries.</p>
             </div>
           </div>
@@ -96,18 +96,18 @@
 
           <div class="feature-list">
             <div class="feature-item">
-              <h3>Radio Mode &mdash; Continuous Shuffled Playback</h3>
+              <h3>Radio Mode - Continuous Shuffled Playback</h3>
               <p>Shuffled continuous playback across your entire library for extended immersion sessions. Automatically selects random voiceworks and plays all tracks sequentially, advancing to the next work on completion. Health-checking and auto-recovery mechanisms keep the stream running through network interruptions. Playback state persists across page refreshes.</p>
             </div>
 
             <div class="feature-item">
-              <h3>Playlist Mode &mdash; Sequential Work Playback</h3>
+              <h3>Playlist Mode - Sequential Work Playback</h3>
               <p>Curated playlist playback with forward/back navigation controls injected into the player bar. Auto-advances to the next voicework when the current one finishes. Paired with the Playlist Discovery panel for browsing, searching, and activating community-curated playlists.</p>
             </div>
 
             <div class="feature-item">
-              <h3>Audio Cache &mdash; Offline Playback</h3>
-              <p>IndexedDB-backed audio caching with TTL-based expiration. Automatically caches tracks during playback for offline replay and reduced bandwidth on revisits &mdash; useful for reviewing previously studied content without re-downloading.</p>
+              <h3>Audio Cache - Offline Playback</h3>
+              <p>IndexedDB-backed audio caching with TTL-based expiration. Tracks are cached during playback for offline replay and reduced bandwidth on revisits, which is useful for reviewing previously studied content.</p>
             </div>
 
             <div class="feature-item">
@@ -123,22 +123,22 @@
           <p>Rich media handling and audio visualization.</p>
 
           <div class="placeholder-img" style="margin-bottom: 32px;">
-            <span>Screenshot &mdash; Media Viewer Lightbox</span>
+            <span>Screenshot - Media Viewer Lightbox</span>
           </div>
 
           <div class="feature-list">
             <div class="feature-item">
-              <h3>Media Viewer &mdash; Inline Gallery</h3>
+              <h3>Media Viewer - Inline Gallery</h3>
               <p>Click-to-expand lightbox for images and video files bundled with voiceworks. Supports JPG, PNG, GIF, WebP, MP4, WebM, MOV, AVI, MKV, PDF, TXT, and SRT. Slideshow mode with auto-advance, keyboard navigation (arrow keys, ESC), and swipe support on touch devices.</p>
             </div>
 
             <div class="feature-item">
-              <h3>Player Gallery &mdash; Album Art Slideshow</h3>
+              <h3>Player Gallery - Album Art Slideshow</h3>
               <p>Image gallery integrated into the player's album art area. Displays cover images with slideshow navigation, arrow controls, swipe support, and keyboard shortcuts.</p>
             </div>
 
             <div class="feature-item">
-              <h3>Audio Visualizer &mdash; Real-time Spectrum</h3>
+              <h3>Audio Visualizer - Real-time Spectrum</h3>
               <p>40-bar frequency spectrum visualization using the Web Audio API. Renders in both a collapsible compact view and an expanded player-integrated view with smooth animations and configurable bar styling.</p>
             </div>
 
@@ -161,12 +161,12 @@
             </div>
 
             <div class="feature-item">
-              <h3>Folder Diver &mdash; Smart Directory Navigation</h3>
+              <h3>Folder Diver - Smart Directory Navigation</h3>
               <p>Intelligently navigates nested voicework directory structures to find audio content. Uses a folder scoring algorithm that weights by audio file count, folder name keywords, and content relevance.</p>
             </div>
 
             <div class="feature-item">
-              <h3>Flat View &mdash; Alternative File Browser</h3>
+              <h3>Flat View - Alternative File Browser</h3>
               <p>Side-drawer panel showing all files from a voicework in a flat list. Supports direct playback, lightbox image viewing, and file path copy with responsive layout.</p>
             </div>
           </div>
@@ -236,8 +236,8 @@
             </div>
 
             <div class="feature-item">
-              <h3>On-Device ML Pipeline</h3>
-              <p>Whisper transcription and neural translation models run in dedicated Web Workers using Transformers.js. WebGPU provides GPU acceleration with automatic WASM fallback. Worker coalescing batches requests in 8ms windows for optimal throughput.</p>
+              <h3>Hybrid AI Pipeline</h3>
+              <p>Whisper transcription runs on-device in dedicated Web Workers via Transformers.js, with WebGPU acceleration and automatic WASM fallback. Translation and semantic embedding use web APIs with caching, retry logic, and request coalescing for stable performance.</p>
             </div>
 
             <div class="feature-item">
@@ -260,7 +260,7 @@
         <a href="installation.html">Installation</a>
         <a href="manual.html">Manual</a>
       </div>
-      <p>Voiceworks Toolkit &mdash; MIT License</p>
+      <p>Voiceworks Toolkit - MIT License</p>
     </div>
   </footer>
 

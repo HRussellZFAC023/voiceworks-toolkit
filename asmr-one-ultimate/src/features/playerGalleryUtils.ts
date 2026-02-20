@@ -1,3 +1,5 @@
+import type { PlayerTrack } from '../types/api';
+
 export function normalizeWorkId(value: string | number | null | undefined): string | null {
     if (value == null) return null;
 
@@ -17,4 +19,18 @@ export function parseWorkIdFromCoverUrl(coverUrl: string): string | null {
     const match = coverUrl.match(/\/cover\/((?:[A-Za-z]+)?\d+)/i);
     if (!match?.[1]) return null;
     return normalizeWorkId(match[1]);
+}
+
+type WorkIdTrackFields = Pick<PlayerTrack, 'work' | 'workId' | 'work_id'>;
+
+export function parseWorkIdFromTrack(track: WorkIdTrackFields | null | undefined): string | null {
+    if (!track) return null;
+    return normalizeWorkId(track.work?.id ?? track.workId ?? track.work_id);
+}
+
+export function resolveGalleryWorkId(
+    eventWorkId: string | number | null | undefined,
+    track: WorkIdTrackFields | null | undefined,
+): string | null {
+    return normalizeWorkId(eventWorkId) ?? parseWorkIdFromTrack(track);
 }

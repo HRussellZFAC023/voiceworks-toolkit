@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Manual — Voiceworks Toolkit</title>
+  <title>Manual - Voiceworks Toolkit</title>
   <meta name="description" content="User manual for Voiceworks Toolkit. Learn how to use Learner Mode, Whisper transcription, translation, radio mode, and all other features.">
   <link rel="stylesheet" href="styles.css">
 </head>
@@ -64,11 +64,11 @@
           <li>A new sidebar menu with Radio Mode and Playlist Mode toggles</li>
           <li>Keyboard shortcuts for playback control</li>
           <li>Infinite scroll replacing pagination</li>
-          <li>Translated tags and UI elements (if translation models are downloaded)</li>
+          <li>Translated tags and UI elements (when translation services are enabled)</li>
           <li>Progress tracking checkmarks on work cards</li>
         </ul>
 
-        <p>Most features work out of the box. AI-powered features (transcription, translation, semantic search) require a one-time model download or API key setup in Settings.</p>
+        <p>Most features work out of the box. AI-powered features need light setup in Settings: Whisper requires a one-time model download, and semantic search requires a Jina API key.</p>
 
         <img src="screenshot.jpg" alt="Enhanced interface with subtitles, furigana, and audio visualizer" style="width: 100%; border-radius: var(--radius-lg); border: 1px solid var(--border); margin: 24px 0;">
 
@@ -88,7 +88,7 @@
         <ul>
           <li><strong>Whisper Model:</strong> Choose the transcription model size (tiny, small, medium) and quantization level. Larger models are more accurate but use more memory</li>
           <li><strong>Whisper Language:</strong> Set the default transcription language (Japanese, English, Chinese, Korean, etc.)</li>
-          <li><strong>Translation Model:</strong> Download or update the local neural translation model. Status and progress are shown inline</li>
+          <li><strong>Translation Settings:</strong> Configure web translation behavior and caching controls</li>
           <li><strong>Jina API Key:</strong> Enter your free Jina API key to enable semantic vector search</li>
         </ul>
 
@@ -165,21 +165,21 @@
 
         <p>The toolkit includes two translation mechanisms that work together to provide comprehensive English translation across the interface.</p>
 
-        <h3>Neural Translation (Local)</h3>
-        <p>A local machine translation model runs entirely in your browser via a Web Worker. After downloading the model from Settings, it translates:</p>
+        <h3>Neural Translation (Web Pipeline)</h3>
+        <p>Translation uses a web pipeline with host rotation, retry/backoff, in-flight deduplication, and shared caching. It translates:</p>
         <ul>
           <li>Player track titles (Japanese/Chinese to English)</li>
           <li>Content tags across all pages</li>
           <li>Work card titles in grid and list views</li>
           <li>Circle and voice actor names</li>
         </ul>
-        <p>The model uses WebGPU for acceleration when available, falling back to WASM on older hardware. Translations are cached in a shared cache for instant reuse.</p>
+        <p>No local translation model download is required. Cached translations are reused across features for faster repeat lookups.</p>
 
         <h3>Interface Translation (Static)</h3>
         <p>A built-in translation map converts static UI elements (buttons, menus, sort options, labels) to English. This works immediately without any model download and covers the complete interface.</p>
 
         <h3>Performance</h3>
-        <p>Translation requests are batched in an 8ms coalescing window and deduplicated to prevent redundant work. Single-text requests (like the currently playing track title) are prioritized over batch operations for minimal perceived latency.</p>
+        <p>Translation requests are batched in an 8ms coalescing window and deduplicated to prevent redundant work. Single-text requests (like the currently playing track title) are prioritized over batch operations for lower visible latency.</p>
 
         <!-- Search -->
         <h2 id="search">Search &amp; Discovery</h2>
@@ -206,7 +206,7 @@
         <p>Search history is saved for quick re-use of frequent queries.</p>
 
         <h3>Tag Filters</h3>
-        <p>Click any tag on a work card or detail page to instantly filter by it. Active filters appear as removable chips and persist across navigation. Multi-tag filtering is supported &mdash; click additional tags to narrow your results.</p>
+        <p>Click any tag on a work card or detail page to instantly filter by it. Active filters appear as removable chips and persist across navigation. Multi-tag filtering is supported, so you can click additional tags to narrow results.</p>
 
         <!-- Playback Modes -->
         <h2 id="playback">Playback Modes</h2>
@@ -313,17 +313,17 @@
         <div class="feature-list">
           <div class="feature-item">
             <h3>Does the toolkit send my data to external servers?</h3>
-            <p>AI transcription and translation run entirely on your device &mdash; no audio or text is uploaded. The only external calls are: (1) Jina API for semantic search embeddings (if you provide an API key), and (2) Google Translate as a fallback for Chinese-to-Japanese translation when no local model is available. All other functionality is fully local.</p>
+            <p>Whisper transcription runs on-device, while translation and semantic embeddings use external APIs. In practice, external calls include Google Translate endpoints for translation and Jina embeddings for semantic search when you provide an API key. Results are cached locally in your browser.</p>
           </div>
 
           <div class="feature-item">
             <h3>What browsers are supported?</h3>
-            <p>Any modern Chromium-based browser (Chrome, Edge, Brave) or Firefox with Tampermonkey installed. WebGPU support (Chrome 113+, Edge 113+) is recommended for optimal AI performance but not required &mdash; the toolkit falls back to WASM automatically.</p>
+            <p>Any modern Chromium-based browser (Chrome, Edge, Brave) or Firefox with Tampermonkey installed. WebGPU support (Chrome 113+, Edge 113+) is recommended for best Whisper performance, but the toolkit falls back to WASM automatically.</p>
           </div>
 
           <div class="feature-item">
-            <h3>How much disk space do the AI models use?</h3>
-            <p>The Whisper transcription model uses ~150 MB and the translation model uses ~80 MB. Both are stored in the browser's cache storage and persist across sessions. You can choose smaller quantized variants in Settings to reduce memory usage.</p>
+            <h3>How much disk space do AI assets use?</h3>
+            <p>The Whisper model is the main local download at roughly ~150 MB depending on model choice and quantization. Translation does not require a local model download. Cached transcripts, translations, and embeddings also use browser storage over time.</p>
           </div>
 
           <div class="feature-item">
@@ -333,7 +333,7 @@
 
           <div class="feature-item">
             <h3>Why are translations slow on first load?</h3>
-            <p>The neural translation model needs to be downloaded and initialized on first use. Once loaded, translations are cached and subsequent requests are near-instant. The model remains in memory for the duration of your browsing session.</p>
+            <p>First requests may be slower because the service is warming caches and making fresh network calls. After that, shared translation caching makes repeated text much faster.</p>
           </div>
 
           <div class="feature-item">
@@ -355,7 +355,7 @@
         <a href="installation.html">Installation</a>
         <a href="manual.html">Manual</a>
       </div>
-      <p>Voiceworks Toolkit &mdash; MIT License</p>
+      <p>Voiceworks Toolkit - MIT License</p>
     </div>
   </footer>
 

@@ -9,14 +9,16 @@
 function getWorkerCode(): string {
     return `
 let gpuDeviceLost = false;
+const GPU_ERROR_RE = /WebGPU Context Provider|context.*provider|device lost|GPUDevice|createComputePipeline|createShaderModule|createBuffer|mapAsync|mapping webgpu buffer|invalid buffer|Instance reference|AbortError|release session|invalid session/i;
+const EXPLICIT_DEVICE_LOSS_RE = /device lost|Instance reference|release session|invalid session/i;
 
 self.addEventListener('unhandledrejection', (event) => {
     const reason = event.reason;
     const message = reason && reason.message ? reason.message : String(reason || 'Unknown error');
-    if (/WebGPU Context Provider|context.*provider|device lost|GPUDevice|createComputePipeline|createShaderModule|mapAsync|Instance reference|AbortError|release session|invalid session/i.test(message)) {
+    if (GPU_ERROR_RE.test(message)) {
         event.preventDefault();
         // Fatal GPU device loss — notify host so it can show crash UI
-        if (/device lost|Instance reference|release session|invalid session/i.test(message)) {
+        if (EXPLICIT_DEVICE_LOSS_RE.test(message)) {
             if (!gpuDeviceLost) {
                 gpuDeviceLost = true;
                 skipWebgpu = true;
@@ -80,23 +82,29 @@ let currentBackend = 'wasm';
 let currentVendor = '';
 let currentDtype = '';
 let skipWebgpu = false;
+let preferLowPowerAdapter = false;
+let minWebgpuBufferBytes = 268435456;
 
 async function detectWebGPU() {
     if (typeof navigator === 'undefined' || !('gpu' in navigator)) return null;
     try {
         // Direct requestAdapter — no withTimeout wrapper.
         // ae78075 pattern: let the browser take as long as it needs.
-        let adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
-        if (!adapter) {
-            adapter = await navigator.gpu.requestAdapter({ powerPreference: 'low-power' });
+        const preferences = preferLowPowerAdapter
+            ? ['low-power', 'high-performance']
+            : ['high-performance', 'low-power'];
+        let adapter = null;
+        for (const powerPreference of preferences) {
+            adapter = await navigator.gpu.requestAdapter({ powerPreference });
+            if (adapter) break;
         }
         if (!adapter) return null;
         const info = adapter.info || {};
         const vendor = [info.vendor, info.description, info.architecture].filter(Boolean).join(' ').toLowerCase();
         const maxBuf = adapter.limits?.maxBufferSize || 0;
         console.log('[Whisper Worker] WebGPU adapter:', vendor, '| maxBufferSize:', maxBuf, '(' + Math.round(maxBuf / 1048576) + ' MB)');
-        if (maxBuf > 0 && maxBuf < 268435456) {
-            console.warn('[Whisper Worker] maxBufferSize too small for Whisper models');
+        if (maxBuf > 0 && maxBuf < minWebgpuBufferBytes) {
+            console.warn('[Whisper Worker] maxBufferSize too small for Whisper models (requires >= ' + Math.round(minWebgpuBufferBytes / 1048576) + ' MB)');
             return null;
         }
         return { device: 'webgpu', vendor, maxBuf };
@@ -196,7 +204,7 @@ async function ensurePipeline(settings, progressCb) {
                         pipelinePromise = null;
                         const msg = String(err?.message || err || '');
                         const isMemErr = /allocation|out of memory|OOM|RangeError|createbuffer/i.test(msg);
-                        const isContextErr = /WebGPU Context Provider|context.*provider|device lost|GPUDevice|createComputePipeline|createShaderModule/i.test(msg);
+                        const isContextErr = /WebGPU Context Provider|context.*provider|device lost|GPUDevice|createComputePipeline|createShaderModule|mapping webgpu buffer|invalid buffer/i.test(msg);
                         const isTimeout = /timed out/i.test(msg);
                         const isGpuErr = isMemErr || isContextErr || isTimeout;
 
@@ -373,6 +381,10 @@ async function transcribe(msg) {
 
     const timeOffset = msg.timeOffset || 0;
     const chunkId = msg.chunkId;
+    const requestedUpdateInterval = Number(msg.updateIntervalMs);
+    const updateIntervalMs = Number.isFinite(requestedUpdateInterval)
+        ? Math.max(100, Math.min(1000, Math.floor(requestedUpdateInterval)))
+        : 200;
 
     let wordBuffer = [];
     let lastUpdateAt = 0;
@@ -384,7 +396,7 @@ async function transcribe(msg) {
             detectedWordLevel = isWordLevelChunks(wordBuffer);
         }
         const now = Date.now();
-        if (now - lastUpdateAt < 200) return;
+        if (now - lastUpdateAt < updateIntervalMs) return;
         lastUpdateAt = now;
         sendBufferUpdate();
     }
@@ -425,7 +437,7 @@ async function transcribe(msg) {
         result = await pipe(msg.audio, pipeOpts);
     } catch (error) {
         const errMsg = error.message || String(error);
-        const isGpuError = /createBuffer|RangeError|out of memory|OOM|allocation|device lost|GPUDevice|createComputePipeline|createShaderModule|mapAsync|Instance reference|AbortError|release session|invalid session/i.test(errMsg);
+        const isGpuError = /createBuffer|RangeError|out of memory|OOM|allocation|device lost|GPUDevice|createComputePipeline|createShaderModule|mapAsync|mapping webgpu buffer|invalid buffer|Instance reference|AbortError|release session|invalid session/i.test(errMsg);
 
         if (isGpuError && currentBackend !== 'wasm') {
             console.warn('[Whisper Worker] GPU inference failed, falling back to WASM:', errMsg);
@@ -569,6 +581,11 @@ self.addEventListener('message', async (event) => {
     }
 
     if (msg.type === 'init') {
+        const requestedMinBuffer = Number(msg.minWebgpuBufferBytes);
+        minWebgpuBufferBytes = Number.isFinite(requestedMinBuffer) && requestedMinBuffer > 0
+            ? Math.floor(requestedMinBuffer)
+            : 268435456;
+        preferLowPowerAdapter = msg.preferLowPowerAdapter === true;
         try {
             await ensurePipeline(msg, (data) => self.postMessage(data));
             self.postMessage({ status: 'ready', backend: currentBackend, vendor: currentVendor });

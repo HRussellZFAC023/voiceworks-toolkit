@@ -14,7 +14,7 @@
  *  - Manual playlist URL addition
  */
 
-import { ref, computed, onMounted, watch } from 'vue';
+import { ref, reactive, computed, onMounted, watch } from 'vue';
 import { useI18n } from '../../composables/useI18n';
 import { useBridge } from '../../composables/useBridge';
 import { Logger } from '../../core/Utils';
@@ -34,7 +34,7 @@ const service = PlaylistDiscoveryService.getInstance();
 // Constants
 // ---------------------------------------------------------------------------
 
-const BATCH_SIZE = 24;
+const BATCH_SIZE = 12;
 const COLLAPSE_KEY = 'asmr_ultimate_discover_collapsed';
 
 // ---------------------------------------------------------------------------
@@ -51,36 +51,55 @@ const addFeedback = ref<{ type: 'ok' | 'err'; text: string } | null>(null);
 const searchFeedback = ref<{ type: 'ok' | 'err'; text: string } | null>(null);
 
 /** IDs that have been queued for fetching (to avoid re-fetching) */
-let fetchedIds = new Set<string>();
+const fetchedIds = reactive(new Set<string>());
 /** All discovered IDs snapshot (refreshed on expand / after Google search) */
-let allIds: string[] = [];
+const allIds = ref<string[]>([]);
+/** Cancel token for background filter warmup runs */
+let filterWarmupToken = 0;
 
 // ---------------------------------------------------------------------------
 // Computed
 // ---------------------------------------------------------------------------
 
-const filteredPlaylists = computed(() => {
-    if (!textFilter.value) return loadedPlaylists.value;
-    const q = textFilter.value.toLowerCase();
-    return loadedPlaylists.value.filter(p =>
-        p.name.toLowerCase().includes(q) ||
-        p.user_name.toLowerCase().includes(q),
-    );
+const filterCandidates = computed(() => {
+    const merged = new Map<string, CachedPlaylistMetadata>();
+    for (const playlist of loadedPlaylists.value) {
+        merged.set(playlist.id.toLowerCase(), playlist);
+    }
+    for (const id of allIds.value) {
+        const cached = service.getCachedMetadata(id);
+        if (cached) {
+            merged.set(cached.id.toLowerCase(), cached);
+        }
+    }
+    return Array.from(merged.values());
 });
 
-const hasMore = computed(() => fetchedIds.size < allIds.length);
+const filteredPlaylists = computed(() => {
+    const query = textFilter.value.trim().toLowerCase();
+    if (!query) return loadedPlaylists.value;
+
+    const tokens = query.split(/\s+/).filter(Boolean);
+    return filterCandidates.value.filter((playlist) => {
+        const tags = (playlist.tags || []).join(' ').toLowerCase();
+        const haystack = `${playlist.name} ${playlist.user_name} ${tags}`.toLowerCase();
+        return tokens.every(token => haystack.includes(token));
+    });
+});
+
+const hasMore = computed(() => fetchedIds.size < allIds.value.length);
 
 const statusText = computed(() => {
     if (isLoading.value) return t('playlistLoadingMore');
     if (!hasMore.value && loadedPlaylists.value.length > 0) {
         return format('playlistLoadStatusDone', {
             loaded: loadedPlaylists.value.length,
-            total: allIds.length,
+            total: allIds.value.length,
         });
     }
     return format('playlistLoadStatus', {
         loaded: loadedPlaylists.value.length,
-        total: allIds.length,
+        total: allIds.value.length,
     });
 });
 
@@ -107,17 +126,17 @@ function toggleCollapsed() {
 }
 
 function refreshAndLoad() {
-    allIds = service.getDiscoveredIds().filter(id => !service.isFailed(id));
+    allIds.value = service.getDiscoveredIds().filter(id => !service.isFailed(id));
     fetchedIds.clear();
 
     // Pre-populate from cache
     const cached: CachedPlaylistMetadata[] = [];
     const uncached: string[] = [];
-    for (const id of allIds) {
+    for (const id of allIds.value) {
         const meta = service.getCachedMetadata(id);
         if (meta) {
             cached.push(meta);
-            fetchedIds.add(id);
+            fetchedIds.add(id.toLowerCase());
         } else {
             uncached.push(id);
         }
@@ -126,33 +145,69 @@ function refreshAndLoad() {
 
     // Fetch first batch of uncached
     if (uncached.length > 0) {
-        loadNextBatch();
+        void loadNextBatch();
+    }
+
+    if (textFilter.value.trim()) {
+        void warmFilterCoverage();
     }
 }
 
 async function loadNextBatch() {
     if (isLoading.value) return;
+    if (service.isRateLimitedNow()) return;
 
-    const remaining = allIds.filter(id => !fetchedIds.has(id) && !service.isFailed(id));
+    const remaining = allIds.value.filter((id) => {
+        const normalized = id.toLowerCase();
+        if (fetchedIds.has(normalized)) return false;
+        if (service.isFailed(normalized)) return false;
+        if (service.isTransientFailed(normalized)) return false;
+        return true;
+    });
     if (remaining.length === 0) return;
 
     isLoading.value = true;
     const batch = remaining.slice(0, BATCH_SIZE);
 
     try {
-        for await (const meta of service.fetchMetadataBatch(batch, 4, 300)) {
+        for await (const meta of service.fetchMetadataBatch(batch, 2, 700)) {
             fetchedIds.add(meta.id.toLowerCase());
             // Only add if not already in the list (cache pre-populated it)
             if (!loadedPlaylists.value.some(p => p.id.toLowerCase() === meta.id.toLowerCase())) {
                 loadedPlaylists.value.push(meta);
             }
         }
-        // Mark remaining as fetched even if they failed
-        for (const id of batch) fetchedIds.add(id.toLowerCase());
+        // Mark IDs as fetched only if we actually have metadata or a permanent failure.
+        for (const id of batch) {
+            const normalized = id.toLowerCase();
+            if (service.getCachedMetadata(normalized) || service.isFailed(normalized)) {
+                fetchedIds.add(normalized);
+            }
+        }
     } catch (e) {
         Logger.warn('[PlaylistDiscoverSection] Batch load error:', e);
     } finally {
         isLoading.value = false;
+    }
+}
+
+function hasRemainingMetadata(): boolean {
+    return allIds.value.some(id => !fetchedIds.has(id.toLowerCase()) && !service.isFailed(id));
+}
+
+async function warmFilterCoverage() {
+    const token = ++filterWarmupToken;
+    while (token === filterWarmupToken && !collapsed.value && textFilter.value.trim()) {
+        if (!hasRemainingMetadata()) return;
+        if (service.isRateLimitedNow()) {
+            await new Promise(resolve => setTimeout(resolve, 1200));
+            continue;
+        }
+        if (isLoading.value) {
+            await new Promise(resolve => setTimeout(resolve, 200));
+            continue;
+        }
+        await loadNextBatch();
     }
 }
 
@@ -168,8 +223,11 @@ async function onGoogleSearch() {
         if (ids.length > 0) {
             searchFeedback.value = { type: 'ok', text: `Found ${ids.length} playlists` };
             // Refresh the ID list and load new ones
-            allIds = service.getDiscoveredIds().filter(id => !service.isFailed(id));
-            loadNextBatch();
+            allIds.value = service.getDiscoveredIds().filter(id => !service.isFailed(id));
+            void loadNextBatch();
+            if (textFilter.value.trim()) {
+                void warmFilterCoverage();
+            }
         } else {
             searchFeedback.value = { type: 'err', text: 'No new playlists found' };
         }
@@ -187,7 +245,7 @@ function onAddPlaylist() {
     if (id) {
         addFeedback.value = { type: 'ok', text: 'Added!' };
         addUrl.value = '';
-        allIds = service.getDiscoveredIds().filter(id2 => !service.isFailed(id2));
+        allIds.value = service.getDiscoveredIds().filter(id2 => !service.isFailed(id2));
         // Immediately fetch metadata for the new one
         service.fetchMetadata(id).then(meta => {
             if (meta && !loadedPlaylists.value.some(p => p.id === meta.id)) {
@@ -230,6 +288,14 @@ onMounted(() => {
         refreshAndLoad();
     }
 });
+
+watch([collapsed, textFilter], ([isCollapsed, query]) => {
+    if (isCollapsed || !query.trim()) {
+        filterWarmupToken += 1;
+        return;
+    }
+    void warmFilterCoverage();
+});
 </script>
 
 <template>
@@ -258,7 +324,7 @@ onMounted(() => {
                 <input
                     v-model="textFilter"
                     type="text"
-                    :placeholder="'Filter by name...'"
+                    :placeholder="t('playlistFilterPlaceholder')"
                     class="asmr-discover-search"
                     style="max-width: 220px;"
                 />

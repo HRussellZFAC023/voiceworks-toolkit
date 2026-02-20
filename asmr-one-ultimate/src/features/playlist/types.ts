@@ -30,6 +30,7 @@ export interface CachedPlaylistMetadata {
     name: string;
     user_name: string;
     worksCount: number;
+    tags: string[];
     latestWorkId?: string | number;
     coverUrl: string;
     coverUrlResolved?: boolean;

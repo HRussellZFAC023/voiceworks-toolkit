@@ -27,7 +27,7 @@ const EMBED_BATCH_MAX_CHARS_LIMITED = 2400;
 
 // Circuit breaker: kill & recreate worker after consecutive GPU errors
 const CIRCUIT_BREAKER_THRESHOLD = 3;
-const GPU_ERROR_PATTERN = /createBuffer|RangeError|out of memory|OOM|allocation|device lost|GPUDevice|mapAsync|Instance reference/i;
+const GPU_ERROR_PATTERN = /createBuffer|RangeError|out of memory|OOM|allocation|device lost|GPUDevice|mapAsync|mapping webgpu buffer|invalid buffer|Instance reference/i;
 const EXPLICIT_DEVICE_LOSS_PATTERN = /device lost|Instance reference|release session|invalid session/i;
 
 // ============================================================================

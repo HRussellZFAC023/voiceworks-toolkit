@@ -48,7 +48,23 @@ function isIPad(): boolean {
         || (navigator.maxTouchPoints > 1 && /Macintosh/i.test(ua));
 }
 
-function classify(hasGpu: boolean, memory: number, cores: number, isTouch: boolean, isMobile: boolean): DeviceTier {
+/** Intel Macs (especially 2018-2020) often expose WebGPU but have weak iGPU throughput */
+export function isIntelMac(ua: string, platform: string): boolean {
+    const uaLooksMac = /Macintosh|Mac OS X/i.test(ua);
+    const platformLooksIntelMac = /MacIntel/i.test(platform);
+    const uaLooksIntel = /Intel/i.test(ua);
+    return uaLooksMac && (platformLooksIntelMac || uaLooksIntel);
+}
+
+export function classifyDeviceTier(
+    hasGpu: boolean,
+    memory: number,
+    cores: number,
+    isTouch: boolean,
+    isMobile: boolean,
+    ua: string,
+    platform: string,
+): DeviceTier {
     // iPhone: always constrained — strict per-tab memory (~80-120MB),
     // Safari WebGPU + ONNX unreliable, deviceMemory unavailable
     if (isIPhone()) {
@@ -64,6 +80,12 @@ function classify(hasGpu: boolean, memory: number, cores: number, isTouch: boole
     // Constrained: mobile without GPU, or mobile with very low memory
     if (isMobile && (!hasGpu || (memory > 0 && memory < 4))) {
         return 'constrained';
+    }
+
+    // Intel macOS laptops are often GPU-constrained for real-time Whisper WebGPU.
+    // Treat as limited to enable safer backpressure and avoid eager warmup stalls.
+    if (isIntelMac(ua, platform)) {
+        return 'limited';
     }
 
     // Full: has GPU, enough resources, not mobile
@@ -83,6 +105,7 @@ function buildReason(profile: Omit<DeviceProfile, 'reason'>): string {
     if (profile.cores > 0) parts.push(`${profile.cores} cores`);
     if (isIPhone()) parts.push('iPhone');
     else if (isIPad()) parts.push('iPad');
+    else if (isIntelMac(navigator.userAgent || '', navigator.platform || '')) parts.push('intel-mac');
     if (profile.isMobile) parts.push('mobile');
     else if (profile.isTouch) parts.push('touch');
     parts.push(`${profile.screenWidth}px`);
@@ -139,11 +162,12 @@ export const DeviceCapabilities = {
         const isTouch = 'ontouchstart' in window || nav.maxTouchPoints > 0;
         const screenWidth = screen?.width ?? window.innerWidth;
         const ua = nav.userAgent || '';
+        const platform = nav.platform || '';
 
         const isMobile = (isTouch && screenWidth < 1024)
             || /Mobi|Android|iPhone|iPod/i.test(ua);
 
-        const tier = classify(hasGpu, memory, cores, isTouch, isMobile);
+        const tier = classifyDeviceTier(hasGpu, memory, cores, isTouch, isMobile, ua, platform);
 
         const partial = { tier, hasGpu, memory, cores, isTouch, isMobile, screenWidth, reason: '' };
         partial.reason = buildReason(partial);

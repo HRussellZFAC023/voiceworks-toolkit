@@ -68,6 +68,7 @@ const CONFIG_DEFAULTS: PluginConfig = {
     whisperCacheTranscripts: true,
     whisperAutoWarmup: true,
     alwaysTranscribe: false,
+    forceWhisperWasm: false,
     vectorSearchApiKey: '',
     vectorIndexCursor: 1,
     vectorIndexLatestWorkId: '',

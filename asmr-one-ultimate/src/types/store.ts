@@ -201,6 +201,7 @@ export interface PluginConfig {
     whisperCacheTranscripts: boolean;
     whisperAutoWarmup: boolean;
     alwaysTranscribe: boolean;
+    forceWhisperWasm: boolean;
     vectorSearchApiKey: string;
     vectorIndexCursor: number;
     vectorIndexLatestWorkId: string;

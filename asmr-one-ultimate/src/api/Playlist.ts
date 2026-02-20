@@ -38,11 +38,28 @@ export interface PlaylistMetadata {
     name: string;
     description?: string;
     privacy: number;
-    works: Array<{ id: number; source_id: string } | string>;
+    works: Array<PlaylistMetadataWorkItem | string>;
     works_count?: number;
     user_name?: string;
     created_at?: string;
     updated_at?: string;
+    main_cover_url?: string;
+    mainCoverUrl?: string;
+    thumbnailCoverUrl?: string;
+    samCoverUrl?: string;
+    coverUrl?: string;
+}
+
+export interface PlaylistMetadataWorkItem {
+    id?: number | string;
+    source_id?: string;
+    main_cover_url?: string;
+    mainCoverUrl?: string;
+    thumbnailCoverUrl?: string;
+    samCoverUrl?: string;
+    coverUrl?: string;
+    cover?: string;
+    [key: string]: unknown;
 }
 
 /** Work item in playlist works response */

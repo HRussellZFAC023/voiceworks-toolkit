@@ -1,8 +1,9 @@
 import { openDB, DBSchema } from 'idb';
-import { Logger } from '../core/Utils';
+import { Logger, Config } from '../core/Utils';
 import { getAudioElement } from '../core/DomUtils';
 import { KikoeruBridge } from './KikoeruBridge';
 import { EventBus } from '../core/EventBus';
+import { DeviceCapabilities } from '../core/DeviceCapabilities';
 
 import { gmRequest, retryWithBackoff } from './HttpClient';
 import type { PlayerTrack } from '../types';
@@ -21,6 +22,7 @@ interface AudioDB extends DBSchema {
 }
 
 const MAX_OBJECT_URLS = 5;
+const ONE_GIB = 1024 * 1024 * 1024;
 
 export class AudioCache {
     public static objectUrls = new Map<string, string>();
@@ -79,6 +81,7 @@ export class AudioCache {
                 lastPlayed: Date.now(),
                 size: blob.size
             });
+            await this.enforceSoftCacheLimit(db);
             EventBus.emit('cache:added', { url, size: blob.size });
         } catch (err) {
             if ((err as DOMException).name === 'QuotaExceededError' || (err as DOMException).name === 'QuotaExceeded') {
@@ -97,12 +100,49 @@ export class AudioCache {
                         lastPlayed: Date.now(),
                         size: blob.size
                     });
+                    await this.enforceSoftCacheLimit(db);
                 } catch (retryErr) {
                     Logger.error('[AudioCache] Cache write failed after eviction:', retryErr);
                 }
             } else {
                 Logger.error('[AudioCache] Cache write failed:', err);
             }
+        }
+    }
+
+    private getEffectiveCacheLimitBytes(): number {
+        const deviceLimit = DeviceCapabilities.budget.audioCacheLimit;
+        const configuredGb = Number(Config.get('cacheLimitGB'));
+        const configuredBytes = Number.isFinite(configuredGb) && configuredGb > 0
+            ? Math.floor(configuredGb * ONE_GIB)
+            : deviceLimit;
+        return Math.max(64 * 1024 * 1024, Math.min(deviceLimit, configuredBytes));
+    }
+
+    private async getTotalCachedBytes(db: Awaited<ReturnType<typeof openDB<AudioDB>>>): Promise<number> {
+        const tx = db.transaction('blobs', 'readonly');
+        let cursor = await tx.store.openCursor();
+        let total = 0;
+        while (cursor) {
+            total += cursor.value.size || 0;
+            cursor = await cursor.continue();
+        }
+        return total;
+    }
+
+    private async enforceSoftCacheLimit(db: Awaited<ReturnType<typeof openDB<AudioDB>>>): Promise<void> {
+        const limitBytes = this.getEffectiveCacheLimitBytes();
+        if (limitBytes <= 0) return;
+        try {
+            const totalBytes = await this.getTotalCachedBytes(db);
+            if (totalBytes <= limitBytes) return;
+            const overflowBytes = totalBytes - limitBytes;
+            Logger.debug(
+                `[AudioCache] Soft cache limit exceeded by ~${Math.round(overflowBytes / 1024 / 1024)}MB. Evicting old entries...`,
+            );
+            await this.evictOldEntries(overflowBytes);
+        } catch (err) {
+            Logger.warn('[AudioCache] Soft limit enforcement failed:', err);
         }
     }
 

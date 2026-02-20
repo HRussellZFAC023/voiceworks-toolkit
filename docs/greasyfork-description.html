@@ -1,6 +1,6 @@
-<h3>🎵 Voiceworks Toolkit — All-in-One Enhancement Suite for ASMR.one</h3>
+<h3>🎵 Voiceworks Toolkit - All-in-One Enhancement Suite for ASMR.one</h3>
 
-<p>30+ features for browsing, studying, and listening — powered by on-device AI that runs entirely in your browser. No data ever leaves your machine.</p>
+<p>30+ features for browsing, studying, and listening. Voiceworks blends on-device AI with web-assisted services, then caches results locally so the experience stays fast.</p>
 
 <img src="https://hrussellzfac023.github.io/voiceworks-toolkit/screenshot.png" alt="Learner Mode with dual-language subtitles, furigana, and karaoke highlighting">
 
@@ -8,50 +8,50 @@
 
 <h3>📚 Language Learning</h3>
 <ul>
-<li><strong>Learner Mode</strong> — Real-time dual-language subtitles. Japanese as the primary line with furigana annotations, blurrable English translations underneath. Hover or press <kbd>B</kbd> to reveal. Includes karaoke-style word highlighting that tracks speech in real time.</li>
-<li><strong>Live Transcription</strong> — On-device Whisper speech-to-text. Turns any audio into study material directly from the player — no file uploads needed. WebGPU accelerated with WASM fallback. Transcripts are cached for 90 days. Supports Japanese, English, Chinese, Korean, and more. Export to LRC, VTT, or SRT.</li>
-<li><strong>Neural Translation</strong> — Local JA→EN machine translation running entirely in-browser via Web Workers. Chinese text falls back to Google Translate. Translates subtitles, tags, titles, and UI elements in real time with shared caching.</li>
-<li><strong>Interface Translation</strong> — Localizes the entire platform UI to English: menus, buttons, sort options, and dynamic text.</li>
-<li><strong>JPDB Integration</strong> — Vocabulary mining via <a href="https://jpdb.io">jpdb.io</a>. Look up words from subtitles and track your Japanese vocabulary progress.</li>
+<li><strong>Learner Mode</strong>: Real-time dual-language subtitles. Japanese stays on top with furigana, and English can stay blurred until you hover or press <kbd>B</kbd>. Karaoke-style highlighting follows the spoken line as audio plays.</li>
+<li><strong>Live Transcription</strong>: On-device Whisper speech-to-text. Turn any track into study material directly from the player with no manual uploads. WebGPU acceleration is used when available, with WASM fallback. Transcripts are cached for 90 days and can be exported as LRC, VTT, or SRT.</li>
+<li><strong>Neural Translation</strong>: Web translation pipeline for JA/CN to EN with retry logic, host rotation, and shared caching. Subtitles, tags, titles, and key UI text are translated in real time.</li>
+<li><strong>Interface Translation</strong>: Translates core Chinese and Japanese interface text to English, including menus, sort options, and dynamic labels.</li>
+<li><strong>JPDB Integration</strong>: Vocabulary mining via <a href="https://jpdb.io">jpdb.io</a>. Look up words from subtitles and keep your Japanese study progress in one flow.</li>
 </ul>
 
 <h3>🔍 Search &amp; Discovery</h3>
 <ul>
-<li><strong>Semantic Search</strong> — Find works by meaning, not just keywords. Uses AI embeddings stored locally in IndexedDB. Supports multilingual queries — search in English, get Japanese results.</li>
-<li><strong>Advanced Search</strong> — Multi-filter query builder with tag include/exclude, circle, voice actor, date range, rating, and price filters. AND/OR logic with saved search history.</li>
+<li><strong>Semantic Search</strong>: Find works by meaning, not just keywords. Uses Jina embeddings with vectors cached in IndexedDB for faster repeat queries. Supports multilingual search, including English queries for Japanese content.</li>
+<li><strong>Advanced Search</strong>: Multi-filter query builder with tag include/exclude, circle, voice actor, date range, rating, and price filters. Supports AND/OR logic with saved search history.</li>
 </ul>
 
 <h3>📻 Playback</h3>
 <ul>
-<li><strong>Radio Mode</strong> — Continuous shuffled playback across your library for extended listening sessions. Auto-recovery through network interruptions. State persists across page refreshes.</li>
-<li><strong>Playlist Mode</strong> — Sequential playback with forward/back navigation. Browse and activate community-curated playlists via the Playlist Discovery panel.</li>
-<li><strong>Audio Cache</strong> — Offline playback via IndexedDB caching. Tracks are cached during playback for instant replay on revisit.</li>
-<li><strong>Enhanced Shuffle</strong> — Improved playlist shuffle that maintains the current track and persists across sessions.</li>
+<li><strong>Radio Mode</strong>: Continuous shuffled playback across your library for long listening sessions, with auto-recovery after interruptions. Session state persists across refreshes.</li>
+<li><strong>Playlist Mode</strong>: Sequential playback with forward/back navigation. Browse and activate community playlists from the Playlist Discovery panel.</li>
+<li><strong>Audio Cache</strong>: IndexedDB-backed track caching for faster replays and offline playback.</li>
+<li><strong>Enhanced Shuffle</strong>: Improved shuffle behavior that keeps your current track and remembers shuffle state between sessions.</li>
 </ul>
 
 <h3>🎬 Media &amp; Visualization</h3>
 <ul>
-<li><strong>Media Viewer</strong> — Click-to-expand lightbox for images, videos, and PDFs bundled with works. Slideshow mode, keyboard navigation, swipe support on touch devices.</li>
-<li><strong>Player Gallery</strong> — Album art slideshow integrated into the player with arrow controls and keyboard shortcuts.</li>
-<li><strong>Audio Visualizer</strong> — 40-bar real-time frequency spectrum using the Web Audio API. Compact and expanded views with smooth animations.</li>
-<li><strong>Player Fullscreen</strong> — Fullscreen expansion for the player area. Press <kbd>F</kbd> to toggle.</li>
+<li><strong>Media Viewer</strong>: Click-to-expand lightbox for images, videos, and PDFs bundled with works. Includes slideshow mode, keyboard navigation, and touch swipe support.</li>
+<li><strong>Player Gallery</strong>: Album art slideshow built into the player, with arrow controls and keyboard shortcuts.</li>
+<li><strong>Audio Visualizer</strong>: 40-bar real-time frequency spectrum powered by the Web Audio API, with compact and expanded layouts.</li>
+<li><strong>Player Fullscreen</strong>: Fullscreen expansion for the player area. Press <kbd>F</kbd> to toggle.</li>
 </ul>
 
 <h3>📊 Progress &amp; Organization</h3>
 <ul>
-<li><strong>Auto Progress Tracking</strong> — Automatically marks works as "listening" when playback starts and "listened" at 80% completion. Progress appears on work cards throughout the site.</li>
-<li><strong>Folder Diver</strong> — Smart directory navigation that automatically finds audio content in nested folder structures.</li>
-<li><strong>Flat View</strong> — Side drawer showing all files in a flat list with direct playback and lightbox image viewing.</li>
+<li><strong>Auto Progress Tracking</strong>: Marks works as "listening" when playback starts and "listened" at 80% completion. Progress appears on cards throughout the site.</li>
+<li><strong>Folder Diver</strong>: Smart directory navigation that finds playable audio inside nested folder structures.</li>
+<li><strong>Flat View</strong>: Side drawer that lists all files in a flat layout, with direct playback and lightbox image viewing.</li>
 </ul>
 
 <h3>⚙️ Quality of Life</h3>
 <ul>
-<li><strong>Infinite Scroll</strong> — Replaces pagination on home, category, and search pages.</li>
-<li><strong>OS Media Integration</strong> — System media controls (notification center, lock screen) show track metadata and album art.</li>
-<li><strong>Translated Tags</strong> — All CJK tags translated to English across the entire UI with IndexedDB caching.</li>
-<li><strong>SFW Mode</strong> — Content filtering for public environments.</li>
-<li><strong>Settings Backup/Restore</strong> — Full configuration export and import.</li>
-<li><strong>Localized Settings</strong> — Complete UI in English, 中文, and 日本語.</li>
+<li><strong>Infinite Scroll</strong>: Replaces pagination on home, category, and search pages.</li>
+<li><strong>OS Media Integration</strong>: System media controls (notification center, lock screen) show track metadata and cover art.</li>
+<li><strong>Translated Tags</strong>: CJK tags are translated to English across the UI with local IndexedDB caching.</li>
+<li><strong>SFW Mode</strong>: Content filtering for public or shared environments.</li>
+<li><strong>Settings Backup/Restore</strong>: Full settings export and import.</li>
+<li><strong>Localized Settings</strong>: UI available in English, 中文, and 日本語.</li>
 </ul>
 
 <details>
@@ -75,10 +75,10 @@
 <details>
 <summary><strong>🛠️ Technical Details</strong></summary>
 <ul>
-<li>Runs as a Tampermonkey/Violentmonkey userscript — no browser extension needed</li>
-<li>AI models (Whisper, translation) run in dedicated Web Workers with WebGPU acceleration and automatic WASM fallback</li>
-<li>All AI processing is on-device — no data is sent to external servers (except Google Translate for Chinese→English)</li>
-<li>Caches transcripts, translations, and embeddings locally in IndexedDB</li>
+<li>Runs as a Tampermonkey/Violentmonkey userscript, so no standalone app is required</li>
+<li>Whisper transcription runs in dedicated Web Workers with WebGPU acceleration and WASM fallback</li>
+<li>Translation and semantic embedding requests use web APIs with retry/backoff and local caching</li>
+<li>Transcripts, translations, vectors, and media cache are stored locally in IndexedDB</li>
 <li>Built with TypeScript, Vue 3, Vite, and Transformers.js</li>
 </ul>
 </details>
@@ -87,21 +87,21 @@
 
 <h3>中文说明</h3>
 
-<p>ASMR.one 全能增强套件，30+ 功能，所有 AI 功能在浏览器本地运行。</p>
+<p>ASMR.one 全能增强套件，30+ 功能。Whisper 转录在本地运行，翻译与语义搜索使用在线服务并在本地缓存结果。</p>
 
 <ul>
-<li><strong>学习模式</strong> — 双语字幕（日语主行 + 可模糊英语翻译），假名注音，卡拉OK逐词高亮</li>
-<li><strong>实时转录</strong> — 本地 Whisper 语音转文字，WebGPU 加速，支持导出 LRC/VTT/SRT</li>
-<li><strong>神经翻译</strong> — 本地日→英机器翻译，中文自动回退 Google 翻译</li>
-<li><strong>语义搜索</strong> — AI 向量嵌入搜索，支持多语言查询</li>
-<li><strong>电台模式</strong> — 连续随机播放，自动恢复，状态持久化</li>
-<li><strong>播放列表</strong> — 顺序播放 + 社区播放列表发现</li>
-<li><strong>媒体查看器</strong> — 灯箱查看图片/视频/PDF，幻灯片模式</li>
-<li><strong>音频可视化</strong> — 40频段实时频谱</li>
-<li><strong>进度追踪</strong> — 自动标记收听进度</li>
-<li><strong>键盘快捷键</strong> — 全键盘控制，免提学习</li>
-<li><strong>界面翻译</strong> — 完整英语/中文/日语本地化</li>
-<li><strong>离线缓存</strong> — IndexedDB 音频缓存，离线回放</li>
+<li><strong>学习模式</strong>：双语字幕（日语主行 + 可模糊英语翻译）、假名注音、卡拉OK逐词高亮</li>
+<li><strong>实时转录</strong>：本地 Whisper 语音转文字，WebGPU 加速，支持导出 LRC/VTT/SRT</li>
+<li><strong>神经翻译</strong>：日/中到英文的在线翻译管线，内置重试与缓存</li>
+<li><strong>语义搜索</strong>：基于向量嵌入的语义检索，多语言查询，结果本地缓存</li>
+<li><strong>电台模式</strong>：连续随机播放，自动恢复，状态持久化</li>
+<li><strong>播放列表</strong>：顺序播放 + 社区播放列表发现</li>
+<li><strong>媒体查看器</strong>：灯箱查看图片/视频/PDF，支持幻灯片模式</li>
+<li><strong>音频可视化</strong>：40 频段实时频谱</li>
+<li><strong>进度追踪</strong>：自动标记收听进度</li>
+<li><strong>键盘快捷键</strong>：全键盘控制，免提学习</li>
+<li><strong>界面翻译</strong>：支持英语、中文、日语本地化</li>
+<li><strong>离线缓存</strong>：IndexedDB 音频缓存，支持离线回放</li>
 </ul>
 
 <p>📖 <a href="https://hrussellzfac023.github.io/voiceworks-toolkit/">完整文档 / Full Documentation</a></p>

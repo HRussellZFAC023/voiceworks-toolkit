@@ -547,6 +547,8 @@ const credits = [
                 </div>
                 <hr class="q-separator q-separator--horizontal q-separator--dark">
                 <SettingsToggle config-key="alwaysTranscribe" :label="t('alwaysTranscribe')" :sublabel="t('alwaysTranscribeSub')" icon="auto_fix_high" />
+                <hr class="q-separator q-separator--horizontal q-separator--dark">
+                <SettingsToggle config-key="forceWhisperWasm" :label="t('forceWhisperWasm')" :sublabel="t('forceWhisperWasmSub')" icon="developer_board_off" />
             </div>
         </template>
 

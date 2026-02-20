@@ -1,5 +1,8 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { Whisper } from '../../src/features/Whisper';
+import { DeviceCapabilities } from '../../src/core/DeviceCapabilities';
+import { GpuScheduler } from '../../src/core/GpuScheduler';
+import { Config } from '../../src/core/Utils';
 
 const { gmSpy } = vi.hoisted(() => ({
     gmSpy: vi.fn(),
@@ -23,7 +26,163 @@ vi.mock('../../src/infrastructure/AudioCache', () => ({
 
 describe('Whisper', () => {
     beforeEach(() => {
+        vi.restoreAllMocks();
         document.body.innerHTML = '';
+    });
+
+    describe('getWhisperSettings', () => {
+        it('keeps full-tier defaults for current machines', () => {
+            vi.spyOn(Config, 'get').mockImplementation((key) => {
+                const map: Record<string, string | number | boolean> = {
+                    primarySubtitleLang: 'ja',
+                    whisperTask: 'transcribe',
+                    whisperAutoWarmup: true,
+                    whisperCacheTranscripts: true,
+                };
+                return map[key as string] ?? false;
+            });
+            vi.spyOn(DeviceCapabilities, 'profile', 'get').mockReturnValue({
+                tier: 'full',
+                hasGpu: true,
+                memory: 16,
+                cores: 8,
+                isTouch: false,
+                isMobile: false,
+                screenWidth: 1920,
+                reason: 'full-tier test profile',
+            } as any);
+            vi.spyOn(DeviceCapabilities, 'shouldWarmup', 'get').mockReturnValue(true);
+            vi.spyOn(DeviceCapabilities, 'budget', 'get').mockReturnValue({
+                whisperIdleMs: 10 * 60 * 1000,
+            } as any);
+            vi.spyOn(GpuScheduler, 'getMemoryPressure').mockReturnValue('low');
+
+            const whisper = new Whisper();
+            const settings = (whisper as any).getWhisperSettings();
+
+            expect(settings.maxPendingChunks).toBe(6);
+            expect(settings.pollIntervalMs).toBe(250);
+            expect(settings.workerUpdateIntervalMs).toBe(200);
+            expect(settings.preferLowPowerAdapter).toBe(false);
+            expect(settings.autoWarmup).toBe(true);
+            expect(settings.idleUnloadMs).toBe(10 * 60 * 1000);
+        });
+
+        it('reduces pressure on limited-tier machines and skips eager warmup', () => {
+            vi.spyOn(Config, 'get').mockImplementation((key) => {
+                const map: Record<string, string | number | boolean> = {
+                    primarySubtitleLang: 'ja',
+                    whisperTask: 'transcribe',
+                    whisperAutoWarmup: true,
+                    whisperCacheTranscripts: true,
+                };
+                return map[key as string] ?? false;
+            });
+            vi.spyOn(DeviceCapabilities, 'profile', 'get').mockReturnValue({
+                tier: 'limited',
+                hasGpu: true,
+                memory: 8,
+                cores: 4,
+                isTouch: false,
+                isMobile: false,
+                screenWidth: 1366,
+                reason: 'limited-tier test profile',
+            } as any);
+            vi.spyOn(DeviceCapabilities, 'shouldWarmup', 'get').mockReturnValue(false);
+            vi.spyOn(DeviceCapabilities, 'budget', 'get').mockReturnValue({
+                whisperIdleMs: 5 * 60 * 1000,
+            } as any);
+            vi.spyOn(GpuScheduler, 'getMemoryPressure').mockReturnValue('medium');
+
+            const whisper = new Whisper();
+            const settings = (whisper as any).getWhisperSettings();
+
+            expect(settings.maxPendingChunks).toBe(3);
+            expect(settings.pollIntervalMs).toBe(325);
+            expect(settings.workerUpdateIntervalMs).toBe(260);
+            expect(settings.preferLowPowerAdapter).toBe(true);
+            expect(settings.autoWarmup).toBe(false);
+            expect(settings.idleUnloadMs).toBe(5 * 60 * 1000);
+            expect(settings.minWebgpuBufferBytes).toBe(384 * 1024 * 1024);
+        });
+
+        it('aggressively throttles pending work under high pressure', () => {
+            vi.spyOn(Config, 'get').mockImplementation((key) => {
+                const map: Record<string, string | number | boolean> = {
+                    primarySubtitleLang: 'ja',
+                    whisperTask: 'transcribe',
+                    whisperAutoWarmup: true,
+                    whisperCacheTranscripts: true,
+                };
+                return map[key as string] ?? false;
+            });
+            vi.spyOn(DeviceCapabilities, 'profile', 'get').mockReturnValue({
+                tier: 'constrained',
+                hasGpu: false,
+                memory: 2,
+                cores: 2,
+                isTouch: true,
+                isMobile: true,
+                screenWidth: 414,
+                reason: 'constrained-tier test profile',
+            } as any);
+            vi.spyOn(DeviceCapabilities, 'shouldWarmup', 'get').mockReturnValue(false);
+            vi.spyOn(DeviceCapabilities, 'budget', 'get').mockReturnValue({
+                whisperIdleMs: 2 * 60 * 1000,
+            } as any);
+            vi.spyOn(GpuScheduler, 'getMemoryPressure').mockReturnValue('high');
+
+            const whisper = new Whisper();
+            const settings = (whisper as any).getWhisperSettings();
+
+            expect(settings.maxPendingChunks).toBe(1);
+            expect(settings.pollIntervalMs).toBe(500);
+            expect(settings.workerUpdateIntervalMs).toBe(350);
+            expect(settings.preferLowPowerAdapter).toBe(true);
+        });
+
+        it('supports forced WASM mode from settings', () => {
+            vi.spyOn(Config, 'get').mockImplementation((key) => {
+                const map: Record<string, string | number | boolean> = {
+                    primarySubtitleLang: 'ja',
+                    whisperTask: 'transcribe',
+                    whisperAutoWarmup: true,
+                    whisperCacheTranscripts: true,
+                    forceWhisperWasm: true,
+                };
+                return map[key as string] ?? false;
+            });
+            vi.spyOn(DeviceCapabilities, 'profile', 'get').mockReturnValue({
+                tier: 'full',
+                hasGpu: true,
+                memory: 16,
+                cores: 8,
+                isTouch: false,
+                isMobile: false,
+                screenWidth: 1920,
+                reason: 'full-tier test profile',
+            } as any);
+            vi.spyOn(DeviceCapabilities, 'shouldWarmup', 'get').mockReturnValue(true);
+            vi.spyOn(DeviceCapabilities, 'budget', 'get').mockReturnValue({
+                whisperIdleMs: 10 * 60 * 1000,
+            } as any);
+            vi.spyOn(GpuScheduler, 'getMemoryPressure').mockReturnValue('low');
+
+            const whisper = new Whisper();
+            const settings = (whisper as any).getWhisperSettings();
+
+            expect(settings.forceWasm).toBe(true);
+            expect(settings.autoWarmup).toBe(false);
+            expect(settings.maxPendingChunks).toBe(3);
+        });
+    });
+
+    describe('gpu error detection', () => {
+        it('treats WebGPU invalid buffer mapping as recoverable GPU error', () => {
+            const whisper = new Whisper();
+            const isGpuError = (whisper as any).isGpuErrorMessage('Mapping WebGPU buffer failed: Invalid buffer');
+            expect(isGpuError).toBe(true);
+        });
     });
 
     describe('parseSegments', () => {

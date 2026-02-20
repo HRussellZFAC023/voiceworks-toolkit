@@ -22,7 +22,7 @@ import { WorkService } from '../../services/WorkService';
 import { MediaViewerController } from '../MediaViewerController';
 import { Logger } from '../../core/Utils';
 import type { AudioTrack, TrackFolder, TrackItem } from '../../types/api';
-import { normalizeWorkId, parseWorkIdFromCoverUrl } from '../playerGalleryUtils';
+import { normalizeWorkId, parseWorkIdFromCoverUrl, resolveGalleryWorkId } from '../playerGalleryUtils';
 
 const IMG_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg']);
 
@@ -593,6 +593,15 @@ function promoteCoverToFront(cover: string): void {
     }
 }
 
+function resetToCoverOnly(cover: string): void {
+    images.value = [cover];
+    currentIndex.value = 0;
+    imageSeen.value.clear();
+    imageSeen.value.add(cover);
+    syncCoverUrl();
+    syncAlbumart();
+}
+
 function refreshGalleryForTrackChange(workIdFromEvent?: string): void {
     const normalizedEventWorkId = normalizeWorkId(workIdFromEvent);
     const detectedWorkId = normalizedEventWorkId || detectWorkId();
@@ -609,6 +618,16 @@ function refreshGalleryForTrackChange(workIdFromEvent?: string): void {
     // Validate cover belongs to the loaded work (DOM may lag behind store on work change)
     const coverWorkId = parseWorkIdFromCoverUrl(cover);
     if (coverWorkId && loadedWorkId.value && coverWorkId !== loadedWorkId.value) return;
+
+    // If we cannot resolve work ID but the live cover changed to an unseen URL,
+    // assume a work transition and drop stale gallery images from the previous work.
+    if (!detectedWorkId && !coverWorkId && loadedWorkId.value && !imageSeen.value.has(cover)) {
+        Logger.debug('[PlayerGallery] Unknown work transition detected from cover update; resetting stale gallery');
+        loadedWorkId.value = null;
+        excludedUrls.value.clear();
+        resetToCoverOnly(cover);
+        return;
+    }
 
     // Fallback for states where work ID isn't available yet (playlist/miniplayer transitions):
     // keep the full gallery but ensure the live cover is shown first.
@@ -651,8 +670,9 @@ onMounted(() => {
     on('fullscreen:exit', () => onExitFullscreen());
     on('work:change', (p) => onWorkChange(p.workId));
     on('track:change', (p) => {
+        const resolvedWorkId = resolveGalleryWorkId(p.workId, p.track);
         // Let host UI/store settle across multiple ticks, then refresh.
-        scheduleRefreshRetries(p.workId);
+        scheduleRefreshRetries(resolvedWorkId ?? undefined);
     });
 
     // Sync albumart on mount

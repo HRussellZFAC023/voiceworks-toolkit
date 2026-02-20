@@ -13,7 +13,7 @@ let gpuFallbackSent = false;
 self.addEventListener('unhandledrejection', (event) => {
     const reason = event.reason;
     const message = reason && reason.message ? reason.message : String(reason || 'Unknown error');
-    if (/WebGPU Context Provider|context.*provider|device lost|GPUDevice|createComputePipeline|createShaderModule|mapAsync|Instance reference|AbortError/i.test(message)) {
+    if (/WebGPU Context Provider|context.*provider|device lost|GPUDevice|createComputePipeline|createShaderModule|mapAsync|mapping webgpu buffer|invalid buffer|Instance reference|AbortError/i.test(message)) {
         event.preventDefault();
         // Fatal GPU device loss — notify host so it can broadcast to other workers
         if (/device lost|Instance reference/i.test(message)) {
@@ -280,7 +280,7 @@ async function _loadPipeline(modelName, _cascadeDepth) {
             } catch (err) {
                 const msg = String(err?.message || err || '');
                 const isMemErr = /allocation|out of memory|OOM|RangeError|createbuffer/i.test(msg);
-                const isContextErr = /WebGPU Context Provider|context.*provider|device lost|GPUDevice|createComputePipeline|createShaderModule/i.test(msg);
+                const isContextErr = /WebGPU Context Provider|context.*provider|device lost|GPUDevice|createComputePipeline|createShaderModule|mapping webgpu buffer|invalid buffer/i.test(msg);
                 const isTimeout = /timed out/i.test(msg);
                 const isOrtNumericErr = /^\\d+$/.test(msg.trim());
                 const isGpuErr = isMemErr || isContextErr || isTimeout || isOrtNumericErr;
@@ -387,7 +387,7 @@ async function embed(texts) {
 
 // ---- GPU error recovery ----
 
-const GPU_ERROR_RE = /createBuffer|RangeError|out of memory|OOM|allocation|shader|device lost|GPUDevice|createComputePipeline|createShaderModule/i;
+const GPU_ERROR_RE = /createBuffer|RangeError|out of memory|OOM|allocation|shader|device lost|GPUDevice|createComputePipeline|createShaderModule|mapAsync|mapping webgpu buffer|invalid buffer/i;
 
 /**
  * Switch to WASM backend. Serialized: if already switching, returns the

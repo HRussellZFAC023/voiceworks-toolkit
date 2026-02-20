@@ -1392,6 +1392,21 @@ body:not(.body--dark) .asmr-card-translation {
   z-index: calc(var(--z-menu, 10002) + 1) !important;
 }
 
+/* But dialog-owned dropdown menus (e.g. q-select in Create playlist) must
+   remain clickable above dialog content. */
+.q-body--dialog .q-menu,
+.body--dialog .q-menu,
+body.q-body--prevent-scroll .q-menu,
+body:has(.q-dialog[aria-hidden="false"]) .q-menu,
+.q-dialog[aria-hidden="false"] ~ .q-menu {
+  z-index: calc(var(--z-menu, 10002) + 2) !important;
+}
+
+/* Quasar q-select dropdown listboxes use *_lb ids. Keep them above dialogs. */
+.q-menu[id$="_lb"] {
+  z-index: calc(var(--z-menu, 10002) + 2) !important;
+}
+
 /* ========================================
    Fix: Remove default Quasar image overlay padding
    ======================================== */

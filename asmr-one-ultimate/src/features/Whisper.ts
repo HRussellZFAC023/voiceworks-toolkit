@@ -20,6 +20,7 @@ import { TranslationService } from '../services/TranslationService';
 import { AudioCache } from '../infrastructure/AudioCache';
 import { gmRequest } from '../infrastructure/HttpClient';
 import { GpuScheduler, Priority } from '../core/GpuScheduler';
+import { DeviceCapabilities } from '../core/DeviceCapabilities';
 import { buildLrcFromSegments, buildVttFromSegments } from './transcriptFileUtils';
 import { correctWhisperText } from '../data/nsfw-glossary';
 
@@ -28,16 +29,21 @@ import { correctWhisperText } from '../data/nsfw-glossary';
 // ============================================================================
 
 const TARGET_SAMPLE_RATE = 16000;
-const MAX_PENDING_CHUNKS = 6;
+const DEFAULT_MAX_PENDING_CHUNKS = 6;
 const DEFAULT_MODEL = 'onnx-community/whisper-small_timestamped';
 const CACHE_TTL_MS = 1000 * 60 * 60 * 24 * 90; // 90 days
 const MODEL_READY_TTL_MS = 1000 * 60 * 60 * 24 * 30; // 30 days
 // No lookahead limit — transcribe the entire audio from start to finish.
-// MAX_PENDING_CHUNKS provides natural backpressure (6 concurrent chunks max).
+// DEFAULT_MAX_PENDING_CHUNKS provides natural backpressure (6 concurrent chunks max).
 const INITIAL_BACKFILL_SEC = 30;
 const SEEK_BACKFILL_SEC = 15;
-const POLL_INTERVAL_MS = 250;
+const DEFAULT_POLL_INTERVAL_MS = 250;
+const DEFAULT_WORKER_UPDATE_INTERVAL_MS = 200;
+const DEFAULT_MIN_WEBGPU_BUFFER_BYTES = 256 * 1024 * 1024;
 const TRANSLATE_AHEAD_MAX_SEGMENTS_PER_RUN = 50;
+const GPU_ERROR_PATTERN =
+    /createBuffer|RangeError|out of memory|OOM|allocation|device lost|GPUDevice|createComputePipeline|createShaderModule|mapAsync|mapping webgpu buffer|invalid buffer|Instance reference|AbortError|release session|invalid session/i;
+const EXPLICIT_DEVICE_LOSS_PATTERN = /device lost|Instance reference|release session|invalid session/i;
 
 // ============================================================================
 // Worker message types
@@ -109,6 +115,13 @@ interface WhisperSettings {
     cacheTranscripts: boolean;
     autoWarmup: boolean;
     silenceThreshold: number;
+    maxPendingChunks: number;
+    pollIntervalMs: number;
+    workerUpdateIntervalMs: number;
+    idleUnloadMs: number;
+    forceWasm: boolean;
+    preferLowPowerAdapter: boolean;
+    minWebgpuBufferBytes: number;
 }
 
 interface CachedTranscript {
@@ -194,7 +207,6 @@ export class Whisper {
     private gpuRecoveryTimer: number | null = null;
     private idleUnloadTimer: number | null = null;
     private loadLeaseRelease: (() => void) | null = null; // GpuScheduler load lease
-    private static readonly IDLE_UNLOAD_MS = 10 * 60 * 1000; // 10 minutes
     private storeWatcherBound = false;
     private _audioCache: AudioCache | null = null;
     private autoStartTimer: number | null = null;
@@ -323,6 +335,26 @@ export class Whisper {
                 this.worker.postMessage({ type: 'skip-webgpu' });
             }
         });
+
+        EventBus.on('config:change', ({ key, value }) => {
+            if (key !== 'forceWhisperWasm') return;
+            const enabled = value === true;
+            Logger.log(`[Whisper] Force WASM ${enabled ? 'enabled' : 'disabled'} via settings`);
+
+            if (!this.worker) return;
+            const wasTranscribing = this.transcribing;
+            if (wasTranscribing) {
+                this.stopTranscription('force-wasm-config-change');
+            }
+            this.resetWorker(enabled ? 'force-wasm-enabled' : 'force-wasm-disabled');
+
+            if (wasTranscribing) {
+                const audio = getAudioElement();
+                if (audio && !audio.paused) {
+                    this.startTranscription().catch(err => Logger.error('[Whisper] Restart after WASM toggle failed:', err));
+                }
+            }
+        });
     }
 
     private handleTrackChange(newSrc: string): void {
@@ -402,6 +434,18 @@ export class Whisper {
             this.fetchAbortController.abort();
             this.fetchAbortController = null;
         }
+    }
+
+    private isGpuErrorMessage(message: string): boolean {
+        return GPU_ERROR_PATTERN.test(message);
+    }
+
+    private isExplicitDeviceLossMessage(message: string): boolean {
+        return EXPLICIT_DEVICE_LOSS_PATTERN.test(message);
+    }
+
+    private shouldForceWasm(): boolean {
+        return Config.get('forceWhisperWasm') === true;
     }
 
     // ------------------------------------------------------------------------
@@ -640,12 +684,13 @@ export class Whisper {
         this.clearIdleUnloadTimer();
         // Don't unload if auto-transcribe is pending (will start again on next track)
         if (this.autoTranscribeWorkId) return;
+        const settings = this.getWhisperSettings();
         this.idleUnloadTimer = window.setTimeout(() => {
             if (!this.transcribing && this.worker) {
                 Logger.log('[Whisper] Idle timeout reached, unloading model to free memory');
                 this.resetWorker('idle-unload');
             }
-        }, Whisper.IDLE_UNLOAD_MS);
+        }, settings.idleUnloadMs);
     }
 
     private clearIdleUnloadTimer(): void {
@@ -869,9 +914,10 @@ export class Whisper {
 
     private startProcessingLoop(): void {
         this.stopProcessingLoop();
+        const settings = this.getWhisperSettings();
         this.processingLoopId = window.setInterval(() => {
             this.maybeProcessNextChunk();
-        }, POLL_INTERVAL_MS);
+        }, settings.pollIntervalMs);
     }
 
     private stopProcessingLoop(): void {
@@ -912,12 +958,11 @@ export class Whisper {
             }
         }
 
-        if (this.pendingChunks >= MAX_PENDING_CHUNKS) return;
-
         const audio = this.audio || getAudioElement();
         if (!audio) return;
 
         const settings = this.getWhisperSettings();
+        if (this.pendingChunks >= settings.maxPendingChunks) return;
         const chunkSamples = Math.floor(settings.chunkLengthS * TARGET_SAMPLE_RATE);
         const overlapSec = settings.strideLengthS;
         const playhead = audio.currentTime;
@@ -1057,14 +1102,17 @@ export class Whisper {
 
         // Only skip WebGPU if it failed THIS session — don't inherit from translation's
         // cached dtype, as the issue may have been transient (driver/Chrome update).
-        if (Whisper.webgpuFailed) {
+        if (Whisper.webgpuFailed || this.shouldForceWasm()) {
+            if (this.shouldForceWasm()) {
+                Logger.debug('[Whisper] WebGPU disabled by user setting (forceWhisperWasm)');
+            }
             this.worker.postMessage({ type: 'skip-webgpu' });
         }
         this.worker.onerror = (e: ErrorEvent) => {
             if (this.gpuCrashed) return; // Already showing crash UI
             const errObj = (e as ErrorEvent & { error?: unknown }).error;
             const errorMsg = e.message || (errObj instanceof Error ? errObj.message : '') || 'Unknown worker error';
-            const isGpuError = /createBuffer|RangeError|out of memory|OOM|allocation|device lost|GPUDevice|createComputePipeline|createShaderModule|mapAsync|Instance reference|AbortError|release session|invalid session/i.test(errorMsg);
+            const isGpuError = this.isGpuErrorMessage(errorMsg);
             const isTerminalGpuFailure = /WebGPU is required|All WebGPU.*failed/i.test(errorMsg);
             const details = {
                 message: errorMsg,
@@ -1185,6 +1233,8 @@ export class Whisper {
                 language: settings.language,
                 chunkLengthS: settings.chunkLengthS,
                 strideLengthS: settings.strideLengthS,
+                preferLowPowerAdapter: settings.preferLowPowerAdapter,
+                minWebgpuBufferBytes: settings.minWebgpuBufferBytes,
             });
         });
     }
@@ -1222,6 +1272,7 @@ export class Whisper {
             strideLengthS: settings.strideLengthS,
             chunkId,
             priority,
+            updateIntervalMs: settings.workerUpdateIntervalMs,
         });
     }
 
@@ -1402,14 +1453,14 @@ export class Whisper {
                     break;
                 }
                 const errMsg = message.data?.message || I18n.t('whisperUnknownError');
-                const isGpuError = /createBuffer|RangeError|out of memory|OOM|allocation|device lost|GPUDevice|createComputePipeline|createShaderModule|mapAsync|Instance reference|AbortError|release session|invalid session/i.test(errMsg);
+                const isGpuError = this.isGpuErrorMessage(errMsg);
                 // "WebGPU is required" means worker tried WebGPU, it failed, but WASM
                 // fallback is disabled. This is a terminal GPU failure — do NOT retry.
                 const isWebgpuRequiredError = /WebGPU is required/i.test(errMsg);
                 // "All WebGPU.*failed" means every dtype candidate was exhausted.
                 const isAllGpuFailed = /All WebGPU.*failed/i.test(errMsg);
                 const isTerminalGpuFailure = isWebgpuRequiredError || isAllGpuFailed;
-                const isExplicitDeviceLoss = /device lost|Instance reference|release session|invalid session/i.test(errMsg);
+                const isExplicitDeviceLoss = this.isExplicitDeviceLossMessage(errMsg);
 
                 if ((isGpuError || isTerminalGpuFailure) && !Whisper.webgpuFailed) {
                     Whisper.webgpuFailed = true;
@@ -1569,7 +1620,11 @@ export class Whisper {
                 const existingText = existing.text.trim();
                 const nextText = seg.text.trim();
                 if ((preferNew || nextText.length >= existingText.length) && this.isSignificantUpdate(existingText, nextText)) {
-                    this.segments[matchIdx] = seg;
+                    // Guard: don't replace a long segment with much shorter text
+                    // (chunk-boundary overlap can produce truncated re-transcriptions)
+                    if (existingText.length <= 4 || nextText.length >= existingText.length * 0.5) {
+                        this.segments[matchIdx] = seg;
+                    }
                 }
                 this.lastSegmentEnd = Math.max(this.lastSegmentEnd, seg.end, existing.end);
                 continue;
@@ -1615,14 +1670,17 @@ export class Whisper {
                     const prevText = prev.text.trim();
                     const segText = seg.text.trim();
                     if (this.isSignificantUpdate(prevText, segText) && (segText.length > prevText.length || preferNew)) {
-                        deduped[deduped.length - 1] = seg;
+                        // Guard: don't replace with much shorter text (chunk-boundary artifact)
+                        if (prevText.length <= 4 || segText.length >= prevText.length * 0.5) {
+                            deduped[deduped.length - 1] = seg;
+                        }
                     }
                     continue;
                 }
                 if (prev && this.shouldCollapseAdjacentDuplicate(prev, seg)) {
                     const prevText = prev.text.trim();
                     const segText = seg.text.trim();
-                    if (preferNew || segText.length >= prevText.length) {
+                    if ((preferNew || segText.length >= prevText.length) && (prevText.length <= 4 || segText.length >= prevText.length * 0.5)) {
                         deduped[deduped.length - 1] = {
                             ...seg,
                             start: Math.min(prev.start, seg.start),
@@ -1955,19 +2013,71 @@ export class Whisper {
     // ------------------------------------------------------------------------
 
     private getWhisperSettings(): WhisperSettings {
+        const profile = DeviceCapabilities.profile;
+        const memoryPressure = GpuScheduler.getMemoryPressure();
+        const forceWasm = this.shouldForceWasm();
+
+        let maxPendingChunks = DEFAULT_MAX_PENDING_CHUNKS;
+        let pollIntervalMs = DEFAULT_POLL_INTERVAL_MS;
+        let workerUpdateIntervalMs = DEFAULT_WORKER_UPDATE_INTERVAL_MS;
+        let preferLowPowerAdapter = false;
+        let minWebgpuBufferBytes = DEFAULT_MIN_WEBGPU_BUFFER_BYTES;
+
+        if (profile.tier === 'limited') {
+            maxPendingChunks = 4;
+            pollIntervalMs = 325;
+            workerUpdateIntervalMs = 260;
+            preferLowPowerAdapter = true;
+            minWebgpuBufferBytes = 384 * 1024 * 1024;
+        } else if (profile.tier === 'constrained') {
+            maxPendingChunks = 2;
+            pollIntervalMs = 450;
+            workerUpdateIntervalMs = 320;
+            preferLowPowerAdapter = true;
+            minWebgpuBufferBytes = 512 * 1024 * 1024;
+        }
+
+        if (memoryPressure === 'high') {
+            maxPendingChunks = Math.max(1, maxPendingChunks - 2);
+            pollIntervalMs = Math.max(pollIntervalMs, 500);
+            workerUpdateIntervalMs = Math.max(workerUpdateIntervalMs, 350);
+        } else if (memoryPressure === 'medium' && profile.tier !== 'full') {
+            maxPendingChunks = Math.max(2, maxPendingChunks - 1);
+        }
+
+        if (forceWasm) {
+            // CPU/WASM path: keep queue shallow to avoid pegging low-spec machines.
+            maxPendingChunks = Math.min(maxPendingChunks, profile.tier === 'full' ? 3 : 2);
+            pollIntervalMs = Math.max(pollIntervalMs, 400);
+            workerUpdateIntervalMs = Math.max(workerUpdateIntervalMs, 350);
+            preferLowPowerAdapter = true;
+        }
+
         const primaryLang = (Config.get('primarySubtitleLang') as string | undefined) || 'ja';
         const language = primaryLang.toLowerCase() === 'ja' ? 'japanese' : primaryLang.toLowerCase();
+        const configuredTask = String(Config.get('whisperTask') || 'transcribe').toLowerCase();
+        const subtask = configuredTask === 'translate' ? 'translate' : 'transcribe';
+        const autoWarmupConfigured = Config.get('whisperAutoWarmup') !== false;
+        const cacheTranscripts = Config.get('whisperCacheTranscripts') !== false;
+        const idleUnloadMs = DeviceCapabilities.budget.whisperIdleMs;
 
         return {
             model: DEFAULT_MODEL,
-            subtask: 'transcribe',
+            subtask,
             language,
             multilingual: true,
             chunkLengthS: 29,
             strideLengthS: 5,
-            cacheTranscripts: true,
-            autoWarmup: true,
+            cacheTranscripts,
+            autoWarmup: autoWarmupConfigured && DeviceCapabilities.shouldWarmup && !forceWasm,
             silenceThreshold: 0,
+            maxPendingChunks,
+            pollIntervalMs,
+            workerUpdateIntervalMs,
+            idleUnloadMs,
+            forceWasm,
+            preferLowPowerAdapter,
+            minWebgpuBufferBytes,
         };
     }
 

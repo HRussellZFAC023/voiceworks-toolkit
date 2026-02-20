@@ -12,9 +12,10 @@
 
 import { Logger } from '../../core/Utils';
 import { GooglePlaylistScraper } from '../../scrapers/GooglePlaylistScraper';
-import { apiRequest } from './PlaylistService';
+import { buildCoverUrl } from '../../types/api';
+import { apiRequest, getApiBaseUrl } from './PlaylistService';
 import KNOWN_PLAYLISTS from '../../data/known-playlists.json';
-import type { PlaylistMetadata } from '../../api/Playlist';
+import type { PlaylistMetadata, PlaylistMetadataWorkItem } from '../../api/Playlist';
 import type { CachedPlaylistMetadata, GoogleSearchCache } from './types';
 
 // ---------------------------------------------------------------------------
@@ -26,11 +27,15 @@ const METADATA_CACHE_KEY = 'asmr_ultimate_playlist_metadata_cache';
 const METADATA_SOFT_TTL_MS = 4 * 60 * 60 * 1000;   // 4 hours — serve stale, revalidate
 const METADATA_HARD_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days — evict
 const FAILED_CACHE_KEY = 'asmr_ultimate_failed_playlist_cache';
+const FAILED_CACHE_VERSION_KEY = 'asmr_ultimate_failed_playlist_cache_version';
+const FAILED_CACHE_VERSION = 2;
 const FAILED_TTL_MS = 24 * 60 * 60 * 1000;          // 24 hours
 const GOOGLE_CACHE_KEY = 'asmr_ultimate_google_search_cache';
 
 const UNKNOWN_NAME = 'Unknown Playlist';
 const KNOWN_IDS = KNOWN_PLAYLISTS.map(p => p.id.toLowerCase());
+const TRANSIENT_FAIL_TTL_MS = 5 * 60 * 1000; // 5 min
+const RATE_LIMIT_BACKOFF_MS = 90 * 1000; // 90 sec
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -48,6 +53,108 @@ function parseJson<T>(raw: unknown): T | null {
     } catch { return null; }
 }
 
+function readFirstCoverUrl(candidate: unknown): string {
+    if (!candidate || typeof candidate !== 'object') return '';
+    const record = candidate as Record<string, unknown>;
+    const keys = [
+        'coverUrl',
+        'cover',
+        'main_cover_url',
+        'mainCoverUrl',
+        'thumbnailCoverUrl',
+        'samCoverUrl',
+    ] as const;
+    for (const key of keys) {
+        const value = record[key];
+        if (typeof value === 'string' && value.trim()) return value.trim();
+    }
+    return '';
+}
+
+function normalizeWorkId(raw: unknown): number | null {
+    if (typeof raw === 'number' && Number.isFinite(raw)) {
+        return raw;
+    }
+    if (typeof raw !== 'string') return null;
+    const value = raw.trim();
+    if (!value) return null;
+    if (/^\d+$/.test(value)) return Number(value);
+    const prefixed = value.match(/^[A-Za-z]+(\d+)$/);
+    if (prefixed) return Number(prefixed[1]);
+    return null;
+}
+
+function normalizeTagName(raw: unknown): string | null {
+    if (typeof raw !== 'string') return null;
+    const compact = raw.replace(/\s+/g, ' ').trim();
+    return compact || null;
+}
+
+function collectTagNames(candidate: unknown, sink: Map<string, string>): void {
+    if (!candidate) return;
+
+    if (typeof candidate === 'string') {
+        const normalized = normalizeTagName(candidate);
+        if (!normalized) return;
+        const key = normalized.toLowerCase();
+        if (!sink.has(key)) sink.set(key, normalized);
+        return;
+    }
+
+    if (Array.isArray(candidate)) {
+        for (const item of candidate) collectTagNames(item, sink);
+        return;
+    }
+
+    if (typeof candidate !== 'object') return;
+
+    const record = candidate as Record<string, unknown>;
+    for (const key of ['name', 'title', 'ja', 'en', 'name_ja', 'name_en'] as const) {
+        const value = record[key];
+        const normalized = normalizeTagName(value);
+        if (!normalized) continue;
+        const lowered = normalized.toLowerCase();
+        if (!sink.has(lowered)) sink.set(lowered, normalized);
+    }
+
+    for (const key of ['tags', 'genres', 'tags_replaced', 'genres_replaced'] as const) {
+        collectTagNames(record[key], sink);
+    }
+}
+
+function normalizeTagArray(raw: unknown): string[] {
+    const tags = new Map<string, string>();
+    collectTagNames(raw, tags);
+    return Array.from(tags.values());
+}
+
+function extractErrorStatus(error: unknown): number | null {
+    if (!error || typeof error !== 'object') return null;
+    const record = error as Record<string, unknown>;
+    if (typeof record.status === 'number') return record.status;
+
+    const response = record.response;
+    if (response && typeof response === 'object') {
+        const responseStatus = (response as Record<string, unknown>).status;
+        if (typeof responseStatus === 'number') return responseStatus;
+    }
+    return null;
+}
+
+function isRateLimitError(error: unknown): boolean {
+    const status = extractErrorStatus(error);
+    if (status === 429) return true;
+    const message = error instanceof Error ? error.message : String(error || '');
+    return /\b429\b/.test(message);
+}
+
+function isTransientNetworkError(error: unknown): boolean {
+    const status = extractErrorStatus(error);
+    if (status === 0) return true;
+    const message = error instanceof Error ? error.message : String(error || '');
+    return /network error|failed to fetch|cors|timeout|err_failed/i.test(message);
+}
+
 // ---------------------------------------------------------------------------
 // Service
 // ---------------------------------------------------------------------------
@@ -61,8 +168,12 @@ export class PlaylistDiscoveryService {
     private metadataCache = new Map<string, CachedPlaylistMetadata>();
     /** failed playlist IDs → timestamp */
     private failedCache = new Map<string, number>();
+    /** temporary cooldown for transient fetch failures (rate limit / network) */
+    private transientFailureCache = new Map<string, number>();
     /** google search cache (raw IDs) */
     private googleIds: string[] = [];
+    /** global API backoff when playlist metadata endpoint starts returning 429 */
+    private rateLimitUntil = 0;
 
     private constructor() {
         this.loadManualIds();
@@ -104,7 +215,10 @@ export class PlaylistDiscoveryService {
             this.metadataCache.delete(id.toLowerCase());
             return null;
         }
-        return entry;
+        return {
+            ...entry,
+            tags: normalizeTagArray(entry.tags),
+        };
     }
 
     /** Is this playlist's metadata stale (past soft TTL)? */
@@ -123,6 +237,20 @@ export class PlaylistDiscoveryService {
         return false;
     }
 
+    /** Is this playlist temporarily paused due to recent transient failure? */
+    isTransientFailed(id: string): boolean {
+        const until = this.transientFailureCache.get(id.toLowerCase());
+        if (!until) return false;
+        if (Date.now() < until) return true;
+        this.transientFailureCache.delete(id.toLowerCase());
+        return false;
+    }
+
+    /** Is playlist metadata API currently in global rate-limit cooldown? */
+    isRateLimitedNow(): boolean {
+        return Date.now() < this.rateLimitUntil;
+    }
+
     /** Fetch metadata for a single playlist. Returns null on failure. */
     async fetchMetadata(id: string): Promise<CachedPlaylistMetadata | null> {
         const key = id.toLowerCase();
@@ -133,6 +261,8 @@ export class PlaylistDiscoveryService {
 
         // Skip known-failed
         if (this.isFailed(key)) return cached ?? null;
+        if (this.isTransientFailed(key)) return cached ?? null;
+        if (this.isRateLimitedNow()) return cached ?? null;
 
         try {
             const meta = await apiRequest<PlaylistMetadata>(
@@ -142,19 +272,45 @@ export class PlaylistDiscoveryService {
                 this.markFailed(key);
                 return null;
             }
+            const cachedLatestWorkId = cached?.latestWorkId;
+            const resolved = this.resolveCoverFromMetadata(meta);
+            const shouldResolveFromWorks = !resolved.coverUrl && !cached?.coverUrl;
+            const fallback = shouldResolveFromWorks
+                ? await this.resolveCoverFromPlaylistWorks(key)
+                : { coverUrl: '', latestWorkId: undefined as string | number | undefined };
+            const coverUrl = resolved.coverUrl || fallback.coverUrl || cached?.coverUrl || '';
+            const latestWorkId = resolved.latestWorkId ?? fallback.latestWorkId ?? cachedLatestWorkId;
+            const tags = normalizeTagArray([
+                cached?.tags || [],
+                this.resolveTagsFromMetadata(meta),
+            ]);
             const entry: CachedPlaylistMetadata = {
                 id: meta.id ?? key,
                 name: meta.name,
                 user_name: meta.user_name ?? 'Unknown',
                 worksCount: meta.works_count ?? 0,
-                coverUrl: '',
+                tags,
+                latestWorkId,
+                coverUrl,
+                coverUrlResolved: Boolean(coverUrl),
                 cachedAt: Date.now(),
             };
             this.metadataCache.set(key, entry);
             this.saveMetadataCache();
+            this.transientFailureCache.delete(key);
             return entry;
         } catch (e) {
             Logger.warn('[PlaylistDiscoveryService] fetchMetadata failed:', id, e);
+            if (isRateLimitError(e)) {
+                const jitter = Math.floor(Math.random() * 5000);
+                this.rateLimitUntil = Date.now() + RATE_LIMIT_BACKOFF_MS + jitter;
+                this.transientFailureCache.set(key, this.rateLimitUntil);
+                return cached ?? null;
+            }
+            if (isTransientNetworkError(e)) {
+                this.transientFailureCache.set(key, Date.now() + TRANSIENT_FAIL_TTL_MS);
+                return cached ?? null;
+            }
             this.markFailed(key);
             return cached ?? null;   // serve stale if available
         }
@@ -260,7 +416,11 @@ export class PlaylistDiscoveryService {
             for (const e of entries) {
                 if (!e.name || e.name === UNKNOWN_NAME) continue;
                 if (now - e.cachedAt < METADATA_HARD_TTL_MS) {
-                    this.metadataCache.set(e.id.toLowerCase(), e);
+                    const normalized: CachedPlaylistMetadata = {
+                        ...e,
+                        tags: normalizeTagArray((e as { tags?: unknown }).tags),
+                    };
+                    this.metadataCache.set(e.id.toLowerCase(), normalized);
                 }
             }
             Logger.debug('[PlaylistDiscoveryService] Loaded', this.metadataCache.size, 'cached metadata');
@@ -273,6 +433,13 @@ export class PlaylistDiscoveryService {
 
     private loadFailedCache(): void {
         try {
+            const version = Number(gmGet<number | string>(FAILED_CACHE_VERSION_KEY, 1));
+            if (version !== FAILED_CACHE_VERSION) {
+                this.failedCache.clear();
+                gmSet(FAILED_CACHE_KEY, JSON.stringify([]));
+                gmSet(FAILED_CACHE_VERSION_KEY, FAILED_CACHE_VERSION);
+                return;
+            }
             const raw = gmGet(FAILED_CACHE_KEY, null);
             const entries = parseJson<Array<{ id: string; failedAt: number }>>(raw);
             if (!Array.isArray(entries)) return;
@@ -289,6 +456,7 @@ export class PlaylistDiscoveryService {
         const arr = Array.from(this.failedCache.entries())
             .map(([id, failedAt]) => ({ id, failedAt }));
         gmSet(FAILED_CACHE_KEY, JSON.stringify(arr));
+        gmSet(FAILED_CACHE_VERSION_KEY, FAILED_CACHE_VERSION);
     }
 
     private markFailed(id: string): void {
@@ -318,5 +486,80 @@ export class PlaylistDiscoveryService {
         const uuidPattern = /[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/i;
         const match = trimmed.match(uuidPattern);
         return match ? match[0].toLowerCase() : null;
+    }
+
+    private resolveCoverFromMetadata(meta: PlaylistMetadata): { coverUrl: string; latestWorkId?: string | number } {
+        const topLevelCover = readFirstCoverUrl(meta);
+        if (topLevelCover) {
+            return { coverUrl: topLevelCover };
+        }
+
+        if (!Array.isArray(meta.works) || meta.works.length === 0) {
+            return { coverUrl: '' };
+        }
+
+        return this.resolveCoverFromWork(meta.works[0]);
+    }
+
+    private resolveTagsFromMetadata(meta: PlaylistMetadata): string[] {
+        const tags = new Map<string, string>();
+        const record = meta as unknown as Record<string, unknown>;
+        collectTagNames(record.tags, tags);
+        collectTagNames(record.genres, tags);
+        collectTagNames(record.tags_replaced, tags);
+        collectTagNames(record.genres_replaced, tags);
+
+        if (Array.isArray(meta.works)) {
+            for (const work of meta.works) {
+                if (!work || typeof work !== 'object') continue;
+                const workRecord = work as Record<string, unknown>;
+                collectTagNames(workRecord.tags, tags);
+                collectTagNames(workRecord.genres, tags);
+                collectTagNames(workRecord.tags_replaced, tags);
+                collectTagNames(workRecord.genres_replaced, tags);
+            }
+        }
+
+        return Array.from(tags.values());
+    }
+
+    private resolveCoverFromWork(work: PlaylistMetadataWorkItem | string | undefined): {
+        coverUrl: string;
+        latestWorkId?: string | number;
+    } {
+        if (!work) return { coverUrl: '' };
+
+        const workCover = readFirstCoverUrl(work);
+        const workObject = typeof work === 'object' && work !== null
+            ? work as Record<string, unknown>
+            : null;
+        const rawWorkId = workObject?.id ?? workObject?.source_id ?? work;
+        const latestWorkId = normalizeWorkId(rawWorkId) ?? undefined;
+
+        if (workCover) {
+            return { coverUrl: workCover, latestWorkId };
+        }
+        if (latestWorkId !== undefined) {
+            return {
+                coverUrl: buildCoverUrl(latestWorkId, 'main', getApiBaseUrl()),
+                latestWorkId,
+            };
+        }
+
+        return { coverUrl: '' };
+    }
+
+    private async resolveCoverFromPlaylistWorks(id: string): Promise<{ coverUrl: string; latestWorkId?: string | number }> {
+        try {
+            const worksResponse = await apiRequest<{ works?: PlaylistMetadataWorkItem[] }>(
+                '/api/playlist/get-playlist-works',
+                { id, page: 1, pageSize: 1 },
+            );
+            const firstWork = Array.isArray(worksResponse?.works) ? worksResponse.works[0] : undefined;
+            return this.resolveCoverFromWork(firstWork);
+        } catch (e) {
+            Logger.debug('[PlaylistDiscoveryService] cover lookup failed:', id, e);
+            return { coverUrl: '' };
+        }
     }
 }

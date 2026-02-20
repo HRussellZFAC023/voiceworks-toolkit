@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Voiceworks Toolkit — Japanese Language Learning Tools</title>
-  <meta name="description" content="Browser-based toolkit for Japanese language learning through immersion with native voiceworks. On-device AI transcription, neural translation, and 30+ features.">
+  <title>Voiceworks Toolkit - Japanese Language Learning Tools</title>
+  <meta name="description" content="Browser-based toolkit for Japanese language learning through immersion with native voiceworks. On-device Whisper transcription, web-assisted translation, semantic search, and 30+ features.">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -38,8 +38,8 @@
         <h1>Voiceworks Toolkit</h1>
         <p class="tagline">
           A browser-based toolkit for Japanese language learning through immersion with native voiceworks.
-          On-device AI transcription, real-time neural translation, and dozens of study features &mdash;
-          all running locally with no external server dependencies.
+          On-device Whisper transcription, web-assisted translation, and dozens of study features.
+          Built for fast, practical immersion with local caching and WebGPU acceleration when available.
         </p>
         <div class="hero-actions">
           <a href="installation.html" class="btn btn-primary">
@@ -64,7 +64,7 @@
     <!-- Screenshot -->
     <section style="padding: 0 0 80px; border: none;">
       <div class="container">
-        <img src="screenshot.jpg" alt="Voiceworks Toolkit — Player with dual-language subtitles, furigana annotations, audio visualizer, and translated track titles" style="width: 100%; border-radius: var(--radius-lg); border: 1px solid var(--border);">
+        <img src="screenshot.jpg" alt="Voiceworks Toolkit - Player with dual-language subtitles, furigana annotations, audio visualizer, and translated track titles" style="width: 100%; border-radius: var(--radius-lg); border: 1px solid var(--border);">
       </div>
     </section>
 
@@ -73,7 +73,7 @@
       <div class="container">
         <div class="section-header">
           <h2>Core Features</h2>
-          <p>Everything you need for immersion-based Japanese study, running entirely in your browser.</p>
+          <p>Everything you need for immersion-based Japanese study, tuned for speed, clarity, and daily use.</p>
         </div>
 
         <div class="features-grid">
@@ -86,19 +86,19 @@
           <div class="feature-card">
             <div class="feature-icon">&#x1F399;</div>
             <h3>Live Transcription</h3>
-            <p>On-device Whisper speech-to-text with WebGPU acceleration. Turns any voicework into study material &mdash; no uploads needed. Export to LRC, VTT, or SRT formats.</p>
+            <p>On-device Whisper speech-to-text with WebGPU acceleration. Turns any voicework into study material with no manual uploads. Export to LRC, VTT, or SRT formats.</p>
           </div>
 
           <div class="feature-card">
             <div class="feature-icon">&#x1F310;</div>
             <h3>Neural Translation</h3>
-            <p>Local machine translation models running in Web Workers. Japanese-to-English translation with batch coalescing and shared caching for real-time performance.</p>
+            <p>Web translation pipeline for Japanese and Chinese text with retry logic, host rotation, and shared caching for real-time performance.</p>
           </div>
 
           <div class="feature-card">
             <div class="feature-icon">&#x1F50D;</div>
             <h3>Semantic Search</h3>
-            <p>Find voiceworks by meaning using AI vector embeddings stored locally in IndexedDB. Supports multilingual queries with tag-based hints and paginated results.</p>
+            <p>Find voiceworks by meaning using Jina embeddings with local IndexedDB caching. Supports multilingual queries with tag hints and paginated results.</p>
           </div>
 
           <div class="feature-card">
@@ -132,8 +132,8 @@
           </div>
           <div class="feature-card" style="text-align: center;">
             <div class="feature-icon" style="margin: 0 auto 20px;">&#x1F9E0;</div>
-            <h3>AI Runs Locally</h3>
-            <p>Whisper transcription and neural translation models run entirely in your browser using WebGPU. No data leaves your device.</p>
+            <h3>Hybrid AI Pipeline</h3>
+            <p>Whisper transcription runs on-device. Translation and semantic embeddings use web APIs with local caching, retries, and rate-limit handling.</p>
           </div>
           <div class="feature-card" style="text-align: center;">
             <div class="feature-icon" style="margin: 0 auto 20px;">&#x1F3AF;</div>
@@ -175,7 +175,7 @@
         <a href="installation.html">Installation</a>
         <a href="manual.html">Manual</a>
       </div>
-      <p>Voiceworks Toolkit &mdash; MIT License</p>
+      <p>Voiceworks Toolkit - MIT License</p>
     </div>
   </footer>
 

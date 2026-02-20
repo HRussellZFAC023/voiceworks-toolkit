@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Installation — Voiceworks Toolkit</title>
+  <title>Installation - Voiceworks Toolkit</title>
   <meta name="description" content="Install Voiceworks Toolkit in one click from Greasyfork. Just add Tampermonkey and start studying Japanese.">
   <link rel="stylesheet" href="styles.css">
 </head>
@@ -42,7 +42,7 @@
         <div class="feature-list" style="margin-bottom: 48px;">
           <div class="feature-item">
             <h3>Browser</h3>
-            <p>A Chromium-based browser (Chrome, Edge, Brave, etc.) or Firefox. WebGPU support is recommended for optimal AI performance but not required &mdash; the toolkit automatically falls back to WASM on older hardware.</p>
+            <p>A Chromium-based browser (Chrome, Edge, Brave, etc.) or Firefox. WebGPU support is recommended for best AI performance, but the toolkit automatically falls back to WASM on older hardware.</p>
           </div>
           <div class="feature-item">
             <h3>Tampermonkey</h3>
@@ -90,7 +90,7 @@ npm run build</code></pre>
           <div class="step">
             <h3>Development Mode (HMR)</h3>
             <pre><code>npm run dev</code></pre>
-            <p>Open <code>http://localhost:5173/asmr-one-ultimate.user.js</code> in your browser to install the dev script. Keep the dev server running while browsing &mdash; changes will hot-reload automatically.</p>
+            <p>Open <code>http://localhost:5173/asmr-one-ultimate.user.js</code> in your browser to install the dev script. Keep the dev server running while browsing so changes hot-reload automatically.</p>
           </div>
         </div>
 
@@ -136,11 +136,11 @@ npm run test:e2e:ui
 # Step-through debugging
 npm run test:e2e:debug</code></pre>
 
-        <p>E2E tests run in a headless Chromium browser with automatic userscript injection &mdash; no manual browser setup or Tampermonkey installation needed. GM_* APIs are stubbed using localStorage.</p>
+        <p>E2E tests run in a headless Chromium browser with automatic userscript injection, so no manual browser setup or Tampermonkey installation is needed. GM_* APIs are stubbed using localStorage.</p>
 
         <h2>Updating</h2>
 
-        <p><strong>Greasyfork installs</strong> update automatically &mdash; Tampermonkey checks for new versions periodically and applies them.</p>
+        <p><strong>Greasyfork installs</strong> update automatically. Tampermonkey checks for new versions periodically and applies them.</p>
 
         <p><strong>Source builds:</strong> pull the latest changes and rebuild:</p>
 
@@ -161,7 +161,7 @@ npm run build</code></pre>
           </div>
           <div class="feature-item">
             <h3>WebGPU not available</h3>
-            <p>WebGPU requires a compatible browser and GPU drivers. If WebGPU is unavailable, the toolkit automatically falls back to WASM for all AI features. Performance will be slower but functional.</p>
+            <p>WebGPU requires a compatible browser and GPU drivers. If WebGPU is unavailable, the toolkit automatically falls back to WASM for on-device features like Whisper transcription. Performance will be slower but functional.</p>
           </div>
           <div class="feature-item">
             <h3>Build errors</h3>
@@ -182,7 +182,7 @@ npm run build</code></pre>
         <a href="installation.html">Installation</a>
         <a href="manual.html">Manual</a>
       </div>
-      <p>Voiceworks Toolkit &mdash; MIT License</p>
+      <p>Voiceworks Toolkit - MIT License</p>
     </div>
   </footer>
 
