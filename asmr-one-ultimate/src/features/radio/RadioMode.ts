@@ -512,9 +512,9 @@ export class RadioMode {
         if (this.lastQueueIndex < 0) return;
 
         const player = this.bridge.player;
-        const queue = player.queue || player.playlist || [];
+        const queue = this.getActiveQueue(player);
         const queueIndex = player.queueIndex ?? 0;
-        const hasNextPlayable = this.hasNextPlayableTrack(queue as PlayerTrack[], queueIndex);
+        const hasNextPlayable = this.hasNextPlayableTrack(queue, queueIndex);
 
         // Prefer HTML5 audio element for accurate time info (Vuex may lag or reset)
         const audio = getAudioElement();
@@ -562,7 +562,7 @@ export class RadioMode {
         // If playAllInFolder is enabled but host auto-advance stalls after ended,
         // force-start the next playable track in the current queue.
         if (this.playAllInFolder && hasNextPlayable && audioEnded && !player.playing) {
-            this.forcePlayNextTrackInQueue(queue as PlayerTrack[], queueIndex);
+            this.forcePlayNextTrackInQueue(queue, queueIndex);
             return;
         }
 
@@ -691,15 +691,15 @@ export class RadioMode {
         if (this.isSkipping) return;
 
         const player = this.bridge.player;
-        const queue = player.queue || player.playlist || [];
+        const queue = this.getActiveQueue(player);
         const queueIndex = player.queueIndex ?? 0;
-        const hasNextPlayable = this.hasNextPlayableTrack(queue as PlayerTrack[], queueIndex);
+        const hasNextPlayable = this.hasNextPlayableTrack(queue, queueIndex);
 
         Logger.debug('[RadioMode] Audio ended event', { queueIndex, queueLength: queue.length });
 
         // If playAllInFolder and more tracks remain, force-advance if needed.
         if (this.playAllInFolder && hasNextPlayable) {
-            this.forcePlayNextTrackInQueue(queue as PlayerTrack[], queueIndex);
+            this.forcePlayNextTrackInQueue(queue, queueIndex);
             return;
         }
 
@@ -990,9 +990,9 @@ export class RadioMode {
         if (!this._isActive) return;
 
         const player = this.bridge.player;
-        const queue = player.queue || player.playlist || [];
+        const queue = this.getActiveQueue(player);
         const queueIndex = player.queueIndex ?? 0;
-        const hasNextPlayable = this.hasNextPlayableTrack(queue as PlayerTrack[], queueIndex);
+        const hasNextPlayable = this.hasNextPlayableTrack(queue, queueIndex);
 
         Logger.debug('[RadioMode] Track ended, queueIndex:', queueIndex, 'queueLength:', queue.length);
 
@@ -1003,6 +1003,42 @@ export class RadioMode {
 
         Logger.debug('[RadioMode] Queue ended, trigger skip to next work');
         this.skipToNext();
+    }
+
+    /**
+     * Merge host queue + playlist so "play entire work" does not prematurely
+     * skip when the host moves remaining tracks into playlist.
+     */
+    private getActiveQueue(player = this.bridge.player): PlayerTrack[] {
+        const queue = Array.isArray(player.queue) ? player.queue as PlayerTrack[] : [];
+        const playlist = Array.isArray(player.playlist) ? player.playlist as PlayerTrack[] : [];
+        if (queue.length === 0) return playlist;
+        if (playlist.length === 0) return queue;
+
+        const merged: PlayerTrack[] = [...queue];
+        const seen = new Set<string>();
+
+        for (const track of queue) {
+            const id = this.getTrackId(track);
+            if (id) seen.add(id);
+        }
+
+        for (const track of playlist) {
+            const id = this.getTrackId(track);
+            if (id && seen.has(id)) continue;
+            if (id) seen.add(id);
+            merged.push(track);
+        }
+
+        return merged;
+    }
+
+    private getTrackId(track: PlayerTrack | null | undefined): string | null {
+        if (!track) return null;
+        const anyTrack = track as PlayerTrack & { hash?: string; mediaStreamUrl?: string; src?: string; title?: string };
+        const stableKey = anyTrack.hash || anyTrack.mediaStreamUrl || anyTrack.src || anyTrack.title;
+        if (!stableKey) return null;
+        return `${anyTrack.type || 'track'}:${stableKey}`;
     }
 
     private getNextPlayableTrackIndex(queue: PlayerTrack[], currentIndex: number): number {

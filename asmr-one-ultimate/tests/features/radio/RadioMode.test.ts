@@ -282,4 +282,23 @@ describe('RadioMode', () => {
 
         expect(skipSpy).not.toHaveBeenCalled();
     });
+
+    it('does not advance when remaining audio is in playlist but queue has only current track', async () => {
+        (radioMode as any)._isActive = true;
+        (radioMode as any).playAllInFolder = true;
+
+        mockBridge.player.queue = [
+            { type: 'audio', hash: 'a1', title: 'Track 1' },
+        ];
+        mockBridge.player.playlist = [
+            { type: 'audio', hash: 'a2', title: 'Track 2' },
+        ];
+        mockBridge.player.queueIndex = 0;
+
+        const skipSpy = vi.spyOn(radioMode, 'skipToNext').mockResolvedValue(undefined);
+
+        (radioMode as any).handleTrackEnd();
+
+        expect(skipSpy).not.toHaveBeenCalled();
+    });
 });
