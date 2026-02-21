@@ -273,6 +273,10 @@ function buildHostWaveEnvelope(audio: HTMLAudioElement): void {
         for (let i = 0; i < points; i++) {
             const x = Math.round((i / Math.max(1, points - 1)) * (width - 1));
             let activePixels = 0;
+            let minY = height;
+            let maxY = -1;
+            let maxDist = 0;
+            const mid = (height - 1) / 2;
 
             for (let y = 0; y < height; y++) {
                 const idx = (y * width + x) * 4;
@@ -283,10 +287,23 @@ function buildHostWaveEnvelope(audio: HTMLAudioElement): void {
                 const g = data[idx + 1] || 0;
                 const b = data[idx + 2] || 0;
                 const delta = Math.abs(r - bgR) + Math.abs(g - bgG) + Math.abs(b - bgB);
-                if (delta > 24) activePixels++;
+                if (delta <= 24) continue;
+                activePixels++;
+                if (y < minY) minY = y;
+                if (y > maxY) maxY = y;
+                const dist = Math.abs(y - mid);
+                if (dist > maxDist) maxDist = dist;
             }
 
-            envelope[i] = clamp01(activePixels / Math.max(1, height));
+            if (maxY >= 0) {
+                const span = (maxY - minY + 1) / Math.max(1, height);
+                const distNorm = maxDist / Math.max(1, height * 0.5);
+                const density = activePixels / Math.max(1, height);
+                // Weighted blend gives stronger correlation to waveform loudness.
+                envelope[i] = clamp01((distNorm * 0.72) + (span * 0.18) + (density * 0.10));
+            } else {
+                envelope[i] = 0;
+            }
         }
 
         // Smooth noisy columns and normalize.

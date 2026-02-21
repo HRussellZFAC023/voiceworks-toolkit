@@ -145,6 +145,9 @@ export class TranslatedTags {
             this.resetPlayerTranslationState();
         });
         this.trackChangeCleanup = EventBus.on('track:change', () => {
+            // Track switches can reuse player DOM while prior translation batches are
+            // still in flight. Cancel the active queue first to avoid stale apply().
+            this.cancelActiveTranslationQueue();
             this.resetPlayerTranslationState();
         });
 

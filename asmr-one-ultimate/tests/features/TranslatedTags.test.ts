@@ -3,6 +3,7 @@ import { TranslatedTags } from '../../src/features/TranslatedTags';
 import { KikoeruBridge } from '../../src/infrastructure/KikoeruBridge';
 import { Config } from '../../src/core/Config';
 import { TranslationService } from '../../src/services/TranslationService';
+import { EventBus } from '../../src/core/EventBus';
 
 // Mock TagDatabase
 vi.mock('../../src/infrastructure/TagDatabase', () => {
@@ -284,5 +285,28 @@ describe('TranslatedTags', () => {
         expect(label.hasAttribute('data-asmrtag-translation')).toBe(false);
         expect(label.classList.contains('asmr-translated')).toBe(false);
         expect(label.classList.contains('asmr-worktree-translation')).toBe(false);
+    });
+
+    it('cancels active translation queue on track change', async () => {
+        await bridge.initialize();
+
+        const translatedTags = TranslatedTags.getInstance();
+        (bridge as any)._apiClient = {
+            getTags: vi.fn().mockResolvedValue({ data: [] }),
+        };
+        await translatedTags.enable();
+
+        (translatedTags as any).activeQueueKey = 'translated-tags:RJ999|/work/RJ999';
+        const trackChangeCall = [...vi.mocked(EventBus.on).mock.calls]
+            .reverse()
+            .find(([event]) => event === 'track:change');
+        expect(trackChangeCall).toBeTruthy();
+
+        const trackChangeHandler = trackChangeCall?.[1] as (payload: unknown) => void;
+        trackChangeHandler({ track: { title: 'next' } });
+
+        expect(vi.mocked(TranslationService.cancelPending)).toHaveBeenCalledWith({
+            cancellableKey: 'translated-tags:RJ999|/work/RJ999'
+        });
     });
 });

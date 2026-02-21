@@ -171,12 +171,13 @@ body.asmr-fullscreen-active .player-bar-container {
 }
 
 .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-slideshow-toggle {
-    top: 8px !important;
-    right: 76px !important;
+    top: max(8px, env(safe-area-inset-top)) !important;
+    right: calc(76px + env(safe-area-inset-right)) !important;
     width: 26px !important;
     height: 26px !important;
     opacity: 0.5;
     transform: none !important;
+    z-index: 120 !important;
 }
 
 @media (hover: hover) {
@@ -200,12 +201,13 @@ body.asmr-fullscreen-active .player-bar-container {
 }
 
 .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-exclude {
-    top: 8px !important;
-    right: 42px !important;
+    top: max(8px, env(safe-area-inset-top)) !important;
+    right: calc(42px + env(safe-area-inset-right)) !important;
     width: 26px !important;
     height: 26px !important;
     opacity: 0.5;
     transform: none !important;
+    z-index: 120 !important;
 }
 
 @media (hover: hover) {
@@ -309,8 +311,8 @@ body.asmr-fullscreen-active .player-bar-container {
 /* Exit Button - MINIMALIST & BLENDED */
 .audio-player .asmr-fullscreen-btn {
     position: absolute !important;
-    top: 8px !important;
-    right: 8px !important;
+    top: max(8px, env(safe-area-inset-top)) !important;
+    right: max(8px, env(safe-area-inset-right)) !important;
     z-index: 1000000 !important;
     width: 26px !important;
     height: 26px !important;
@@ -390,6 +392,16 @@ body.asmr-fullscreen-active .player-bar-container {
         opacity: 0 !important;
         pointer-events: none !important;
     }
+}
+
+/* Keep gallery controls visible/tappable while idle in fullscreen */
+.audio-player.asmr-player-fullscreen.asmr-controls-idle .albumart .asmr-gallery-nav,
+.audio-player.asmr-player-fullscreen.asmr-controls-idle .albumart .asmr-gallery-counter,
+.audio-player.asmr-player-fullscreen.asmr-controls-idle .albumart .asmr-gallery-slideshow-toggle,
+.audio-player.asmr-player-fullscreen.asmr-controls-idle .albumart .asmr-gallery-exclude,
+.audio-player.asmr-player-fullscreen.asmr-controls-idle .asmr-fullscreen-btn {
+    opacity: 1 !important;
+    pointer-events: auto !important;
 }
 
 /* Keep gallery controls visible/tappable during slideshow on touch devices */
@@ -501,6 +513,7 @@ body.asmr-fullscreen-active .player-bar-container {
     .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-exclude {
         width: 22px !important;
         height: 22px !important;
+        top: max(6px, env(safe-area-inset-top)) !important;
     }
 
     .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-slideshow-toggle .material-icons,
@@ -511,6 +524,8 @@ body.asmr-fullscreen-active .player-bar-container {
     .audio-player .asmr-fullscreen-btn {
         width: 22px !important;
         height: 22px !important;
+        top: max(6px, env(safe-area-inset-top)) !important;
+        right: max(6px, env(safe-area-inset-right)) !important;
     }
 
     .audio-player .asmr-fullscreen-btn .material-icons {
@@ -521,12 +536,18 @@ body.asmr-fullscreen-active .player-bar-container {
 /* Mobile landscape (incl. iPhone landscape) — maximize art area and avoid tiny image */
 @media (hover: none) and (orientation: landscape) and (max-height: 540px) {
     .audio-player.asmr-player-fullscreen .albumart {
-        padding: 2px 8px !important;
+        flex: 1 1 auto !important;
+        min-height: 58vh !important;
+        padding:
+            max(2px, env(safe-area-inset-top))
+            max(8px, env(safe-area-inset-right))
+            max(2px, env(safe-area-inset-bottom))
+            max(8px, env(safe-area-inset-left)) !important;
     }
 
     .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-img {
         max-width: 100vw !important;
-        max-height: calc(100vh - 74px) !important;
+        max-height: calc(100vh - 64px) !important;
     }
 
     .audio-player.asmr-player-fullscreen .text-center.q-mb-sm.column {
