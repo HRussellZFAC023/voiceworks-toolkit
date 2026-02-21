@@ -73,7 +73,7 @@ describe('Whisper', () => {
             expect(settings.idleUnloadMs).toBe(10 * 60 * 1000);
         });
 
-        it('reduces pressure on limited-tier machines and skips eager warmup', () => {
+        it('reduces pressure on limited-tier desktop machines without forcing low-power adapters', () => {
             vi.spyOn(Config, 'get').mockImplementation((key) => {
                 const map: Record<string, string | number | boolean> = {
                     primarySubtitleLang: 'ja',
@@ -105,7 +105,7 @@ describe('Whisper', () => {
             expect(settings.maxPendingChunks).toBe(3);
             expect(settings.pollIntervalMs).toBe(325);
             expect(settings.workerUpdateIntervalMs).toBe(260);
-            expect(settings.preferLowPowerAdapter).toBe(true);
+            expect(settings.preferLowPowerAdapter).toBe(false);
             expect(settings.autoWarmup).toBe(false);
             expect(settings.idleUnloadMs).toBe(5 * 60 * 1000);
             expect(settings.minWebgpuBufferBytes).toBe(384 * 1024 * 1024);

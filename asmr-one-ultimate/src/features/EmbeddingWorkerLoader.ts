@@ -111,26 +111,65 @@ let currentDtype = '';
 let skipWebgpu = false;
 let preferredDtype = '';
 
+function scoreAdapter(vendor, maxBuf, powerPreference) {
+    const v = (vendor || '').toLowerCase();
+    let vendorScore = 0;
+    if (/(amd|radeon|rdna|nvidia|geforce|rtx|gtx)/i.test(v)) vendorScore = 3;
+    else if (/(intel|iris|uhd|xe|gen-9|gen9)/i.test(v)) vendorScore = -2;
+    else if (/(qualcomm|adreno|mali|powervr)/i.test(v)) vendorScore = -1;
+    else if (/(apple|m[1-9]|metal)/i.test(v)) vendorScore = 1;
+
+    const powerScore = powerPreference === 'high-performance' ? 2 : 0;
+    const bufferScore = maxBuf >= 1073741824 ? 2 : (maxBuf >= 536870912 ? 1 : 0);
+    return vendorScore * 3 + powerScore + bufferScore;
+}
+
+function sortAdaptersByScore(a, b) {
+    if (b.score !== a.score) return b.score - a.score;
+    if (b.maxBuf !== a.maxBuf) return b.maxBuf - a.maxBuf;
+    if (a.powerPreference === b.powerPreference) return 0;
+    if (a.powerPreference === 'high-performance') return -1;
+    if (b.powerPreference === 'high-performance') return 1;
+    return 0;
+}
+
 async function detectWebGPU() {
     if (typeof navigator === 'undefined' || !('gpu' in navigator)) return null;
     try {
         // Direct requestAdapter — no timeout wrapper.
         // withTimeout creates dangling promises that interfere with subsequent
         // requestAdapter calls from ONNX Runtime internally.
-        let adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
-        if (!adapter) {
-            adapter = await navigator.gpu.requestAdapter({ powerPreference: 'low-power' });
+        const preferences = ['high-performance', 'low-power'];
+        const candidates = [];
+        for (const powerPreference of preferences) {
+            let adapter = null;
+            try {
+                adapter = await navigator.gpu.requestAdapter({ powerPreference });
+            } catch (err) {
+                console.warn('[Embedding Worker] requestAdapter failed for', powerPreference, err);
+                continue;
+            }
+            if (!adapter) continue;
+            const info = adapter.info || {};
+            const vendor = [info.vendor, info.description, info.architecture].filter(Boolean).join(' ').toLowerCase();
+            const maxBuf = adapter.limits?.maxBufferSize || 0;
+            if (maxBuf > 0 && maxBuf < 134217728) {
+                console.warn('[Embedding Worker] Rejected adapter (' + powerPreference + ') — maxBufferSize too small:', maxBuf);
+                continue;
+            }
+            const score = scoreAdapter(vendor, maxBuf, powerPreference);
+            candidates.push({ adapter, vendor, maxBuf, powerPreference, score });
         }
-        if (!adapter) return null;
-        const info = adapter.info || {};
-        const vendor = [info.vendor, info.description, info.architecture].filter(Boolean).join(' ').toLowerCase();
-        const maxBuf = adapter.limits?.maxBufferSize || 0;
-        console.log('[Embedding Worker] WebGPU adapter:', vendor, '| maxBufferSize:', maxBuf, '(' + Math.round(maxBuf / 1048576) + ' MB)');
-        if (maxBuf > 0 && maxBuf < 134217728) {
-            console.warn('[Embedding Worker] maxBufferSize too small for embedding model');
+        if (!candidates.length) {
+            console.warn('[Embedding Worker] No usable WebGPU adapter found');
             return null;
         }
-        return { device: 'webgpu', vendor, maxBuf };
+        candidates.sort(sortAdaptersByScore);
+        const chosen = candidates[0];
+        const describe = (c) => (c.vendor || 'unknown') + ' [' + c.powerPreference + '] ' + Math.round(c.maxBuf / 1048576) + 'MB score=' + c.score;
+        console.log('[Embedding Worker] WebGPU adapter candidates:', candidates.map(describe).join(' | '));
+        console.log('[Embedding Worker] WebGPU adapter selected:', describe(chosen));
+        return { device: 'webgpu', vendor: chosen.vendor, maxBuf: chosen.maxBuf };
     } catch {
         return null;
     }

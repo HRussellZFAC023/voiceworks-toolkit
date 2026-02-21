@@ -85,29 +85,67 @@ let skipWebgpu = false;
 let preferLowPowerAdapter = false;
 let minWebgpuBufferBytes = 268435456;
 
+function scoreAdapter(vendor, maxBuf, powerPreference, preferredPower) {
+    const v = (vendor || '').toLowerCase();
+    let vendorScore = 0;
+    if (/(amd|radeon|rdna|nvidia|geforce|rtx|gtx)/i.test(v)) vendorScore = 3;
+    else if (/(intel|iris|uhd|xe|gen-9|gen9)/i.test(v)) vendorScore = -2;
+    else if (/(qualcomm|adreno|mali|powervr)/i.test(v)) vendorScore = -1;
+    else if (/(apple|m[1-9]|metal)/i.test(v)) vendorScore = 1;
+
+    const powerScore = powerPreference === preferredPower ? 2 : 0;
+    const bufferScore = maxBuf >= 1073741824 ? 2 : (maxBuf >= 536870912 ? 1 : 0);
+    return vendorScore * 3 + powerScore + bufferScore;
+}
+
+function sortAdaptersByScore(a, b) {
+    if (b.score !== a.score) return b.score - a.score;
+    if (b.maxBuf !== a.maxBuf) return b.maxBuf - a.maxBuf;
+    if (a.powerPreference === b.powerPreference) return 0;
+    if (a.powerPreference === 'high-performance') return -1;
+    if (b.powerPreference === 'high-performance') return 1;
+    return 0;
+}
+
 async function detectWebGPU() {
     if (typeof navigator === 'undefined' || !('gpu' in navigator)) return null;
     try {
         // Direct requestAdapter — no withTimeout wrapper.
         // ae78075 pattern: let the browser take as long as it needs.
+        const preferredPower = preferLowPowerAdapter ? 'low-power' : 'high-performance';
         const preferences = preferLowPowerAdapter
             ? ['low-power', 'high-performance']
             : ['high-performance', 'low-power'];
-        let adapter = null;
+        const candidates = [];
         for (const powerPreference of preferences) {
-            adapter = await navigator.gpu.requestAdapter({ powerPreference });
-            if (adapter) break;
+            let adapter = null;
+            try {
+                adapter = await navigator.gpu.requestAdapter({ powerPreference });
+            } catch (err) {
+                console.warn('[Whisper Worker] requestAdapter failed for', powerPreference, err);
+                continue;
+            }
+            if (!adapter) continue;
+            const info = adapter.info || {};
+            const vendor = [info.vendor, info.description, info.architecture].filter(Boolean).join(' ').toLowerCase();
+            const maxBuf = adapter.limits?.maxBufferSize || 0;
+            if (maxBuf > 0 && maxBuf < minWebgpuBufferBytes) {
+                console.warn('[Whisper Worker] Rejected adapter (' + powerPreference + ') — maxBufferSize too small:', maxBuf);
+                continue;
+            }
+            const score = scoreAdapter(vendor, maxBuf, powerPreference, preferredPower);
+            candidates.push({ adapter, vendor, maxBuf, powerPreference, score });
         }
-        if (!adapter) return null;
-        const info = adapter.info || {};
-        const vendor = [info.vendor, info.description, info.architecture].filter(Boolean).join(' ').toLowerCase();
-        const maxBuf = adapter.limits?.maxBufferSize || 0;
-        console.log('[Whisper Worker] WebGPU adapter:', vendor, '| maxBufferSize:', maxBuf, '(' + Math.round(maxBuf / 1048576) + ' MB)');
-        if (maxBuf > 0 && maxBuf < minWebgpuBufferBytes) {
-            console.warn('[Whisper Worker] maxBufferSize too small for Whisper models (requires >= ' + Math.round(minWebgpuBufferBytes / 1048576) + ' MB)');
+        if (!candidates.length) {
+            console.warn('[Whisper Worker] No usable WebGPU adapter found');
             return null;
         }
-        return { device: 'webgpu', vendor, maxBuf };
+        candidates.sort(sortAdaptersByScore);
+        const chosen = candidates[0];
+        const describe = (c) => (c.vendor || 'unknown') + ' [' + c.powerPreference + '] ' + Math.round(c.maxBuf / 1048576) + 'MB score=' + c.score;
+        console.log('[Whisper Worker] WebGPU adapter candidates:', candidates.map(describe).join(' | '));
+        console.log('[Whisper Worker] WebGPU adapter selected:', describe(chosen));
+        return { device: 'webgpu', vendor: chosen.vendor, maxBuf: chosen.maxBuf };
     } catch {
         return null;
     }

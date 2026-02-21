@@ -2074,7 +2074,9 @@ export class Whisper {
             maxPendingChunks = 4;
             pollIntervalMs = 325;
             workerUpdateIntervalMs = 260;
-            preferLowPowerAdapter = true;
+            // Keep desktop limited devices on high-performance preference so
+            // dual-GPU systems can still pick discrete adapters for Whisper.
+            preferLowPowerAdapter = profile.isMobile;
             minWebgpuBufferBytes = 384 * 1024 * 1024;
         } else if (profile.tier === 'constrained') {
             maxPendingChunks = 2;
