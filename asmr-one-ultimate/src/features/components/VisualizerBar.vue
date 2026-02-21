@@ -34,6 +34,8 @@ const BAR_GAP = 2;
 const BAR_RADIUS = 2;
 const POSITION_POLL_MS = 500;
 const SMOOTHING = 0.35;        // lerp factor toward new value (lower = smoother)
+const FALLBACK_MIN_LEVEL = 0.05;
+const FALLBACK_MAX_LEVEL = 0.95;
 
 // ---------------------------------------------------------------------------
 // Reactive state
@@ -202,14 +204,39 @@ function sampleLogBuckets(data: Uint8Array): Float32Array {
     return out;
 }
 
+/**
+ * Mobile-safe fallback (no analyser): synthesize lively bars from playback time.
+ * This keeps the visualizer usable on iOS Safari where we intentionally avoid
+ * createMediaElementSource() to preserve lock-screen/background audio playback.
+ */
+function sampleFallbackBuckets(timeSec: number, playbackRate: number): Float32Array {
+    const out = new Float32Array(HALF_BARS);
+    const speed = Math.max(0.6, Math.min(2.5, Number.isFinite(playbackRate) ? playbackRate : 1));
+
+    for (let i = 0; i < HALF_BARS; i++) {
+        const centerBias = 1 - (i / Math.max(1, HALF_BARS - 1)) * 0.55;
+        const waveA = 0.52 + 0.34 * Math.sin(timeSec * (2.2 * speed) + i * 0.42);
+        const waveB = 0.20 * Math.sin(timeSec * (0.9 * speed) + i * 0.18 + phase * 0.7);
+        const ripple = 0.10 * Math.sin(phase * 4.0 + i * 1.3);
+        const level = (waveA + waveB + ripple) * centerBias;
+        out[i] = Math.max(FALLBACK_MIN_LEVEL, Math.min(FALLBACK_MAX_LEVEL, level));
+    }
+
+    return out;
+}
+
 function renderFrame() {
-    if (!analyser || !analyserAvailable) return;
-
-    const data = new Uint8Array(analyser.frequencyBinCount);
-    analyser.getByteFrequencyData(data);
-
-    // Log-scale into HALF_BARS buckets
-    const raw = sampleLogBuckets(data);
+    const audio = getAudioElement();
+    let raw: Float32Array;
+    if (analyser && analyserAvailable) {
+        const data = new Uint8Array(analyser.frequencyBinCount);
+        analyser.getByteFrequencyData(data);
+        raw = sampleLogBuckets(data);
+    } else {
+        // Fallback path for mobile Safari (no analyser by design in AudioAnalysis.ts).
+        if (!audio || audio.paused) return;
+        raw = sampleFallbackBuckets(audio.currentTime || phase, audio.playbackRate || 1);
+    }
 
     // Smooth toward new values + advance idle sway phase
     phase += 0.015;

@@ -1,6 +1,7 @@
 import { KikoeruBridge } from '../infrastructure/KikoeruBridge';
 import { Logger } from '../core/Utils';
 import { getAudioElement } from '../core/DomUtils';
+import { gmRequest } from '../infrastructure/HttpClient';
 import { buildCoverUrl } from '../types/api';
 import type { KikoeruStoreState } from '../types';
 import type { PlayerTrack, WorkDetail } from '../types';
@@ -19,12 +20,40 @@ function toAbsoluteUrl(url: string): string {
     return new URL(url, window.location.origin).href;
 }
 
+function guessImageType(url: string): string | undefined {
+    if (!url) return undefined;
+
+    if (url.startsWith('data:')) {
+        const mime = url.slice(5, url.indexOf(';'));
+        return mime || undefined;
+    }
+
+    const path = url.split('?')[0].toLowerCase();
+    if (path.endsWith('.png')) return 'image/png';
+    if (path.endsWith('.webp')) return 'image/webp';
+    if (path.endsWith('.gif')) return 'image/gif';
+    if (path.endsWith('.avif')) return 'image/avif';
+    if (path.endsWith('.jpg') || path.endsWith('.jpeg')) return 'image/jpeg';
+    return undefined;
+}
+
+function parseCssUrl(input: string): string {
+    if (!input) return '';
+    const match = input.match(/url\((['"]?)(.*?)\1\)/i);
+    return match?.[2] || '';
+}
+
 export class MediaSessionManager {
     private bridge: KikoeruBridge;
     private unwatch: (() => void) | null = null;
     private lastMetadata: string | null = null;
     private timeupdateHandler: (() => void) | null = null;
     private connectedAudio: HTMLAudioElement | null = null;
+    private lastTrack: PlayerTrack | undefined;
+    private lastWork: WorkDetail | undefined;
+    private artworkDataUrlCache = new Map<string, string>();
+    private artworkPrefetching = new Map<string, Promise<string | null>>();
+    private artworkFailed = new Set<string>();
 
     constructor() {
         this.bridge = KikoeruBridge.getInstance();
@@ -64,6 +93,8 @@ export class MediaSessionManager {
     }
 
     private update(state: { track: PlayerTrack | undefined; playing: boolean | undefined; work: WorkDetail | undefined }): void {
+        this.lastTrack = state.track;
+        this.lastWork = state.work;
         this.updateMetadata(state.track, state.work);
         this.updatePlaybackState(!!state.playing);
         // Re-attach position sync in case the audio element changed (new track)
@@ -75,41 +106,16 @@ export class MediaSessionManager {
         const artist = work?.name || work?.circle?.name || (track?.workTitle || 'ASMR.one');
         const album = work?.title || 'Unknown Album';
 
-        // Try to find the best cover (comprehensive fallback chain)
-        const w = work as (WorkDetail & Record<string, unknown>) | undefined;
-        let coverUrl =
-            w?.mainCoverUrl ||
-            track?.cover ||
-            (w?.main_cover as string | undefined) ||
-            (w?.cover as string | undefined) ||
-            (w?.thumbnail as string | undefined) ||
-            ((w?.image_main as { url?: string } | undefined)?.url) ||
-            ((w?.image_thum as { url?: string } | undefined)?.url);
+        const coverCandidates = this.resolveCoverCandidates(track, work);
+        const primaryRemoteCover = coverCandidates[0];
+        const inlineCover = primaryRemoteCover ? this.artworkDataUrlCache.get(primaryRemoteCover) : undefined;
+        const artwork = this.buildArtwork(coverCandidates, inlineCover);
 
-        // Last-resort fallback: build cover URL from work ID
-        if (!coverUrl && w?.id) {
-            coverUrl = buildCoverUrl(w.id, 'main');
-        }
-
-        // Ensure the URL is absolute — Media Session requires absolute URLs
-        // for lock-screen artwork to load correctly on mobile
-        if (coverUrl) {
-            coverUrl = toAbsoluteUrl(coverUrl);
-        }
-
-        // Avoid spamming updates if metadata hasn't changed
-        const key = `${title}|${artist}|${coverUrl}`;
+        // Avoid spamming updates if metadata hasn't changed.
+        // Include whether we upgraded to an inline (data URL) artwork source.
+        const key = `${title}|${artist}|${album}|${coverCandidates.join(',')}|${inlineCover ? 'inline' : 'remote'}`;
         if (this.lastMetadata === key) return;
         this.lastMetadata = key;
-
-        let artwork: MediaImage[] = [];
-        if (coverUrl) {
-            artwork = [
-                { src: coverUrl, sizes: '512x512', type: 'image/jpeg' },
-                { src: coverUrl, sizes: '256x256', type: 'image/jpeg' },
-                { src: coverUrl, sizes: '128x128', type: 'image/jpeg' },
-            ];
-        }
 
         if (navigator.mediaSession) {
             navigator.mediaSession.metadata = new MediaMetadata({
@@ -118,8 +124,165 @@ export class MediaSessionManager {
                 album,
                 artwork,
             });
-            Logger.debug('[MediaSession] Updated metadata:', { title, artist, hasCover: !!coverUrl });
+            Logger.debug('[MediaSession] Updated metadata:', {
+                title,
+                artist,
+                hasCover: coverCandidates.length > 0,
+                inlineArtwork: !!inlineCover,
+            });
         }
+
+        // iOS lock screen / Dynamic Island may fail to fetch authenticated remote artwork.
+        // Prefetch and cache a data URL so the system UI can always render artwork.
+        if (primaryRemoteCover && !inlineCover) {
+            this.prefetchArtworkDataUrl(primaryRemoteCover);
+        }
+    }
+
+    private resolveCoverCandidates(track: PlayerTrack | undefined, work: WorkDetail | undefined): string[] {
+        const w = work as (WorkDetail & Record<string, unknown>) | undefined;
+        const candidates: string[] = [];
+        const push = (value: unknown) => {
+            if (typeof value !== 'string') return;
+            const trimmed = value.trim();
+            if (!trimmed) return;
+            candidates.push(toAbsoluteUrl(trimmed));
+        };
+
+        push(w?.mainCoverUrl);
+        push(track?.cover);
+        push((w?.main_cover as string | undefined));
+        push((w?.cover as string | undefined));
+        push((w?.thumbnail as string | undefined));
+        push((w?.image_main as { url?: string } | undefined)?.url);
+        push((w?.image_thum as { url?: string } | undefined)?.url);
+
+        if (w?.id) {
+            push(buildCoverUrl(w.id, 'main'));
+        }
+
+        // DOM fallback (works even when store metadata is incomplete).
+        push(this.getCoverUrlFromDom());
+        push(this.getFaviconUrl());
+
+        const deduped: string[] = [];
+        const seen = new Set<string>();
+        for (const src of candidates) {
+            if (!src || seen.has(src)) continue;
+            seen.add(src);
+            deduped.push(src);
+        }
+        return deduped;
+    }
+
+    private getCoverUrlFromDom(): string | undefined {
+        const img = document.querySelector('.audio-player .albumart img, .audio-player .q-img img') as HTMLImageElement | null;
+        if (img?.src) return img.src;
+
+        const qimg = document.querySelector('.audio-player .albumart .q-img__image, .audio-player .q-img__image') as HTMLElement | null;
+        if (qimg) {
+            const bg = qimg.style.backgroundImage || getComputedStyle(qimg).backgroundImage || '';
+            const parsed = parseCssUrl(bg);
+            if (parsed) return parsed;
+        }
+        return undefined;
+    }
+
+    private getFaviconUrl(): string | undefined {
+        const icon = document.querySelector('link[rel*="icon"]') as HTMLLinkElement | null;
+        if (!icon?.href) return undefined;
+        return toAbsoluteUrl(icon.href);
+    }
+
+    private buildArtwork(coverCandidates: string[], inlineCover?: string): MediaImage[] {
+        const preferred: string[] = [];
+        if (inlineCover) preferred.push(inlineCover);
+        for (const src of coverCandidates) {
+            if (preferred.includes(src)) continue;
+            preferred.push(src);
+            if (preferred.length >= 2) break;
+        }
+
+        const sizes = ['96x96', '128x128', '192x192', '256x256', '384x384', '512x512'];
+        const artwork: MediaImage[] = [];
+        for (const src of preferred) {
+            const type = guessImageType(src);
+            for (const size of sizes) {
+                const entry: MediaImage = { src, sizes: size };
+                if (type) entry.type = type;
+                artwork.push(entry);
+            }
+        }
+        return artwork;
+    }
+
+    private prefetchArtworkDataUrl(coverUrl: string): void {
+        if (!coverUrl) return;
+        if (this.artworkDataUrlCache.has(coverUrl)) return;
+        if (this.artworkFailed.has(coverUrl)) return;
+        if (this.artworkPrefetching.has(coverUrl)) return;
+
+        const task = this.fetchArtworkDataUrl(coverUrl)
+            .then((dataUrl) => {
+                if (!dataUrl) {
+                    this.artworkFailed.add(coverUrl);
+                    return null;
+                }
+                this.artworkDataUrlCache.set(coverUrl, dataUrl);
+                // Bound cache growth in long sessions.
+                if (this.artworkDataUrlCache.size > 24) {
+                    const oldest = this.artworkDataUrlCache.keys().next().value as string | undefined;
+                    if (oldest) this.artworkDataUrlCache.delete(oldest);
+                }
+                // Re-emit metadata so lock-screen/Dynamic Island can switch to inline artwork.
+                this.lastMetadata = null;
+                this.updateMetadata(this.lastTrack, this.lastWork);
+                return dataUrl;
+            })
+            .catch(() => {
+                this.artworkFailed.add(coverUrl);
+                return null;
+            })
+            .finally(() => {
+                this.artworkPrefetching.delete(coverUrl);
+            });
+
+        this.artworkPrefetching.set(coverUrl, task);
+    }
+
+    private async fetchArtworkDataUrl(coverUrl: string): Promise<string | null> {
+        try {
+            const gmRes = await gmRequest({
+                url: coverUrl,
+                responseType: 'blob',
+                timeout: 15000,
+            });
+            const blob = gmRes.response as Blob | undefined;
+            if (blob instanceof Blob && blob.size > 0) {
+                return await this.blobToDataUrl(blob);
+            }
+        } catch {
+            // Fall through to fetch() fallback.
+        }
+
+        try {
+            const res = await fetch(coverUrl, { credentials: 'include' });
+            if (!res.ok) return null;
+            const blob = await res.blob();
+            if (!(blob instanceof Blob) || blob.size <= 0) return null;
+            return await this.blobToDataUrl(blob);
+        } catch {
+            return null;
+        }
+    }
+
+    private blobToDataUrl(blob: Blob): Promise<string> {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(String(reader.result || ''));
+            reader.onerror = () => reject(reader.error || new Error('Failed to read blob as data URL'));
+            reader.readAsDataURL(blob);
+        });
     }
 
     private updatePlaybackState(playing: boolean): void {
@@ -140,17 +303,30 @@ export class MediaSessionManager {
         this.detachPositionSync();
 
         this.connectedAudio = audio;
-        this.timeupdateHandler = () => this.syncPositionState(audio);
+        this.timeupdateHandler = () => {
+            this.syncPositionState(audio);
+            this.updatePlaybackState(!audio.paused);
+        };
         audio.addEventListener('timeupdate', this.timeupdateHandler);
 
-        // Also sync on seeked so the scrubber jumps immediately
+        // Keep lock screen state in sync across seeks, play/pause, and metadata load.
         audio.addEventListener('seeked', this.timeupdateHandler);
+        audio.addEventListener('play', this.timeupdateHandler);
+        audio.addEventListener('pause', this.timeupdateHandler);
+        audio.addEventListener('loadedmetadata', this.timeupdateHandler);
+        audio.addEventListener('ratechange', this.timeupdateHandler);
+        // Initial state sync for newly connected audio element.
+        this.timeupdateHandler();
     }
 
     private detachPositionSync(): void {
         if (this.connectedAudio && this.timeupdateHandler) {
             this.connectedAudio.removeEventListener('timeupdate', this.timeupdateHandler);
             this.connectedAudio.removeEventListener('seeked', this.timeupdateHandler);
+            this.connectedAudio.removeEventListener('play', this.timeupdateHandler);
+            this.connectedAudio.removeEventListener('pause', this.timeupdateHandler);
+            this.connectedAudio.removeEventListener('loadedmetadata', this.timeupdateHandler);
+            this.connectedAudio.removeEventListener('ratechange', this.timeupdateHandler);
         }
         this.connectedAudio = null;
         this.timeupdateHandler = null;
