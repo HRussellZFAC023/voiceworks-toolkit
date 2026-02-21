@@ -1309,9 +1309,9 @@ body:not(.body--dark) .asmr-card-translation {
    the viewport. Compact everything to fit.
    ======================================== */
 @media (max-width: 600px) {
-  /* Hide inline visualizer — redundant on small screen */
+  /* Keep inline visualizer visible on mobile and just make it compact */
   .audio-player .asmr-viz-bar {
-    display: none !important;
+    min-height: 28px !important;
   }
 
   /* Shrink album art to leave room for subtitles + controls */

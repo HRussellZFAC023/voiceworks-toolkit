@@ -36,6 +36,7 @@ const POSITION_POLL_MS = 500;
 const SMOOTHING = 0.35;        // lerp factor toward new value (lower = smoother)
 const FALLBACK_MIN_LEVEL = 0.05;
 const FALLBACK_MAX_LEVEL = 0.95;
+const WAVE_FALLBACK_POINTS = 720;
 
 // ---------------------------------------------------------------------------
 // Reactive state
@@ -64,6 +65,9 @@ let positionPollId: number | null = null;
 let audioCleanups: (() => void)[] = [];
 let smoothBars = new Float32Array(HALF_BARS);  // smoothed bar heights [0..1]
 let phase = 0;                                  // slow phase for idle sway
+let hostWaveEnvelope: Float32Array | null = null;
+let hostWaveEnvelopeKey = '';
+let hostWaveUnavailable = false;
 
 // ---------------------------------------------------------------------------
 // Computed
@@ -225,6 +229,116 @@ function sampleFallbackBuckets(timeSec: number, playbackRate: number): Float32Ar
     return out;
 }
 
+function clamp01(v: number): number {
+    if (!Number.isFinite(v)) return 0;
+    return Math.max(0, Math.min(1, v));
+}
+
+function findHostWaveCanvas(): HTMLCanvasElement | null {
+    const selectors = [
+        '.player-bar-container canvas',
+        '.player-bar canvas',
+        '.simple-progress-overlay canvas',
+        'canvas#canvas',
+    ];
+    for (const selector of selectors) {
+        const nodes = document.querySelectorAll<HTMLCanvasElement>(selector);
+        for (const canvas of Array.from(nodes)) {
+            if (!canvas.isConnected) continue;
+            if (canvas.width < 64 || canvas.height < 12) continue;
+            return canvas;
+        }
+    }
+    return null;
+}
+
+function buildHostWaveEnvelope(audio: HTMLAudioElement): void {
+    if (hostWaveUnavailable) return;
+    const canvas = findHostWaveCanvas();
+    if (!canvas) return;
+
+    const src = audio.currentSrc || audio.src || '';
+    if (!src) return;
+    const nextKey = `${src}|${canvas.width}x${canvas.height}`;
+    if (hostWaveEnvelope && hostWaveEnvelopeKey === nextKey) return;
+
+    try {
+        const ctx = canvas.getContext('2d');
+        if (!ctx || canvas.width <= 0 || canvas.height <= 0) return;
+
+        const width = canvas.width;
+        const height = canvas.height;
+        const image = ctx.getImageData(0, 0, width, height);
+        const data = image.data;
+        const points = Math.max(128, Math.min(WAVE_FALLBACK_POINTS, Math.floor(width / 2)));
+        const envelope = new Float32Array(points);
+
+        // Estimate background color from the top-left corner.
+        const bgR = data[0] ?? 0;
+        const bgG = data[1] ?? 0;
+        const bgB = data[2] ?? 0;
+
+        for (let i = 0; i < points; i++) {
+            const x = Math.round((i / Math.max(1, points - 1)) * (width - 1));
+            let activePixels = 0;
+
+            for (let y = 0; y < height; y++) {
+                const idx = (y * width + x) * 4;
+                const a = data[idx + 3] || 0;
+                if (a < 10) continue;
+
+                const r = data[idx] || 0;
+                const g = data[idx + 1] || 0;
+                const b = data[idx + 2] || 0;
+                const delta = Math.abs(r - bgR) + Math.abs(g - bgG) + Math.abs(b - bgB);
+                if (delta > 24) activePixels++;
+            }
+
+            envelope[i] = clamp01(activePixels / Math.max(1, height));
+        }
+
+        // Smooth noisy columns and normalize.
+        for (let i = 1; i < envelope.length - 1; i++) {
+            envelope[i] = (envelope[i - 1] + envelope[i] * 2 + envelope[i + 1]) / 4;
+        }
+        let max = 0;
+        for (let i = 0; i < envelope.length; i++) max = Math.max(max, envelope[i]);
+        if (max <= 0.02) return;
+        for (let i = 0; i < envelope.length; i++) {
+            envelope[i] = clamp01(envelope[i] / max);
+        }
+
+        hostWaveEnvelope = envelope;
+        hostWaveEnvelopeKey = nextKey;
+        hostWaveUnavailable = false;
+    } catch (err) {
+        // Canvas may be tainted by the host app in some browsers.
+        Logger.debug('[Visualizer] Host waveform fallback unavailable:', err);
+        hostWaveUnavailable = true;
+    }
+}
+
+function sampleHostWaveBuckets(audio: HTMLAudioElement): Float32Array | null {
+    if (!hostWaveEnvelope || hostWaveEnvelope.length < 4) return null;
+    const duration = audio.duration;
+    if (!Number.isFinite(duration) || duration <= 0) return null;
+
+    const ratio = clamp01(audio.currentTime / duration);
+    const out = new Float32Array(HALF_BARS);
+    for (let i = 0; i < HALF_BARS; i++) {
+        // Sample around current playback position to mimic spectrum spread.
+        const rel = (i / Math.max(1, HALF_BARS - 1)) - 0.5; // [-0.5, 0.5]
+        const pos = clamp01(ratio + rel * 0.22);
+        const idx = Math.round(pos * (hostWaveEnvelope.length - 1));
+        const base = hostWaveEnvelope[idx] || 0;
+        const centerBias = 1 - (i / Math.max(1, HALF_BARS - 1)) * 0.35;
+        const shimmer = 0.9 + 0.1 * Math.sin((audio.currentTime * 4.0) + i * 0.35);
+        const level = base * centerBias * shimmer * 1.2;
+        out[i] = Math.max(FALLBACK_MIN_LEVEL, Math.min(FALLBACK_MAX_LEVEL, level));
+    }
+    return out;
+}
+
 function renderFrame() {
     const audio = getAudioElement();
     let raw: Float32Array;
@@ -235,7 +349,8 @@ function renderFrame() {
     } else {
         // Fallback path for mobile Safari (no analyser by design in AudioAnalysis.ts).
         if (!audio || audio.paused) return;
-        raw = sampleFallbackBuckets(audio.currentTime || phase, audio.playbackRate || 1);
+        buildHostWaveEnvelope(audio);
+        raw = sampleHostWaveBuckets(audio) || sampleFallbackBuckets(audio.currentTime || phase, audio.playbackRate || 1);
     }
 
     // Smooth toward new values + advance idle sway phase
@@ -437,6 +552,9 @@ on('track:change', () => {
         refreshAudioSourceState();
         connectedAudioEl = null;
         analyser = null;
+        hostWaveEnvelope = null;
+        hostWaveEnvelopeKey = '';
+        hostWaveUnavailable = false;
         connectAudioAnalyser();
         syncPauseState();
     } else if (AppStore.getConfig('alwaysShowVisualizer')) {

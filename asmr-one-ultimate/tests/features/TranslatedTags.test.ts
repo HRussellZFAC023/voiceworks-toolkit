@@ -259,4 +259,30 @@ describe('TranslatedTags', () => {
         expect(crumb.classList.contains('asmr-worktree-translation')).toBe(true);
         expect(crumb.dataset.asmrtagTranslation).toBe('Main story');
     });
+
+    it('clears stale translated state in player surfaces', async () => {
+        await bridge.initialize();
+        document.body.innerHTML += `
+            <div class="audio-player">
+                <div
+                    class="q-item__label asmr-translated asmr-worktree-translation"
+                    data-asmrtag="古いタイトル.wav"
+                    data-asmrtag-state="done"
+                    data-asmrtag-translation="Old title.wav"
+                >
+                    古いタイトル.wav
+                </div>
+            </div>
+        `;
+
+        const translatedTags = TranslatedTags.getInstance();
+        (translatedTags as any).resetPlayerTranslationState();
+
+        const label = document.querySelector('.audio-player .q-item__label') as HTMLElement;
+        expect(label.hasAttribute('data-asmrtag')).toBe(false);
+        expect(label.hasAttribute('data-asmrtag-state')).toBe(false);
+        expect(label.hasAttribute('data-asmrtag-translation')).toBe(false);
+        expect(label.classList.contains('asmr-translated')).toBe(false);
+        expect(label.classList.contains('asmr-worktree-translation')).toBe(false);
+    });
 });

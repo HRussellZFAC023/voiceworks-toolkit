@@ -376,11 +376,7 @@ body.asmr-fullscreen-active .player-bar-container {
 .audio-player.asmr-player-fullscreen .row.items-center.q-mx-lg,
 .audio-player.asmr-player-fullscreen .row.q-py-md.self-center,
 .audio-player.asmr-player-fullscreen .row.items-center.q-mx-lg.q-pt-sm,
-.audio-player.asmr-player-fullscreen .row.self-center,
-.audio-player.asmr-player-fullscreen .albumart .asmr-gallery-nav,
-.audio-player.asmr-player-fullscreen .albumart .asmr-gallery-counter,
-.audio-player.asmr-player-fullscreen .albumart .asmr-gallery-slideshow-toggle,
-.audio-player.asmr-player-fullscreen .albumart .asmr-gallery-exclude {
+.audio-player.asmr-player-fullscreen .row.self-center {
     transition: opacity 0.4s ease !important;
 }
 
@@ -390,13 +386,21 @@ body.asmr-fullscreen-active .player-bar-container {
     .audio-player.asmr-player-fullscreen.asmr-controls-idle .row.items-center.q-mx-lg,
     .audio-player.asmr-player-fullscreen.asmr-controls-idle .row.q-py-md.self-center,
     .audio-player.asmr-player-fullscreen.asmr-controls-idle .row.items-center.q-mx-lg.q-pt-sm,
-    .audio-player.asmr-player-fullscreen.asmr-controls-idle .row.self-center,
-    .audio-player.asmr-player-fullscreen.asmr-controls-idle .albumart .asmr-gallery-nav,
-    .audio-player.asmr-player-fullscreen.asmr-controls-idle .albumart .asmr-gallery-counter,
-    .audio-player.asmr-player-fullscreen.asmr-controls-idle .albumart .asmr-gallery-slideshow-toggle,
-    .audio-player.asmr-player-fullscreen.asmr-controls-idle .albumart .asmr-gallery-exclude {
+    .audio-player.asmr-player-fullscreen.asmr-controls-idle .row.self-center {
         opacity: 0 !important;
         pointer-events: none !important;
+    }
+}
+
+/* Keep gallery controls visible/tappable during slideshow on touch devices */
+@media (hover: none) {
+    .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-nav,
+    .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-counter,
+    .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-slideshow-toggle,
+    .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-exclude,
+    .audio-player.asmr-player-fullscreen .asmr-fullscreen-btn {
+        opacity: 1 !important;
+        pointer-events: auto !important;
     }
 }
 
@@ -511,5 +515,35 @@ body.asmr-fullscreen-active .player-bar-container {
 
     .audio-player .asmr-fullscreen-btn .material-icons {
         font-size: 14px !important;
+    }
+}
+
+/* Mobile landscape (incl. iPhone landscape) — maximize art area and avoid tiny image */
+@media (hover: none) and (orientation: landscape) and (max-height: 540px) {
+    .audio-player.asmr-player-fullscreen .albumart {
+        padding: 2px 8px !important;
+    }
+
+    .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-img {
+        max-width: 100vw !important;
+        max-height: calc(100vh - 74px) !important;
+    }
+
+    .audio-player.asmr-player-fullscreen .text-center.q-mb-sm.column {
+        margin-top: 4px !important;
+        margin-bottom: 8px !important;
+    }
+
+    .audio-player.asmr-player-fullscreen .row.items-center.q-mx-lg {
+        margin-bottom: 6px !important;
+    }
+
+    .audio-player.asmr-player-fullscreen .row.q-py-md.self-center {
+        padding: 2px 0 6px !important;
+        margin: 0 !important;
+    }
+
+    .audio-player.asmr-player-fullscreen .row.self-center:last-of-type {
+        padding-bottom: max(12px, env(safe-area-inset-bottom)) !important;
     }
 }

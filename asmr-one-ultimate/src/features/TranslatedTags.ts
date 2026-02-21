@@ -46,6 +46,8 @@ export class TranslatedTags {
     private pathChangeCleanup?: () => void;
     private routeKeyCleanup?: () => void;
     private jpdbGuardCleanup?: () => void;
+    private workChangeCleanup?: () => void;
+    private trackChangeCleanup?: () => void;
     private activeQueueKey = '';
 
     private constructor() {
@@ -135,6 +137,17 @@ export class TranslatedTags {
             this.resetWorkTreeTranslationState();
         });
 
+        // Work/track transitions can reuse DOM nodes across pages and player surfaces.
+        // Proactively clear stale translation attributes to avoid sticky labels.
+        this.workChangeCleanup = EventBus.on('work:change', () => {
+            this.cancelActiveTranslationQueue();
+            this.resetWorkTreeTranslationState();
+            this.resetPlayerTranslationState();
+        });
+        this.trackChangeCleanup = EventBus.on('track:change', () => {
+            this.resetPlayerTranslationState();
+        });
+
         // Reset per-element state on folder changes so cached DOM doesn't leak across levels
         const unwatch = this.bridge.$watch?.(() => this.getCurrentWorkTreeKey(), (next: string, prev: string) => {
             if (next !== prev) {
@@ -184,6 +197,14 @@ export class TranslatedTags {
         if (this.routeKeyCleanup) {
             this.routeKeyCleanup();
             this.routeKeyCleanup = undefined;
+        }
+        if (this.workChangeCleanup) {
+            this.workChangeCleanup();
+            this.workChangeCleanup = undefined;
+        }
+        if (this.trackChangeCleanup) {
+            this.trackChangeCleanup();
+            this.trackChangeCleanup = undefined;
         }
         this.cancelActiveTranslationQueue();
         if (globalWindow.__ASMR_TRANSLATED_TAGS__ === this) {
@@ -828,6 +849,29 @@ export class TranslatedTags {
                 });
         });
         Logger.debug('[TranslatedTags] Reset work-tree translation state (restored originals)');
+    }
+
+    private resetPlayerTranslationState(): void {
+        const roots = document.querySelectorAll('.audio-player, .player-bar, .player-bar-container, .current-play-list');
+        roots.forEach(root => {
+            root.querySelectorAll<HTMLElement>('[data-asmrtag], [data-asmrtag-state], [data-asmrtag-scope], [data-asmrtag-translation], .asmr-translated, .asmr-worktree-translation')
+                .forEach(el => {
+                    const original = el.dataset.asmrtag;
+                    if (original && el.classList.contains('asmr-translated')) {
+                        const currentText = (el.textContent || '').trim();
+                        if (currentText !== original && currentText.includes(original)) {
+                            el.textContent = original;
+                        }
+                    }
+                    delete el.dataset.asmrtag;
+                    delete el.dataset.asmrtagState;
+                    delete el.dataset.asmrtagUntil;
+                    delete el.dataset.asmrtagScope;
+                    delete el.dataset.asmrtagTranslation;
+                    el.classList.remove('asmr-translated');
+                    el.classList.remove('asmr-worktree-translation');
+                });
+        });
     }
 
     private getCurrentWorkTreeKey(): string {
