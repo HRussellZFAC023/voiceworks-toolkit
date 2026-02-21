@@ -456,11 +456,6 @@ export class Whisper {
 
     private getWasmPolicyReason(): string | null {
         if (Config.get('forceWhisperWasm') === true) return 'forceWhisperWasm';
-        // Firefox WebGPU is still inconsistent for Whisper on some systems.
-        // Keep a reliable default (WASM) unless the user explicitly opts in.
-        if (this.isFirefoxBrowser() && Config.get('whisperFirefoxWebgpu') !== true) {
-            return 'firefox-default-wasm';
-        }
         return null;
     }
 

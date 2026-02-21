@@ -213,7 +213,41 @@ describe('Whisper', () => {
             expect(settings.maxPendingChunks).toBe(3);
         });
 
-        it('forces WASM on Firefox by default for Whisper reliability', () => {
+        it('keeps WebGPU enabled on Firefox by default when WASM is not forced', () => {
+            vi.spyOn(Config, 'get').mockImplementation((key) => {
+                const map: Record<string, string | number | boolean> = {
+                    primarySubtitleLang: 'ja',
+                    whisperTask: 'transcribe',
+                    whisperAutoWarmup: true,
+                    whisperCacheTranscripts: true,
+                    forceWhisperWasm: false,
+                };
+                return map[key as string] ?? false;
+            });
+            vi.spyOn(DeviceCapabilities, 'profile', 'get').mockReturnValue({
+                tier: 'limited',
+                hasGpu: true,
+                memory: 8,
+                cores: 4,
+                isTouch: false,
+                isMobile: false,
+                screenWidth: 1440,
+                reason: 'limited-tier test profile',
+            } as any);
+            vi.spyOn(DeviceCapabilities, 'shouldWarmup', 'get').mockReturnValue(false);
+            vi.spyOn(DeviceCapabilities, 'budget', 'get').mockReturnValue({
+                whisperIdleMs: 5 * 60 * 1000,
+            } as any);
+            vi.spyOn(GpuScheduler, 'getMemoryPressure').mockReturnValue('low');
+
+            const whisper = new Whisper();
+            vi.spyOn(whisper as any, 'isFirefoxBrowser').mockReturnValue(true);
+            const settings = (whisper as any).getWhisperSettings();
+
+            expect(settings.forceWasm).toBe(false);
+        });
+
+        it('keeps WebGPU enabled on Firefox full-tier desktop GPUs', () => {
             vi.spyOn(Config, 'get').mockImplementation((key) => {
                 const map: Record<string, string | number | boolean> = {
                     primarySubtitleLang: 'ja',
@@ -244,8 +278,7 @@ describe('Whisper', () => {
             vi.spyOn(whisper as any, 'isFirefoxBrowser').mockReturnValue(true);
             const settings = (whisper as any).getWhisperSettings();
 
-            expect(settings.forceWasm).toBe(true);
-            expect(settings.autoWarmup).toBe(false);
+            expect(settings.forceWasm).toBe(false);
         });
 
         it('allows Firefox WebGPU when explicit opt-in is enabled', () => {
@@ -261,18 +294,18 @@ describe('Whisper', () => {
                 return map[key as string] ?? false;
             });
             vi.spyOn(DeviceCapabilities, 'profile', 'get').mockReturnValue({
-                tier: 'full',
+                tier: 'limited',
                 hasGpu: true,
-                memory: 16,
-                cores: 8,
+                memory: 8,
+                cores: 4,
                 isTouch: false,
                 isMobile: false,
-                screenWidth: 1920,
-                reason: 'full-tier test profile',
+                screenWidth: 1366,
+                reason: 'limited-tier test profile',
             } as any);
-            vi.spyOn(DeviceCapabilities, 'shouldWarmup', 'get').mockReturnValue(true);
+            vi.spyOn(DeviceCapabilities, 'shouldWarmup', 'get').mockReturnValue(false);
             vi.spyOn(DeviceCapabilities, 'budget', 'get').mockReturnValue({
-                whisperIdleMs: 10 * 60 * 1000,
+                whisperIdleMs: 5 * 60 * 1000,
             } as any);
             vi.spyOn(GpuScheduler, 'getMemoryPressure').mockReturnValue('low');
 
