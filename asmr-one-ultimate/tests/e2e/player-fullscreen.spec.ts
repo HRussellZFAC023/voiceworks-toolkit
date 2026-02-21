@@ -170,7 +170,14 @@ test.describe('Player Gallery', () => {
             return;
         }
 
-        // Gallery image should be visible whenever a valid image URL is loaded
+        const src = await galleryImg.evaluate(el => (el as HTMLImageElement).src || '');
+        if (!src) {
+            console.log('Note: Gallery image has no source yet - skipping visibility assertion');
+            return;
+        }
+
+        // Gallery image should be visible whenever a valid image URL is loaded.
+        await galleryImg.evaluate(el => (el as HTMLImageElement).decode?.().catch(() => undefined));
         const imgDisplay = await galleryImg.evaluate(el => getComputedStyle(el).display);
         expect(imgDisplay).not.toBe('none');
     });

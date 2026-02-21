@@ -34,9 +34,10 @@ const BAR_GAP = 2;
 const BAR_RADIUS = 2;
 const POSITION_POLL_MS = 500;
 const SMOOTHING = 0.35;        // lerp factor toward new value (lower = smoother)
-const FALLBACK_MIN_LEVEL = 0.05;
+const FALLBACK_MIN_LEVEL = 0.015;
 const FALLBACK_MAX_LEVEL = 0.95;
 const WAVE_FALLBACK_POINTS = 720;
+const HOST_WAVE_RETRY_MS = 2500;
 
 // ---------------------------------------------------------------------------
 // Reactive state
@@ -67,7 +68,7 @@ let smoothBars = new Float32Array(HALF_BARS);  // smoothed bar heights [0..1]
 let phase = 0;                                  // slow phase for idle sway
 let hostWaveEnvelope: Float32Array | null = null;
 let hostWaveEnvelopeKey = '';
-let hostWaveUnavailable = false;
+let hostWaveRetryAt = 0;
 
 // ---------------------------------------------------------------------------
 // Computed
@@ -208,27 +209,6 @@ function sampleLogBuckets(data: Uint8Array): Float32Array {
     return out;
 }
 
-/**
- * Mobile-safe fallback (no analyser): synthesize lively bars from playback time.
- * This keeps the visualizer usable on iOS Safari where we intentionally avoid
- * createMediaElementSource() to preserve lock-screen/background audio playback.
- */
-function sampleFallbackBuckets(timeSec: number, playbackRate: number): Float32Array {
-    const out = new Float32Array(HALF_BARS);
-    const speed = Math.max(0.6, Math.min(2.5, Number.isFinite(playbackRate) ? playbackRate : 1));
-
-    for (let i = 0; i < HALF_BARS; i++) {
-        const centerBias = 1 - (i / Math.max(1, HALF_BARS - 1)) * 0.55;
-        const waveA = 0.52 + 0.34 * Math.sin(timeSec * (2.2 * speed) + i * 0.42);
-        const waveB = 0.20 * Math.sin(timeSec * (0.9 * speed) + i * 0.18 + phase * 0.7);
-        const ripple = 0.10 * Math.sin(phase * 4.0 + i * 1.3);
-        const level = (waveA + waveB + ripple) * centerBias;
-        out[i] = Math.max(FALLBACK_MIN_LEVEL, Math.min(FALLBACK_MAX_LEVEL, level));
-    }
-
-    return out;
-}
-
 function clamp01(v: number): number {
     if (!Number.isFinite(v)) return 0;
     return Math.max(0, Math.min(1, v));
@@ -253,9 +233,13 @@ function findHostWaveCanvas(): HTMLCanvasElement | null {
 }
 
 function buildHostWaveEnvelope(audio: HTMLAudioElement): void {
-    if (hostWaveUnavailable) return;
+    const now = Date.now();
+    if (hostWaveRetryAt > now) return;
     const canvas = findHostWaveCanvas();
-    if (!canvas) return;
+    if (!canvas) {
+        hostWaveRetryAt = now + 700;
+        return;
+    }
 
     const src = audio.currentSrc || audio.src || '';
     if (!src) return;
@@ -273,10 +257,18 @@ function buildHostWaveEnvelope(audio: HTMLAudioElement): void {
         const points = Math.max(128, Math.min(WAVE_FALLBACK_POINTS, Math.floor(width / 2)));
         const envelope = new Float32Array(points);
 
-        // Estimate background color from the top-left corner.
-        const bgR = data[0] ?? 0;
-        const bgG = data[1] ?? 0;
-        const bgB = data[2] ?? 0;
+        // Estimate background color from all four corners.
+        const corners = [0, width - 1, (height - 1) * width, (height * width) - 1];
+        let bgR = 0; let bgG = 0; let bgB = 0;
+        for (const pos of corners) {
+            const idx = pos * 4;
+            bgR += data[idx] || 0;
+            bgG += data[idx + 1] || 0;
+            bgB += data[idx + 2] || 0;
+        }
+        bgR /= corners.length;
+        bgG /= corners.length;
+        bgB /= corners.length;
 
         for (let i = 0; i < points; i++) {
             const x = Math.round((i / Math.max(1, points - 1)) * (width - 1));
@@ -303,18 +295,21 @@ function buildHostWaveEnvelope(audio: HTMLAudioElement): void {
         }
         let max = 0;
         for (let i = 0; i < envelope.length; i++) max = Math.max(max, envelope[i]);
-        if (max <= 0.02) return;
+        if (max <= 0.02) {
+            hostWaveRetryAt = now + HOST_WAVE_RETRY_MS;
+            return;
+        }
         for (let i = 0; i < envelope.length; i++) {
             envelope[i] = clamp01(envelope[i] / max);
         }
 
         hostWaveEnvelope = envelope;
         hostWaveEnvelopeKey = nextKey;
-        hostWaveUnavailable = false;
+        hostWaveRetryAt = 0;
     } catch (err) {
         // Canvas may be tainted by the host app in some browsers.
         Logger.debug('[Visualizer] Host waveform fallback unavailable:', err);
-        hostWaveUnavailable = true;
+        hostWaveRetryAt = now + HOST_WAVE_RETRY_MS;
     }
 }
 
@@ -326,15 +321,32 @@ function sampleHostWaveBuckets(audio: HTMLAudioElement): Float32Array | null {
     const ratio = clamp01(audio.currentTime / duration);
     const out = new Float32Array(HALF_BARS);
     for (let i = 0; i < HALF_BARS; i++) {
-        // Sample around current playback position to mimic spectrum spread.
         const rel = (i / Math.max(1, HALF_BARS - 1)) - 0.5; // [-0.5, 0.5]
-        const pos = clamp01(ratio + rel * 0.22);
-        const idx = Math.round(pos * (hostWaveEnvelope.length - 1));
-        const base = hostWaveEnvelope[idx] || 0;
-        const centerBias = 1 - (i / Math.max(1, HALF_BARS - 1)) * 0.35;
-        const shimmer = 0.9 + 0.1 * Math.sin((audio.currentTime * 4.0) + i * 0.35);
-        const level = base * centerBias * shimmer * 1.2;
+        const pos = clamp01(ratio + rel * 0.18);
+        const center = Math.round(pos * (hostWaveEnvelope.length - 1));
+        let sum = 0;
+        let weight = 0;
+
+        // Sample a small local window for stability, weighted toward center.
+        for (let k = -2; k <= 2; k++) {
+            const idx = Math.max(0, Math.min(hostWaveEnvelope.length - 1, center + k));
+            const w = 1 / (1 + Math.abs(k));
+            sum += (hostWaveEnvelope[idx] || 0) * w;
+            weight += w;
+        }
+
+        const base = weight > 0 ? sum / weight : 0;
+        const centerBias = 1 - Math.abs(rel) * 0.22;
+        const level = base * centerBias * 1.18;
         out[i] = Math.max(FALLBACK_MIN_LEVEL, Math.min(FALLBACK_MAX_LEVEL, level));
+    }
+    return out;
+}
+
+function samplePassiveBuckets(): Float32Array {
+    const out = new Float32Array(HALF_BARS);
+    for (let i = 0; i < HALF_BARS; i++) {
+        out[i] = Math.max(FALLBACK_MIN_LEVEL, smoothBars[i] * 0.96);
     }
     return out;
 }
@@ -347,10 +359,11 @@ function renderFrame() {
         analyser.getByteFrequencyData(data);
         raw = sampleLogBuckets(data);
     } else {
-        // Fallback path for mobile Safari (no analyser by design in AudioAnalysis.ts).
+        // Mobile path: use host waveform envelope (track-derived).
+        // If unavailable temporarily, decay existing bars instead of synthetic patterns.
         if (!audio || audio.paused) return;
         buildHostWaveEnvelope(audio);
-        raw = sampleHostWaveBuckets(audio) || sampleFallbackBuckets(audio.currentTime || phase, audio.playbackRate || 1);
+        raw = sampleHostWaveBuckets(audio) || samplePassiveBuckets();
     }
 
     // Smooth toward new values + advance idle sway phase
@@ -390,10 +403,11 @@ function renderFrame() {
         ctx.shadowColor = `rgba(${r1}, ${g1}, ${b1}, 0.35)`;
         ctx.shadowBlur = 8 * dpr;
 
+        const allowSway = analyserAvailable;
         // Draw mirrored: center outward.  Index 0 = center, HALF_BARS-1 = edge.
         for (let i = 0; i < HALF_BARS; i++) {
             // Idle sway: gentle sine wave that ripples across bars
-            const sway = 0.03 * Math.sin(phase + i * 0.25);
+            const sway = allowSway ? 0.03 * Math.sin(phase + i * 0.25) : 0;
             const val = Math.min(1, Math.max(0, smoothBars[i] + sway));
             const barH = Math.max(2 * dpr, val * h * 0.92);
 
@@ -554,7 +568,7 @@ on('track:change', () => {
         analyser = null;
         hostWaveEnvelope = null;
         hostWaveEnvelopeKey = '';
-        hostWaveUnavailable = false;
+        hostWaveRetryAt = 0;
         connectAudioAnalyser();
         syncPauseState();
     } else if (AppStore.getConfig('alwaysShowVisualizer')) {

@@ -301,4 +301,46 @@ describe('RadioMode', () => {
 
         expect(skipSpy).not.toHaveBeenCalled();
     });
+
+    it('does not advance early around 95% when last track has not ended', async () => {
+        (radioMode as any)._isActive = true;
+        (radioMode as any).playAllInFolder = true;
+        (radioMode as any).isSkipping = false;
+        (radioMode as any).lastQueueIndex = 0;
+        (radioMode as any).manuallyPaused = false;
+
+        mockBridge.player.queue = [
+            { type: 'audio', hash: 'a1', title: 'Track 1' },
+        ];
+        mockBridge.player.queueIndex = 0;
+        mockBridge.player.playing = true;
+        mockBridge.player.currentTime = 95;
+        mockBridge.player.duration = 100;
+
+        const skipSpy = vi.spyOn(radioMode, 'skipToNext').mockResolvedValue(undefined);
+        (radioMode as any).checkQueuePosition();
+
+        expect(skipSpy).not.toHaveBeenCalled();
+    });
+
+    it('advances only at natural end when final track reaches duration', async () => {
+        (radioMode as any)._isActive = true;
+        (radioMode as any).playAllInFolder = true;
+        (radioMode as any).isSkipping = false;
+        (radioMode as any).lastQueueIndex = 0;
+        (radioMode as any).manuallyPaused = false;
+
+        mockBridge.player.queue = [
+            { type: 'audio', hash: 'a1', title: 'Track 1' },
+        ];
+        mockBridge.player.queueIndex = 0;
+        mockBridge.player.playing = true;
+        mockBridge.player.currentTime = 100;
+        mockBridge.player.duration = 100;
+
+        const skipSpy = vi.spyOn(radioMode, 'skipToNext').mockResolvedValue(undefined);
+        (radioMode as any).checkQueuePosition();
+
+        expect(skipSpy).toHaveBeenCalledTimes(1);
+    });
 });

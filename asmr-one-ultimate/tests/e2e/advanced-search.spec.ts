@@ -44,17 +44,14 @@ test.describe('Advanced Search Dialog', () => {
         const dialog = helpers.getAdvancedSearchDialog(injectedPage);
         await expect(dialog).toBeVisible({ timeout: 5000 });
 
-        // Include tags input
-        const includeInput = dialog.locator('#adv-include-tags, .asmr-include-filter');
+        // Include/exclude tag filters (real site dialog uses placeholder + ARIA listboxes)
+        const includeInput = dialog.getByPlaceholder('Type to filter tags...').first();
+        const excludeInput = dialog.getByPlaceholder('Type to filter tags...').nth(1);
         await expect(includeInput).toBeVisible();
-
-        // Exclude tags input
-        const excludeInput = dialog.locator('#adv-exclude-tags, .asmr-exclude-filter');
         await expect(excludeInput).toBeVisible();
 
-        // Include and exclude select lists
-        const includeSelect = dialog.locator('.asmr-include-select');
-        const excludeSelect = dialog.locator('.asmr-exclude-select');
+        const includeSelect = dialog.getByRole('listbox', { name: /include tags/i });
+        const excludeSelect = dialog.getByRole('listbox', { name: /exclude tags/i });
         await expect(includeSelect).toBeVisible();
         await expect(excludeSelect).toBeVisible();
     });
@@ -70,10 +67,10 @@ test.describe('Advanced Search Dialog', () => {
         const dialog = helpers.getAdvancedSearchDialog(injectedPage);
         await expect(dialog).toBeVisible({ timeout: 5000 });
 
-        const vaFilter = dialog.locator('#adv-va-filter, .asmr-va-filter');
+        const vaFilter = dialog.getByPlaceholder('Search voice actors...');
         await expect(vaFilter).toBeVisible();
 
-        const vaSelect = dialog.locator('.asmr-va-select');
+        const vaSelect = dialog.getByRole('listbox', { name: /voice actor/i });
         await expect(vaSelect).toBeVisible();
     });
 
@@ -126,10 +123,10 @@ test.describe('Advanced Search Dialog', () => {
         const dialog = helpers.getAdvancedSearchDialog(injectedPage);
         await expect(dialog).toBeVisible({ timeout: 5000 });
 
-        const includeChips = dialog.locator('.asmr-chips-include');
-        const excludeChips = dialog.locator('.asmr-chips-exclude');
-        await expect(includeChips).toHaveCount(1);
-        await expect(excludeChips).toHaveCount(1);
+        const includeList = dialog.getByRole('listbox', { name: /include tags/i });
+        const excludeList = dialog.getByRole('listbox', { name: /exclude tags/i });
+        await expect(includeList).toBeVisible();
+        await expect(excludeList).toBeVisible();
     });
 
     test('dialog has language selector', async ({ injectedPage, isScriptLoaded, waitForBridge }) => {

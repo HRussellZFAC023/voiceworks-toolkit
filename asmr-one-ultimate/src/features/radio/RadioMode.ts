@@ -530,8 +530,7 @@ export class RadioMode {
         }
 
         const isLastTrack = !hasNextPlayable;
-        const nearEnd = duration > 0 && (duration - currentTime) < 5;
-        const highProgress = duration > 0 && (currentTime / duration) > 0.95;
+        const atNaturalEnd = duration > 0 && (duration - currentTime) <= 0.15;
 
         // Only log periodically to avoid spam (every 10th check when playing)
         if (player.playing && duration > 0) {
@@ -540,8 +539,7 @@ export class RadioMode {
                 queueLength: queue.length,
                 isLastTrack,
                 progress: `${((currentTime / duration) * 100).toFixed(1)}%`,
-                nearEnd,
-                highProgress,
+                atNaturalEnd,
                 audioEnded,
             });
         }
@@ -566,10 +564,11 @@ export class RadioMode {
             return;
         }
 
-        // Last track in queue: skip to next work when near the end or when ended
-        if (isLastTrack && (nearEnd || highProgress || audioEnded) && !this.isSkipping) {
+        // Last track in queue: skip to next work only at true end.
+        // Avoid early transitions around ~90-95% progress.
+        if (isLastTrack && (atNaturalEnd || audioEnded) && !this.isSkipping) {
             Logger.debug('[RadioMode] End of last track detected, trigger skip to next work', {
-                isLastTrack, nearEnd, highProgress, audioEnded,
+                isLastTrack, atNaturalEnd, audioEnded,
             });
             this.recordActivity();
             this.skipToNext();

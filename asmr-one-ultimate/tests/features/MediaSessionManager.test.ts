@@ -54,5 +54,32 @@ describe('MediaSessionManager', () => {
         expect(candidates.some((url) => url.includes('/api/cover/123.jpg'))).toBe(true);
         expect(candidates.some((url) => url.includes('/favicon.ico'))).toBe(true);
     });
-});
 
+    it('uses DOM now-playing labels when track/work store values are temporarily missing', () => {
+        document.body.innerHTML = `
+            <div class="audio-player">
+                <div class="text-bold ellipsis-2-lines">Track from DOM</div>
+                <div class="text-caption">Work from DOM</div>
+            </div>
+        `;
+
+        const manager = new MediaSessionManager() as any;
+        const metadata = manager.resolveMetadataText(undefined, undefined);
+
+        expect(metadata.title).toBe('Track from DOM');
+        expect(metadata.artist).toBe('Work from DOM');
+        expect(metadata.album).toBe('Work from DOM');
+    });
+
+    it('prefers work title as artist and circle name as album for lockscreen metadata', () => {
+        const manager = new MediaSessionManager() as any;
+        const metadata = manager.resolveMetadataText(
+            { title: 'Track Name' } as any,
+            { title: 'Work Title', name: 'Circle Alias', circle: { name: 'Circle Name' } } as any
+        );
+
+        expect(metadata.title).toBe('Track Name');
+        expect(metadata.artist).toBe('Work Title');
+        expect(metadata.album).toBe('Circle Name');
+    });
+});

@@ -1,6 +1,7 @@
 import { KikoeruBridge } from '../infrastructure/KikoeruBridge';
 import { Logger } from '../core/Utils';
-import { getAudioElement } from '../core/DomUtils';
+import { EventBus } from '../core/EventBus';
+import { getAudioElement, getCleanText, PLAYER_BAR_SELECTOR } from '../core/DomUtils';
 import { gmRequest } from '../infrastructure/HttpClient';
 import { buildCoverUrl } from '../types/api';
 import type { KikoeruStoreState } from '../types';
@@ -59,6 +60,9 @@ export class MediaSessionManager {
     private artworkFailed = new Set<string>();
     private artworkRefreshTimers: number[] = [];
     private artworkRefreshKey: string | null = null;
+    private eventCleanups: Array<() => void> = [];
+    private metadataRefreshHandler: (() => void) | null = null;
+    private visibilityHandler: (() => void) | null = null;
 
     constructor() {
         this.bridge = KikoeruBridge.getInstance();
@@ -85,31 +89,41 @@ export class MediaSessionManager {
         }
 
         this.setHandlers();
+        this.eventCleanups.push(
+            EventBus.on('track:change', (payload) => this.onTrackChange(payload as { track?: PlayerTrack; workId?: string })),
+            EventBus.on('work:change', () => this.forceMetadataRefresh('work:change')),
+        );
+
+        this.visibilityHandler = () => this.forceMetadataRefresh('visibilitychange');
+        document.addEventListener('visibilitychange', this.visibilityHandler);
+        window.addEventListener('pageshow', this.visibilityHandler);
+
         this.attachPositionSync();
 
         // Initial sync
-        const state = store.state.AudioPlayer;
-        if (!state) return;
+        const state = this.readCurrentStoreState();
         this.update({
-            track: state.currentTrack || state.currentPlayingFile,
+            track: state.track,
             playing: state.playing || false,
-            work: state.work
+            work: state.work,
         });
     }
 
     private update(state: { track: PlayerTrack | undefined; playing: boolean | undefined; work: WorkDetail | undefined }): void {
-        this.lastTrack = state.track;
-        this.lastWork = state.work;
-        this.updateMetadata(state.track, state.work);
-        this.updatePlaybackState(!!state.playing);
+        const current = this.readCurrentStoreState();
+        const track = state.track || current.track || this.lastTrack;
+        const work = state.work || current.work || this.lastWork;
+        if (track) this.lastTrack = track;
+        if (work) this.lastWork = work;
+
+        this.updateMetadata(track, work);
+        this.updatePlaybackState(!!(state.playing ?? current.playing));
         // Re-attach position sync in case the audio element changed (new track)
         this.attachPositionSync();
     }
 
     private updateMetadata(track: PlayerTrack | undefined, work: WorkDetail | undefined): void {
-        const title = track?.title || (work ? (work.title || 'Unknown Work') : 'No Track');
-        const artist = work?.name || work?.circle?.name || (track?.workTitle || 'ASMR.one');
-        const album = work?.title || 'Unknown Album';
+        const { title, artist, album } = this.resolveMetadataText(track, work);
 
         const coverCandidates = this.resolveCoverCandidates(track, work);
         const primaryRemoteCover = coverCandidates[0];
@@ -145,6 +159,173 @@ export class MediaSessionManager {
         } else {
             this.clearArtworkRefreshTimers();
         }
+    }
+
+    private readCurrentStoreState(): {
+        track: PlayerTrack | undefined;
+        playing: boolean | undefined;
+        work: WorkDetail | undefined;
+    } {
+        const ap = this.bridge.store.state.AudioPlayer;
+        if (!ap) return { track: undefined, playing: undefined, work: undefined };
+        return {
+            track: ap.currentTrack || ap.currentPlayingFile,
+            playing: ap.playing,
+            work: ap.work,
+        };
+    }
+
+    private onTrackChange(payload: { track?: PlayerTrack; workId?: string }): void {
+        if (payload?.track) {
+            this.lastTrack = payload.track;
+        }
+        if (payload?.workId) {
+            const currentId = this.lastWork?.id ? String(this.lastWork.id) : '';
+            if (currentId !== payload.workId) {
+                const inferredTitle = this.textOrEmpty(payload.track?.workTitle);
+                if (inferredTitle) {
+                    this.lastWork = { id: payload.workId, title: inferredTitle } as unknown as WorkDetail;
+                }
+            }
+        }
+        this.forceMetadataRefresh('track:change');
+    }
+
+    private forceMetadataRefresh(reason: string): void {
+        const current = this.readCurrentStoreState();
+        const track = current.track || this.lastTrack;
+        const work = current.work || this.lastWork;
+        if (track) this.lastTrack = track;
+        if (work) this.lastWork = work;
+        this.lastMetadata = null;
+        this.updateMetadata(track, work);
+        this.updatePlaybackState(!!current.playing);
+        this.attachPositionSync();
+        Logger.debug('[MediaSession] Forced metadata refresh:', reason);
+    }
+
+    private textOrEmpty(value: unknown): string {
+        if (typeof value !== 'string') return '';
+        return value.replace(/\s+/g, ' ').trim();
+    }
+
+    private resolveMetadataText(track: PlayerTrack | undefined, work: WorkDetail | undefined): {
+        title: string;
+        artist: string;
+        album: string;
+    } {
+        const trackTitle = this.textOrEmpty(track?.title);
+        const trackWorkTitle = this.textOrEmpty(track?.workTitle);
+        const workTitle = this.textOrEmpty(work?.title);
+        const workName = this.textOrEmpty(work?.name);
+        const circleName = this.textOrEmpty(work?.circle?.name);
+
+        const dom = this.resolveNowPlayingTextFromDom(
+            trackTitle || trackWorkTitle,
+            workTitle || workName || trackWorkTitle,
+        );
+
+        const title = trackTitle || dom.trackTitle || workTitle || trackWorkTitle || 'No Track';
+        const resolvedWorkTitle = workTitle || dom.workTitle || trackWorkTitle || workName;
+        const artist = resolvedWorkTitle || circleName || workName || 'ASMR.one';
+        const album = circleName || workName || resolvedWorkTitle || 'Unknown Album';
+
+        return { title, artist, album };
+    }
+
+    private resolveNowPlayingTextFromDom(trackHint: string, workHint: string): {
+        trackTitle: string;
+        workTitle: string;
+    } {
+        const roots = Array.from(
+            document.querySelectorAll<HTMLElement>(`${PLAYER_BAR_SELECTOR}, .audio-player, .current-play-list`)
+        );
+
+        let trackTitle = '';
+        let workTitle = '';
+
+        for (const root of roots) {
+            const trackEl = this.findTrackTitleElement(root, trackHint);
+            if (!trackTitle && trackEl) {
+                trackTitle = this.textOrEmpty(getCleanText(trackEl));
+            }
+
+            const workEl = this.findWorkTitleElement(root, trackEl, workHint);
+            if (!workTitle && workEl) {
+                workTitle = this.textOrEmpty(getCleanText(workEl));
+            }
+
+            if (trackTitle && workTitle) break;
+        }
+
+        return { trackTitle, workTitle };
+    }
+
+    private findTrackTitleElement(root: HTMLElement, trackHint: string): HTMLElement | null {
+        const candidates = Array.from(root.querySelectorAll<HTMLElement>(
+            '.ellipsis-2-lines, .text-bold, .q-item__label:not(.q-item__label--caption)'
+        ));
+
+        let best: HTMLElement | null = null;
+        let bestScore = Number.NEGATIVE_INFINITY;
+
+        for (const el of candidates) {
+            const text = this.textOrEmpty(getCleanText(el));
+            if (!text) continue;
+
+            let score = 0;
+            if (el.classList.contains('text-bold')) score += 35;
+            if (el.classList.contains('ellipsis-2-lines')) score += 30;
+            if (!el.closest('.q-item')) score += 20;
+            if (el.closest('.audio-player')) score += 10;
+            if (/^\d{1,2}:\d{2}(?::\d{2})?$/.test(text)) score -= 70;
+
+            if (trackHint) {
+                if (text === trackHint) score += 120;
+                else if (text.includes(trackHint) || trackHint.includes(text)) score += 60;
+            }
+
+            if (score > bestScore) {
+                bestScore = score;
+                best = el;
+            }
+        }
+
+        return best;
+    }
+
+    private findWorkTitleElement(root: HTMLElement, trackEl: HTMLElement | null, workHint: string): HTMLElement | null {
+        const candidates = Array.from(root.querySelectorAll<HTMLElement>(
+            '.text-caption, .text-subtitle2, .text-grey-5, .q-item__label--caption'
+        ));
+
+        const trackText = trackEl ? this.textOrEmpty(getCleanText(trackEl)) : '';
+        let best: HTMLElement | null = null;
+        let bestScore = Number.NEGATIVE_INFINITY;
+
+        for (const el of candidates) {
+            const text = this.textOrEmpty(getCleanText(el));
+            if (!text || text === trackText) continue;
+
+            let score = 0;
+            if (!el.closest('.q-item')) score += 25;
+            if (el.closest('.audio-player')) score += 10;
+            if (trackEl && trackEl.parentElement && el.parentElement === trackEl.parentElement) score += 15;
+            if (/^\d{1,2}:\d{2}(?::\d{2})?$/.test(text)) score -= 70;
+            if (/^\d+(?:\.\d+)?\s*(?:MB|GB|KB|kHz|Hz|fps)?$/i.test(text)) score -= 40;
+
+            if (workHint) {
+                if (text === workHint) score += 120;
+                else if (text.includes(workHint) || workHint.includes(text)) score += 60;
+            }
+
+            if (score > bestScore) {
+                bestScore = score;
+                best = el;
+            }
+        }
+
+        return best;
     }
 
     private resolveCoverCandidates(track: PlayerTrack | undefined, work: WorkDetail | undefined): string[] {
@@ -398,6 +579,7 @@ export class MediaSessionManager {
             this.syncPositionState(audio);
             this.updatePlaybackState(!audio.paused);
         };
+        this.metadataRefreshHandler = () => this.forceMetadataRefresh('audio-event');
         audio.addEventListener('timeupdate', this.timeupdateHandler);
 
         // Keep lock screen state in sync across seeks, play/pause, and metadata load.
@@ -406,6 +588,9 @@ export class MediaSessionManager {
         audio.addEventListener('pause', this.timeupdateHandler);
         audio.addEventListener('loadedmetadata', this.timeupdateHandler);
         audio.addEventListener('ratechange', this.timeupdateHandler);
+        audio.addEventListener('loadedmetadata', this.metadataRefreshHandler);
+        audio.addEventListener('canplay', this.metadataRefreshHandler);
+        audio.addEventListener('playing', this.metadataRefreshHandler);
         // Initial state sync for newly connected audio element.
         this.timeupdateHandler();
     }
@@ -418,9 +603,15 @@ export class MediaSessionManager {
             this.connectedAudio.removeEventListener('pause', this.timeupdateHandler);
             this.connectedAudio.removeEventListener('loadedmetadata', this.timeupdateHandler);
             this.connectedAudio.removeEventListener('ratechange', this.timeupdateHandler);
+            if (this.metadataRefreshHandler) {
+                this.connectedAudio.removeEventListener('loadedmetadata', this.metadataRefreshHandler);
+                this.connectedAudio.removeEventListener('canplay', this.metadataRefreshHandler);
+                this.connectedAudio.removeEventListener('playing', this.metadataRefreshHandler);
+            }
         }
         this.connectedAudio = null;
         this.timeupdateHandler = null;
+        this.metadataRefreshHandler = null;
     }
 
     private syncPositionState(audio: HTMLAudioElement): void {
@@ -514,6 +705,15 @@ export class MediaSessionManager {
         if (this.unwatch) {
             this.unwatch();
             this.unwatch = null;
+        }
+        for (const cleanup of this.eventCleanups) {
+            try { cleanup(); } catch { /* no-op */ }
+        }
+        this.eventCleanups = [];
+        if (this.visibilityHandler) {
+            document.removeEventListener('visibilitychange', this.visibilityHandler);
+            window.removeEventListener('pageshow', this.visibilityHandler);
+            this.visibilityHandler = null;
         }
         this.detachPositionSync();
         this.clearArtworkRefreshTimers();

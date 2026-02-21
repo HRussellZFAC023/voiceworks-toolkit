@@ -15,6 +15,8 @@ const __dirname = path.dirname(__filename);
 
 const USERSCRIPT_PATH = path.join(__dirname, '../../dist/asmr-one-ultimate.user.js');
 const AUTH_PATH = path.join(__dirname, '.auth.json');
+const isRealE2E = process.env.E2E_REAL === '1' || process.env.E2E_NO_MOCKS === '1';
+const requireAuth = process.env.E2E_REQUIRE_AUTH === '1';
 const TEST_IMAGE_BODY = Buffer.from(
     'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMB/6XGD2sAAAAASUVORK5CYII=',
     'base64'
@@ -51,7 +53,7 @@ async function ensureLoggedIn(page: Page): Promise<boolean> {
     if (context.__authReady != null) return context.__authReady;
 
     const creds = loadAuthConfig();
-    if (!creds) {
+    if (!creds || !requireAuth) {
         context.__authReady = false;
         return false;
     }
@@ -105,16 +107,62 @@ const BLOCKED_URL_PATTERNS = [
     /sentry\.io/,
 ];
 
-// Parallelism helper: Rotate between subdomains to avoid 429 rate limits
-const ASMR_SUBDOMAINS = ['asmr.one', 'www.asmr.one', 'asmr-100.com', 'asmr-200.com', 'asmr-300.com'];
-function getBaseUrl(index: number) {
-    return `https://${ASMR_SUBDOMAINS[index % ASMR_SUBDOMAINS.length]}`;
+const BASE_URLS = (() => {
+    const custom = (process.env.E2E_BASE_URLS || process.env.E2E_BASE_URL || '').trim();
+    if (custom) {
+        return custom
+            .split(',')
+            .map(v => v.trim())
+            .filter(Boolean)
+            .map(v => (v.startsWith('http://') || v.startsWith('https://')) ? v : `https://${v}`);
+    }
+    if (isRealE2E) {
+        // Keep real runs on stable production domains (avoid flaky mirror hosts).
+        return ['https://www.asmr.one', 'https://asmr.one'];
+    }
+    return ['https://asmr.one', 'https://www.asmr.one', 'https://asmr-100.com', 'https://asmr-200.com', 'https://asmr-300.com'];
+})();
+
+function getBaseUrl(index: number): string {
+    return BASE_URLS[index % BASE_URLS.length];
 }
 
-// SystemJS dependencies required by the userscript
-const SYSTEMJS_URLS = [
+function buildUrl(base: string, pathOrUrl: string): string {
+    if (pathOrUrl.startsWith('http://') || pathOrUrl.startsWith('https://')) return pathOrUrl;
+    const normalizedPath = pathOrUrl.startsWith('/') ? pathOrUrl : `/${pathOrUrl}`;
+    return `${base}${normalizedPath}`;
+}
+
+async function gotoWithFallback(page: Page, pathOrUrl: string, waitMs = 0): Promise<void> {
+    const workerIndex = (page.context() as any)._workerIndex || 0;
+    let lastError: unknown = null;
+    for (let i = 0; i < BASE_URLS.length; i++) {
+        const base = getBaseUrl(workerIndex + i);
+        const target = buildUrl(base, pathOrUrl);
+        try {
+            await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 30000 });
+            // Wait a beat so anti-bot / CDN error pages can settle.
+            await sleep(500);
+            const isBadGateway = await page.evaluate(() => {
+                const text = (document.body?.innerText || '').toLowerCase();
+                return text.includes('502') || text.includes('bad gateway');
+            }).catch(() => false);
+            if (isBadGateway) throw new Error(`Gateway error on ${target}`);
+            if (waitMs > 0) await sleep(waitMs);
+            return;
+        } catch (err) {
+            lastError = err;
+        }
+    }
+    throw lastError instanceof Error ? lastError : new Error(`Failed to open ${pathOrUrl} on all configured base URLs`);
+}
+
+// Fallback dependencies if userscript metadata cannot be parsed.
+const FALLBACK_REQUIRE_URLS = [
+    'https://cdn.jsdelivr.net/npm/vue@3.5.27/dist/vue.global.prod.js',
     'https://cdn.jsdelivr.net/npm/systemjs@6.15.1/dist/system.min.js',
     'https://cdn.jsdelivr.net/npm/systemjs@6.15.1/dist/extras/named-register.min.js',
+    "data:application/javascript,%3B(typeof%20System!%3D'undefined')%26%26(System%3Dnew%20System.constructor())%3B",
 ];
 
 // GM_* API stubs for running outside Tampermonkey
@@ -165,10 +213,15 @@ window.GM_info = window.GM_info || { script: { name: 'ASMR Ultimate', version: '
 window.unsafeWindow = window;
 `;
 
-// Cache the userscript content
-let cachedUserscript: string | null = null;
+type UserscriptBundle = {
+    code: string;
+    requires: string[];
+};
 
-function loadUserscript(): string {
+// Cache the parsed userscript once per worker process.
+let cachedUserscript: UserscriptBundle | null = null;
+
+function loadUserscript(): UserscriptBundle {
     if (cachedUserscript) return cachedUserscript;
 
     try {
@@ -176,13 +229,24 @@ function loadUserscript(): string {
             throw new Error(`Userscript not found at ${USERSCRIPT_PATH}`);
         }
 
-        let script = fs.readFileSync(USERSCRIPT_PATH, 'utf-8');
+        const raw = fs.readFileSync(USERSCRIPT_PATH, 'utf-8');
+        const headerMatch = raw.match(/^\/\/\s*==UserScript==[\s\S]*?\/\/\s*==\/UserScript==\s*/m);
+        const header = headerMatch?.[0] || '';
+
+        const requires = Array.from(header.matchAll(/\/\/\s*@require\s+(.+)$/gm))
+            .map((m) => m[1]?.trim())
+            .filter((v): v is string => !!v);
+
+        let script = raw;
 
         // Remove userscript header (everything before first non-comment code)
         script = script.replace(/^\/\/\s*==UserScript==[\s\S]*?\/\/\s*==\/UserScript==\s*/m, '');
 
-        cachedUserscript = script;
-        return script;
+        cachedUserscript = {
+            code: script,
+            requires: requires.length > 0 ? requires : FALLBACK_REQUIRE_URLS,
+        };
+        return cachedUserscript;
     } catch (e) {
         throw new Error(
             `Cannot load userscript from ${USERSCRIPT_PATH}.\n` +
@@ -213,8 +277,8 @@ export const test = base.extend<Fixtures>({
                 (function() {
                     if (window !== window.top) return;
                     
-                    const SYSTEMJS_URLS = ${JSON.stringify(SYSTEMJS_URLS)};
-                    const USERSCRIPT = ${JSON.stringify(userscript)};
+                    const REQUIRE_URLS = ${JSON.stringify(userscript.requires)};
+                    const USERSCRIPT = ${JSON.stringify(userscript.code)};
                     
                     async function init() {
                         if (!location.href.includes('asmr.one') && !location.href.includes('asmr-')) return;
@@ -222,23 +286,18 @@ export const test = base.extend<Fixtures>({
 
                         console.log('[E2E] Starting script injection...');
 
-                        // Load SystemJS
-                        for (const url of SYSTEMJS_URLS) {
-                            await new Promise((resolve, reject) => {
+                        // Load userscript @require dependencies (Vue/SystemJS/etc.) in metadata order.
+                        for (const url of REQUIRE_URLS) {
+                            await new Promise((resolve) => {
                                 const script = document.createElement('script');
                                 script.src = url;
                                 script.onload = resolve;
                                 script.onerror = () => {
-                                    console.error('[E2E] Failed to load SystemJS from ' + url);
+                                    console.error('[E2E] Failed to load @require dependency from ' + url);
                                     resolve();
                                 };
                                 document.head.appendChild(script);
                             });
-                        }
-
-                        // Initialize SystemJS
-                        if (typeof window.System !== 'undefined') {
-                            window.System = new window.System.constructor();
                         }
 
                         // Inject Userscript
@@ -248,10 +307,10 @@ export const test = base.extend<Fixtures>({
                         console.log('[E2E] Userscript injected');
                     }
 
-                    if (document.readyState === 'complete') {
-                        init();
+                    if (document.readyState === 'loading') {
+                        document.addEventListener('DOMContentLoaded', init, { once: true });
                     } else {
-                        window.addEventListener('load', init);
+                        setTimeout(init, 0);
                     }
                 })();
             `
@@ -269,15 +328,21 @@ export const test = base.extend<Fixtures>({
             });
         });
 
-        // Block heavy resources context-wide
-        await context.route('**/*.{png,jpg,jpeg,gif,webp,svg,ico,woff2,ttf,eot,mp3,mp4,ogg,wav,flac}*', (route) => route.abort());
-        await context.route(url =>
-            BLOCKED_URL_PATTERNS.some(p => p.test(url.toString())),
-            (route) => route.abort()
-        );
+        if (!isRealE2E) {
+            // Block heavy resources context-wide
+            await context.route('**/*.{png,jpg,jpeg,gif,webp,svg,ico,woff2,ttf,eot,mp3,mp4,ogg,wav,flac}*', (route) => route.abort());
+            await context.route(url =>
+                BLOCKED_URL_PATTERNS.some(p => p.test(url.toString())),
+                (route) => route.abort()
+            );
+        } else {
+            // In real mode keep all real APIs/media; only drop noisy telemetry.
+            await context.route('**/api/**/sentry/**', (route) => route.abort());
+            await context.route('**://sentry.asmr.one/**', (route) => route.abort());
+        }
 
-        // API Mocking for maximum speed and reliability
-        await context.route('**/api/**', async (route) => {
+        // API Mocking for deterministic mode
+        if (!isRealE2E) await context.route('**/api/**', async (route) => {
             const url = route.request().url();
             const method = route.request().method();
 
@@ -403,7 +468,7 @@ export const test = base.extend<Fixtures>({
         });
 
         // Mock Google Translate to avoid flaky network + console errors
-        await context.route('https://translate.googleapis.com/**', async (route) => {
+        if (!isRealE2E) await context.route('https://translate.googleapis.com/**', async (route) => {
             const body = JSON.stringify([[['Mock translation', '', null, null, 1]], null, 'en']);
             await route.fulfill({ status: 200, contentType: 'application/json', body });
         });
@@ -420,9 +485,12 @@ export const test = base.extend<Fixtures>({
             if (msg.type() === 'error') {
                 if (text.includes('ERR_FAILED') || text.includes('net::ERR_')) return;
                 console.log(`[Browser error]: ${text}`);
-            } else if (text.includes('[E2E]') || text.includes('[ASMR]') || text.includes('Bridge')) {
+            } else if (text.includes('[E2E]') || text.includes('[ASMR]') || text.includes('[ASMR Ultimate]') || text.includes('Bridge')) {
                 console.log(`[Browser ${msg.type()}]: ${text}`);
             }
+        });
+        page.on('pageerror', err => {
+            console.log(`[Page error]: ${err.message}`);
         });
 
         await ensureLoggedIn(page);
@@ -435,7 +503,7 @@ export const test = base.extend<Fixtures>({
             while (Date.now() - start < 15000) {
                 const ready = await injectedPage.evaluate(() => {
                     const w = window as any;
-                    return !!(w.__ASMR_LOGGER__ || w.ASMRUlt || w.__ASMR_ULTIMATE_INITIALIZED__);
+                    return !!(w.ASMRUlt && w.__ASMR_KIKOERU_BRIDGE__?.store);
                 }).catch(() => false);
                 if (ready) return true;
                 await sleep(250);
@@ -452,7 +520,14 @@ export const test = base.extend<Fixtures>({
                 const ready = await injectedPage.evaluate(() => {
                     try {
                         const w = window as any;
-                        return !!(w.__ASMR_KIKOERU_BRIDGE__?.store || w.ASMRUlt);
+                        const bridgeReady = !!w.__ASMR_KIKOERU_BRIDGE__?.store;
+                        const apiReady = !!w.ASMRUlt;
+                        const mountedFeature =
+                            !!document.querySelector('.asmr-header-actions') ||
+                            !!document.querySelector('.asmr-playlist-btn') ||
+                            !!document.querySelector('.asmr-vector-btn') ||
+                            !!document.querySelector('#asmr-radio-toggle');
+                        return bridgeReady && apiReady && mountedFeature;
                     } catch { return false; }
                 }).catch(() => false);
                 if (ready) return true;
@@ -469,51 +544,35 @@ export const helpers = {
     // Navigation helpers — reduced default waits for faster execution.
     // addInitScript ensures the script is ready early.
     async gotoHome(page: Page, waitMs = 0) {
-        const baseUrl = getBaseUrl((page.context() as any)._workerIndex || 0);
-        await page.goto(baseUrl, { waitUntil: 'commit', timeout: 30000 });
-        if (waitMs > 0) await sleep(waitMs);
+        await gotoWithFallback(page, '/', waitMs);
     },
 
     async gotoWork(page: Page, workId: string, waitMs = 0) {
-        const baseUrl = getBaseUrl((page.context() as any)._workerIndex || 0);
-        await page.goto(`${baseUrl}/work/${workId}`, { waitUntil: 'commit', timeout: 30000 });
-        if (waitMs > 0) await sleep(waitMs);
+        await gotoWithFallback(page, `/work/${workId}`, waitMs);
     },
 
     async gotoSettings(page: Page, waitMs = 0) {
-        const baseUrl = getBaseUrl((page.context() as any)._workerIndex || 0);
-        await page.goto(`${baseUrl}/settings`, { waitUntil: 'commit', timeout: 30000 });
-        if (waitMs > 0) await sleep(waitMs);
+        await gotoWithFallback(page, '/settings', waitMs);
     },
 
     async gotoTags(page: Page, waitMs = 0) {
-        const baseUrl = getBaseUrl((page.context() as any)._workerIndex || 0);
-        await page.goto(`${baseUrl}/tags`, { waitUntil: 'commit', timeout: 30000 });
-        if (waitMs > 0) await sleep(waitMs);
+        await gotoWithFallback(page, '/tags', waitMs);
     },
 
     async gotoWorks(page: Page, waitMs = 0) {
-        const baseUrl = getBaseUrl((page.context() as any)._workerIndex || 0);
-        await page.goto(`${baseUrl}/works`, { waitUntil: 'commit', timeout: 30000 });
-        if (waitMs > 0) await sleep(waitMs);
+        await gotoWithFallback(page, '/works', waitMs);
     },
 
     async gotoPlaylists(page: Page, waitMs = 0) {
-        const baseUrl = getBaseUrl((page.context() as any)._workerIndex || 0);
-        await page.goto(`${baseUrl}/playlists`, { waitUntil: 'commit', timeout: 30000 });
-        if (waitMs > 0) await sleep(waitMs);
+        await gotoWithFallback(page, '/playlists', waitMs);
     },
 
     async gotoCircles(page: Page, waitMs = 0) {
-        const baseUrl = getBaseUrl((page.context() as any)._workerIndex || 0);
-        await page.goto(`${baseUrl}/circles`, { waitUntil: 'commit', timeout: 30000 });
-        if (waitMs > 0) await sleep(waitMs);
+        await gotoWithFallback(page, '/circles', waitMs);
     },
 
     async gotoVAs(page: Page, waitMs = 0) {
-        const baseUrl = getBaseUrl((page.context() as any)._workerIndex || 0);
-        await page.goto(`${baseUrl}/vas`, { waitUntil: 'commit', timeout: 30000 });
-        if (waitMs > 0) await sleep(waitMs);
+        await gotoWithFallback(page, '/vas', waitMs);
     },
 
     // Health monitoring
@@ -719,6 +778,7 @@ export const helpers = {
     // Playlist Mode Helpers
     async openAdvancedSearch(page: Page) {
         const btn = this.getPlaylistMakerButton(page);
+        await btn.first().waitFor({ state: 'visible', timeout: 15000 });
         await btn.click();
         await sleep(1000);
     },

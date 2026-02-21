@@ -19,6 +19,8 @@ import { defineConfig, devices } from '@playwright/test';
 // Set workers to undefined to let Playwright scale automatically based on CPU cores.
 const workers = process.env.PW_WORKERS ? parseInt(process.env.PW_WORKERS, 10) : undefined;
 const slowMo = parseInt(process.env.PW_SLOWMO || '', 10) || 0;
+const isRealE2E = process.env.E2E_REAL === '1' || process.env.E2E_NO_MOCKS === '1';
+const baseURL = process.env.E2E_BASE_URL || 'https://www.asmr.one';
 
 export default defineConfig({
     testDir: './tests/e2e',
@@ -32,7 +34,7 @@ export default defineConfig({
         timeout: 10000,
     },
     use: {
-        baseURL: 'https://asmr.one',
+        baseURL,
         trace: 'on-first-retry',
         // Disable video recording to save RAM — only enable on retry
         video: process.env.CI ? 'on-first-retry' : 'off',
@@ -71,8 +73,8 @@ export default defineConfig({
             use: { ...devices['Desktop Chrome'] },
         },
     ],
-    // Start dev server automatically if not running
-    webServer: {
+    // Start dev server automatically if not running (not needed for real-site E2E).
+    webServer: isRealE2E ? undefined : {
         command: 'npm run dev',
         url: 'http://localhost:5173',
         reuseExistingServer: true,
