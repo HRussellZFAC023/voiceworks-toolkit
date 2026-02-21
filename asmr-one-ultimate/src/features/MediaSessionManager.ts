@@ -6,6 +6,9 @@ import { buildCoverUrl } from '../types/api';
 import type { KikoeruStoreState } from '../types';
 import type { PlayerTrack, WorkDetail } from '../types';
 
+const ARTWORK_MAX_EDGE = 512;
+const ARTWORK_DATA_URL_TARGET_LEN = 420_000;
+
 /**
  * Ensure a URL is absolute.  Relative paths (e.g. `/api/cover/…`) are
  * resolved against the current page origin so the Media Session API
@@ -54,6 +57,8 @@ export class MediaSessionManager {
     private artworkDataUrlCache = new Map<string, string>();
     private artworkPrefetching = new Map<string, Promise<string | null>>();
     private artworkFailed = new Set<string>();
+    private artworkRefreshTimers: number[] = [];
+    private artworkRefreshKey: string | null = null;
 
     constructor() {
         this.bridge = KikoeruBridge.getInstance();
@@ -136,6 +141,9 @@ export class MediaSessionManager {
         // Prefetch and cache a data URL so the system UI can always render artwork.
         if (primaryRemoteCover && !inlineCover) {
             this.prefetchArtworkDataUrl(primaryRemoteCover);
+            this.scheduleArtworkRefresh(primaryRemoteCover);
+        } else {
+            this.clearArtworkRefreshTimers();
         }
     }
 
@@ -226,9 +234,14 @@ export class MediaSessionManager {
             .then((dataUrl) => {
                 if (!dataUrl) {
                     this.artworkFailed.add(coverUrl);
+                    Logger.warn('[MediaSession] Artwork prefetch failed:', coverUrl);
                     return null;
                 }
                 this.artworkDataUrlCache.set(coverUrl, dataUrl);
+                Logger.debug('[MediaSession] Cached inline artwork data URL:', {
+                    source: coverUrl,
+                    length: dataUrl.length,
+                });
                 // Bound cache growth in long sessions.
                 if (this.artworkDataUrlCache.size > 24) {
                     const oldest = this.artworkDataUrlCache.keys().next().value as string | undefined;
@@ -259,7 +272,7 @@ export class MediaSessionManager {
             });
             const blob = gmRes.response as Blob | undefined;
             if (blob instanceof Blob && blob.size > 0) {
-                return await this.blobToDataUrl(blob);
+                return await this.blobToOptimizedDataUrl(blob);
             }
         } catch {
             // Fall through to fetch() fallback.
@@ -270,10 +283,60 @@ export class MediaSessionManager {
             if (!res.ok) return null;
             const blob = await res.blob();
             if (!(blob instanceof Blob) || blob.size <= 0) return null;
-            return await this.blobToDataUrl(blob);
+            return await this.blobToOptimizedDataUrl(blob);
         } catch {
             return null;
         }
+    }
+
+    private async blobToOptimizedDataUrl(blob: Blob): Promise<string> {
+        // Non-image payloads: preserve old behavior.
+        if (!blob.type || !blob.type.startsWith('image/')) {
+            return this.blobToDataUrl(blob);
+        }
+
+        try {
+            const img = await this.loadImageFromBlob(blob);
+            const srcW = img.naturalWidth || img.width || ARTWORK_MAX_EDGE;
+            const srcH = img.naturalHeight || img.height || ARTWORK_MAX_EDGE;
+            const scale = Math.min(1, ARTWORK_MAX_EDGE / Math.max(srcW, srcH));
+            const dstW = Math.max(1, Math.round(srcW * scale));
+            const dstH = Math.max(1, Math.round(srcH * scale));
+
+            const canvas = document.createElement('canvas');
+            canvas.width = dstW;
+            canvas.height = dstH;
+            const ctx = canvas.getContext('2d');
+            if (!ctx) return this.blobToDataUrl(blob);
+            ctx.drawImage(img, 0, 0, dstW, dstH);
+
+            let quality = 0.9;
+            let dataUrl = canvas.toDataURL('image/jpeg', quality);
+            while (dataUrl.length > ARTWORK_DATA_URL_TARGET_LEN && quality > 0.55) {
+                quality -= 0.1;
+                dataUrl = canvas.toDataURL('image/jpeg', quality);
+            }
+            return dataUrl;
+        } catch {
+            return this.blobToDataUrl(blob);
+        }
+    }
+
+    private loadImageFromBlob(blob: Blob): Promise<HTMLImageElement> {
+        return new Promise((resolve, reject) => {
+            const url = URL.createObjectURL(blob);
+            const img = new Image();
+            img.decoding = 'async';
+            img.onload = () => {
+                URL.revokeObjectURL(url);
+                resolve(img);
+            };
+            img.onerror = () => {
+                URL.revokeObjectURL(url);
+                reject(new Error('Failed to decode artwork blob'));
+            };
+            img.src = url;
+        });
     }
 
     private blobToDataUrl(blob: Blob): Promise<string> {
@@ -283,6 +346,34 @@ export class MediaSessionManager {
             reader.onerror = () => reject(reader.error || new Error('Failed to read blob as data URL'));
             reader.readAsDataURL(blob);
         });
+    }
+
+    private scheduleArtworkRefresh(coverUrl: string): void {
+        if (this.artworkDataUrlCache.has(coverUrl)) return;
+        if (this.artworkRefreshKey === coverUrl && this.artworkRefreshTimers.length > 0) return;
+
+        this.clearArtworkRefreshTimers();
+        this.artworkRefreshKey = coverUrl;
+        for (const delay of [900, 2600, 5200]) {
+            const timer = window.setTimeout(() => {
+                // If cached meanwhile, no refresh needed.
+                if (this.artworkDataUrlCache.has(coverUrl)) {
+                    this.clearArtworkRefreshTimers();
+                    return;
+                }
+                this.lastMetadata = null;
+                this.updateMetadata(this.lastTrack, this.lastWork);
+            }, delay);
+            this.artworkRefreshTimers.push(timer);
+        }
+    }
+
+    private clearArtworkRefreshTimers(): void {
+        for (const timer of this.artworkRefreshTimers) {
+            clearTimeout(timer);
+        }
+        this.artworkRefreshTimers = [];
+        this.artworkRefreshKey = null;
     }
 
     private updatePlaybackState(playing: boolean): void {
@@ -425,6 +516,7 @@ export class MediaSessionManager {
             this.unwatch = null;
         }
         this.detachPositionSync();
+        this.clearArtworkRefreshTimers();
         if (navigator.mediaSession) {
             navigator.mediaSession.metadata = null;
             navigator.mediaSession.setActionHandler('play', null);
