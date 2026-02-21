@@ -384,6 +384,41 @@ describe('Whisper', () => {
         });
     });
 
+    describe('seek synchronization', () => {
+        it('defers seek snapshot update to requestAnimationFrame', () => {
+            vi.useFakeTimers();
+            try {
+                const whisper = new Whisper();
+                const audio = document.createElement('audio');
+                audio.currentTime = 12.34;
+                (whisper as any).audio = audio;
+
+                const snapshotSpy = vi.spyOn(whisper as any, 'emitWhisperSnapshot').mockImplementation(() => {});
+                const processSpy = vi.spyOn(whisper as any, 'maybeProcessNextChunk').mockImplementation(() => {});
+
+                let rafCb: any = null;
+                vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb: any): number => {
+                    rafCb = cb;
+                    return 1;
+                });
+                vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => {});
+
+                (whisper as any).handleSeek();
+
+                expect(snapshotSpy).not.toHaveBeenCalled();
+                expect(rafCb).not.toBeNull();
+
+                if (rafCb) (rafCb as (time: number) => void)(performance.now());
+                expect(snapshotSpy).toHaveBeenCalledWith('seek');
+
+                vi.advanceTimersByTime(101);
+                expect(processSpy).toHaveBeenCalled();
+            } finally {
+                vi.useRealTimers();
+            }
+        });
+    });
+
     describe('buildWordTimings', () => {
         it('splits text into word timings for whitespace languages', () => {
             const whisper = new Whisper();

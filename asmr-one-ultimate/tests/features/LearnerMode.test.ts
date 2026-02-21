@@ -44,6 +44,7 @@ vi.mock('../../src/core/Utils', async () => {
 
 describe('LearnerMode', () => {
     beforeEach(() => {
+        vi.restoreAllMocks();
         document.body.innerHTML = '';
     });
 
@@ -120,6 +121,25 @@ describe('LearnerMode', () => {
 
         // Expanded should NOT be hidden (stable layout)
         expect(expanded?.style.display).not.toBe('none');
+    });
+
+    it('defers seeking subtitle refresh to requestAnimationFrame', () => {
+        const learner = new LearnerMode();
+        const updateSpy = vi.spyOn(learner as any, 'updateLyrics').mockImplementation(() => {});
+
+        let rafCb: any = null;
+        vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb: any): number => {
+            rafCb = cb;
+            return 1;
+        });
+        vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => {});
+
+        (learner as any).handleAudioSeeking();
+
+        expect(updateSpy).not.toHaveBeenCalled();
+        expect(rafCb).not.toBeNull();
+        if (rafCb) (rafCb as (time: number) => void)(performance.now());
+        expect(updateSpy).toHaveBeenCalledTimes(1);
     });
 
 });
