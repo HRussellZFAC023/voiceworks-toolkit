@@ -69,6 +69,7 @@ const CONFIG_DEFAULTS: PluginConfig = {
     whisperAutoWarmup: true,
     alwaysTranscribe: false,
     forceWhisperWasm: false,
+    whisperFirefoxWebgpu: false,
     vectorSearchApiKey: '',
     vectorIndexCursor: 1,
     vectorIndexLatestWorkId: '',

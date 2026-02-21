@@ -146,6 +146,7 @@ let lastSetCoverMaxH = '';  // Track our last-set value to distinguish from host
 let rafPlayerObserver = 0;
 let rafCoverAdjust = 0;
 let rafDrawerSync = 0;
+let seekingRafId = 0;
 
 // Host more button (for overflow proxy)
 let hostMoreBtn: HTMLElement | null = null;
@@ -522,19 +523,36 @@ function handleAudioPause() {
 }
 
 function handleAudioSeeking() {
-    // Reset dedup state and immediately update display so subtitles track the
-    // scrub position in real-time. Don't clearDisplay() — show the line at
-    // the new position (or hold the previous line during gaps).
+    // Cancel any pending seeking RAF to avoid stale updates
+    if (seekingRafId) {
+        cancelAnimationFrame(seekingRafId);
+        seekingRafId = 0;
+    }
+
+    // Reset dedup state and defer subtitle update to next frame so audio.currentTime
+    // has synchronized with the seek target. During rapid scrubbing, the seeking event
+    // fires before currentTime is fully updated, causing subtitles to lag behind.
     lastText = '';
     lastDisplayedText = '';
     lastSecondaryShown = '';
     lastWhisperDisplayText = '';
     translationToken += 1;
     resetRealtimeQueues();
-    updateLyrics();
+
+    // Defer to next frame when currentTime will have synchronized
+    seekingRafId = requestAnimationFrame(() => {
+        seekingRafId = 0;
+        updateLyrics();
+    });
 }
 
 function handleAudioSeeked() {
+    // Cancel any pending seeking RAF since seeked is the final event
+    if (seekingRafId) {
+        cancelAnimationFrame(seekingRafId);
+        seekingRafId = 0;
+    }
+
     // Final refresh after the user releases the scrubber.
     // Reset dedup again in case seeking handler's update was stale.
     lastText = '';
@@ -1997,6 +2015,7 @@ onUnmounted(() => {
     clearKaraokeState();
     unbindAudio();
     if (seekedDebounceTimer) { clearTimeout(seekedDebounceTimer); seekedDebounceTimer = null; }
+    if (seekingRafId) { cancelAnimationFrame(seekingRafId); seekingRafId = 0; }
     if (rafPlayerObserver) { cancelAnimationFrame(rafPlayerObserver); rafPlayerObserver = 0; }
     if (rafCoverAdjust) { cancelAnimationFrame(rafCoverAdjust); rafCoverAdjust = 0; }
     if (rafDrawerSync) { cancelAnimationFrame(rafDrawerSync); rafDrawerSync = 0; }

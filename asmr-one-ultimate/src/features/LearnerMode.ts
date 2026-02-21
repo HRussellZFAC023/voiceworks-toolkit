@@ -77,6 +77,7 @@ export class LearnerMode {
     // rAF coalescing — prevent layout thrashing during window resize
     private rafPlayerObserver = 0;
     private rafDrawerSync = 0;
+    private seekingRafId = 0;
 
     // Cached DOM element references (avoid querySelectorAll in hot paths)
     private cachedJpEls: HTMLElement[] = [];
@@ -508,17 +509,35 @@ export class LearnerMode {
     };
 
     private handleAudioSeeking = () => {
+        // Cancel any pending seeking RAF to avoid stale updates
+        if (this.seekingRafId) {
+            cancelAnimationFrame(this.seekingRafId);
+            this.seekingRafId = 0;
+        }
+
         this.lastText = '';
         this.lastDisplayedText = '';
         this.lastSecondaryShown = '';
         this.lastWhisperDisplayText = '';
         this.translationToken += 1;
-        // Immediately update display so subtitles track the scrub position in real-time
-        this.updateLyrics();
+
+        // Defer subtitle update to next frame so audio.currentTime has synchronized
+        // with the seek target. During rapid scrubbing, the seeking event fires before
+        // currentTime is fully updated, causing subtitles to lag behind the scrubber.
+        this.seekingRafId = requestAnimationFrame(() => {
+            this.seekingRafId = 0;
+            this.updateLyrics();
+        });
     };
 
     private seekedDebounceTimer: number | null = null;
     private handleAudioSeeked = () => {
+        // Cancel any pending seeking RAF since seeked is the final event
+        if (this.seekingRafId) {
+            cancelAnimationFrame(this.seekingRafId);
+            this.seekingRafId = 0;
+        }
+
         // Final refresh when user releases scrubber — reset dedup for clean state
         this.lastText = '';
         this.lastDisplayedText = '';
@@ -1938,6 +1957,7 @@ export class LearnerMode {
         this.collapsed = null;
         if (this.rafPlayerObserver) { cancelAnimationFrame(this.rafPlayerObserver); this.rafPlayerObserver = 0; }
         if (this.rafDrawerSync) { cancelAnimationFrame(this.rafDrawerSync); this.rafDrawerSync = 0; }
+        if (this.seekingRafId) { cancelAnimationFrame(this.seekingRafId); this.seekingRafId = 0; }
         this.playerObserver?.disconnect();
         this.playerObserver = null;
         this.clearWhisperTicker();

@@ -202,6 +202,7 @@ export interface PluginConfig {
     whisperAutoWarmup: boolean;
     alwaysTranscribe: boolean;
     forceWhisperWasm: boolean;
+    whisperFirefoxWebgpu: boolean;
     vectorSearchApiKey: string;
     vectorIndexCursor: number;
     vectorIndexLatestWorkId: string;

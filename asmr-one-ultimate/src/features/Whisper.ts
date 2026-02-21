@@ -210,6 +210,7 @@ export class Whisper {
     private idleUnloadTimer: number | null = null;
     private loadLeaseRelease: (() => void) | null = null; // GpuScheduler load lease
     private storeWatcherBound = false;
+    private loggedTranscriptKeys = new Set<string>();
     private _audioCache: AudioCache | null = null;
     private autoStartTimer: number | null = null;
     private fetchAbortController: AbortController | null = null;
@@ -449,8 +450,22 @@ export class Whisper {
         return EXPLICIT_DEVICE_LOSS_PATTERN.test(message);
     }
 
+    private isFirefoxBrowser(): boolean {
+        return /firefox/i.test(navigator.userAgent || '');
+    }
+
+    private getWasmPolicyReason(): string | null {
+        if (Config.get('forceWhisperWasm') === true) return 'forceWhisperWasm';
+        // Firefox WebGPU is still inconsistent for Whisper on some systems.
+        // Keep a reliable default (WASM) unless the user explicitly opts in.
+        if (this.isFirefoxBrowser() && Config.get('whisperFirefoxWebgpu') !== true) {
+            return 'firefox-default-wasm';
+        }
+        return null;
+    }
+
     private shouldForceWasm(): boolean {
-        return Config.get('forceWhisperWasm') === true;
+        return this.getWasmPolicyReason() !== null;
     }
 
     private markWebgpuFailed(reason: string): void {
@@ -542,6 +557,7 @@ export class Whisper {
         this.autoTranscribeWorkId = workId || null;
         AppStore.setWhisperState({ currentTrackSrc: src, isTranscribing: true });
         this.segments = [];
+        this.loggedTranscriptKeys.clear();
         this.lastSegmentEnd = 0;
         this.nextChunkId = 0;
         this.pendingChunks = 0;
@@ -577,6 +593,7 @@ export class Whisper {
                         if (corrected !== seg.text) seg.text = corrected;
                     }
                     this.segments = cached.segments;
+                    this.logNewTranscriptSegments('cache');
                     this.lastSegmentEnd = cached.segments[cached.segments.length - 1]?.end || 0;
                     this.updateTranscriptIndex(this.currentCacheKey, cached);
                     const latest = cached.segments[cached.segments.length - 1];
@@ -694,6 +711,7 @@ export class Whisper {
         this.pendingChunks = 0;
         this.chunkSendTimes.clear();
         this.chunkGenerations.clear();
+        this.loggedTranscriptKeys.clear();
         AppStore.setWhisperState({ isTranscribing: false, isLoadingModel: false, progress: 0, progressMessage: '', currentTrackSrc: this.currentTrackSrc });
 
         if (this.audio) {
@@ -706,6 +724,10 @@ export class Whisper {
         if (this.seekDebounceTimer) {
             clearTimeout(this.seekDebounceTimer);
             this.seekDebounceTimer = null;
+        }
+        if (this.seekingRafId) {
+            cancelAnimationFrame(this.seekingRafId);
+            this.seekingRafId = 0;
         }
         this.stopProcessingLoop();
         this.pcmBuffer = null;
@@ -744,6 +766,7 @@ export class Whisper {
         this.nextChunkId = 0;
         this.lastSegmentEnd = 0;
         this.segments = [];
+        this.loggedTranscriptKeys.clear();
         this.currentCacheKey = null;
         this.currentCacheIdentity = null;
         this.chunkSendTimes.clear();
@@ -773,6 +796,39 @@ export class Whisper {
 
     private isHlsUrl(url: string): boolean {
         return /\.m3u8($|\?)/i.test(url) || /\/hls\//i.test(url);
+    }
+
+    private isTrustedPlaybackHost(hostname: string): boolean {
+        const host = hostname.toLowerCase();
+        return host === 'asmr.one'
+            || host === 'www.asmr.one'
+            || host.endsWith('.asmr.one')
+            || host === 'asmr-100.com'
+            || host === 'asmr-200.com'
+            || host === 'asmr-300.com'
+            || host === 'api.asmr.one'
+            || host === 'api.asmr-100.com'
+            || host === 'api.asmr-200.com'
+            || host === 'api.asmr-300.com';
+    }
+
+    private shouldPreferGmRequestForAudio(url: string): boolean {
+        try {
+            const parsed = new URL(url, window.location.href);
+            if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+
+            const crossOrigin = parsed.origin !== window.location.origin;
+            if (!crossOrigin) return false;
+
+            const path = parsed.pathname.toLowerCase();
+            const hasMediaExtension = /\.(mp3|wav|m4a|flac|ogg|aac|opus)(?:$|\?)/i.test(path);
+            const looksStaticDownload = path.includes('/download/') || hasMediaExtension;
+            const trustedHost = this.isTrustedPlaybackHost(parsed.hostname);
+
+            return looksStaticDownload || !trustedHost;
+        } catch {
+            return false;
+        }
     }
 
     // ------------------------------------------------------------------------
@@ -823,11 +879,15 @@ export class Whisper {
             arrayBuffer = await res.arrayBuffer();
         } else {
             // 2b. Download audio file — try methods in order of reliability:
-            //   1. bridge.axios (includes JWT auth headers the API requires)
-            //   2. gmRequest (Tampermonkey CORS bypass, includes cookies)
+            //   1. bridge.axios OR gmRequest, selected by URL characteristics
+            //   2. fallback to the other transport
             //   3. bare fetch (same-origin / CORS-enabled URLs only)
             Logger.debug('[Whisper] Downloading audio:', originalUrl);
             this.dispatchProgress(I18n.t('whisperDownloadingAudio'), 0, 'loading');
+            const preferGmRequest = this.shouldPreferGmRequestForAudio(originalUrl);
+            if (preferGmRequest) {
+                Logger.debug('[Whisper] Using gmRequest-first strategy for cross-origin/static media URL');
+            }
 
             const reportProgress = (loaded: number, total: number | null) => {
                 const loadedMB = (loaded / 1024 / 1024).toFixed(1);
@@ -848,8 +908,7 @@ export class Whisper {
                 }
             };
 
-            try {
-                // Primary: bridge.axios has JWT auth interceptor — required for asmr.one API
+            const tryAxiosDownload = async (): Promise<ArrayBuffer> => {
                 // Inactivity-based timeout: abort only if no data received for 60s
                 // (a fixed timeout fails for large files that are actively downloading)
                 const INACTIVITY_MS = 60_000;
@@ -886,26 +945,47 @@ export class Whisper {
                     signal?.removeEventListener('abort', onExternalAbort);
                 });
                 const response = await Promise.race([download, inactivityGuard]);
-                arrayBuffer = response.data;
-                Logger.debug('[Whisper] Audio downloaded via axios:', (arrayBuffer.byteLength / 1024 / 1024).toFixed(2) + 'MB');
-            } catch (axiosErr) {
+                return response.data;
+            };
+
+            const tryGmRequestDownload = async (): Promise<ArrayBuffer> => {
+                const res = await gmRequest({
+                    url: originalUrl,
+                    responseType: 'arraybuffer',
+                    timeout: 600_000, // 10 min — large audio files need generous total timeout
+                    onprogress: (event) => {
+                        reportProgress(event.loaded, event.lengthComputable ? event.total : null);
+                    },
+                });
+                return res.response as ArrayBuffer;
+            };
+
+            try {
+                if (preferGmRequest) {
+                    arrayBuffer = await tryGmRequestDownload();
+                    Logger.debug('[Whisper] Audio downloaded via gmRequest:', (arrayBuffer.byteLength / 1024 / 1024).toFixed(2) + 'MB');
+                } else {
+                    arrayBuffer = await tryAxiosDownload();
+                    Logger.debug('[Whisper] Audio downloaded via axios:', (arrayBuffer.byteLength / 1024 / 1024).toFixed(2) + 'MB');
+                }
+            } catch (primaryErr) {
                 // If aborted due to track change, propagate immediately — don't try fallbacks
                 if (signal?.aborted) throw new DOMException('Download aborted (track changed)', 'AbortError');
-                Logger.warn('[Whisper] axios download failed, trying gmRequest:', axiosErr);
+                Logger.warn(
+                    `[Whisper] ${preferGmRequest ? 'gmRequest' : 'axios'} download failed, trying ${preferGmRequest ? 'axios' : 'gmRequest'}:`,
+                    primaryErr,
+                );
                 try {
-                    const res = await gmRequest({
-                        url: originalUrl,
-                        responseType: 'arraybuffer',
-                        timeout: 600_000, // 10 min — large audio files need generous total timeout
-                        onprogress: (event) => {
-                            reportProgress(event.loaded, event.lengthComputable ? event.total : null);
-                        },
-                    });
-                    arrayBuffer = res.response as ArrayBuffer;
-                    Logger.debug('[Whisper] Audio downloaded via gmRequest:', (arrayBuffer.byteLength / 1024 / 1024).toFixed(2) + 'MB');
+                    if (preferGmRequest) {
+                        arrayBuffer = await tryAxiosDownload();
+                        Logger.debug('[Whisper] Audio downloaded via axios:', (arrayBuffer.byteLength / 1024 / 1024).toFixed(2) + 'MB');
+                    } else {
+                        arrayBuffer = await tryGmRequestDownload();
+                        Logger.debug('[Whisper] Audio downloaded via gmRequest:', (arrayBuffer.byteLength / 1024 / 1024).toFixed(2) + 'MB');
+                    }
                 } catch {
                     if (signal?.aborted) throw new DOMException('Download aborted (track changed)', 'AbortError');
-                    Logger.warn('[Whisper] gmRequest failed, trying fetch');
+                    Logger.warn('[Whisper] Secondary download transport failed, trying fetch');
                     const res = await fetch(originalUrl, { signal });
                     arrayBuffer = await res.arrayBuffer();
                     Logger.debug('[Whisper] Audio downloaded via fetch:', (arrayBuffer.byteLength / 1024 / 1024).toFixed(2) + 'MB');
@@ -1039,13 +1119,24 @@ export class Whisper {
     }
 
     private seekDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+    private seekingRafId = 0;
 
     private handleSeek = (): void => {
         if (!this.audio) return;
 
-        // Emit snapshot immediately so subtitle display tracks the scrub in real-time.
-        // No debounce for the UI update — the user expects instant subtitle feedback.
-        this.emitWhisperSnapshot('seek');
+        // Cancel any pending RAF to avoid stale updates
+        if (this.seekingRafId) {
+            cancelAnimationFrame(this.seekingRafId);
+            this.seekingRafId = 0;
+        }
+
+        // Defer snapshot to next frame so audio.currentTime has synchronized with seek target.
+        // During rapid scrubbing, the seeking event fires before currentTime updates, causing
+        // subtitles to lag behind the scrubber position.
+        this.seekingRafId = requestAnimationFrame(() => {
+            this.seekingRafId = 0;
+            this.emitWhisperSnapshot('seek');
+        });
 
         if (this.seekDebounceTimer) {
             clearTimeout(this.seekDebounceTimer);
@@ -1142,7 +1233,7 @@ export class Whisper {
         // cached dtype, as the issue may have been transient (driver/Chrome update).
         if (Whisper.webgpuFailed || this.shouldForceWasm()) {
             if (this.shouldForceWasm()) {
-                Logger.debug('[Whisper] WebGPU disabled by user setting (forceWhisperWasm)');
+                Logger.debug('[Whisper] WebGPU disabled by policy (' + this.getWasmPolicyReason() + ')');
             }
             this.worker.postMessage({ type: 'skip-webgpu' });
         }
@@ -1396,6 +1487,7 @@ export class Whisper {
                 }
                 const segments = this.parseSegments(update.data?.[1]?.chunks);
                 this.mergeSegments(segments, { preferNew: false });
+                this.logNewTranscriptSegments('update');
                 this.updateTranscribingProgress();
                 const latest = this.segments[this.segments.length - 1];
                 EventBus.emit('whisper:update', {
@@ -1423,7 +1515,12 @@ export class Whisper {
                 }
                 const segments = this.parseSegments(complete.data?.chunks);
                 Logger.debug(`[Whisper] Complete chunk ${complete.chunkId}: ${segments.length} segments, text="${complete.data?.text?.slice(0, 50)}"`);
+                const chunkText = String(complete.data?.text || '').trim();
+                if (chunkText) {
+                    Logger.log(`[Whisper][Chunk ${complete.chunkId}] ${chunkText}`);
+                }
                 this.mergeSegments(segments, { preferNew: true });
+                this.logNewTranscriptSegments('complete');
                 this.updateTranscribingProgress();
                 const latest = this.segments[this.segments.length - 1];
                 EventBus.emit('whisper:update', {
@@ -1600,6 +1697,7 @@ export class Whisper {
         if (!this.finalizeOnIdle || this.pendingChunks > 0) return;
         this.finalizeOnIdle = false;
         this.persistCache(true);
+        this.logNewTranscriptSegments('final');
         EventBus.emit('whisper:complete', { text: this.segments.map((s) => s.text).join(' ') });
         AppStore.setWhisperState({
             isTranscribing: this.transcribing,
@@ -1634,6 +1732,23 @@ export class Whisper {
         if (shorter.length < 12) return false;
 
         return longer.includes(shorter) && (shorter.length / longer.length) >= 0.75;
+    }
+
+    private transcriptLogKey(seg: WhisperSegment): string {
+        const start = Number.isFinite(seg.start) ? Math.round(seg.start * 100) : -1;
+        const end = Number.isFinite(seg.end) ? Math.round(seg.end * 100) : -1;
+        return `${start}|${end}|${seg.text}`;
+    }
+
+    private logNewTranscriptSegments(source: 'update' | 'complete' | 'final' | 'cache'): void {
+        for (const seg of this.segments) {
+            const key = this.transcriptLogKey(seg);
+            if (this.loggedTranscriptKeys.has(key)) continue;
+            this.loggedTranscriptKeys.add(key);
+            const start = Number.isFinite(seg.start) ? seg.start.toFixed(2) : '?';
+            const end = Number.isFinite(seg.end) ? seg.end.toFixed(2) : '?';
+            Logger.log(`[Whisper][Transcript][${source}] [${start}-${end}] ${seg.text}`);
+        }
     }
 
     private shouldCollapseAdjacentDuplicate(prev: WhisperSegment, next: WhisperSegment): boolean {
@@ -2070,13 +2185,15 @@ export class Whisper {
         let preferLowPowerAdapter = false;
         let minWebgpuBufferBytes = DEFAULT_MIN_WEBGPU_BUFFER_BYTES;
 
+        const isIntelMacProfile = /\bintel-mac\b/i.test(profile.reason || '');
+
         if (profile.tier === 'limited') {
             maxPendingChunks = 4;
             pollIntervalMs = 325;
             workerUpdateIntervalMs = 260;
-            // Keep desktop limited devices on high-performance preference so
-            // dual-GPU systems can still pick discrete adapters for Whisper.
-            preferLowPowerAdapter = profile.isMobile;
+            // Limited-tier mobile and Intel-mac profiles perform better with
+            // low-power adapters for sustained real-time Whisper.
+            preferLowPowerAdapter = profile.isMobile || isIntelMacProfile;
             minWebgpuBufferBytes = 384 * 1024 * 1024;
         } else if (profile.tier === 'constrained') {
             maxPendingChunks = 2;

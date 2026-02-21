@@ -110,6 +110,7 @@ let currentVendor = '';
 let currentDtype = '';
 let skipWebgpu = false;
 let preferredDtype = '';
+let firefoxFp16ProbeState = 'pending';
 
 function scoreAdapter(vendor, maxBuf, powerPreference) {
     const v = (vendor || '').toLowerCase();
@@ -185,15 +186,37 @@ async function detectBackend() {
 
 function getDtypeCandidates(device, vendor) {
     if (device === 'webgpu') {
-        if (isFirefox) {
-            console.log('[Embedding Worker] Firefox: using fp32 only (fp16 hangs)');
-            return ['fp32'];
-        }
         const isIntel = /intel|xe|arc/i.test(vendor);
         const isQualcomm = /qualcomm|adreno/i.test(vendor);
-        // Intel Xe-2 HPG / Qualcomm Adreno: fp32 first (fp16 may produce garbage)
+
+        // Intel / Qualcomm: pin to fp32 for output stability.
+        if (isIntel || isQualcomm) {
+            return ['fp32'];
+        }
+
+        if (isFirefox) {
+            const hasKnownVendor = !!(vendor && vendor.trim() && vendor !== 'unknown');
+            if (preferredDtype === 'fp32') {
+                console.log('[Embedding Worker] Firefox: using cached fp32 preference');
+                return ['fp32'];
+            }
+            if (preferredDtype === 'fp16') {
+                console.log('[Embedding Worker] Firefox: using cached fp16 preference with fp32 fallback');
+                return ['fp16', 'fp32'];
+            }
+            if (!hasKnownVendor) {
+                console.log('[Embedding Worker] Firefox: adapter vendor unknown, using fp32 to avoid blind fp16 probe');
+                return ['fp32'];
+            }
+            if (firefoxFp16ProbeState === 'failed') {
+                console.log('[Embedding Worker] Firefox: fp16 probe failed previously, using fp32 only');
+                return ['fp32'];
+            }
+            console.log('[Embedding Worker] Firefox: probing fp16 first (short timeout), fallback to fp32');
+            return ['fp16', 'fp32'];
+        }
         // Others (Apple, NVIDIA, AMD): fp16 first (uses less memory, faster)
-        const candidates = (isIntel || isQualcomm) ? ['fp32', 'fp16'] : ['fp16', 'fp32'];
+        const candidates = ['fp16', 'fp32'];
         if (preferredDtype && candidates.includes(preferredDtype)) {
             return [preferredDtype, ...candidates.filter(d => d !== preferredDtype)];
         }
@@ -298,7 +321,8 @@ async function _loadPipeline(modelName, _cascadeDepth) {
             env.hub.allowRemoteModels = true;
 
             try {
-                const PIPELINE_TIMEOUT_MS = 120000;
+                const isFirefoxFp16Probe = isFirefox && currentBackend === 'webgpu' && dtype === 'fp16' && firefoxFp16ProbeState !== 'failed';
+                const PIPELINE_TIMEOUT_MS = isFirefoxFp16Probe ? 12000 : 120000;
                 const candidate = await withTimeout(
                     pipeline('feature-extraction', modelName, {
                         progress_callback: progressCb,
@@ -315,6 +339,10 @@ async function _loadPipeline(modelName, _cascadeDepth) {
                 currentModelName = modelName;
                 currentDtype = dtype;
                 pipelineReady = true;
+                if (isFirefox && currentBackend === 'webgpu' && dtype === 'fp16') {
+                    firefoxFp16ProbeState = 'succeeded';
+                    console.log('[Embedding Worker] Firefox fp16 probe succeeded');
+                }
                 return pipelineInstance;
             } catch (err) {
                 const msg = String(err?.message || err || '');
@@ -325,6 +353,10 @@ async function _loadPipeline(modelName, _cascadeDepth) {
                 const isGpuErr = isMemErr || isContextErr || isTimeout || isOrtNumericErr;
 
                 console.warn('[Embedding Worker] Load error:', dtype, hubUrl, msg, err);
+                if (isFirefox && currentBackend === 'webgpu' && dtype === 'fp16') {
+                    firefoxFp16ProbeState = 'failed';
+                    console.warn('[Embedding Worker] Firefox fp16 probe failed, pinning to fp32 for this worker');
+                }
 
                 if (currentBackend === 'webgpu' && isGpuErr) {
                     await releaseGpuResources();

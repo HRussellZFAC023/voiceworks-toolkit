@@ -253,11 +253,14 @@ function initWorker(): Promise<void> {
                 if (webgpuFailed) {
                     worker.postMessage({ type: 'skip-webgpu' });
                 }
-                // Only send cached dtype hint if it's relevant. WASM-only dtypes (q8/q4)
-                // are useless when GPU is available — worker uses fp32 on WebGPU anyway,
-                // and q8 is the default WASM fallback order.
-                const isWasmOnlyDtype = ['q8', 'q4'].includes(rememberedDtype);
-                if (rememberedDtype && !(isWasmOnlyDtype && DeviceCapabilities.profile.hasGpu && !webgpuFailed)) {
+                // Avoid pinning WebGPU dtype from stale cache across different adapters
+                // (e.g. Intel fp32 cache forcing AMD off fp16). Let worker select dtype
+                // per active GPU. Keep dtype hinting only for WASM/recovery paths.
+                const gpuPath = DeviceCapabilities.profile.hasGpu && !webgpuFailed;
+                const isFirefox = /firefox/i.test(navigator.userAgent || '');
+                // Allow cached dtype on Firefox even on GPU path so a known-good fp32/fp16
+                // preference can bypass probe overhead on subsequent worker inits.
+                if (rememberedDtype && (!gpuPath || isFirefox)) {
                     worker.postMessage({ type: 'preferred-dtype', dtype: rememberedDtype });
                 }
 

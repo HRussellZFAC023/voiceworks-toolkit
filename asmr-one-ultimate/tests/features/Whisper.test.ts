@@ -111,6 +111,38 @@ describe('Whisper', () => {
             expect(settings.minWebgpuBufferBytes).toBe(384 * 1024 * 1024);
         });
 
+        it('prefers low-power adapters on Intel-mac limited profiles', () => {
+            vi.spyOn(Config, 'get').mockImplementation((key) => {
+                const map: Record<string, string | number | boolean> = {
+                    primarySubtitleLang: 'ja',
+                    whisperTask: 'transcribe',
+                    whisperAutoWarmup: true,
+                    whisperCacheTranscripts: true,
+                };
+                return map[key as string] ?? false;
+            });
+            vi.spyOn(DeviceCapabilities, 'profile', 'get').mockReturnValue({
+                tier: 'limited',
+                hasGpu: true,
+                memory: 8,
+                cores: 4,
+                isTouch: false,
+                isMobile: false,
+                screenWidth: 1440,
+                reason: 'limited, GPU, 8GB, 4 cores, intel-mac, 1440px',
+            } as any);
+            vi.spyOn(DeviceCapabilities, 'shouldWarmup', 'get').mockReturnValue(false);
+            vi.spyOn(DeviceCapabilities, 'budget', 'get').mockReturnValue({
+                whisperIdleMs: 5 * 60 * 1000,
+            } as any);
+            vi.spyOn(GpuScheduler, 'getMemoryPressure').mockReturnValue('low');
+
+            const whisper = new Whisper();
+            const settings = (whisper as any).getWhisperSettings();
+
+            expect(settings.preferLowPowerAdapter).toBe(true);
+        });
+
         it('aggressively throttles pending work under high pressure', () => {
             vi.spyOn(Config, 'get').mockImplementation((key) => {
                 const map: Record<string, string | number | boolean> = {
@@ -179,6 +211,76 @@ describe('Whisper', () => {
             expect(settings.forceWasm).toBe(true);
             expect(settings.autoWarmup).toBe(false);
             expect(settings.maxPendingChunks).toBe(3);
+        });
+
+        it('forces WASM on Firefox by default for Whisper reliability', () => {
+            vi.spyOn(Config, 'get').mockImplementation((key) => {
+                const map: Record<string, string | number | boolean> = {
+                    primarySubtitleLang: 'ja',
+                    whisperTask: 'transcribe',
+                    whisperAutoWarmup: true,
+                    whisperCacheTranscripts: true,
+                    forceWhisperWasm: false,
+                };
+                return map[key as string] ?? false;
+            });
+            vi.spyOn(DeviceCapabilities, 'profile', 'get').mockReturnValue({
+                tier: 'full',
+                hasGpu: true,
+                memory: 16,
+                cores: 8,
+                isTouch: false,
+                isMobile: false,
+                screenWidth: 1920,
+                reason: 'full-tier test profile',
+            } as any);
+            vi.spyOn(DeviceCapabilities, 'shouldWarmup', 'get').mockReturnValue(true);
+            vi.spyOn(DeviceCapabilities, 'budget', 'get').mockReturnValue({
+                whisperIdleMs: 10 * 60 * 1000,
+            } as any);
+            vi.spyOn(GpuScheduler, 'getMemoryPressure').mockReturnValue('low');
+
+            const whisper = new Whisper();
+            vi.spyOn(whisper as any, 'isFirefoxBrowser').mockReturnValue(true);
+            const settings = (whisper as any).getWhisperSettings();
+
+            expect(settings.forceWasm).toBe(true);
+            expect(settings.autoWarmup).toBe(false);
+        });
+
+        it('allows Firefox WebGPU when explicit opt-in is enabled', () => {
+            vi.spyOn(Config, 'get').mockImplementation((key) => {
+                const map: Record<string, string | number | boolean> = {
+                    primarySubtitleLang: 'ja',
+                    whisperTask: 'transcribe',
+                    whisperAutoWarmup: true,
+                    whisperCacheTranscripts: true,
+                    forceWhisperWasm: false,
+                    whisperFirefoxWebgpu: true,
+                };
+                return map[key as string] ?? false;
+            });
+            vi.spyOn(DeviceCapabilities, 'profile', 'get').mockReturnValue({
+                tier: 'full',
+                hasGpu: true,
+                memory: 16,
+                cores: 8,
+                isTouch: false,
+                isMobile: false,
+                screenWidth: 1920,
+                reason: 'full-tier test profile',
+            } as any);
+            vi.spyOn(DeviceCapabilities, 'shouldWarmup', 'get').mockReturnValue(true);
+            vi.spyOn(DeviceCapabilities, 'budget', 'get').mockReturnValue({
+                whisperIdleMs: 10 * 60 * 1000,
+            } as any);
+            vi.spyOn(GpuScheduler, 'getMemoryPressure').mockReturnValue('low');
+
+            const whisper = new Whisper();
+            vi.spyOn(whisper as any, 'isFirefoxBrowser').mockReturnValue(true);
+            const settings = (whisper as any).getWhisperSettings();
+
+            expect(settings.forceWasm).toBe(false);
         });
     });
 

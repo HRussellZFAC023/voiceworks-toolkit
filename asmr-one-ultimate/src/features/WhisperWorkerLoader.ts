@@ -134,7 +134,17 @@ async function detectWebGPU() {
                 continue;
             }
             const score = scoreAdapter(vendor, maxBuf, powerPreference, preferredPower);
-            candidates.push({ adapter, vendor, maxBuf, powerPreference, score });
+            const candidate = { adapter, vendor, maxBuf, powerPreference, score };
+            candidates.push(candidate);
+
+            // Respect requested power class deterministically.
+            // If the preferred class yields a usable adapter, use it immediately.
+            if (powerPreference === preferredPower) {
+                const describe = (c) => (c.vendor || 'unknown') + ' [' + c.powerPreference + '] ' + Math.round(c.maxBuf / 1048576) + 'MB score=' + c.score;
+                console.log('[Whisper Worker] WebGPU adapter candidates:', candidates.map(describe).join(' | '));
+                console.log('[Whisper Worker] WebGPU adapter selected:', describe(candidate), '(preferred power)');
+                return { device: 'webgpu', vendor: candidate.vendor, maxBuf: candidate.maxBuf };
+            }
         }
         if (!candidates.length) {
             console.warn('[Whisper Worker] No usable WebGPU adapter found');
