@@ -92,7 +92,7 @@ describe('WhisperWorkerLoader', () => {
 
         expect(code).toContain('const INFERENCE_TIMEOUT_MS = 45_000;');
         expect(code).toContain('const FAST_BOOTSTRAP_TIMEOUT_MS = 30_000;');
-        expect(code).toContain('const FIRST_GPU_INFERENCE_TIMEOUT_MS = 90_000;');
+        expect(code).toContain('const FIRST_GPU_INFERENCE_TIMEOUT_MS = IS_FIREFOX ? 45_000 : 90_000;');
         expect(code).toContain('const ENABLE_SHADER_WARMUP = false;');
         expect(code).toContain('Warmup disabled; first inference may include shader compilation');
         expect(code).toContain('ENABLE_SHADER_WARMUP');

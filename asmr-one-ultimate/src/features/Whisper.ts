@@ -42,6 +42,7 @@ const DEFAULT_WORKER_UPDATE_INTERVAL_MS = 200;
 const DEFAULT_MIN_WEBGPU_BUFFER_BYTES = 256 * 1024 * 1024;
 const CHUNK_STALL_TIMEOUT_FLOOR_MS = 25_000;
 const CHUNK_STALL_TIMEOUT_MULTIPLIER = 3;
+const FIRST_CHUNK_STALL_TIMEOUT_MS = 20_000;
 const INITIAL_BOOTSTRAP_CHUNK_LENGTH_S = 6;
 const TRANSLATE_AHEAD_MAX_SEGMENTS_PER_RUN = 50;
 const GPU_ERROR_PATTERN =
@@ -186,6 +187,7 @@ export class Whisper {
     private chunkGenerations = new Map<number, number>();
     private chunkOffsets = new Map<number, number>();
     private chunkLastActivity = new Map<number, number>();
+    private chunkTimeoutMs = new Map<number, number>();
 
     private statusEl: HTMLElement | null = null;
     private errorDismissTimer: number | null = null;
@@ -194,6 +196,7 @@ export class Whisper {
     private autoWarmupStarted = false;
     private modelLoadTimer: number | null = null;
     private modelReady = false;
+    private workerInitPending = false;
     private autoTranscribeWorkId: string | null = null;
 
     private finalizeOnIdle = false;
@@ -763,6 +766,7 @@ export class Whisper {
         this.chunkGenerations.clear();
         this.chunkOffsets.clear();
         this.chunkLastActivity.clear();
+        this.chunkTimeoutMs.clear();
         this.hasWorkerChunkActivity = false;
         if (resetRecovery) {
             this.chunkStallRecoveryCount = 0;
@@ -794,6 +798,7 @@ export class Whisper {
         this.chunkGenerations.delete(chunkId);
         this.chunkOffsets.delete(chunkId);
         this.chunkLastActivity.delete(chunkId);
+        this.chunkTimeoutMs.delete(chunkId);
     }
 
     private resetState(reason: string): void {
@@ -1160,8 +1165,11 @@ export class Whisper {
         this.transcribedUpTo += chunkLengthS - overlapSec;
     }
 
-    private getChunkStallTimeoutMs(settings: WhisperSettings): number {
-        const scaledTimeout = Math.round(settings.chunkLengthS * 1000 * CHUNK_STALL_TIMEOUT_MULTIPLIER);
+    private getChunkStallTimeoutMs(chunkLengthS: number, hasActivity: boolean): number {
+        if (!hasActivity) {
+            return Math.max(FIRST_CHUNK_STALL_TIMEOUT_MS, Math.round(chunkLengthS * 2500));
+        }
+        const scaledTimeout = Math.round(chunkLengthS * 1000 * CHUNK_STALL_TIMEOUT_MULTIPLIER);
         const floorTimeout = DeviceCapabilities.profile.isMobile
             ? CHUNK_STALL_TIMEOUT_FLOOR_MS * 2
             : CHUNK_STALL_TIMEOUT_FLOOR_MS;
@@ -1170,27 +1178,36 @@ export class Whisper {
 
     private checkForStalledChunks(settings: WhisperSettings): void {
         if (!this.transcribing || this.pendingChunks <= 0 || this.chunkSendTimes.size === 0) return;
-        // Avoid resetting during cold-start when the very first chunk is still in-flight.
-        if (!this.hasWorkerChunkActivity && this.pendingChunks <= 1) return;
-        const timeoutMs = this.getChunkStallTimeoutMs(settings);
         const now = performance.now();
         let stalledChunkId: number | null = null;
         let stalledForMs = 0;
+        let stalledTimeoutMs = 0;
+        let worstOverdueMs = 0;
 
         for (const [chunkId, sentAt] of this.chunkSendTimes.entries()) {
             const lastActivity = this.chunkLastActivity.get(chunkId) ?? sentAt;
             const ageMs = now - lastActivity;
-            if (ageMs > stalledForMs) {
-                stalledForMs = ageMs;
+            const timeoutMs = this.chunkTimeoutMs.get(chunkId)
+                ?? this.getChunkStallTimeoutMs(settings.chunkLengthS, this.hasWorkerChunkActivity);
+            const overdueMs = ageMs - timeoutMs;
+            if (overdueMs > worstOverdueMs) {
+                worstOverdueMs = overdueMs;
                 stalledChunkId = chunkId;
+                stalledForMs = ageMs;
+                stalledTimeoutMs = timeoutMs;
             }
         }
 
-        if (stalledChunkId === null || stalledForMs < timeoutMs) return;
-        this.recoverFromStalledChunks(settings, stalledChunkId, stalledForMs);
+        if (stalledChunkId === null || worstOverdueMs <= 0) return;
+        this.recoverFromStalledChunks(settings, stalledChunkId, stalledForMs, stalledTimeoutMs);
     }
 
-    private recoverFromStalledChunks(settings: WhisperSettings, stalledChunkId: number, stalledForMs: number): void {
+    private recoverFromStalledChunks(
+        settings: WhisperSettings,
+        stalledChunkId: number,
+        stalledForMs: number,
+        timeoutMs: number,
+    ): void {
         const now = performance.now();
         if (now - this.lastChunkStallRecoveryAt < Whisper.CHUNK_STALL_RECOVERY_COOLDOWN_MS) return;
         this.lastChunkStallRecoveryAt = now;
@@ -1205,6 +1222,7 @@ export class Whisper {
         Logger.warn('[Whisper] Chunk processing stalled; resetting worker', {
             stalledChunkId,
             stalledForMs: Math.round(stalledForMs),
+            timeoutMs: Math.round(timeoutMs),
             pendingChunks: this.pendingChunks,
             recoveries: this.chunkStallRecoveryCount,
             resumeFrom,
@@ -1338,6 +1356,7 @@ export class Whisper {
             this.worker.postMessage({ type: 'skip-webgpu' });
         }
         this.worker.onerror = (e: ErrorEvent) => {
+            this.workerInitPending = false;
             if (this.gpuCrashed) return; // Already showing crash UI
             const errObj = (e as ErrorEvent & { error?: unknown }).error;
             const errorMsg = e.message || (errObj instanceof Error ? errObj.message : '') || 'Unknown worker error';
@@ -1410,6 +1429,7 @@ export class Whisper {
 
     private resetWorker(reason: string): void {
         this.releaseLoadLease();
+        this.workerInitPending = false;
         if (this.worker) {
             // Send reset so worker can dispose GPU pipeline before we kill it
             try { this.worker.postMessage({ type: 'reset' }); } catch { /* ignore */ }
@@ -1437,8 +1457,17 @@ export class Whisper {
             this.gpuCrashed = false;
             this.maybeReenableWebgpu('init-worker');
         }
+        if (this.worker && this.modelReady) {
+            Logger.debug('[Whisper] initWorker skipped: model already ready');
+            return;
+        }
+        if (this.workerInitPending) {
+            Logger.debug('[Whisper] initWorker skipped: model init already pending');
+            return;
+        }
         MLCrashGuard.initStarted('whisper');
         this.ensureWorker();
+        this.workerInitPending = true;
         this.modelReady = false;
         this.dispatchProgress(I18n.t('whisperLoading'), 5, 'model');
 
@@ -1452,6 +1481,7 @@ export class Whisper {
                 // Worker was terminated while waiting for lease
                 release();
                 this.loadLeaseRelease = null;
+                this.workerInitPending = false;
                 return;
             }
             // No timeout - large models can take a while to download
@@ -1500,6 +1530,7 @@ export class Whisper {
         this.chunkLastActivity.set(chunkId, sentAt);
         this.chunkOffsets.set(chunkId, timeOffset);
         this.chunkGenerations.set(chunkId, this.transcriptionGeneration);
+        this.chunkTimeoutMs.set(chunkId, this.getChunkStallTimeoutMs(chunkLengthS, this.hasWorkerChunkActivity));
         Logger.debug(`[Whisper] Sending chunk ${chunkId}, offset=${timeOffset.toFixed(2)}s, priority=${priority}, samples=${audio.length}`);
         this.worker!.postMessage({
             type: 'transcribe',
@@ -1534,6 +1565,7 @@ export class Whisper {
                 // Model ready - clear loading status and hide transcribing indicator
                 MLCrashGuard.initComplete('whisper');
                 this.releaseLoadLease();
+                this.workerInitPending = false;
                 this.clearModelLoadTimer();
                 this.modelReady = true;
                 SharedCache.set(CacheKeys.whisperModelReady(this.getWhisperSettings().model), true, MODEL_READY_TTL_MS);
@@ -1698,6 +1730,7 @@ export class Whisper {
 
             case 'error': {
                 this.releaseLoadLease();
+                this.workerInitPending = false;
                 // If GPU already crashed fatally, don't overwrite the persistent crash message
                 if (this.gpuCrashed) {
                     Logger.debug('[Whisper] Ignoring error after GPU crash:', message.data?.message);

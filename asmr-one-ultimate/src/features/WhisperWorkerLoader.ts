@@ -248,7 +248,7 @@ async function releaseGpuResources() {
 const IS_FIREFOX = typeof navigator !== 'undefined' && /firefox/i.test(navigator.userAgent || '');
 const INFERENCE_TIMEOUT_MS = 45_000;
 const FAST_BOOTSTRAP_TIMEOUT_MS = 30_000;
-const FIRST_GPU_INFERENCE_TIMEOUT_MS = 90_000;
+const FIRST_GPU_INFERENCE_TIMEOUT_MS = IS_FIREFOX ? 45_000 : 90_000;
 const ENABLE_SHADER_WARMUP = false;
 const GPU_INFERENCE_ERROR_RE = /createBuffer|RangeError|out of memory|OOM|allocation|device lost|GPUDevice|createComputePipeline|createShaderModule|mapAsync|mapping webgpu buffer|invalid buffer|Instance reference|AbortError|release session|invalid session|index out of bounds|timed out/i;
 function toErrorMessage(error) {
