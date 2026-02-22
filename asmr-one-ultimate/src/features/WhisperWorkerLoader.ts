@@ -198,35 +198,18 @@ function getDtypeCandidates(device, vendor) {
     //   q4 decoder produces empty output on Firefox WebGPU
     // → decoder MUST be fp32 on WebGPU. Encoder can try fp16 first for speed.
 
-    const isIntelArc = /intel.*arc|\\barc\\b/i.test(vendor);
     const isIntel = /intel|xe|iris|uhd|gen-9|gen9/i.test(vendor);
     const isQualcomm = /qualcomm|adreno/i.test(vendor);
 
-    // Arc dGPU: try fp16 encoder first for speed, fall back to fp32 if unstable.
-    if (isIntelArc) {
-        return [
-            { encoder_model: 'fp16', decoder_model_merged: 'fp32' },
-            { encoder_model: 'fp32', decoder_model_merged: 'fp32' },
-        ];
+    // Firefox WebGPU remains fragile on Whisper decoder cache paths.
+    // Keep dtype deterministic and conservative.
+    if (IS_FIREFOX) {
+        return [{ encoder_model: 'fp32', decoder_model_merged: 'fp32' }];
     }
 
     // Intel / Qualcomm: pin to fp32 for output stability.
     if (isIntel || isQualcomm) {
         return [{ encoder_model: 'fp32', decoder_model_merged: 'fp32' }];
-    }
-
-    if (IS_FIREFOX) {
-        const hasKnownVendor = !!(vendor && vendor.trim() && vendor !== 'unknown');
-        if (!hasKnownVendor) {
-            // Firefox with unknown vendor: fp32 to avoid blind fp16 probe
-            console.log('[Whisper Worker] Firefox: vendor unknown, pinning to fp32');
-            return [{ encoder_model: 'fp32', decoder_model_merged: 'fp32' }];
-        }
-        // Firefox with known vendor: try fp16 encoder, fall back to fp32
-        return [
-            { encoder_model: 'fp16', decoder_model_merged: 'fp32' },
-            { encoder_model: 'fp32', decoder_model_merged: 'fp32' },
-        ];
     }
 
     // Others (Apple, NVIDIA, AMD on Chrome/Edge): fp16 encoder first
@@ -252,16 +235,12 @@ async function releaseGpuResources() {
     await new Promise(r => setTimeout(r, 250));
 }
 
-// Inference timeout — detect hangs quickly and fail over without long stalls.
-// Firefox often needs a longer first-pass WebGPU window after pipeline/model init.
+// Inference timeout — keep a small, deterministic model across browsers.
 const IS_FIREFOX = typeof navigator !== 'undefined' && /firefox/i.test(navigator.userAgent || '');
-const INFERENCE_TIMEOUT_MS = IS_FIREFOX ? 60_000 : 45_000;
-const FAST_BOOTSTRAP_TIMEOUT_MS = IS_FIREFOX ? 45_000 : 30_000;
-// Safety-net timeout for the first WebGPU inference if warmup was skipped or failed.
-// Firefox wgpu shader compilation can take 60-180s on first run (wgpu#7443).
-const FIRST_GPU_INFERENCE_TIMEOUT_MS = IS_FIREFOX ? 180_000 : 90_000;
-// Warmup can block Firefox startup for too long; rely on first-inference timeout there.
-const ENABLE_SHADER_WARMUP = !IS_FIREFOX;
+const INFERENCE_TIMEOUT_MS = 45_000;
+const FAST_BOOTSTRAP_TIMEOUT_MS = 30_000;
+const FIRST_GPU_INFERENCE_TIMEOUT_MS = 90_000;
+const ENABLE_SHADER_WARMUP = false;
 const GPU_INFERENCE_ERROR_RE = /createBuffer|RangeError|out of memory|OOM|allocation|device lost|GPUDevice|createComputePipeline|createShaderModule|mapAsync|mapping webgpu buffer|invalid buffer|Instance reference|AbortError|release session|invalid session|index out of bounds|timed out/i;
 function toErrorMessage(error) {
     return error && error.message ? error.message : String(error || 'Unknown error');
@@ -375,35 +354,15 @@ async function ensurePipeline(settings, progressCb) {
                     loadingMultilingual = settings.multilingual;
                     pipelinePromise = pipeline('automatic-speech-recognition', modelName, opts);
                     try {
-                        const pipe = await pipelinePromise;
+                        await pipelinePromise;
                         currentModel = modelName;
                         currentMultilingual = settings.multilingual;
                         currentDtype = JSON.stringify(dtype);
                         console.log('[Whisper Worker] Model loaded on webgpu [' + currentDtype + ']:', modelName);
 
-                        // Warmup: run a tiny inference to trigger WebGPU shader compilation.
-                        // Do this on Chromium. On Firefox, skip warmup to avoid blocking startup.
-                        // First real inference already uses an extended timeout window.
-                        if (!gpuShadersCompiled && ENABLE_SHADER_WARMUP) {
-                            console.log('[Whisper Worker] Compiling WebGPU shaders (warmup)...');
-                            self.postMessage({ status: 'progress', file: 'shader-warmup', progress: 0 });
-                            let warmupCompiled = false;
-                            try {
-                                const warmupAudio = new Float32Array(16000); // 1s silence at 16kHz
-                                const t0 = Date.now();
-                                await pipe(warmupAudio, { return_timestamps: true });
-                                console.log('[Whisper Worker] Shader warmup complete in ' + ((Date.now() - t0) / 1000).toFixed(1) + 's');
-                                warmupCompiled = true;
-                            } catch (warmupErr) {
-                                console.warn('[Whisper Worker] Shader warmup failed (non-fatal):', toErrorMessage(warmupErr));
-                            }
-                            if (warmupCompiled) {
-                                gpuShadersCompiled = true;
-                            } else {
-                                console.warn('[Whisper Worker] Keeping first-run timeout window because warmup did not complete');
-                            }
-                        } else if (!gpuShadersCompiled) {
-                            console.log('[Whisper Worker] Skipping warmup on Firefox; using extended first-inference timeout');
+                        // Keep startup simple and let first real inference compile shaders lazily.
+                        if (!gpuShadersCompiled && !ENABLE_SHADER_WARMUP) {
+                            console.log('[Whisper Worker] Warmup disabled; first inference may include shader compilation');
                         }
 
                         return pipelinePromise;

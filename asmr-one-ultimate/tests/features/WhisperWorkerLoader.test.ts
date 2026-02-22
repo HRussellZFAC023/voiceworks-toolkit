@@ -71,22 +71,25 @@ describe('WhisperWorkerLoader', () => {
         expect(code).not.toContain("decoder_model_merged: 'q4'");
     });
 
-    it('tries fp16 encoder first on Intel Arc, then falls back to fp32', () => {
+    it('pins Firefox WebGPU dtype to fp32/fp32 for stability', () => {
         const code = __getWhisperWorkerCodeForTests();
 
-        expect(code).toContain('isIntelArc');
-        expect(code).toContain("encoder_model: 'fp16'");
-        expect(code).toContain("encoder_model: 'fp32'");
+        expect(code).toContain('if (IS_FIREFOX) {');
+        expect(code).toContain("return [{ encoder_model: 'fp32', decoder_model_merged: 'fp32' }];");
+        expect(code).not.toContain('isIntelArc');
     });
 
-    it('keeps first-run timeout window when shader warmup does not complete', () => {
+    it('uses simplified timeout model with shader warmup disabled', () => {
         const code = __getWhisperWorkerCodeForTests();
 
+        expect(code).toContain('const INFERENCE_TIMEOUT_MS = 45_000;');
+        expect(code).toContain('const FAST_BOOTSTRAP_TIMEOUT_MS = 30_000;');
+        expect(code).toContain('const FIRST_GPU_INFERENCE_TIMEOUT_MS = 90_000;');
+        expect(code).toContain('const ENABLE_SHADER_WARMUP = false;');
+        expect(code).toContain('Warmup disabled; first inference may include shader compilation');
         expect(code).toContain('ENABLE_SHADER_WARMUP');
-        expect(code).toContain('Skipping warmup on Firefox; using extended first-inference timeout');
-        expect(code).toContain('let warmupCompiled = false;');
-        expect(code).toContain('if (warmupCompiled)');
-        expect(code).toContain('Keeping first-run timeout window because warmup did not complete');
+        expect(code).not.toContain('Compiling WebGPU shaders (warmup)...');
+        expect(code).not.toContain('let warmupCompiled = false;');
     });
 
     it('reuses same in-flight pipeline load instead of disposing/recreating', () => {
