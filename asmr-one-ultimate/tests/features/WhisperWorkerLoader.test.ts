@@ -88,4 +88,12 @@ describe('WhisperWorkerLoader', () => {
         expect(code).toContain('if (warmupCompiled)');
         expect(code).toContain('Keeping first-run timeout window because warmup did not complete');
     });
+
+    it('reuses same in-flight pipeline load instead of disposing/recreating', () => {
+        const code = __getWhisperWorkerCodeForTests();
+
+        expect(code).toContain('let loadingModel = null;');
+        expect(code).toContain('const sameLoading = !currentModel');
+        expect(code).toContain('if (pipelinePromise && (sameLoaded || sameLoading))');
+    });
 });

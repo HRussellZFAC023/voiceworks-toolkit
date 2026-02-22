@@ -319,20 +319,31 @@ let pipelinePromise = null;
 let currentModel = null;
 let currentMultilingual = null;
 let gpuShadersCompiled = false;
+let loadingModel = null;
+let loadingMultilingual = null;
 
 async function ensurePipeline(settings, progressCb) {
     await loadTransformers();
 
     const modelName = resolveModelName(settings.model, settings.multilingual);
+    const sameLoaded = currentModel === modelName && currentMultilingual === settings.multilingual;
+    const sameLoading = !currentModel
+        && loadingModel === modelName
+        && loadingMultilingual === settings.multilingual;
 
-    if (pipelinePromise && currentModel === modelName && currentMultilingual === settings.multilingual) {
+    // Reuse in-flight load for same model/settings instead of disposing/recreating.
+    if (pipelinePromise && (sameLoaded || sameLoading)) {
         return pipelinePromise;
     }
 
-    // Dispose previous pipeline if needed
+    // Dispose previous pipeline only when switching to different settings.
     if (pipelinePromise) {
         try { await (await pipelinePromise).dispose?.(); } catch {}
         pipelinePromise = null;
+        currentModel = null;
+        currentMultilingual = null;
+        loadingModel = null;
+        loadingMultilingual = null;
     }
 
     const backend = await detectBackend();
@@ -360,6 +371,8 @@ async function ensurePipeline(settings, progressCb) {
                         device: 'webgpu',
                         dtype,
                     };
+                    loadingModel = modelName;
+                    loadingMultilingual = settings.multilingual;
                     pipelinePromise = pipeline('automatic-speech-recognition', modelName, opts);
                     try {
                         const pipe = await pipelinePromise;
@@ -396,6 +409,8 @@ async function ensurePipeline(settings, progressCb) {
                         return pipelinePromise;
                     } catch (err) {
                         pipelinePromise = null;
+                        loadingModel = null;
+                        loadingMultilingual = null;
                         const msg = String(err?.message || err || '');
                         const isMemErr = /allocation|out of memory|OOM|RangeError|createbuffer/i.test(msg);
                         const isContextErr = /WebGPU Context Provider|context.*provider|device lost|GPUDevice|createComputePipeline|createShaderModule|mapping webgpu buffer|invalid buffer/i.test(msg);
@@ -442,6 +457,8 @@ async function ensurePipeline(settings, progressCb) {
         env.hub.baseUrl = HUB_BASE_URLS[hubIdx];
         env.hub.allowRemoteModels = true;
 
+        loadingModel = modelName;
+        loadingMultilingual = settings.multilingual;
         pipelinePromise = pipeline('automatic-speech-recognition', modelName, wasmOpts);
         try {
             await pipelinePromise;
@@ -453,6 +470,8 @@ async function ensurePipeline(settings, progressCb) {
         } catch (err) {
             lastErr = err;
             pipelinePromise = null;
+            loadingModel = null;
+            loadingMultilingual = null;
             if (!isUnauthorizedError(err)) {
                 throw err;
             }
@@ -658,6 +677,8 @@ async function transcribe(msg) {
         pipelinePromise = null;
         currentModel = null;
         currentMultilingual = null;
+        loadingModel = null;
+        loadingMultilingual = null;
 
         self.postMessage({ status: 'initiate', backend: 'wasm', vendor: '' });
         const wasmPipe = await ensurePipeline(msg, (data) => self.postMessage(data));
@@ -810,6 +831,8 @@ self.addEventListener('message', async (event) => {
         }
         currentModel = null;
         currentMultilingual = null;
+        loadingModel = null;
+        loadingMultilingual = null;
         gpuShadersCompiled = false;
         return;
     }
