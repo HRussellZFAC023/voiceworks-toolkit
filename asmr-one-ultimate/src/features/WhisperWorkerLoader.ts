@@ -1,8 +1,8 @@
 /**
  * WhisperWorkerLoader - WebGPU Whisper worker (Transformers.js)
  *
- * Runs whisper models in a Web Worker. Prefers WebGPU with fp32+q4 dtype,
- * falls back to WASM. Dynamic import with CDN fallback for resilience.
+ * Runs whisper models in a Web Worker. Prefers WebGPU with fp16/fp32 encoder
+ * + fp32 decoder, falls back to WASM. Dynamic import with CDN fallback for resilience.
  * Supports word-level timestamps and real-time streaming.
  */
 
@@ -11,10 +11,20 @@ function getWorkerCode(): string {
 let gpuDeviceLost = false;
 const GPU_ERROR_RE = /WebGPU Context Provider|context.*provider|device lost|GPUDevice|createComputePipeline|createShaderModule|createBuffer|mapAsync|mapping webgpu buffer|invalid buffer|Instance reference|AbortError|release session|invalid session/i;
 const EXPLICIT_DEVICE_LOSS_RE = /device lost|Instance reference|release session|invalid session/i;
+const RECOVERABLE_GPU_REJECTION_RE = /index out of bounds|table index is out of bounds|inference timed out|timed out/i;
+const SUPPRESS_RECOVERABLE_REJECTIONS_WINDOW_MS = 120000;
+let suppressRecoverableGpuRejectionsUntil = 0;
 
 self.addEventListener('unhandledrejection', (event) => {
     const reason = event.reason;
     const message = reason && reason.message ? reason.message : String(reason || 'Unknown error');
+    if (Date.now() < suppressRecoverableGpuRejectionsUntil && RECOVERABLE_GPU_REJECTION_RE.test(message)) {
+        // After timeout/fallback, stale GPU promises can still reject in the background.
+        // Suppress these so host state is not poisoned by late async failures.
+        event.preventDefault();
+        console.warn('[Whisper Worker] Suppressed late recoverable GPU rejection:', message);
+        return;
+    }
     if (GPU_ERROR_RE.test(message)) {
         event.preventDefault();
         // Fatal GPU device loss — notify host so it can show crash UI
@@ -169,12 +179,42 @@ async function detectBackend() {
     return { device: 'wasm', vendor: '', maxBuf: 0 };
 }
 
-function getDtypeCandidates(device) {
+function getDtypeCandidates(device, vendor) {
     if (device !== 'webgpu') return null;
     // Per HuggingFace docs: encoder-decoder models like Whisper need per-module dtype.
-    // fp16 decoder FAILS (Transformers.js #894), q8 decoder gibberish on WebGPU (#1317).
-    // Official config: encoder fp32, decoder q4.
-    return [{ encoder_model: 'fp32', decoder_model_merged: 'q4' }];
+    // Decoder constraints on WebGPU:
+    //   fp16 decoder FAILS (Transformers.js #894)
+    //   q8 decoder gibberish on WebGPU (Transformers.js #1317)
+    //   q4 decoder produces empty output on Firefox WebGPU
+    // → decoder MUST be fp32 on WebGPU. Encoder can try fp16 first for speed.
+
+    const isIntel = /intel|xe|arc/i.test(vendor);
+    const isQualcomm = /qualcomm|adreno/i.test(vendor);
+
+    // Intel / Qualcomm: pin to fp32 for output stability.
+    if (isIntel || isQualcomm) {
+        return [{ encoder_model: 'fp32', decoder_model_merged: 'fp32' }];
+    }
+
+    if (IS_FIREFOX) {
+        const hasKnownVendor = !!(vendor && vendor.trim() && vendor !== 'unknown');
+        if (!hasKnownVendor) {
+            // Firefox with unknown vendor: fp32 to avoid blind fp16 probe
+            console.log('[Whisper Worker] Firefox: vendor unknown, pinning to fp32');
+            return [{ encoder_model: 'fp32', decoder_model_merged: 'fp32' }];
+        }
+        // Firefox with known vendor: try fp16 encoder, fall back to fp32
+        return [
+            { encoder_model: 'fp16', decoder_model_merged: 'fp32' },
+            { encoder_model: 'fp32', decoder_model_merged: 'fp32' },
+        ];
+    }
+
+    // Others (Apple, NVIDIA, AMD on Chrome/Edge): fp16 encoder first
+    return [
+        { encoder_model: 'fp16', decoder_model_merged: 'fp32' },
+        { encoder_model: 'fp32', decoder_model_merged: 'fp32' },
+    ];
 }
 
 function resolveModelName(model, multilingual) {
@@ -208,6 +248,10 @@ function postChunkError(chunkId, message, gpuFallback = false) {
     self.postMessage({ status: 'error', data, chunkId });
 }
 
+function armRecoverableRejectionSuppression() {
+    suppressRecoverableGpuRejectionsUntil = Date.now() + SUPPRESS_RECOVERABLE_REJECTIONS_WINDOW_MS;
+}
+
 function withInferenceTimeout(promise, ms) {
     let timer;
     let timedOut = false;
@@ -224,6 +268,7 @@ function withInferenceTimeout(promise, ms) {
     const timeout = new Promise((_, reject) => {
         timer = setTimeout(() => {
             timedOut = true;
+            armRecoverableRejectionSuppression();
             reject(new Error('WebGPU inference timed out after ' + (ms / 1000) + 's'));
         }, ms);
     });
@@ -272,9 +317,10 @@ async function ensurePipeline(settings, progressCb) {
 
     // --- WebGPU path: try dtype candidates ---
     if (currentBackend === 'webgpu') {
-        const dtypeCandidates = getDtypeCandidates(currentBackend);
+        const dtypeCandidates = getDtypeCandidates(currentBackend, currentVendor);
         if (dtypeCandidates) {
             for (const dtype of dtypeCandidates) {
+                if (skipWebgpu) break; // Context error detected — abort remaining dtypes
                 for (let hubIdx = 0; hubIdx < HUB_BASE_URLS.length; hubIdx++) {
                     env.hub = env.hub || {};
                     env.hub.baseUrl = HUB_BASE_URLS[hubIdx];
@@ -548,6 +594,7 @@ async function transcribe(msg) {
         if (currentBackend === 'wasm') throw new Error(reasonMsg);
 
         console.warn('[Whisper Worker] GPU inference failed, falling back to WASM:', reasonMsg);
+        armRecoverableRejectionSuppression();
         // Keep this worker on WASM after a GPU inference failure. This avoids
         // webgpu<->wasm thrash loops and stale timeout rejections poisoning the queue.
         skipWebgpu = true;

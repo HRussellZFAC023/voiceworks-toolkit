@@ -53,4 +53,20 @@ describe('WhisperWorkerLoader', () => {
         expect(code).toContain('timedOut = true;');
         expect(code).toContain('Promise.race([guarded, timeout])');
     });
+
+    it('suppresses late recoverable GPU unhandled rejections after fallback', () => {
+        const code = __getWhisperWorkerCodeForTests();
+
+        expect(code).toContain('RECOVERABLE_GPU_REJECTION_RE');
+        expect(code).toContain('suppressRecoverableGpuRejectionsUntil');
+        expect(code).toContain('Suppressed late recoverable GPU rejection');
+        expect(code).toContain('armRecoverableRejectionSuppression();');
+    });
+
+    it('uses fp32 decoder on webgpu dtype candidates', () => {
+        const code = __getWhisperWorkerCodeForTests();
+
+        expect(code).toContain("decoder_model_merged: 'fp32'");
+        expect(code).not.toContain("decoder_model_merged: 'q4'");
+    });
 });
