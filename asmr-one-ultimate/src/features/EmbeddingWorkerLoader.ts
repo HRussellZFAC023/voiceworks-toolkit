@@ -111,6 +111,9 @@ let currentDtype = '';
 let skipWebgpu = false;
 let preferredDtype = '';
 let firefoxFp16ProbeState = 'pending';
+// GPU vendor hint from host (detected via WebGL on main thread).
+// Firefox hides adapter.info for fingerprinting; this fills the gap.
+let gpuVendorHint = '';
 
 function scoreAdapter(vendor, maxBuf, powerPreference) {
     const v = (vendor || '').toLowerCase();
@@ -152,7 +155,12 @@ async function detectWebGPU() {
             }
             if (!adapter) continue;
             const info = adapter.info || {};
-            const vendor = [info.vendor, info.description, info.architecture].filter(Boolean).join(' ').toLowerCase();
+            let vendor = [info.vendor, info.description, info.architecture].filter(Boolean).join(' ').toLowerCase();
+            // Firefox hides adapter.info — use WebGL-detected vendor from host as fallback
+            if (!vendor && gpuVendorHint) {
+                vendor = gpuVendorHint;
+                console.log('[Embedding Worker] Using host GPU vendor hint:', vendor);
+            }
             const maxBuf = adapter.limits?.maxBufferSize || 0;
             if (maxBuf > 0 && maxBuf < 134217728) {
                 console.warn('[Embedding Worker] Rejected adapter (' + powerPreference + ') — maxBufferSize too small:', maxBuf);
@@ -538,6 +546,7 @@ self.addEventListener('message', async (event) => {
     }
 
     if (msg.type === 'init') {
+        if (msg.gpuVendorHint) gpuVendorHint = String(msg.gpuVendorHint).toLowerCase();
         try {
             currentModelName = msg.model;
             await ensurePipeline(msg.model);

@@ -20,11 +20,37 @@ export interface DeviceProfile {
     isTouch: boolean;
     isMobile: boolean;
     screenWidth: number;
+    /** GPU vendor/renderer from WebGL (works even when WebGPU hides adapter info, e.g. Firefox) */
+    gpuVendor: string;
     /** Human-readable explanation of the tier decision */
     reason: string;
 }
 
 let cached: DeviceProfile | null = null;
+
+/**
+ * Detect GPU vendor/renderer via WebGL debug info.
+ * Firefox hides adapter.info in WebGPU for fingerprinting protection,
+ * but WebGL's WEBGL_debug_renderer_info still exposes vendor/renderer.
+ * Returns a lowercase string like "nvidia geforce rtx 3080" or "" if unavailable.
+ */
+function detectGpuVendorViaWebGL(): string {
+    try {
+        const canvas = document.createElement('canvas');
+        const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+        if (!gl || !(gl instanceof WebGLRenderingContext)) return '';
+        const ext = gl.getExtension('WEBGL_debug_renderer_info');
+        if (!ext) return '';
+        const vendor = gl.getParameter(ext.UNMASKED_VENDOR_WEBGL) || '';
+        const renderer = gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) || '';
+        // Clean up context
+        const loseCtx = gl.getExtension('WEBGL_lose_context');
+        loseCtx?.loseContext();
+        return [vendor, renderer].filter(Boolean).join(' ').toLowerCase();
+    } catch {
+        return '';
+    }
+}
 
 type NavigatorWithCapabilities = Navigator & {
     deviceMemory?: number;
@@ -169,7 +195,8 @@ export const DeviceCapabilities = {
 
         const tier = classifyDeviceTier(hasGpu, memory, cores, isTouch, isMobile, ua, platform);
 
-        const partial = { tier, hasGpu, memory, cores, isTouch, isMobile, screenWidth, reason: '' };
+        const gpuVendor = hasGpu ? detectGpuVendorViaWebGL() : '';
+        const partial = { tier, hasGpu, memory, cores, isTouch, isMobile, screenWidth, gpuVendor, reason: '' };
         partial.reason = buildReason(partial);
 
         cached = partial as DeviceProfile;

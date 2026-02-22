@@ -292,7 +292,7 @@ function initWorker(): Promise<void> {
                     }
                 };
 
-                worker.postMessage({ type: 'init', model: EMBEDDING_MODEL });
+                worker.postMessage({ type: 'init', model: EMBEDDING_MODEL, gpuVendorHint: DeviceCapabilities.profile.gpuVendor });
             } catch (err) {
                 releaseLease();
                 terminateWorker();

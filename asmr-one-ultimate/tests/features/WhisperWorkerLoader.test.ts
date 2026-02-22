@@ -59,6 +59,7 @@ describe('WhisperWorkerLoader', () => {
 
         expect(code).toContain('RECOVERABLE_GPU_REJECTION_RE');
         expect(code).toContain('suppressRecoverableGpuRejectionsUntil');
+        expect(code).toContain('looksNumericGpuCode');
         expect(code).toContain('Suppressed late recoverable GPU rejection');
         expect(code).toContain('armRecoverableRejectionSuppression();');
     });
@@ -68,5 +69,21 @@ describe('WhisperWorkerLoader', () => {
 
         expect(code).toContain("decoder_model_merged: 'fp32'");
         expect(code).not.toContain("decoder_model_merged: 'q4'");
+    });
+
+    it('tries fp16 encoder first on Intel Arc, then falls back to fp32', () => {
+        const code = __getWhisperWorkerCodeForTests();
+
+        expect(code).toContain('isIntelArc');
+        expect(code).toContain("encoder_model: 'fp16'");
+        expect(code).toContain("encoder_model: 'fp32'");
+    });
+
+    it('keeps first-run timeout window when shader warmup does not complete', () => {
+        const code = __getWhisperWorkerCodeForTests();
+
+        expect(code).toContain('let warmupCompiled = false;');
+        expect(code).toContain('if (warmupCompiled)');
+        expect(code).toContain('Keeping first-run timeout window because warmup did not complete');
     });
 });

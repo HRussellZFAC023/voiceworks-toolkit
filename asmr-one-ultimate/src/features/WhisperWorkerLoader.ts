@@ -18,7 +18,9 @@ let suppressRecoverableGpuRejectionsUntil = 0;
 self.addEventListener('unhandledrejection', (event) => {
     const reason = event.reason;
     const message = reason && reason.message ? reason.message : String(reason || 'Unknown error');
-    if (Date.now() < suppressRecoverableGpuRejectionsUntil && RECOVERABLE_GPU_REJECTION_RE.test(message)) {
+    const looksNumericGpuCode = /^\\d+$/.test(message);
+    if (Date.now() < suppressRecoverableGpuRejectionsUntil
+        && (RECOVERABLE_GPU_REJECTION_RE.test(message) || looksNumericGpuCode)) {
         // After timeout/fallback, stale GPU promises can still reject in the background.
         // Suppress these so host state is not poisoned by late async failures.
         event.preventDefault();
@@ -94,6 +96,9 @@ let currentDtype = '';
 let skipWebgpu = false;
 let preferLowPowerAdapter = false;
 let minWebgpuBufferBytes = 268435456;
+// GPU vendor hint from host (detected via WebGL on main thread).
+// Firefox hides adapter.info for fingerprinting; this fills the gap.
+let gpuVendorHint = '';
 
 function scoreAdapter(vendor, maxBuf, powerPreference, preferredPower) {
     const v = (vendor || '').toLowerCase();
@@ -137,7 +142,12 @@ async function detectWebGPU() {
             }
             if (!adapter) continue;
             const info = adapter.info || {};
-            const vendor = [info.vendor, info.description, info.architecture].filter(Boolean).join(' ').toLowerCase();
+            let vendor = [info.vendor, info.description, info.architecture].filter(Boolean).join(' ').toLowerCase();
+            // Firefox hides adapter.info — use WebGL-detected vendor from host as fallback
+            if (!vendor && gpuVendorHint) {
+                vendor = gpuVendorHint;
+                console.log('[Whisper Worker] Using host GPU vendor hint:', vendor);
+            }
             const maxBuf = adapter.limits?.maxBufferSize || 0;
             if (maxBuf > 0 && maxBuf < minWebgpuBufferBytes) {
                 console.warn('[Whisper Worker] Rejected adapter (' + powerPreference + ') — maxBufferSize too small:', maxBuf);
@@ -188,8 +198,17 @@ function getDtypeCandidates(device, vendor) {
     //   q4 decoder produces empty output on Firefox WebGPU
     // → decoder MUST be fp32 on WebGPU. Encoder can try fp16 first for speed.
 
-    const isIntel = /intel|xe|arc/i.test(vendor);
+    const isIntelArc = /intel.*arc|\\barc\\b/i.test(vendor);
+    const isIntel = /intel|xe|iris|uhd|gen-9|gen9/i.test(vendor);
     const isQualcomm = /qualcomm|adreno/i.test(vendor);
+
+    // Arc dGPU: try fp16 encoder first for speed, fall back to fp32 if unstable.
+    if (isIntelArc) {
+        return [
+            { encoder_model: 'fp16', decoder_model_merged: 'fp32' },
+            { encoder_model: 'fp32', decoder_model_merged: 'fp32' },
+        ];
+    }
 
     // Intel / Qualcomm: pin to fp32 for output stability.
     if (isIntel || isQualcomm) {
@@ -238,6 +257,9 @@ async function releaseGpuResources() {
 const IS_FIREFOX = typeof navigator !== 'undefined' && /firefox/i.test(navigator.userAgent || '');
 const INFERENCE_TIMEOUT_MS = IS_FIREFOX ? 60_000 : 45_000;
 const FAST_BOOTSTRAP_TIMEOUT_MS = IS_FIREFOX ? 45_000 : 30_000;
+// Safety-net timeout for the first WebGPU inference if warmup was skipped or failed.
+// Firefox wgpu shader compilation can take 60-180s on first run (wgpu#7443).
+const FIRST_GPU_INFERENCE_TIMEOUT_MS = IS_FIREFOX ? 180_000 : 90_000;
 const GPU_INFERENCE_ERROR_RE = /createBuffer|RangeError|out of memory|OOM|allocation|device lost|GPUDevice|createComputePipeline|createShaderModule|mapAsync|mapping webgpu buffer|invalid buffer|Instance reference|AbortError|release session|invalid session|index out of bounds|timed out/i;
 function toErrorMessage(error) {
     return error && error.message ? error.message : String(error || 'Unknown error');
@@ -277,6 +299,9 @@ function withInferenceTimeout(promise, ms) {
 
 function getInferenceTimeoutMs(currentBackend, chunkLengthS) {
     if (currentBackend !== 'webgpu') return INFERENCE_TIMEOUT_MS;
+    // First GPU inference may include residual shader compilation if warmup
+    // was skipped or only partially compiled shaders. Give it much more time.
+    if (!gpuShadersCompiled) return FIRST_GPU_INFERENCE_TIMEOUT_MS;
     let timeoutMs = INFERENCE_TIMEOUT_MS;
     if (Number(chunkLengthS) <= 8) {
         timeoutMs = Math.min(timeoutMs, FAST_BOOTSTRAP_TIMEOUT_MS);
@@ -291,6 +316,7 @@ function getInferenceTimeoutMs(currentBackend, chunkLengthS) {
 let pipelinePromise = null;
 let currentModel = null;
 let currentMultilingual = null;
+let gpuShadersCompiled = false;
 
 async function ensurePipeline(settings, progressCb) {
     await loadTransformers();
@@ -334,11 +360,37 @@ async function ensurePipeline(settings, progressCb) {
                     };
                     pipelinePromise = pipeline('automatic-speech-recognition', modelName, opts);
                     try {
-                        await pipelinePromise;
+                        const pipe = await pipelinePromise;
                         currentModel = modelName;
                         currentMultilingual = settings.multilingual;
                         currentDtype = JSON.stringify(dtype);
                         console.log('[Whisper Worker] Model loaded on webgpu [' + currentDtype + ']:', modelName);
+
+                        // Warmup: run a tiny inference to trigger WebGPU shader compilation.
+                        // Firefox wgpu/Naga+DXC compiles shaders ~75x slower than Chrome Dawn/Tint
+                        // (wgpu#7443, Bugzilla#1951219). Without warmup, the first real inference
+                        // hits all shader compilation at once and can take 60-180s, causing timeout.
+                        // After warmup, shaders are cached and inference is fast.
+                        if (!gpuShadersCompiled) {
+                            console.log('[Whisper Worker] Compiling WebGPU shaders (warmup)...');
+                            self.postMessage({ status: 'progress', file: 'shader-warmup', progress: 0 });
+                            let warmupCompiled = false;
+                            try {
+                                const warmupAudio = new Float32Array(16000); // 1s silence at 16kHz
+                                const t0 = Date.now();
+                                await pipe(warmupAudio, { return_timestamps: true });
+                                console.log('[Whisper Worker] Shader warmup complete in ' + ((Date.now() - t0) / 1000).toFixed(1) + 's');
+                                warmupCompiled = true;
+                            } catch (warmupErr) {
+                                console.warn('[Whisper Worker] Shader warmup failed (non-fatal):', toErrorMessage(warmupErr));
+                            }
+                            if (warmupCompiled) {
+                                gpuShadersCompiled = true;
+                            } else {
+                                console.warn('[Whisper Worker] Keeping first-run timeout window because warmup did not complete');
+                            }
+                        }
+
                         return pipelinePromise;
                     } catch (err) {
                         pipelinePromise = null;
@@ -619,6 +671,7 @@ async function transcribe(msg) {
     let result = null;
     try {
         result = await runInference(pipe, pipeOpts, currentBackend);
+        if (currentBackend === 'webgpu') gpuShadersCompiled = true;
     } catch (initialError) {
         const initialMsg = toErrorMessage(initialError);
         const canRetryWithoutWords = pipeOpts.return_timestamps === 'word';
@@ -755,6 +808,7 @@ self.addEventListener('message', async (event) => {
         }
         currentModel = null;
         currentMultilingual = null;
+        gpuShadersCompiled = false;
         return;
     }
 
@@ -764,6 +818,7 @@ self.addEventListener('message', async (event) => {
             ? Math.floor(requestedMinBuffer)
             : 268435456;
         preferLowPowerAdapter = msg.preferLowPowerAdapter === true;
+        if (msg.gpuVendorHint) gpuVendorHint = String(msg.gpuVendorHint).toLowerCase();
         try {
             await ensurePipeline(msg, (data) => self.postMessage(data));
             self.postMessage({ status: 'ready', backend: currentBackend, vendor: currentVendor });

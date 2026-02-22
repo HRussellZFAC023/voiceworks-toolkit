@@ -1465,6 +1465,7 @@ export class Whisper {
                 strideLengthS: settings.strideLengthS,
                 preferLowPowerAdapter: settings.preferLowPowerAdapter,
                 minWebgpuBufferBytes: settings.minWebgpuBufferBytes,
+                gpuVendorHint: DeviceCapabilities.profile.gpuVendor,
             });
         });
     }
