@@ -420,3 +420,8 @@ export function stripJpdbAnnotations(root: Element): void {
 export function isChinese(text: string): boolean {
     return /[\u4e00-\u9fff]/.test(text) && !/[\u3040-\u309f\u30a0-\u30ff]/.test(text);
 }
+
+/** Text has at least one letter/CJK character worth translating (not pure punctuation/symbols) */
+export function isTranslatable(text: string): boolean {
+    return /[\p{L}\p{N}]/u.test(text);
+}

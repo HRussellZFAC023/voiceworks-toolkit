@@ -17,7 +17,7 @@
     background: var(--asmr-bg-overlay);
     backdrop-filter: blur(24px);
     border-top: 1px solid var(--asmr-border-color);
-    z-index: var(--z-joi, 9992);
+    z-index: var(--asmr-player-bar-z-index, var(--z-joi, 9992));
     transition: opacity 0.3s ease, transform 0.3s ease, background 0.4s ease,
                 box-shadow 0.4s ease;
     box-shadow: 0 -2px 12px rgba(0, 0, 0, 0.08);

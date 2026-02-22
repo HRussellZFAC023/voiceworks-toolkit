@@ -12,7 +12,7 @@ import {
 } from './learnerLyricsUtils';
 
 import { KikoeruBridge } from '../infrastructure/KikoeruBridge';
-import { getAudioElement, getPlayerBar, isChinese } from '../core/DomUtils';
+import { getAudioElement, getPlayerBar, isChinese, isTranslatable } from '../core/DomUtils';
 import {
     buildKaraokeCharMap, computeWordKaraokeIndices, computeTimeFallbackKaraokeIndices,
     type KaraokeCharMap,
@@ -1092,7 +1092,6 @@ export class LearnerMode {
 
         if (useWhisper) {
             const targetLang = (Config.get('subtitleLang') || 'en').toLowerCase();
-            const allowSecondary = !this.whisperLive || this.whisperFromCache;
             if (this.whisperLines.length) {
                 this.currentLyrics = this.whisperLines;
                 const display = this.getWhisperDisplay();
@@ -1102,15 +1101,17 @@ export class LearnerMode {
                 }
 
                 let cachedSecondary: string | null = null;
-                if (fullText) {
+                const translatable = fullText && isTranslatable(fullText);
+                if (translatable) {
                     cachedSecondary = TranslationService.peekCached(fullText, targetLang);
-                    // If not cached and live, fire async translation so it's ready next tick.
+                    // If not cached, fire async translation so it's ready next tick.
                     // Throttled to avoid spamming (translate() has in-flight dedup but we avoid the overhead).
-                    if (!cachedSecondary && this.whisperLive && this.shouldTickerTranslate(fullText)) {
-                        const token = ++this.translationToken;
+                    if (!cachedSecondary && this.shouldTickerTranslate(fullText)) {
                         TranslationService.translate(fullText, targetLang).then(translated => {
-                            // Guard: text still current (lastText tracks whisper text, lastDisplayedText tracks displayed)
-                            if (translated && (this.lastDisplayedText === fullText || this.lastText === fullText) && token === this.translationToken) {
+                            // Guard: text still current — accept if either tracker matches.
+                            // No token guard: we WANT late-arriving translations to display
+                            // even if the ticker has since fired for the same text.
+                            if (translated && (this.lastDisplayedText === fullText || this.lastText === fullText)) {
                                 this.updateSecondaryLine(translated, false);
                                 this.lastSecondaryShown = translated;
                             }
@@ -1131,13 +1132,19 @@ export class LearnerMode {
                 if (fullText && fullText !== this.lastDisplayedText) {
                     this.lastDisplayedText = fullText;
                     this.lastSecondaryShown = '';
-                    if (cachedSecondary) {
+                    if (!translatable) {
+                        // Pure punctuation/symbols — clear secondary, nothing to translate
+                        this.updateSecondaryLine('', false);
+                    } else if (cachedSecondary) {
                         this.updateSecondaryLine(cachedSecondary, false);
                         this.lastSecondaryShown = cachedSecondary;
-                    } else if (allowSecondary) {
+                    } else {
+                        // No cached translation yet — show empty placeholder (prevents stale
+                        // text from previous segment). Async translate() callback or cache-fill
+                        // detector on next tick will populate when translation arrives.
                         this.updateSecondaryLine('', true);
                     }
-                } else if (fullText && cachedSecondary && cachedSecondary !== this.lastSecondaryShown) {
+                } else if (translatable && cachedSecondary && cachedSecondary !== this.lastSecondaryShown) {
                     // Translation became available (e.g. translateAhead filled the cache)
                     this.updateSecondaryLine(cachedSecondary, false);
                     this.lastSecondaryShown = cachedSecondary;
@@ -1203,11 +1210,11 @@ export class LearnerMode {
                     this.lastText = this.whisperText;
                 }
                 let cachedFallback: string | null = null;
-                cachedFallback = TranslationService.peekCached(this.whisperText, targetLang);
-                if (!cachedFallback && this.whisperLive && this.shouldTickerTranslate(this.whisperText)) {
-                    const token = ++this.translationToken;
+                const wtTranslatable = isTranslatable(this.whisperText);
+                if (wtTranslatable) cachedFallback = TranslationService.peekCached(this.whisperText, targetLang);
+                if (wtTranslatable && !cachedFallback && this.shouldTickerTranslate(this.whisperText)) {
                     TranslationService.translate(this.whisperText, targetLang).then(translated => {
-                        if (translated && (this.lastDisplayedText === this.whisperText || this.lastText === this.whisperText) && token === this.translationToken) {
+                        if (translated && (this.lastDisplayedText === this.whisperText || this.lastText === this.whisperText)) {
                             this.updateSecondaryLine(translated, false);
                             this.lastSecondaryShown = translated;
                         }
@@ -1222,13 +1229,15 @@ export class LearnerMode {
                 if (this.whisperText !== this.lastDisplayedText) {
                     this.lastDisplayedText = this.whisperText;
                     this.lastSecondaryShown = '';
-                    if (cachedFallback) {
+                    if (!wtTranslatable) {
+                        this.updateSecondaryLine('', false);
+                    } else if (cachedFallback) {
                         this.updateSecondaryLine(cachedFallback, false);
                         this.lastSecondaryShown = cachedFallback;
-                    } else if (allowSecondary) {
+                    } else {
                         this.updateSecondaryLine('', true);
                     }
-                } else if (cachedFallback && cachedFallback !== this.lastSecondaryShown) {
+                } else if (wtTranslatable && cachedFallback && cachedFallback !== this.lastSecondaryShown) {
                     this.updateSecondaryLine(cachedFallback, false);
                     this.lastSecondaryShown = cachedFallback;
                 }
@@ -1845,7 +1854,15 @@ export class LearnerMode {
             idx = firstAfter - 1;
         }
         const rawTarget = idx + offset;
-        const targetIdx = Math.max(0, Math.min(lines.length - 1, rawTarget));
+        let targetIdx = Math.max(0, Math.min(lines.length - 1, rawTarget));
+        // Ensure backward seek reaches a meaningfully earlier time position.
+        // Handles near-duplicate timestamps from word-level grouping and
+        // floating-point precision after seeking to line.time + 0.01.
+        if (offset < 0) {
+            while (targetIdx > 0 && lines[targetIdx].time > now - 0.05) {
+                targetIdx--;
+            }
+        }
         // If clamped (no more segments in this direction), fall back to time-based seek
         if (targetIdx === idx && offset !== 0) {
             audio.currentTime = Math.max(0, audio.currentTime + offset * 5);

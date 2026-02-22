@@ -15,10 +15,10 @@ let gpuFallbackSent = false;
 self.addEventListener('unhandledrejection', (event) => {
     const reason = event.reason;
     const message = reason && reason.message ? reason.message : String(reason || 'Unknown error');
-    if (/WebGPU Context Provider|context.*provider|device lost|GPUDevice|createComputePipeline|createShaderModule|mapAsync|mapping webgpu buffer|invalid buffer|Instance reference|AbortError/i.test(message)) {
+    if (/WebGPU Context Provider|context.*provider|device lost|GPUDevice|createComputePipeline|createShaderModule|mapAsync|mapping webgpu buffer|invalid buffer|Instance reference|AbortError|reading 'destroy'|reading 'dispose'/i.test(message)) {
         event.preventDefault();
         // Fatal GPU device loss — notify host so it can broadcast to other workers
-        if (/device lost|Instance reference/i.test(message)) {
+        if (/device lost|Instance reference|reading 'destroy'|reading 'dispose'/i.test(message)) {
             if (!gpuDeviceLost) {
                 gpuDeviceLost = true;
                 skipWebgpu = true;
@@ -466,7 +466,7 @@ async function embed(texts) {
 
 // ---- GPU error recovery ----
 
-const GPU_ERROR_RE = /createBuffer|RangeError|out of memory|OOM|allocation|shader|device lost|GPUDevice|createComputePipeline|createShaderModule|mapAsync|mapping webgpu buffer|invalid buffer/i;
+const GPU_ERROR_RE = /createBuffer|RangeError|out of memory|OOM|allocation|shader|device lost|GPUDevice|createComputePipeline|createShaderModule|mapAsync|mapping webgpu buffer|invalid buffer|reading 'destroy'|reading 'dispose'|Instance reference/i;
 
 /**
  * Switch to WASM backend. Serialized: if already switching, returns the

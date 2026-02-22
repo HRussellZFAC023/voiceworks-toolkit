@@ -3,9 +3,8 @@
  */
 
 export const WORKER_TRANSFORMER_URLS = [
-    'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.1',
-    'https://esm.sh/@huggingface/transformers@3.8.1',
-    'https://unpkg.com/@huggingface/transformers@3.8.1?module',
+    'https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.0.0-next.4',
+    'https://esm.sh/@huggingface/transformers@4.0.0-next.4',
 ] as const;
 
 export const WORKER_HUB_BASE_URLS = [

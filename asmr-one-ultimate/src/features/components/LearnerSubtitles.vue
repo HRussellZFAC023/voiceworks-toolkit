@@ -19,7 +19,7 @@ import { useI18n } from '../../composables/useI18n';
 import { TranslationService } from '../../services/TranslationService';
 import { AppStore } from '../../store/AppStore';
 import { AudioCache } from '../../infrastructure/AudioCache';
-import { getAudioElement, getPlayerBar, isChinese } from '../../core/DomUtils';
+import { getAudioElement, getPlayerBar, isChinese, isTranslatable } from '../../core/DomUtils';
 import { Logger, Config } from '../../core/Utils';
 import type { WhisperUpdatePayload, JPDBToken, AudioPlayerState, KikoeruStoreState, KikoeruApp, VueRoute, PlayerTrack, AvailableLyric } from '../../types';
 import { buildSegments, sliceSegments, type FuriganaSegment } from '../../lib/jpdb-segments';
@@ -1083,7 +1083,6 @@ function updateLyrics() {
 
 function _updateWhisperDisplay() {
     const targetLang = (Config.get('subtitleLang') as string || 'en').toLowerCase();
-    const allowSecondary = !whisperLive || whisperFromCache;
 
     if (whisperLines.length) {
         currentLyrics = whisperLines;
@@ -1092,10 +1091,11 @@ function _updateWhisperDisplay() {
         if (fullText && fullText !== lastText) lastText = fullText;
 
         let cachedSecondary: string | null = null;
-        if (fullText) {
+        const translatable = fullText && isTranslatable(fullText);
+        if (translatable) {
             cachedSecondary = TranslationService.peekCached(fullText, targetLang);
-            if (!cachedSecondary && whisperLive && shouldTickerTranslate(fullText)) {
-                const token = ++translationToken;
+            // If not cached, fire async translation so it's ready next tick.
+            if (!cachedSecondary && shouldTickerTranslate(fullText)) {
                 realtimeQueueKey = updateQueueKey(
                     realtimeQueueKey,
                     buildTranslationQueueKey('learner:whisper-live', targetLang),
@@ -1104,7 +1104,9 @@ function _updateWhisperDisplay() {
                     cancellable: true,
                     cancellableKey: realtimeQueueKey,
                 }).then(tr => {
-                    if (tr && lastDisplayedText === fullText && token === translationToken) {
+                    // Guard: text still current — accept if either tracker matches.
+                    // No token guard: we WANT late-arriving translations to display.
+                    if (tr && (lastDisplayedText === fullText || lastText === fullText)) {
                         updateSecondaryLine(tr, false);
                         lastSecondaryShown = tr;
                     }
@@ -1126,15 +1128,19 @@ function _updateWhisperDisplay() {
         if (fullText && fullText !== lastDisplayedText) {
             lastDisplayedText = fullText;
             lastSecondaryShown = '';
-            // Always show cached translation if available; during live transcription
-            // show empty placeholder (the async translate() will fill it in)
-            if (cachedSecondary) {
+            if (!translatable) {
+                // Pure punctuation/symbols — clear secondary, nothing to translate
+                updateSecondaryLine('', false);
+            } else if (cachedSecondary) {
                 updateSecondaryLine(cachedSecondary, false);
                 lastSecondaryShown = cachedSecondary;
-            } else if (allowSecondary) {
+            } else {
+                // No cached translation yet — show empty placeholder (prevents stale
+                // text from previous segment). Async callback or cache-fill on next tick
+                // will populate when translation arrives.
                 updateSecondaryLine('', true);
             }
-        } else if (fullText && cachedSecondary && cachedSecondary !== lastSecondaryShown) {
+        } else if (translatable && cachedSecondary && cachedSecondary !== lastSecondaryShown) {
             // Translation became available (e.g. translateAhead filled the cache)
             updateSecondaryLine(cachedSecondary, false);
             lastSecondaryShown = cachedSecondary;
@@ -1208,9 +1214,9 @@ function _updateWhisperDisplay() {
     // No whisperLines but whisperText exists
     if (whisperText) {
         if (whisperText !== lastText) lastText = whisperText;
-        let cached: string | null = TranslationService.peekCached(whisperText, targetLang);
-        if (!cached && whisperLive && shouldTickerTranslate(whisperText)) {
-            const token = ++translationToken;
+        const wtTranslatable = isTranslatable(whisperText);
+        let cached: string | null = wtTranslatable ? TranslationService.peekCached(whisperText, targetLang) : null;
+        if (wtTranslatable && !cached && shouldTickerTranslate(whisperText)) {
             realtimeQueueKey = updateQueueKey(
                 realtimeQueueKey,
                 buildTranslationQueueKey('learner:whisper-live', targetLang),
@@ -1219,7 +1225,7 @@ function _updateWhisperDisplay() {
                 cancellable: true,
                 cancellableKey: realtimeQueueKey,
             }).then(tr => {
-                if (tr && lastDisplayedText === whisperText && token === translationToken) {
+                if (tr && (lastDisplayedText === whisperText || lastText === whisperText)) {
                     updateSecondaryLine(tr, false);
                     lastSecondaryShown = tr;
                 }
@@ -1238,13 +1244,15 @@ function _updateWhisperDisplay() {
         if (whisperText !== lastDisplayedText) {
             lastDisplayedText = whisperText;
             lastSecondaryShown = '';
-            if (cached) {
+            if (!wtTranslatable) {
+                updateSecondaryLine('', false);
+            } else if (cached) {
                 updateSecondaryLine(cached, false);
                 lastSecondaryShown = cached;
-            } else if (allowSecondary) {
+            } else {
                 updateSecondaryLine('', true);
             }
-        } else if (cached && cached !== lastSecondaryShown) {
+        } else if (wtTranslatable && cached && cached !== lastSecondaryShown) {
             updateSecondaryLine(cached, false);
             lastSecondaryShown = cached;
         }
@@ -1386,7 +1394,15 @@ function seek(offset: number) {
         idx = firstAfter - 1;
     }
     const rawTarget = idx + offset;
-    const targetIdx = Math.max(0, Math.min(lines.length - 1, rawTarget));
+    let targetIdx = Math.max(0, Math.min(lines.length - 1, rawTarget));
+    // Ensure backward seek reaches a meaningfully earlier time position.
+    // Handles near-duplicate timestamps from word-level grouping and
+    // floating-point precision after seeking to line.time + 0.01.
+    if (offset < 0) {
+        while (targetIdx > 0 && lines[targetIdx].time > now - 0.05) {
+            targetIdx--;
+        }
+    }
     // If clamped (no more segments in this direction), fall back to time-based seek
     if (targetIdx === idx && offset !== 0) {
         audio.currentTime = Math.max(0, audio.currentTime + offset * 5);

@@ -38,11 +38,12 @@ describe('WhisperWorkerLoader', () => {
         expect((capturedBlob as Blob).size).toBeGreaterThan(1000);
     });
 
-    it('uses Transformers.js V4 as primary CDN with V3 fallback', () => {
+    it('uses Transformers.js V4 CDN URLs', () => {
         const code = __getWhisperWorkerCodeForTests();
 
         expect(code).toContain('transformers@4.0.0-next.4');
-        expect(code).toContain('transformers@3.8.1');
+        // V3 fallback removed — all workers now use V4 only
+        expect(code).not.toContain('transformers@3.8.1');
     });
 
     it('uses env.remoteHost for hub URL configuration (not env.hub)', () => {
@@ -106,21 +107,13 @@ describe('WhisperWorkerLoader', () => {
         expect(code).toContain('stride_length_s: msg.strideLengthS');
     });
 
-    it('filters hallucinated non-speech annotations', () => {
+    it('delegates post-processing to host (no hallucination/grouping in worker)', () => {
         const code = __getWhisperWorkerCodeForTests();
 
-        expect(code).toContain('HALLUCINATION_RE');
-        expect(code).toContain('SUBTITLE_HALLUCINATION_RE');
-        expect(code).toContain('cleanHallucinatedChunks');
-    });
-
-    it('groups word-level timestamps into segments', () => {
-        const code = __getWhisperWorkerCodeForTests();
-
-        expect(code).toContain('groupWordsToSegments');
-        expect(code).toContain('isWordLevelChunks');
-        expect(code).toContain('buildSegmentFromWords');
-        expect(code).toContain('SEGMENT_GAP_S');
+        // Processing extracted to whisperProcessing.ts — worker sends raw chunks
+        expect(code).not.toContain('HALLUCINATION_RE');
+        expect(code).not.toContain('groupWordsToSegments');
+        expect(code).toContain('rawChunks');
     });
 
     it('enables word timestamps on all backends with retry fallback', () => {
@@ -129,12 +122,13 @@ describe('WhisperWorkerLoader', () => {
         expect(code).toContain('const useWordTimestamps = true');
     });
 
-    it('detects WebGPU adapter with power preference scoring', () => {
+    it('detects WebGPU adapter with power preference', () => {
         const code = __getWhisperWorkerCodeForTests();
 
         expect(code).toContain('navigator.gpu.requestAdapter(');
-        expect(code).toContain('scoreAdapter');
-        expect(code).toContain('sortAdaptersByScore');
+        expect(code).toContain('powerPreference');
+        // Scoring removed — simplified to preferred + fallback
+        expect(code).not.toContain('scoreAdapter');
     });
 
     it('reuses existing pipeline when model matches', () => {

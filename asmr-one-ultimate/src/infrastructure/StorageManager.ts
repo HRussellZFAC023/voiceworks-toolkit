@@ -21,6 +21,7 @@ const KNOWN_DATABASES = [
     'asmr-one-audio-cache', // Excluded from backup (blobs)
     'asmr-one-ultimate-db', // Legacy (migrated to GM)
     'asmr-one-vectors',     // Vector Search Index
+    'asmr-one-work-cache',  // Work metadata cache (WorkService)
 ];
 
 interface VectorDB extends DBSchema {
@@ -246,10 +247,20 @@ export class StorageManager {
         Logger.log('[StorageManager] Factory reset initiated');
 
         // 1. Delete all known IndexedDB databases
+        // deleteDB hangs if any connection is still open (AudioCache, VectorSearch, etc.)
+        // — use a timeout so the rest of the reset (GM clear, reload) isn't blocked.
+        const DB_DELETE_TIMEOUT_MS = 3000;
+        const withTimeout = (promise: Promise<void>, ms: number): Promise<void> =>
+            Promise.race([
+                promise,
+                new Promise<void>((_, reject) =>
+                    setTimeout(() => reject(new Error(`deleteDB timed out after ${ms}ms (open connection?)`)), ms),
+                ),
+            ]);
         const dbResults = await Promise.allSettled(
             KNOWN_DATABASES.map(name => {
                 Logger.log(`[StorageManager] Deleting IDB: ${name}`);
-                return deleteDB(name);
+                return withTimeout(deleteDB(name), DB_DELETE_TIMEOUT_MS);
             })
         );
         for (let i = 0; i < dbResults.length; i++) {
@@ -280,9 +291,28 @@ export class StorageManager {
             Logger.log(`[StorageManager] Cleared ${toRemove.length} localStorage entries`);
         }
 
-        // 3. Clear object URLs
+        // 3. Clear MLCrashGuard sentinels (localStorage)
+        for (const key of ['__asmr_ml_guard_whisper', '__asmr_ml_guard_vectorSearch']) {
+            localStorage.removeItem(key);
+        }
+
+        // 4. Clear object URLs
         AudioCache.objectUrls.forEach(url => URL.revokeObjectURL(url));
         AudioCache.objectUrls.clear();
+
+        // 4. Clear Browser Cache API (Transformers.js model files)
+        try {
+            if (typeof caches !== 'undefined') {
+                const names = await caches.keys();
+                const modelCaches = names.filter(n =>
+                    n.includes('transformers') || n.includes('onnx') || n.includes('huggingface'),
+                );
+                await Promise.allSettled(modelCaches.map(n => caches.delete(n)));
+                Logger.log(`[StorageManager] Cleared ${modelCaches.length} Cache API entries`);
+            }
+        } catch {
+            Logger.warn('[StorageManager] Cache API clear failed (non-critical)');
+        }
 
         Logger.log('[StorageManager] Factory reset complete. Reloading...');
         window.location.reload();

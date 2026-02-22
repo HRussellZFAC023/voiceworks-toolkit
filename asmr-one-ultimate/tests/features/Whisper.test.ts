@@ -324,7 +324,7 @@ describe('Whisper', () => {
     });
 
     describe('webgpu retry gate', () => {
-        it('re-enables WebGPU once the cooldown has elapsed', () => {
+        it('never re-enables WebGPU after crash (permanent for session)', () => {
             vi.spyOn(Config, 'get').mockImplementation((key) => {
                 if (key === 'forceWhisperWasm') return false;
                 return false;
@@ -342,39 +342,13 @@ describe('Whisper', () => {
 
             const whisper = new Whisper();
             (Whisper as any).webgpuFailed = true;
-            (Whisper as any).webgpuRetryNotBefore = Date.now() - 1;
             (whisper as any).gpuCrashed = true;
 
-            (whisper as any).maybeReenableWebgpu('test');
+            const result = (whisper as any).maybeReenableWebgpu('test');
 
-            expect((Whisper as any).webgpuFailed).toBe(false);
-            expect((Whisper as any).webgpuRetryNotBefore).toBe(0);
-            expect((whisper as any).gpuCrashed).toBe(false);
-        });
-
-        it('keeps WebGPU disabled while cooldown is still active', () => {
-            vi.spyOn(Config, 'get').mockImplementation((key) => {
-                if (key === 'forceWhisperWasm') return false;
-                return false;
-            });
-            vi.spyOn(DeviceCapabilities, 'profile', 'get').mockReturnValue({
-                tier: 'full',
-                hasGpu: true,
-                memory: 16,
-                cores: 8,
-                isTouch: false,
-                isMobile: false,
-                screenWidth: 1920,
-                reason: 'full-tier test profile',
-            } as any);
-
-            const whisper = new Whisper();
-            (Whisper as any).webgpuFailed = true;
-            (Whisper as any).webgpuRetryNotBefore = Date.now() + 30_000;
-
-            (whisper as any).maybeReenableWebgpu('test');
-
+            expect(result).toBe(false);
             expect((Whisper as any).webgpuFailed).toBe(true);
+            expect((whisper as any).gpuCrashed).toBe(true);
         });
     });
 
@@ -804,12 +778,13 @@ describe('Whisper', () => {
     });
 
     describe('isNoiseOnly', () => {
-        it('detects noise patterns', () => {
+        it('detects known whisper annotation patterns', () => {
             const whisper = new Whisper();
             expect((whisper as any).isNoiseOnly('[音楽]')).toBe(true);
-            expect((whisper as any).isNoiseOnly('（笑）')).toBe(true);
             expect((whisper as any).isNoiseOnly('[laughter]')).toBe(true);
             expect((whisper as any).isNoiseOnly('[silence]')).toBe(true);
+            expect((whisper as any).isNoiseOnly('(music)')).toBe(true);
+            expect((whisper as any).isNoiseOnly('  applause  ')).toBe(true);
         });
 
         it('returns false for normal text', () => {
@@ -818,10 +793,13 @@ describe('Whisper', () => {
             expect((whisper as any).isNoiseOnly('Hello world')).toBe(false);
         });
 
-        it('returns true for empty/whitespace text', () => {
+        it('returns false for empty/whitespace and symbols (ASMR content)', () => {
             const whisper = new Whisper();
-            expect((whisper as any).isNoiseOnly('')).toBe(true);
-            expect((whisper as any).isNoiseOnly('   ')).toBe(true);
+            // Empty/whitespace and symbols like ♪ are kept — they are valid ASMR content
+            expect((whisper as any).isNoiseOnly('')).toBe(false);
+            expect((whisper as any).isNoiseOnly('   ')).toBe(false);
+            expect((whisper as any).isNoiseOnly('♪')).toBe(false);
+            expect((whisper as any).isNoiseOnly('~')).toBe(false);
         });
     });
 
