@@ -43,19 +43,14 @@ const CACHE_TTL_MS = CACHE_TTL.THIRTY_DAYS_MS;
 const TRANSLATION_CACHE_SCHEMA_VERSION = 'v3';
 const PREFETCH_MAX_LINES = 1000;
 
-const REMOTE_CONCURRENCY = 36;
-const REMOTE_MIN_INTERVAL_MS = 10;
+const REMOTE_CONCURRENCY = 8;
+const REMOTE_MIN_INTERVAL_MS = 60;
 const REMOTE_RATE_LIMIT_PAUSE_MS = 15_000;
 
 const GOOGLE_TRANSLATE_HOSTS = [
     'translate.googleapis.com',
     'translate.google.com',
     'translate.google.co.jp',
-    'translate.google.de',
-    'translate.google.fr',
-    'translate.google.es',
-    'translate.google.co.kr',
-    'translate.google.com.tw',
 ];
 
 let translateHostIndex = 0;
@@ -364,8 +359,8 @@ async function translateRemoteSingle(text: string, targetLang: string): Promise<
             }),
             {
                 attempts: 2,
-                backoffMs: 250,
-                shouldRetry: (e) => !(e instanceof HttpError) || e.status >= 500,
+                backoffMs: 150,
+                shouldRetry: (e) => e instanceof Error && /timeout/i.test(e.message),
             },
         );
 

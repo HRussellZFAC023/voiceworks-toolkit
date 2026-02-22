@@ -435,7 +435,7 @@ export class Whisper {
             if (this.autoTranscribeWorkId === workId || Config.get('alwaysTranscribe')) {
                 this.startTranscription().catch(err => Logger.error('[Whisper] Auto-start failed:', err));
             }
-        }, 500);
+        }, 200);
     }
 
     private clearAutoStartTimer(): void {
@@ -1546,6 +1546,12 @@ export class Whisper {
                 }
                 if (this.transcribing && this.pcmBuffer) {
                     this.maybeProcessNextChunk();
+                } else if (!this.transcribing && Config.get('alwaysTranscribe')) {
+                    const audio = getAudioElement();
+                    if (audio && !audio.paused) {
+                        Logger.debug('[Whisper] Auto-start safeguard: worker ready while playback is active');
+                        this.startTranscription().catch(err => Logger.error('[Whisper] Auto-start safeguard failed:', err));
+                    }
                 }
                 break;
 
