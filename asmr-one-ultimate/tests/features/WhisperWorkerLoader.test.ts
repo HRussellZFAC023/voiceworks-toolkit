@@ -38,19 +38,19 @@ describe('WhisperWorkerLoader', () => {
         expect((capturedBlob as Blob).size).toBeGreaterThan(1000);
     });
 
-    it('includes temporary WASM fallback logic that retries WebGPU on next chunk', () => {
+    it('pins worker to WASM after GPU inference failure to avoid backend thrash', () => {
         const code = __getWhisperWorkerCodeForTests();
 
-        expect(code).toContain('const useTemporaryFallback = isTimeoutFallback && !transientWebgpuFallbackUsed;');
-        expect(code).toContain('skipWebgpu = !useTemporaryFallback;');
-        expect(code).toContain('transientWebgpuFallbackUsed = true;');
-        expect(code).toContain('Temporary WASM fallback complete; retrying WebGPU on next chunk');
+        expect(code).toContain('skipWebgpu = true;');
+        expect(code).not.toContain('transientWebgpuFallbackUsed');
+        expect(code).not.toContain('Temporary WASM fallback complete; retrying WebGPU on next chunk');
     });
 
-    it('resets temporary fallback state on worker reset message', () => {
+    it('suppresses late WebGPU rejections after timeout recovery', () => {
         const code = __getWhisperWorkerCodeForTests();
 
-        expect(code).toContain('if (msg.type === \'reset\')');
-        expect(code).toContain('transientWebgpuFallbackUsed = false;');
+        expect(code).toContain('Ignoring late WebGPU rejection after timeout');
+        expect(code).toContain('timedOut = true;');
+        expect(code).toContain('Promise.race([guarded, timeout])');
     });
 });
