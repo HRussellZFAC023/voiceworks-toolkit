@@ -260,6 +260,8 @@ const FAST_BOOTSTRAP_TIMEOUT_MS = IS_FIREFOX ? 45_000 : 30_000;
 // Safety-net timeout for the first WebGPU inference if warmup was skipped or failed.
 // Firefox wgpu shader compilation can take 60-180s on first run (wgpu#7443).
 const FIRST_GPU_INFERENCE_TIMEOUT_MS = IS_FIREFOX ? 180_000 : 90_000;
+// Warmup can block Firefox startup for too long; rely on first-inference timeout there.
+const ENABLE_SHADER_WARMUP = !IS_FIREFOX;
 const GPU_INFERENCE_ERROR_RE = /createBuffer|RangeError|out of memory|OOM|allocation|device lost|GPUDevice|createComputePipeline|createShaderModule|mapAsync|mapping webgpu buffer|invalid buffer|Instance reference|AbortError|release session|invalid session|index out of bounds|timed out/i;
 function toErrorMessage(error) {
     return error && error.message ? error.message : String(error || 'Unknown error');
@@ -367,11 +369,9 @@ async function ensurePipeline(settings, progressCb) {
                         console.log('[Whisper Worker] Model loaded on webgpu [' + currentDtype + ']:', modelName);
 
                         // Warmup: run a tiny inference to trigger WebGPU shader compilation.
-                        // Firefox wgpu/Naga+DXC compiles shaders ~75x slower than Chrome Dawn/Tint
-                        // (wgpu#7443, Bugzilla#1951219). Without warmup, the first real inference
-                        // hits all shader compilation at once and can take 60-180s, causing timeout.
-                        // After warmup, shaders are cached and inference is fast.
-                        if (!gpuShadersCompiled) {
+                        // Do this on Chromium. On Firefox, skip warmup to avoid blocking startup.
+                        // First real inference already uses an extended timeout window.
+                        if (!gpuShadersCompiled && ENABLE_SHADER_WARMUP) {
                             console.log('[Whisper Worker] Compiling WebGPU shaders (warmup)...');
                             self.postMessage({ status: 'progress', file: 'shader-warmup', progress: 0 });
                             let warmupCompiled = false;
@@ -389,6 +389,8 @@ async function ensurePipeline(settings, progressCb) {
                             } else {
                                 console.warn('[Whisper Worker] Keeping first-run timeout window because warmup did not complete');
                             }
+                        } else if (!gpuShadersCompiled) {
+                            console.log('[Whisper Worker] Skipping warmup on Firefox; using extended first-inference timeout');
                         }
 
                         return pipelinePromise;

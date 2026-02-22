@@ -82,6 +82,8 @@ describe('WhisperWorkerLoader', () => {
     it('keeps first-run timeout window when shader warmup does not complete', () => {
         const code = __getWhisperWorkerCodeForTests();
 
+        expect(code).toContain('ENABLE_SHADER_WARMUP');
+        expect(code).toContain('Skipping warmup on Firefox; using extended first-inference timeout');
         expect(code).toContain('let warmupCompiled = false;');
         expect(code).toContain('if (warmupCompiled)');
         expect(code).toContain('Keeping first-run timeout window because warmup did not complete');
