@@ -30,22 +30,31 @@ let cached: DeviceProfile | null = null;
 
 /**
  * Detect GPU vendor/renderer via WebGL debug info.
- * Firefox hides adapter.info in WebGPU for fingerprinting protection,
- * but WebGL's WEBGL_debug_renderer_info still exposes vendor/renderer.
- * Returns a lowercase string like "nvidia geforce rtx 3080" or "" if unavailable.
+ * Firefox hides adapter.info in WebGPU for fingerprinting protection.
+ * Prefer standard VENDOR/RENDERER first to avoid WEBGL_debug_renderer_info warnings,
+ * then fall back to unmasked values when available.
  */
 function detectGpuVendorViaWebGL(): string {
     try {
         const canvas = document.createElement('canvas');
         const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
         if (!gl || !(gl instanceof WebGLRenderingContext)) return '';
-        const ext = gl.getExtension('WEBGL_debug_renderer_info');
-        if (!ext) return '';
-        const vendor = gl.getParameter(ext.UNMASKED_VENDOR_WEBGL) || '';
-        const renderer = gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) || '';
-        // Clean up context
-        const loseCtx = gl.getExtension('WEBGL_lose_context');
-        loseCtx?.loseContext();
+        const isFirefox = /firefox/i.test(navigator.userAgent || '');
+        const stdVendor = gl.getParameter(gl.VENDOR) || '';
+        const stdRenderer = gl.getParameter(gl.RENDERER) || '';
+
+        let vendor = String(stdVendor || '');
+        let renderer = String(stdRenderer || '');
+
+        // Only probe debug extension outside Firefox to avoid deprecation warnings.
+        if (!isFirefox) {
+            const ext = gl.getExtension('WEBGL_debug_renderer_info');
+            if (ext) {
+                vendor = String(gl.getParameter(ext.UNMASKED_VENDOR_WEBGL) || vendor);
+                renderer = String(gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) || renderer);
+            }
+        }
+
         return [vendor, renderer].filter(Boolean).join(' ').toLowerCase();
     } catch {
         return '';

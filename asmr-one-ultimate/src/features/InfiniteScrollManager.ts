@@ -12,6 +12,7 @@ import { KikoeruBridge } from '../infrastructure/KikoeruBridge';
 import { AppStore } from '../store/AppStore';
 import { Logger } from '../core/Utils';
 import { EventBus } from '../core/EventBus';
+import { escapeHtml } from '../core/DomUtils';
 import type { KikoeruApp } from '../types';
 import { buildInfiniteScrollApiUrl } from './infiniteScrollApiUtils';
 
@@ -715,7 +716,7 @@ export class InfiniteScrollManager {
                 <div>
                     <div class="fit q-card q-card--dark q-dark">
                         <a href="/work/${rjCode}" class="">
-                            <div role="img" aria-label="Cover of ${this.escapeHtml(title)}" class="q-img overflow-hidden q-img--menu" style="max-width: 560px;">
+                            <div role="img" aria-label="Cover of ${escapeHtml(title)}" class="q-img overflow-hidden q-img--menu" style="max-width: 560px;">
                                 <div style="padding-bottom: 75%;"></div>
                                 <div class="q-img__image absolute-full" style="background-size: cover; background-position: 50% 50%; background-image: url('${coverUrl}');">
                                     <img src="${coverUrl}" aria-hidden="true" class="absolute-full fit">
@@ -733,10 +734,10 @@ export class InfiniteScrollManager {
                         <hr class="q-separator q-separator--horizontal q-separator--dark">
                         <div>
                             <div class="q-mx-sm text-h6 text-weight-regular ellipsis-2-lines">
-                                <a href="/work/${rjCode}" style="color: inherit;" title="${this.escapeHtml(title)}">${this.escapeHtml(title)}</a>
+                                <a href="/work/${rjCode}" style="color: inherit;" title="${escapeHtml(title)}">${escapeHtml(title)}</a>
                             </div>
                             <div class="q-ml-sm q-mb-xs text-subtitle1 text-weight-regular">
-                                <div class="text-grey ellipsis">${this.escapeHtml(circle)}</div>
+                                <div class="text-grey ellipsis">${escapeHtml(circle)}</div>
                             </div>
                             <div class="row items-center">
                                 <div class="col-auto q-ml-sm">
@@ -794,12 +795,6 @@ export class InfiniteScrollManager {
             return `${hours}.${Math.round(minutes / 6)}h`;
         }
         return `${minutes}m`;
-    }
-
-    private escapeHtml(str: string): string {
-        const div = document.createElement('div');
-        div.textContent = str;
-        return div.innerHTML;
     }
 
     private showLoadingIndicator(): void {

@@ -48,7 +48,7 @@ describe('LearnerMode', () => {
         document.body.innerHTML = '';
     });
 
-    it('updates expanded subtitles with blurred EN by default', async () => {
+    it('updates expanded subtitles with blurred EN by default', () => {
         const learner = new LearnerMode();
 
         const player = document.createElement('div');
@@ -62,7 +62,9 @@ describe('LearnerMode', () => {
         (learner as any).injectExpanded(player);
         (learner as any).injectCollapsedControls(bar);
 
-        await (learner as any).displaySubtitle('hello');
+        (learner as any).updatePrimaryLine('hello');
+        (learner as any).updateSecondaryLine('hello-en', false);
+        (learner as any).updateVisibility();
 
         const jpTexts = Array.from(document.querySelectorAll('.learner-jp')).map(el => el.textContent);
         const enEls = Array.from(document.querySelectorAll('.learner-en')) as HTMLElement[];

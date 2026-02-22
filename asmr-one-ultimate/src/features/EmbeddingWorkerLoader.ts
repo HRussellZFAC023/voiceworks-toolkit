@@ -5,6 +5,8 @@
  * Supports WebGPU and WASM backends. Returns normalized 384-dim vectors.
  */
 
+import { createInlineWorker } from './workerLoaderShared';
+
 function getWorkerCode(): string {
     return `
 let gpuDeviceLost = false;
@@ -35,14 +37,14 @@ let pipeline;
 let env;
 
 const TRANSFORMER_URLS = [
-    'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.1',
-    'https://esm.sh/@huggingface/transformers@3.8.1',
-    'https://unpkg.com/@huggingface/transformers@3.8.1?module',
+    'https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.0.0-next.4',
+    'https://esm.sh/@huggingface/transformers@4.0.0-next.4',
+
 ];
 
 const HUB_BASE_URLS = [
-    'https://hf-mirror.com',
     'https://huggingface.co',
+    'https://hf-mirror.com',
 ];
 
 let transformersLoaded = false;
@@ -324,9 +326,7 @@ async function _loadPipeline(modelName, _cascadeDepth) {
     for (const dtype of dtypeCandidates) {
         for (let hubIdx = 0; hubIdx < HUB_BASE_URLS.length; hubIdx++) {
             const hubUrl = HUB_BASE_URLS[hubIdx];
-            env.hub = env.hub || {};
-            env.hub.baseUrl = hubUrl;
-            env.hub.allowRemoteModels = true;
+            env.remoteHost = hubUrl.endsWith('/') ? hubUrl : hubUrl + '/';
 
             try {
                 const isFirefoxFp16Probe = isFirefox && currentBackend === 'webgpu' && dtype === 'fp16' && firefoxFp16ProbeState !== 'failed';
@@ -584,8 +584,5 @@ self.addEventListener('message', async (event) => {
 }
 
 export function createEmbeddingWorker(): Worker {
-    const workerCode = getWorkerCode();
-    const blob = new Blob([workerCode], { type: 'application/javascript' });
-    const blobUrl = URL.createObjectURL(blob);
-    return new Worker(blobUrl, { type: 'module' });
+    return createInlineWorker(getWorkerCode());
 }

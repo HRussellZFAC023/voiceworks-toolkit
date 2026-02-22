@@ -9,6 +9,7 @@
  */
 
 import type { JPDBToken, JPDBRuby } from '../types/jpdb';
+import { escapeHtml } from '../core/DomUtils';
 
 // ============================================================================
 // Types
@@ -256,6 +257,3 @@ export function segmentsToHtml(segments: FuriganaSegment[]): string {
     }).join('');
 }
 
-function escapeHtml(str: string): string {
-    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-}

@@ -10,13 +10,8 @@ import { I18n } from '../core/Config';
 import { MediaViewer } from './MediaViewer';
 import { EventBus } from '../core/EventBus';
 import { AppStore } from '../store/AppStore';
-import { isChinese } from '../core/DomUtils';
+import { escapeHtml, isChinese } from '../core/DomUtils';
 import { extractEmbeddedRjCode, extractPrimaryRjCode } from './rjCodeUtils';
-
-/** Escape HTML special characters to prevent XSS */
-function escapeHtml(s: string): string {
-    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-}
 
 export class WorkMetadata {
     private bridge: KikoeruBridge;

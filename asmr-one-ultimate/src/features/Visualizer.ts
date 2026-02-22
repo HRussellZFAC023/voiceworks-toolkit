@@ -9,8 +9,8 @@
 import { Logger, I18n } from '../core/Utils';
 import { EventBus } from '../core/EventBus';
 import { CentralObserver } from '../core/CentralObserver';
-import { getAudioElement } from '../core/DomUtils';
-import { getOrCreateSourceNode } from '../core/AudioAnalysis';
+import { calculateBottomOffset, getAudioElement, syncOverflowButtonState } from '../core/DomUtils';
+import { connectAudioAnalyser as connectSharedAudioAnalyser } from '../core/AudioAnalysis';
 import { AppStore } from '../store/AppStore';
 
 // ============================================================================
@@ -171,38 +171,26 @@ export class Visualizer {
     // ------------------------------------------------------------------------
 
     private connectAudioAnalyser(): void {
-        const audio = getAudioElement();
-        if (!audio) {
-            Logger.debug('[Visualizer] No audio element found');
+        const currentAudio = getAudioElement();
+        if (currentAudio && this.connectedAudioEl === currentAudio && this.analyser) return;
+
+        const connected = connectSharedAudioAnalyser({
+            fftSize: 256,
+            smoothingTimeConstant: 0.7,
+            tag: 'Visualizer',
+            requireValidSource: false,
+        });
+        if (!connected) {
             this.analyserAvailable = false;
             return;
         }
 
-        if (this.connectedAudioEl === audio && this.analyser) return;
-
-        const result = getOrCreateSourceNode(audio);
-        if (!result) {
-            Logger.debug('[Visualizer] Audio analyser failed (cross-origin?)');
-            this.analyserAvailable = false;
-            return;
-        }
-
-        try {
-            this.audioCtx = result.ctx;
-            this.sourceNode = result.source;
-
-            this.analyser = this.audioCtx.createAnalyser();
-            this.analyser.fftSize = 256;
-            this.analyser.smoothingTimeConstant = 0.7;
-            this.sourceNode.connect(this.analyser);
-
-            this.connectedAudioEl = audio;
-            this.analyserAvailable = true;
-            Logger.debug('[Visualizer] Audio analyser connected');
-        } catch (err) {
-            Logger.debug('[Visualizer] Audio analyser failed:', err);
-            this.analyserAvailable = false;
-        }
+        this.audioCtx = connected.ctx;
+        this.sourceNode = connected.source;
+        this.analyser = connected.analyser;
+        this.connectedAudioEl = connected.audio;
+        this.analyserAvailable = true;
+        Logger.debug('[Visualizer] Audio analyser connected');
     }
 
     // ------------------------------------------------------------------------
@@ -361,22 +349,7 @@ export class Visualizer {
         if (isPlayerMinimized) {
             this.barEl.style.display = '';
 
-            const playerBar = document.querySelector('.q-footer, .player-bar-container') as HTMLElement | null;
-            const subsBar = document.querySelector('body > .learner-subs-collapsed') as HTMLElement | null;
-            const joiBar = document.querySelector('body > .asmr-joi-bar-collapsed') as HTMLElement | null;
-
-            let bottomOffset = playerBar?.offsetHeight || 60;
-
-            // Stack above collapsed subs if visible
-            if (subsBar && subsBar.style.display !== 'none' && !subsBar.classList.contains('hidden') && subsBar.offsetHeight > 0) {
-                bottomOffset += subsBar.offsetHeight;
-            }
-
-            // Stack above JOI bar if visible
-            if (joiBar && joiBar.style.display !== 'none' && !joiBar.classList.contains('hidden') && joiBar.offsetHeight > 0) {
-                bottomOffset += joiBar.offsetHeight;
-            }
-
+            const bottomOffset = calculateBottomOffset({ includeVizBar: false });
             this.barEl.style.bottom = `${bottomOffset}px`;
 
             if (this.expandedBarEl?.isConnected) {
@@ -421,14 +394,7 @@ export class Visualizer {
     // ------------------------------------------------------------------------
 
     private syncOverflowButton(active: boolean): void {
-        const btns = document.querySelectorAll('.asmr-viz-btn');
-        btns.forEach(btn => {
-            const icon = btn.querySelector('.material-icons');
-            if (icon) {
-                icon.classList.toggle('asmr-accent', active);
-            }
-            btn.classList.toggle('learner-btn-active', active);
-        });
+        syncOverflowButtonState('.asmr-viz-btn', active);
     }
 
     // ------------------------------------------------------------------------

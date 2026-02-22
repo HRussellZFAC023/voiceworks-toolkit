@@ -106,6 +106,7 @@ describe('Whisper', () => {
             expect(settings.pollIntervalMs).toBe(325);
             expect(settings.workerUpdateIntervalMs).toBe(260);
             expect(settings.preferLowPowerAdapter).toBe(false);
+            // shouldWarmup is mocked false, so autoWarmup is false
             expect(settings.autoWarmup).toBe(false);
             expect(settings.idleUnloadMs).toBe(5 * 60 * 1000);
             expect(settings.minWebgpuBufferBytes).toBe(384 * 1024 * 1024);
@@ -525,6 +526,18 @@ describe('Whisper', () => {
             minWebgpuBufferBytes: 256 * 1024 * 1024,
         };
 
+        it('scales chunk stall timeout based on chunk length', () => {
+            const whisper = new Whisper();
+
+            // v149: getChunkStallTimeoutMs(settings) uses chunkLengthS * 1000 * 3
+            // with floor of CHUNK_STALL_TIMEOUT_FLOOR_MS (25_000)
+            const timeout = (whisper as any).getChunkStallTimeoutMs(settings);
+
+            // 29s * 1000 * 3 = 87_000, floor = 25_000 → 87_000
+            expect(timeout).toBeGreaterThanOrEqual(25_000);
+            expect(timeout).toBe(87_000);
+        });
+
         it('detects stalled in-flight chunks and triggers recovery', () => {
             const whisper = new Whisper();
             const recoverSpy = vi.spyOn(whisper as any, 'recoverFromStalledChunks').mockImplementation(() => {});
@@ -574,6 +587,15 @@ describe('Whisper', () => {
             expect((whisper as any).modelReady).toBe(false);
         });
 
+        it('clears modelReady on reset', () => {
+            const whisper = new Whisper();
+
+            (whisper as any).modelReady = true;
+            (whisper as any).resetWorker('test-reset');
+
+            expect((whisper as any).modelReady).toBe(false);
+        });
+
         it('limits startup to one in-flight chunk until first worker activity', () => {
             const whisper = new Whisper();
             const sendSpy = vi.spyOn(whisper as any, 'sendChunk').mockImplementation(() => {});
@@ -606,6 +628,29 @@ describe('Whisper', () => {
             (whisper as any).transcribing = true;
             (whisper as any).modelReady = true;
             (whisper as any).hasWorkerChunkActivity = false;
+            (whisper as any).pendingChunks = 0;
+            (whisper as any).pcmBuffer = new Float32Array(16_000 * 120);
+            (whisper as any).pcmDuration = 120;
+            (whisper as any).transcribedUpTo = 0;
+
+            (whisper as any).maybeProcessNextChunk();
+
+            expect(sendSpy).toHaveBeenCalledTimes(1);
+            expect(sendSpy.mock.calls[0]?.[4]).toBe(6);
+        });
+
+        it('uses the same bootstrap chunk size on WebGPU', () => {
+            const whisper = new Whisper();
+            const sendSpy = vi.spyOn(whisper as any, 'sendChunk').mockImplementation(() => {});
+            vi.spyOn((whisper as any).bridge, 'currentTrack', 'get').mockReturnValue(null);
+
+            const audio = document.createElement('audio');
+            audio.currentTime = 0;
+            (whisper as any).audio = audio;
+            (whisper as any).transcribing = true;
+            (whisper as any).modelReady = true;
+            (whisper as any).hasWorkerChunkActivity = false;
+            (whisper as any).workerBackend = 'webgpu';
             (whisper as any).pendingChunks = 0;
             (whisper as any).pcmBuffer = new Float32Array(16_000 * 120);
             (whisper as any).pcmDuration = 120;

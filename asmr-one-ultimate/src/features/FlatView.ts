@@ -11,7 +11,7 @@ import { Logger } from '../core/Logger';
 import { CentralObserver } from '../core/CentralObserver';
 import { TIMING } from '../core/Constants';
 import { EventBus } from '../core/EventBus';
-import { isDarkMode } from '../core/DomUtils';
+import { calculateBottomOffset, escapeHtml, isDarkMode } from '../core/DomUtils';
 import type { TrackFolder, TrackItem, TracksResponse } from '../types/api';
 import { WorkService } from '../services/WorkService';
 import { I18n } from '../core/Utils';
@@ -372,8 +372,8 @@ export class FlatView {
                     ${icon}
                 </div>
                 <div class="q-item__section column q-item__section--main justify-center">
-                    <div class="q-item__label" style="overflow-wrap: break-word;">${this.escapeHtml(item.title)}</div>
-                    ${item.folderPath ? `<div class="q-item__label q-item__label--caption text-caption ellipsis">${this.escapeHtml(item.folderPath)}</div>` : ''}
+                    <div class="q-item__label" style="overflow-wrap: break-word;">${escapeHtml(item.title)}</div>
+                    ${item.folderPath ? `<div class="q-item__label q-item__label--caption text-caption ellipsis">${escapeHtml(item.folderPath)}</div>` : ''}
                 </div>
             </div>`;
         }).join('\n');
@@ -474,7 +474,7 @@ export class FlatView {
             case 'image': {
                 const streamUrl = item.mediaStreamUrl || `/api/media/stream/${item.hash}`;
                 const thumbUrl = `${streamUrl}${streamUrl.includes('?') ? '&' : '?'}token=${token}`;
-                return `<img src="${this.escapeHtml(thumbUrl)}" alt="${this.escapeHtml(item.title)}"
+                return `<img src="${escapeHtml(thumbUrl)}" alt="${escapeHtml(item.title)}"
                     width="40" height="40" class="asmr-flat-thumb" loading="lazy"
                     onerror="this.outerHTML='<i aria-hidden=\\'true\\' class=\\'q-icon notranslate material-icons\\' style=\\'font-size:34px;color:#ff9800\\'>photo</i>'" />`;
             }
@@ -681,29 +681,10 @@ export class FlatView {
      *  The flat panel always sits at the far right edge.
      *  When an expanded miniplayer is present, it gets pushed left by the panel width. */
     private syncBottomOffset(): void {
-        const playerBar = document.querySelector('.q-footer, .player-bar-container') as HTMLElement | null;
         const expandedPlayer = document.querySelector('.audio-player.fixed-bottom-right') as HTMLElement | null;
 
         // Player bar at the bottom — always respect its height
-        let bottomOffset = playerBar ? playerBar.offsetHeight : 0;
-
-        // Stack above collapsed subs bar if visible
-        const subsBar = document.querySelector('body > .learner-subs-collapsed') as HTMLElement | null;
-        if (subsBar && subsBar.style.display !== 'none' && !subsBar.classList.contains('hidden') && subsBar.offsetHeight > 0) {
-            bottomOffset += subsBar.offsetHeight;
-        }
-
-        // Stack above JOI bar if visible
-        const joiBar = document.querySelector('body > .asmr-joi-bar-collapsed') as HTMLElement | null;
-        if (joiBar && joiBar.style.display !== 'none' && !joiBar.classList.contains('hidden') && joiBar.offsetHeight > 0) {
-            bottomOffset += joiBar.offsetHeight;
-        }
-
-        // Stack above visualizer bar if visible
-        const vizBar = document.querySelector('body > .asmr-viz-bar') as HTMLElement | null;
-        if (vizBar && !vizBar.classList.contains('hidden') && vizBar.offsetHeight > 0) {
-            bottomOffset += vizBar.offsetHeight;
-        }
+        const bottomOffset = calculateBottomOffset({ playerFallbackPx: 0 });
 
         // Flat panel always stays at the right edge
         document.documentElement.style.setProperty('--asmr-flat-panel-right', '0px');
@@ -746,9 +727,4 @@ export class FlatView {
         document.documentElement.style.setProperty('--asmr-flat-panel-top', `${top}px`);
     }
 
-    private escapeHtml(str: string): string {
-        const div = document.createElement('div');
-        div.textContent = str;
-        return div.innerHTML;
-    }
 }

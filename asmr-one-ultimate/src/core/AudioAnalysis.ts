@@ -20,6 +20,7 @@
 
 import { Logger } from './Utils';
 import { DeviceCapabilities } from './DeviceCapabilities';
+import { getAudioElement, hasValidAudioSource } from './DomUtils';
 
 const sourceNodes = new WeakMap<HTMLMediaElement, MediaElementAudioSourceNode>();
 const contexts = new WeakMap<HTMLMediaElement, AudioContext>();
@@ -79,5 +80,48 @@ export function resumeAudioContext(audio: HTMLAudioElement): void {
     if (ctx && ctx.state === 'suspended') {
         ctx.resume().catch(() => {});
         Logger.debug('[AudioAnalysis] Resumed AudioContext after visibility change');
+    }
+}
+
+export interface AudioAnalyserOptions {
+    fftSize: number;
+    smoothingTimeConstant: number;
+    tag: string;
+    requireValidSource?: boolean;
+}
+
+export interface ConnectedAudioAnalyser {
+    audio: HTMLAudioElement;
+    ctx: AudioContext;
+    source: MediaElementAudioSourceNode;
+    analyser: AnalyserNode;
+}
+
+/**
+ * Build and connect an AnalyserNode to the shared source node for the current
+ * page audio element. Returns null when unavailable.
+ */
+export function connectAudioAnalyser(options: AudioAnalyserOptions): ConnectedAudioAnalyser | null {
+    const audio = getAudioElement();
+    if (!audio || (options.requireValidSource && !hasValidAudioSource(audio))) {
+        Logger.debug(`[${options.tag}] No valid audio source found`);
+        return null;
+    }
+
+    const result = getOrCreateSourceNode(audio);
+    if (!result) {
+        Logger.debug(`[${options.tag}] Audio analyser failed (cross-origin?)`);
+        return null;
+    }
+
+    try {
+        const analyser = result.ctx.createAnalyser();
+        analyser.fftSize = options.fftSize;
+        analyser.smoothingTimeConstant = options.smoothingTimeConstant;
+        result.source.connect(analyser);
+        return { audio, ctx: result.ctx, source: result.source, analyser };
+    } catch (err) {
+        Logger.debug(`[${options.tag}] Audio analyser failed:`, err);
+        return null;
     }
 }

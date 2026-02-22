@@ -120,7 +120,7 @@ export function computeWordKaraokeIndices(
             // currently spoken character position.
             const duration = Math.max(0.001, e.wordEnd - e.wordStart);
             const progress = Math.max(0, Math.min(1, (now - e.wordStart) / duration));
-            const filled = Math.max(1, Math.min(e.charCount, Math.ceil(progress * e.charCount)));
+            const filled = Math.max(1, Math.min(e.charCount, Math.round(progress * e.charCount)));
             return {
                 splitIdx: e.charStart + filled,
                 hlStart: e.charStart,

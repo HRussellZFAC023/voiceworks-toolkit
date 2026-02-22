@@ -251,7 +251,6 @@ const DEFAULT_APP_STATE: AppState = {
 class AppStoreImpl {
     private _state: AppState = { ...DEFAULT_APP_STATE };
     private _hostStore: KikoeruStore | null = null;
-    private _stateListeners: Set<(state: AppState) => void> = new Set();
 
     constructor() {
         this.migrateSplitModeSettings();
@@ -351,7 +350,6 @@ class AppStoreImpl {
     setState(updater: Partial<AppState> | ((state: AppState) => Partial<AppState>)): void {
         const updates = typeof updater === 'function' ? updater(this._state) : updater;
         this._state = { ...this._state, ...updates };
-        this.notifyStateListeners();
     }
 
     /**
@@ -362,7 +360,6 @@ class AppStoreImpl {
             ...this._state,
             radio: { ...this._state.radio, ...updates },
         };
-        this.notifyStateListeners();
 
         // Emit event if active state changed
         if ('isActive' in updates) {
@@ -386,7 +383,6 @@ class AppStoreImpl {
             ...this._state,
             learner: { ...this._state.learner, ...updates },
         };
-        this.notifyStateListeners();
     }
 
     /**
@@ -397,7 +393,6 @@ class AppStoreImpl {
             ...this._state,
             whisper: { ...this._state.whisper, ...updates },
         };
-        this.notifyStateListeners();
     }
 
     /**
@@ -408,7 +403,6 @@ class AppStoreImpl {
             ...this._state,
             search: { ...this._state.search, ...updates },
         };
-        this.notifyStateListeners();
     }
 
     // =========================================================================
@@ -482,19 +476,6 @@ class AppStoreImpl {
         this._hostStore.commit(mutation, payload);
     }
 
-    // =========================================================================
-    // Private Methods
-    // =========================================================================
-
-    private notifyStateListeners(): void {
-        for (const listener of this._stateListeners) {
-            try {
-                listener(this._state);
-            } catch (error) {
-                console.error('[AppStore] Error in state listener:', error);
-            }
-        }
-    }
 }
 
 // Export singleton instance (persisted across script re-injections)

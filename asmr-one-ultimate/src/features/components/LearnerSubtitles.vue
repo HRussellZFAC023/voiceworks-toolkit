@@ -19,7 +19,7 @@ import { useI18n } from '../../composables/useI18n';
 import { TranslationService } from '../../services/TranslationService';
 import { AppStore } from '../../store/AppStore';
 import { AudioCache } from '../../infrastructure/AudioCache';
-import { getAudioElement, getPlayerBar } from '../../core/DomUtils';
+import { getAudioElement, getPlayerBar, isChinese } from '../../core/DomUtils';
 import { Logger, Config } from '../../core/Utils';
 import type { WhisperUpdatePayload, JPDBToken, AudioPlayerState, KikoeruStoreState, KikoeruApp, VueRoute, PlayerTrack, AvailableLyric } from '../../types';
 import { buildSegments, sliceSegments, type FuriganaSegment } from '../../lib/jpdb-segments';
@@ -29,6 +29,7 @@ import {
     buildKaraokeCharMap, computeWordKaraokeIndices, computeTimeFallbackKaraokeIndices,
     type KaraokeCharMap, type KaraokeWord,
 } from '../karaokeUtils';
+import SubtitleContent from './SubtitleContent.vue';
 
 // ---------------------------------------------------------------------------
 // Composables
@@ -239,8 +240,16 @@ const overflowToggleRef = ref<HTMLElement | null>(null);
 // Helpers
 // ---------------------------------------------------------------------------
 
-function isChinese(text: string): boolean {
-    return /[\u4e00-\u9fff]/.test(text) && !/[\u3040-\u309f\u30a0-\u30ff]/.test(text);
+function resetDedupState(options: { includeWhisperDisplay?: boolean; bumpTranslationToken?: boolean } = {}) {
+    lastText = '';
+    lastDisplayedText = '';
+    lastSecondaryShown = '';
+    if (options.includeWhisperDisplay) {
+        lastWhisperDisplayText = '';
+    }
+    if (options.bumpTranslationToken) {
+        translationToken += 1;
+    }
 }
 
 // Karaoke rAF state — cached per active line for smooth 60fps updates
@@ -532,11 +541,7 @@ function handleAudioSeeking() {
     // Reset dedup state and defer subtitle update to next frame so audio.currentTime
     // has synchronized with the seek target. During rapid scrubbing, the seeking event
     // fires before currentTime is fully updated, causing subtitles to lag behind.
-    lastText = '';
-    lastDisplayedText = '';
-    lastSecondaryShown = '';
-    lastWhisperDisplayText = '';
-    translationToken += 1;
+    resetDedupState({ includeWhisperDisplay: true, bumpTranslationToken: true });
     resetRealtimeQueues();
 
     // Defer to next frame when currentTime will have synchronized
@@ -555,11 +560,7 @@ function handleAudioSeeked() {
 
     // Final refresh after the user releases the scrubber.
     // Reset dedup again in case seeking handler's update was stale.
-    lastText = '';
-    lastDisplayedText = '';
-    lastSecondaryShown = '';
-    lastWhisperDisplayText = '';
-    translationToken += 1;
+    resetDedupState({ includeWhisperDisplay: true, bumpTranslationToken: true });
     resetRealtimeQueues();
     if (seekedDebounceTimer) clearTimeout(seekedDebounceTimer);
     seekedDebounceTimer = window.setTimeout(() => {
@@ -946,7 +947,7 @@ function updateLyrics() {
     const trackKey = getTrackKey();
     if (trackKey && trackKey !== lastTrackKey) {
         lastTrackKey = trackKey;
-        lastText = '';
+        resetDedupState({ includeWhisperDisplay: true, bumpTranslationToken: true });
         currentLyrics = [];
         whisperLines = [];
         whisperText = '';
@@ -954,11 +955,9 @@ function updateLyrics() {
         whisperFromCache = false;
         whisperLive = false;
         whisperLeadSec = 0;
-        lastWhisperDisplayText = '';
         clearWhisperTicker();
         resetLearnerTranslationQueues();
         clearDisplay();
-        translationToken += 1;
     }
 
     const useWhisper = whisperActive;
@@ -1140,7 +1139,10 @@ function _updateWhisperDisplay() {
             updateSecondaryLine(cachedSecondary, false);
             lastSecondaryShown = cachedSecondary;
         }
-        if (display.displayText && display.displayText !== lastWhisperDisplayText) {
+        // In karaoke mode, dedup against fullText (not progressive displayText) so
+        // the rAF 60fps path can take over once the segment is established.
+        const karaokeDedup = karaokeMode.value ? (fullText || display.displayText) : display.displayText;
+        if (display.displayText && karaokeDedup !== lastWhisperDisplayText) {
             const cn = isChinese(display.displayText);
             let prim = display.displayText;
             let splitIdx = -1;
@@ -1174,11 +1176,11 @@ function _updateWhisperDisplay() {
                 }
             }
             updatePrimaryLine(prim, splitIdx, hlStart);
-            lastWhisperDisplayText = prim;
+            lastWhisperDisplayText = karaokeMode.value ? (fullText || prim) : prim;
         } else if (display.displayText && karaokeMode.value) {
-            // Karaoke: text unchanged — rAF handles smooth inter-frame updates.
-            // Safety fallback: recompute if rAF isn't running (e.g. tab was hidden).
-            if (!karaokeRafId && display.activeLine) {
+            // Karaoke: same segment — rAF handles smooth 60fps inter-frame updates.
+            // Also recompute on every tick for responsive scrubbing (even while paused).
+            if (display.activeLine) {
                 const ft = display.fullText || display.displayText;
                 const karaokeTime = display.audioTime ?? display.now;
                 if (karaokeTime != null) {
@@ -1190,6 +1192,8 @@ function _updateWhisperDisplay() {
                     const newHl = segmentMode.value ? 0 : indices.hlStart;
                     if (newSplit !== karaokeSplitIndex.value) karaokeSplitIndex.value = newSplit;
                     if (newHl !== karaokeHighlightStart.value) karaokeHighlightStart.value = newHl;
+                    // Ensure rAF is running for smooth playback updates
+                    startKaraokeRaf();
                 }
             }
         } else if (!display.displayText) {
@@ -1305,11 +1309,9 @@ function handleWhisperClear() {
     whisperFromCache = false;
     whisperLive = false;
     whisperLeadSec = 0;
-    lastWhisperDisplayText = '';
+    resetDedupState({ includeWhisperDisplay: true });
     clearWhisperTicker();
     resetLearnerTranslationQueues();
-    lastText = '';
-    lastDisplayedText = '';
     clearDisplay();
     refreshVisibility();
 }
@@ -1336,19 +1338,15 @@ function onTrackOrWorkChange() {
     // Reset blur to default from settings
     isBlurred.value = !!learnerBlur.value;
 
-    lastText = '';
-    lastDisplayedText = '';
-    lastSecondaryShown = '';
+    resetDedupState({ includeWhisperDisplay: true, bumpTranslationToken: true });
     currentLyrics = [];
     whisperLines = [];
     whisperText = '';
     whisperActive = false;
     whisperFromCache = false;
     whisperLeadSec = 0;
-    lastWhisperDisplayText = '';
     clearWhisperTicker();
     resetLearnerTranslationQueues();
-    translationToken += 1;
     lastPreTranslatedKey = null;
     lastLrcTrackHash = null;
     lrcFetchAttemptedHashes.clear();
@@ -1402,11 +1400,7 @@ function seek(offset: number) {
         if (audio.paused) audio.play().catch(err => Logger.warn('[LearnerMode] Audio play after seek failed:', err));
         // Immediately pre-populate display so the user doesn't see a blank flash.
         // Reset dedup state so updateLyrics() will process the new position.
-        lastText = '';
-        lastDisplayedText = '';
-        lastSecondaryShown = '';
-        lastWhisperDisplayText = '';
-        translationToken += 1;
+        resetDedupState({ includeWhisperDisplay: true, bumpTranslationToken: true });
         resetRealtimeQueues();
         updateLyrics();
     }
@@ -1962,7 +1956,7 @@ onMounted(() => {
     const app = bridge.app as KikoeruApp | undefined;
     if (app?.$watch) {
         app.$watch('$route', (to: VueRoute) => {
-            lastText = '';
+            resetDedupState();
             currentLyrics = [];
             whisperLines = [];
             whisperText = '';
@@ -2022,12 +2016,11 @@ onMounted(() => {
     // Bind audio
     bindAudioTimeUpdate();
 
-    // Initial LRC fetch
-    setTimeout(() => {
-        if (bridge.currentTrack) {
-            fetchLrcForCurrentTrack().catch(err => Logger.error('[LearnerMode] Initial LRC fetch failed:', err));
-        }
-    }, 500);
+    // Initial LRC fetch — immediate if track is already known, otherwise store
+    // watchers (100ms/200ms delays) handle the case where the track appears later.
+    if (bridge.currentTrack) {
+        fetchLrcForCurrentTrack().catch(err => Logger.error('[LearnerMode] Initial LRC fetch failed:', err));
+    }
 
     // Outside-click listener for overflow
     document.addEventListener('click', closeOverflowOnOutsideClick, true);
@@ -2083,20 +2076,20 @@ watch(primaryText, (val) => {
         aria-live="polite"
     >
         <div v-show="showJP" class="learner-jp" :class="{ 'segment-fade': segmentFading }" @animationend="segmentFading = false" lang="ja" role="status">
-            <!-- Karaoke with JPDB furigana -->
-            <template v-if="karaokeHighlightStart >= 0 && karaokeSplitIndex >= 0 && jpdbEnabled">
-                <span class="karaoke-past"><template v-for="(seg, i) in furiganaPast" :key="'p'+i"><span v-if="seg.vid !== undefined" class="jpdb-word" :class="[seg.stateClass, seg.pitchClass]" :data-vid="seg.vid" :data-sid="seg.sid" data-jpdb="true"><ruby v-if="seg.rt">{{ seg.base }}<rt class="jpdb-furi">{{ seg.rt }}</rt></ruby><template v-else>{{ seg.base }}</template></span><template v-else>{{ seg.base }}</template></template></span><span class="karaoke-spoken"><template v-for="(seg, i) in furiganaCurrent" :key="'c'+i"><span v-if="seg.vid !== undefined" class="jpdb-word" :class="[seg.stateClass, seg.pitchClass]" :data-vid="seg.vid" :data-sid="seg.sid" data-jpdb="true"><ruby v-if="seg.rt">{{ seg.base }}<rt class="jpdb-furi">{{ seg.rt }}</rt></ruby><template v-else>{{ seg.base }}</template></span><template v-else>{{ seg.base }}</template></template></span><span class="karaoke-upcoming" :class="{ 'karaoke-hidden': !segmentMode }"><template v-for="(seg, i) in furiganaUpcoming" :key="'u'+i"><span v-if="seg.vid !== undefined" class="jpdb-word" :class="[seg.stateClass, seg.pitchClass]" :data-vid="seg.vid" :data-sid="seg.sid" data-jpdb="true"><ruby v-if="seg.rt">{{ seg.base }}<rt class="jpdb-furi">{{ seg.rt }}</rt></ruby><template v-else>{{ seg.base }}</template></span><template v-else>{{ seg.base }}</template></template></span>
-            </template>
-            <!-- Non-karaoke with JPDB furigana -->
-            <template v-else-if="jpdbEnabled && furiganaAll.length > 0">
-                <template v-for="(seg, i) in furiganaAll" :key="'a'+i"><span v-if="seg.vid !== undefined" class="jpdb-word" :class="[seg.stateClass, seg.pitchClass]" :data-vid="seg.vid" :data-sid="seg.sid" data-jpdb="true"><ruby v-if="seg.rt">{{ seg.base }}<rt class="jpdb-furi">{{ seg.rt }}</rt></ruby><template v-else>{{ seg.base }}</template></span><template v-else>{{ seg.base }}</template></template>
-            </template>
-            <!-- Plain karaoke (no JPDB) -->
-            <template v-else-if="karaokeHighlightStart >= 0 && karaokeSplitIndex >= 0">
-                <span class="karaoke-past">{{ karaokePast }}</span><span class="karaoke-spoken">{{ karaokeCurrent }}</span><span class="karaoke-upcoming" :class="{ 'karaoke-hidden': !segmentMode }">{{ karaokeUpcoming }}</span>
-            </template>
-            <!-- Plain text -->
-            <template v-else>{{ primaryText }}</template>
+            <SubtitleContent
+                :karaoke-highlight-start="karaokeHighlightStart"
+                :karaoke-split-index="karaokeSplitIndex"
+                :jpdb-enabled="jpdbEnabled"
+                :segment-mode="segmentMode"
+                :primary-text="primaryText"
+                :karaoke-past="karaokePast"
+                :karaoke-current="karaokeCurrent"
+                :karaoke-upcoming="karaokeUpcoming"
+                :furigana-past="furiganaPast"
+                :furigana-current="furiganaCurrent"
+                :furigana-upcoming="furiganaUpcoming"
+                :furigana-all="furiganaAll"
+            />
         </div>
         <button
             v-show="enablePlayerTranslator"
@@ -2118,20 +2111,20 @@ watch(primaryText, (val) => {
             aria-live="polite"
         >
             <div v-show="showJP" class="learner-jp" :class="{ 'segment-fade': segmentFading }" @animationend="segmentFading = false" lang="ja" role="status">
-                <!-- Karaoke with JPDB furigana -->
-                <template v-if="karaokeHighlightStart >= 0 && karaokeSplitIndex >= 0 && jpdbEnabled">
-                    <span class="karaoke-past"><template v-for="(seg, i) in furiganaPast" :key="'p'+i"><span v-if="seg.vid !== undefined" class="jpdb-word" :class="[seg.stateClass, seg.pitchClass]" :data-vid="seg.vid" :data-sid="seg.sid" data-jpdb="true"><ruby v-if="seg.rt">{{ seg.base }}<rt class="jpdb-furi">{{ seg.rt }}</rt></ruby><template v-else>{{ seg.base }}</template></span><template v-else>{{ seg.base }}</template></template></span><span class="karaoke-spoken"><template v-for="(seg, i) in furiganaCurrent" :key="'c'+i"><span v-if="seg.vid !== undefined" class="jpdb-word" :class="[seg.stateClass, seg.pitchClass]" :data-vid="seg.vid" :data-sid="seg.sid" data-jpdb="true"><ruby v-if="seg.rt">{{ seg.base }}<rt class="jpdb-furi">{{ seg.rt }}</rt></ruby><template v-else>{{ seg.base }}</template></span><template v-else>{{ seg.base }}</template></template></span><span class="karaoke-upcoming" :class="{ 'karaoke-hidden': !segmentMode }"><template v-for="(seg, i) in furiganaUpcoming" :key="'u'+i"><span v-if="seg.vid !== undefined" class="jpdb-word" :class="[seg.stateClass, seg.pitchClass]" :data-vid="seg.vid" :data-sid="seg.sid" data-jpdb="true"><ruby v-if="seg.rt">{{ seg.base }}<rt class="jpdb-furi">{{ seg.rt }}</rt></ruby><template v-else>{{ seg.base }}</template></span><template v-else>{{ seg.base }}</template></template></span>
-                </template>
-                <!-- Non-karaoke with JPDB furigana -->
-                <template v-else-if="jpdbEnabled && furiganaAll.length > 0">
-                    <template v-for="(seg, i) in furiganaAll" :key="'a'+i"><span v-if="seg.vid !== undefined" class="jpdb-word" :class="[seg.stateClass, seg.pitchClass]" :data-vid="seg.vid" :data-sid="seg.sid" data-jpdb="true"><ruby v-if="seg.rt">{{ seg.base }}<rt class="jpdb-furi">{{ seg.rt }}</rt></ruby><template v-else>{{ seg.base }}</template></span><template v-else>{{ seg.base }}</template></template>
-                </template>
-                <!-- Plain karaoke (no JPDB) -->
-                <template v-else-if="karaokeHighlightStart >= 0 && karaokeSplitIndex >= 0">
-                    <span class="karaoke-past">{{ karaokePast }}</span><span class="karaoke-spoken">{{ karaokeCurrent }}</span><span class="karaoke-upcoming" :class="{ 'karaoke-hidden': !segmentMode }">{{ karaokeUpcoming }}</span>
-                </template>
-                <!-- Plain text -->
-                <template v-else>{{ primaryText }}</template>
+                <SubtitleContent
+                    :karaoke-highlight-start="karaokeHighlightStart"
+                    :karaoke-split-index="karaokeSplitIndex"
+                    :jpdb-enabled="jpdbEnabled"
+                    :segment-mode="segmentMode"
+                    :primary-text="primaryText"
+                    :karaoke-past="karaokePast"
+                    :karaoke-current="karaokeCurrent"
+                    :karaoke-upcoming="karaokeUpcoming"
+                    :furigana-past="furiganaPast"
+                    :furigana-current="furiganaCurrent"
+                    :furigana-upcoming="furiganaUpcoming"
+                    :furigana-all="furiganaAll"
+                />
             </div>
             <button
                 v-show="enablePlayerTranslator"

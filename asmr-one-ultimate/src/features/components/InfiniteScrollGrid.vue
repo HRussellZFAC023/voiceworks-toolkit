@@ -13,6 +13,7 @@ import { useConfig } from '../../composables/useConfig';
 import { useRoute } from '../../composables/useRoute';
 import { useI18n } from '../../composables/useI18n';
 import { Logger } from '../../core/Utils';
+import { escapeHtml } from '../../core/DomUtils';
 import { buildInfiniteScrollApiUrl } from '../infiniteScrollApiUtils';
 
 // ============================================================================
@@ -178,12 +179,6 @@ function formatDuration(seconds: number): string {
         return `${hours}.${Math.round(minutes / 6)}h`;
     }
     return `${minutes}m`;
-}
-
-function escapeHtml(str: string): string {
-    const div = document.createElement('div');
-    div.textContent = str;
-    return div.innerHTML;
 }
 
 function createStarRatingHTML(rating: number): string {

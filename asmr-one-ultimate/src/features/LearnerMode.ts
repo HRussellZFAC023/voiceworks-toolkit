@@ -1,4 +1,4 @@
-import { Logger, Config, I18n } from '../core/Utils';
+﻿import { Logger, Config, I18n } from '../core/Utils';
 import { AppStore } from '../store/AppStore';
 import { TranslationService } from '../services/TranslationService';
 import { EventBus } from '../core/EventBus';
@@ -9,11 +9,10 @@ import {
     normalizeLyricLines,
     parseLrcContent,
     parseSubtitleContent,
-    type ExtendedAudioPlayerState,
 } from './learnerLyricsUtils';
 
 import { KikoeruBridge } from '../infrastructure/KikoeruBridge';
-import { getAudioElement, getPlayerBar } from '../core/DomUtils';
+import { getAudioElement, getPlayerBar, isChinese } from '../core/DomUtils';
 import {
     buildKaraokeCharMap, computeWordKaraokeIndices, computeTimeFallbackKaraokeIndices,
     type KaraokeCharMap,
@@ -88,6 +87,18 @@ export class LearnerMode {
         this.bridge = KikoeruBridge.getInstance();
         this.playbackRate = Number(Config.get('playbackRate')) || 1.0;
         this.isBlurEnabled = !!Config.get('learnerBlur');
+    }
+
+    private resetDedupState(options: { includeWhisperDisplay?: boolean; bumpTranslationToken?: boolean } = {}): void {
+        this.lastText = '';
+        this.lastDisplayedText = '';
+        this.lastSecondaryShown = '';
+        if (options.includeWhisperDisplay) {
+            this.lastWhisperDisplayText = '';
+        }
+        if (options.bumpTranslationToken) {
+            this.translationToken += 1;
+        }
     }
 
     public async enable(): Promise<void> {
@@ -174,7 +185,7 @@ export class LearnerMode {
         const app = this.bridge.app;
         if (app?.$watch) {
             app.$watch('$route', (to: VueRoute) => {
-                this.lastText = '';
+                this.resetDedupState();
                 this.currentLyrics = [];
                 this.whisperLines = [];
                 this.whisperText = '';
@@ -399,19 +410,15 @@ export class LearnerMode {
         this.isBlurEnabled = !!Config.get('learnerBlur');
         this.applyBlurState();
 
-        this.lastText = '';
-        this.lastDisplayedText = '';
-        this.lastSecondaryShown = '';
+        this.resetDedupState({ includeWhisperDisplay: true, bumpTranslationToken: true });
         this.currentLyrics = [];
         this.whisperLines = [];
         this.whisperText = '';
         this.whisperActive = false;
         this.whisperFromCache = false;
         this.whisperLeadSec = 0;
-        this.lastWhisperDisplayText = '';
         this.clearWhisperTicker();
         if (this.seekedDebounceTimer) { clearTimeout(this.seekedDebounceTimer); this.seekedDebounceTimer = null; }
-        this.translationToken += 1;
         this.lastPreTranslatedKey = null; // Reset so new lyrics get pre-translated
         this.lastLrcTrackHash = null; // Reset so we can fetch LRC for new track
         this.lrcFetchAttemptedHashes.clear(); // Allow new track to be fetched
@@ -515,11 +522,7 @@ export class LearnerMode {
             this.seekingRafId = 0;
         }
 
-        this.lastText = '';
-        this.lastDisplayedText = '';
-        this.lastSecondaryShown = '';
-        this.lastWhisperDisplayText = '';
-        this.translationToken += 1;
+        this.resetDedupState({ includeWhisperDisplay: true, bumpTranslationToken: true });
 
         // Defer subtitle update to next frame so audio.currentTime has synchronized
         // with the seek target. During rapid scrubbing, the seeking event fires before
@@ -539,11 +542,7 @@ export class LearnerMode {
         }
 
         // Final refresh when user releases scrubber — reset dedup for clean state
-        this.lastText = '';
-        this.lastDisplayedText = '';
-        this.lastSecondaryShown = '';
-        this.lastWhisperDisplayText = '';
-        this.translationToken += 1;
+        this.resetDedupState({ includeWhisperDisplay: true, bumpTranslationToken: true });
         if (this.seekedDebounceTimer) clearTimeout(this.seekedDebounceTimer);
         this.seekedDebounceTimer = window.setTimeout(() => {
             this.seekedDebounceTimer = null;
@@ -1076,7 +1075,7 @@ export class LearnerMode {
         const trackKey = this.getTrackKey();
         if (trackKey && trackKey !== this.lastTrackKey) {
             this.lastTrackKey = trackKey;
-            this.lastText = '';
+            this.resetDedupState({ includeWhisperDisplay: true, bumpTranslationToken: true });
             this.currentLyrics = [];
             this.whisperLines = [];
             this.whisperText = '';
@@ -1084,10 +1083,8 @@ export class LearnerMode {
             this.whisperFromCache = false;
             this.whisperLive = false;
             this.whisperLeadSec = 0;
-            this.lastWhisperDisplayText = '';
             this.clearWhisperTicker();
             this.clearDisplay();
-            this.translationToken += 1;
         }
 
         // Use Whisper when active (user explicitly enabled it, so it always takes priority)
@@ -1120,7 +1117,7 @@ export class LearnerMode {
                         }).catch(() => { });
 
                         // For CN text, also prefetch JA translation for primary display
-                        const isCN = this.isChinese(fullText);
+                        const isCN = isChinese(fullText);
                         if (isCN && targetLang !== 'ja') {
                             TranslationService.translate(fullText, 'ja').catch(() => { });
                         }
@@ -1146,7 +1143,7 @@ export class LearnerMode {
                     this.lastSecondaryShown = cachedSecondary;
                 }
                 if (display.displayText && display.displayText !== this.lastWhisperDisplayText) {
-                    const isCNPrimary = this.isChinese(display.displayText);
+                    const isCNPrimary = isChinese(display.displayText);
                     let primaryForDisplay = display.displayText;
                     let wSplitIdx = -1;
                     let wHlStart = -1;
@@ -1217,7 +1214,7 @@ export class LearnerMode {
                     }).catch(() => { });
 
                     // For CN text, also prefetch JA translation for primary display
-                    const isCN = this.isChinese(this.whisperText);
+                    const isCN = isChinese(this.whisperText);
                     if (isCN && targetLang !== 'ja') {
                         TranslationService.translate(this.whisperText, 'ja').catch(() => { });
                     }
@@ -1236,7 +1233,7 @@ export class LearnerMode {
                     this.lastSecondaryShown = cachedFallback;
                 }
                 if (this.whisperText !== this.lastWhisperDisplayText) {
-                    const isCNWhisper = this.isChinese(this.whisperText);
+                    const isCNWhisper = isChinese(this.whisperText);
                     let primaryWhisper = this.whisperText;
                     if (isCNWhisper) {
                         const jaCache = TranslationService.peekCached(this.whisperText, 'ja');
@@ -1308,7 +1305,7 @@ export class LearnerMode {
         }
 
         const targetLang = (Config.get('subtitleLang') || 'en').toLowerCase();
-        const isCN = this.isChinese(fullText);
+        const isCN = isChinese(fullText);
 
         // For Chinese subtitles, show JP translation as primary (never raw CN)
         let primaryText: string;
@@ -1410,7 +1407,7 @@ export class LearnerMode {
             if (t && !TranslationService.peekCached(t, targetLang)) {
                 TranslationService.translate(t, targetLang).catch(() => {});
             }
-            if (t && this.isChinese(t) && targetLang !== 'ja' && !TranslationService.peekCached(t, 'ja')) {
+            if (t && isChinese(t) && targetLang !== 'ja' && !TranslationService.peekCached(t, 'ja')) {
                 TranslationService.translate(t, 'ja').catch(() => {});
             }
         }
@@ -1481,11 +1478,8 @@ export class LearnerMode {
         this.whisperFromCache = false;
         this.whisperLive = false;
         this.whisperLeadSec = 0;
-        this.lastWhisperDisplayText = '';
+        this.resetDedupState({ includeWhisperDisplay: true });
         this.clearWhisperTicker();
-        this.lastText = '';
-        this.lastDisplayedText = '';
-        this.lastSecondaryShown = '';
 
         // Remove whisper-active class
         this.expanded?.classList.remove('whisper-active');
@@ -1758,7 +1752,7 @@ export class LearnerMode {
             const allTexts: string[] = [];
 
             for (const text of batch) {
-                const isCN = this.isChinese(text);
+                const isCN = isChinese(text);
 
                 if (isCN && !TranslationService.peekCached(text, 'ja')) {
                     cnTexts.push(text);
@@ -1793,95 +1787,6 @@ export class LearnerMode {
             }, 50); // Brief delay to let initial batch start on worker
         }
     }
-
-    private async displaySubtitle(
-        text: string,
-        secondaryOverride?: string,
-        options?: { skipPrimary?: boolean }
-    ) {
-        if (!text) {
-            return;
-        }
-
-        const isCN = this.isChinese(text);
-        const skipPrimary = options?.skipPrimary === true;
-        const target = (Config.get('subtitleLang') || 'en').toLowerCase();
-
-        // For Chinese text, use JP translation as primary line (for JP learners)
-        let primary = text;
-        if (isCN) {
-            const jaTranslation = TranslationService.peekCached(text, 'ja');
-            if (jaTranslation) primary = jaTranslation;
-        }
-        let secondary = '';
-        let fallbackUsed = false;
-
-        // Check cache first for instant display
-        if (secondaryOverride) {
-            secondary = secondaryOverride;
-        } else if (isCN && target.startsWith('zh')) {
-            secondary = text;
-        } else if (!isCN && target === 'ja') {
-            secondary = text;
-        } else {
-            // Check cache for instant display
-            const cached = TranslationService.peekCached(text, target);
-            if (cached) {
-                secondary = cached;
-            } else {
-                // No cache - use primary as fallback for now
-                secondary = primary;
-                fallbackUsed = true;
-            }
-        }
-
-        // Update DOM immediately with what we have
-        this.ensureUIInjected();
-
-        if (!skipPrimary) {
-            for (const e of this.getJpEls()) e.textContent = primary;
-        }
-        for (const e of this.getEnEls()) {
-            e.textContent = secondary;
-            e.classList.toggle('blurred', this.isBlurEnabled && !!secondary);
-            e.classList.toggle('translation-fallback', fallbackUsed);
-        }
-
-        this.lastDisplayedText = text;
-        document.querySelectorAll('.learner-subs-expanded').forEach(el => {
-            (el as HTMLElement).style.visibility = '';
-        });
-        this.updateVisibility();
-        this.updateStyle();
-
-        // ASYNC UPDATES: Fire translations if needed
-        const needsSecondaryTranslation = fallbackUsed && !secondaryOverride;
-        const needsPrimaryTranslation = isCN && primary === text; // JA not cached yet
-
-        if (needsSecondaryTranslation || needsPrimaryTranslation) {
-            const token = ++this.translationToken;
-
-            if (needsSecondaryTranslation) {
-                TranslationService.translate(text, target).then(translated => {
-                    if (translated && this.lastDisplayedText === text && token === this.translationToken) {
-                        for (const e of this.getEnEls()) {
-                            e.textContent = translated;
-                            e.classList.remove('translation-fallback');
-                        }
-                    }
-                }).catch(() => { /* fire-and-forget: fallback already shown */ });
-            }
-
-            if (needsPrimaryTranslation) {
-                TranslationService.translate(text, 'ja').then(translated => {
-                    if (translated && this.lastDisplayedText === text && token === this.translationToken) {
-                        for (const e of this.getJpEls()) e.textContent = translated;
-                    }
-                }).catch(() => { /* fire-and-forget: CN fallback already shown */ });
-            }
-        }
-    }
-
 
     private updateVisibility() {
         // Toggle visibility based on player state (expanded/minimized) and content availability
@@ -1952,18 +1857,9 @@ export class LearnerMode {
             audio.currentTime = target.time + 0.01;
             if (audio.paused) audio.play().catch(err => Logger.warn('[LearnerMode] Audio play after seek failed:', err));
             // Immediately pre-populate display to avoid blank flash
-            this.lastText = '';
-            this.lastDisplayedText = '';
-            this.lastSecondaryShown = '';
-            this.lastWhisperDisplayText = '';
-            this.translationToken += 1;
+            this.resetDedupState({ includeWhisperDisplay: true, bumpTranslationToken: true });
             this.updateLyrics();
         }
-    }
-
-    /** CJK chars present but no Japanese kana → likely Chinese */
-    private isChinese(text: string): boolean {
-        return /[\u4e00-\u9fff]/.test(text) && !/[\u3040-\u309f\u30a0-\u30ff]/.test(text);
     }
 
     private clearDisplay(): void {
@@ -2009,43 +1905,6 @@ export class LearnerMode {
         // Use the correct source: queue[queueIndex], not currentTrack
         const track = this.bridge.currentTrack;
         return track?.hash || track?.mediaStreamUrl || track?.src || track?.title || null;
-    }
-
-    private getActiveLyricText(): string {
-        const domText = document.querySelector('#lyric')?.textContent?.trim() || '';
-        if (domText) return domText;
-
-        const player = this.bridge.store?.state?.AudioPlayer as ExtendedAudioPlayerState | undefined;
-        const storeText = player?.currentLyric?.trim()
-            || player?.currentLyricText?.trim()
-            || player?.subtitle?.current?.trim()
-            || player?.subtitle?.text?.trim()
-            || '';
-        if (storeText) return storeText;
-
-        const cueText = this.getActiveCueText();
-        if (cueText) return cueText;
-
-        return this.getTextFromTimeline();
-    }
-
-    private getActiveCueText(): string {
-        const audio = getAudioElement();
-        if (!audio?.textTracks) return '';
-
-        for (const track of Array.from(audio.textTracks)) {
-            if (!track) continue;
-            // Enable the track if it's disabled so we can get cues
-            if (track.mode === 'disabled') {
-                track.mode = 'hidden';
-            }
-            const cues = track.activeCues;
-            if (!cues || cues.length === 0) continue;
-            const cue = cues[0] as VTTCue;
-            const text = (cue?.text || '').trim();
-            if (text) return text;
-        }
-        return '';
     }
 
     /**
@@ -2189,10 +2048,6 @@ export class LearnerMode {
         );
     }
 
-    private getWhisperTextFromTimeline(): string {
-        return this.getTextFromTimelineFor(this.whisperLines, this.effectiveLead(this.whisperLeadSec), true);
-    }
-
     private getWhisperDisplay(): { displayText: string; fullText: string; activeLine?: LyricLine; now?: number; audioTime?: number } {
         const audio = getAudioElement();
         if (!audio || this.whisperLines.length === 0) return { displayText: '', fullText: '' };
@@ -2260,15 +2115,6 @@ export class LearnerMode {
     private updatePrimaryLine(text: string, splitIdx = -1, hlStart = -1): void {
         const karaokeEnabled = !!Config.get('karaokeMode');
         const segmentEnabled = !!Config.get('segmentMode');
-
-        // Trigger JPDB parsing (async, non-blocking)
-        if (Config.get('enableJpdb') && Config.get('jpdbSubtitleFurigana') && Config.get('jpdbShowFurigana') && text && text !== this.lastJpdbText) {
-            this.lastJpdbText = text;
-            this.parseJpdbFurigana(text);
-        } else if (!text) {
-            this.jpdbTokens = null;
-            this.lastJpdbText = '';
-        }
 
         for (const e of this.getJpEls()) {
             const isCollapsed = !!e.closest('.learner-subs-collapsed');
@@ -2378,22 +2224,6 @@ export class LearnerMode {
         this.karaokeFullText = '';
     }
 
-    // JPDB furigana state
-    private jpdbTokens: import('../types/jpdb').JPDBToken[] | null = null;
-    private lastJpdbText = '';
-
-    private async parseJpdbFurigana(text: string): Promise<void> {
-        try {
-            const { JpdbService } = await import('../services/JpdbService');
-            const tokens = await JpdbService.parseSingle(text);
-            if (this.lastJpdbText === text) {
-                this.jpdbTokens = tokens;
-            }
-        } catch {
-            // Silently fail
-        }
-    }
-
     /** Lazily refresh cached .learner-jp / .learner-en references */
     private refreshCachedEls(): void {
         this.cachedJpEls = Array.from(document.querySelectorAll<HTMLElement>('.learner-jp'));
@@ -2415,3 +2245,4 @@ export class LearnerMode {
         this.cachedElsDirty = true;
     }
 }
+

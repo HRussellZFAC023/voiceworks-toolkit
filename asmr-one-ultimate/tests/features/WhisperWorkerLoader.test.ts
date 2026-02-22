@@ -3,7 +3,7 @@ import { __getWhisperWorkerCodeForTests, createWhisperWorker } from '../../src/f
 
 describe('WhisperWorkerLoader', () => {
     let capturedBlob: Blob | null = null;
-    let workerCtor: ReturnType<typeof vi.fn>;
+    let workerCtor: any;
     let originalCreateObjectURL: any;
     let originalRevokeObjectURL: any;
 
@@ -18,7 +18,7 @@ describe('WhisperWorkerLoader', () => {
             capturedBlob = blob as Blob;
             return 'blob:test-worker';
         });
-        (URL as any).revokeObjectURL = vi.fn(() => {});
+        (URL as any).revokeObjectURL = vi.fn(() => { });
     });
 
     afterEach(() => {
@@ -38,73 +38,126 @@ describe('WhisperWorkerLoader', () => {
         expect((capturedBlob as Blob).size).toBeGreaterThan(1000);
     });
 
+    it('uses Transformers.js V4 as primary CDN with V3 fallback', () => {
+        const code = __getWhisperWorkerCodeForTests();
+
+        expect(code).toContain('transformers@4.0.0-next.4');
+        expect(code).toContain('transformers@3.8.1');
+    });
+
+    it('uses env.remoteHost for hub URL configuration (not env.hub)', () => {
+        const code = __getWhisperWorkerCodeForTests();
+
+        expect(code).toContain('env.remoteHost');
+        expect(code).not.toContain('env.hub');
+    });
+
+    it('adds CDN import timeout to prevent indefinite hang', () => {
+        const code = __getWhisperWorkerCodeForTests();
+
+        expect(code).toContain('Promise.race');
+        expect(code).toContain('CDN import timeout');
+    });
+
+    it('has unhandledrejection handler that suppresses stale GPU errors', () => {
+        const code = __getWhisperWorkerCodeForTests();
+
+        expect(code).toContain("self.addEventListener('unhandledrejection'");
+        expect(code).toContain('GPU_ERROR_RE');
+        expect(code).toContain('gpuDeviceLost');
+        expect(code).toContain("status: 'gpu-device-lost'");
+    });
+
     it('pins worker to WASM after GPU inference failure to avoid backend thrash', () => {
         const code = __getWhisperWorkerCodeForTests();
 
         expect(code).toContain('skipWebgpu = true;');
-        expect(code).not.toContain('transientWebgpuFallbackUsed');
-        expect(code).not.toContain('Temporary WASM fallback complete; retrying WebGPU on next chunk');
+        expect(code).toContain('GPU inference failed, falling back to WASM');
+        expect(code).toContain("status: 'gpu-degraded'");
     });
 
-    it('suppresses late WebGPU rejections after timeout recovery', () => {
+    it('uses q4 decoder as primary WebGPU dtype (per HF official example)', () => {
         const code = __getWhisperWorkerCodeForTests();
 
-        expect(code).toContain('Ignoring late WebGPU rejection after timeout');
-        expect(code).toContain('timedOut = true;');
-        expect(code).toContain('Promise.race([guarded, timeout])');
+        expect(code).toContain("encoder_model: 'fp32'");
+        expect(code).toContain("decoder_model_merged: 'q4'");
     });
 
-    it('suppresses late recoverable GPU unhandled rejections after fallback', () => {
-        const code = __getWhisperWorkerCodeForTests();
-
-        expect(code).toContain('RECOVERABLE_GPU_REJECTION_RE');
-        expect(code).toContain('suppressRecoverableGpuRejectionsUntil');
-        expect(code).toContain('looksNumericGpuCode');
-        expect(code).toContain('Suppressed late recoverable GPU rejection');
-        expect(code).toContain('armRecoverableRejectionSuppression();');
-    });
-
-    it('uses fp32 decoder on webgpu dtype candidates', () => {
-        const code = __getWhisperWorkerCodeForTests();
-
-        expect(code).toContain("decoder_model_merged: 'fp32'");
-        expect(code).not.toContain("decoder_model_merged: 'q4'");
-    });
-
-    it('pins Firefox WebGPU dtype to fp32/fp32 for stability', () => {
-        const code = __getWhisperWorkerCodeForTests();
-
-        expect(code).toContain('if (IS_FIREFOX) {');
-        expect(code).toContain("return [{ encoder_model: 'fp32', decoder_model_merged: 'fp32' }];");
-    });
-
-    it('uses fp16->fp32 fallback path for Intel Arc on Chromium', () => {
-        const code = __getWhisperWorkerCodeForTests();
-
-        expect(code).toContain('const isIntelArc =');
-        expect(code).toContain('if (isIntelArc) {');
-        expect(code).toContain("{ encoder_model: 'fp16', decoder_model_merged: 'fp32' }");
-        expect(code).toContain("{ encoder_model: 'fp32', decoder_model_merged: 'fp32' }");
-    });
-
-    it('uses simplified timeout model with shader warmup disabled', () => {
+    it('uses proportional inference timeout scaled to chunk length', () => {
         const code = __getWhisperWorkerCodeForTests();
 
         expect(code).toContain('const INFERENCE_TIMEOUT_MS = 45_000;');
-        expect(code).toContain('const FAST_BOOTSTRAP_TIMEOUT_MS = 30_000;');
-        expect(code).toContain('const FIRST_GPU_INFERENCE_TIMEOUT_MS = IS_FIREFOX ? 45_000 : 90_000;');
-        expect(code).toContain('const ENABLE_SHADER_WARMUP = false;');
-        expect(code).toContain('Warmup disabled; first inference may include shader compilation');
-        expect(code).toContain('ENABLE_SHADER_WARMUP');
-        expect(code).not.toContain('Compiling WebGPU shaders (warmup)...');
-        expect(code).not.toContain('let warmupCompiled = false;');
+        expect(code).toContain('WebGPU inference timed out after');
+        expect(code).toContain('chunkS * 5 * 1000');
     });
 
-    it('reuses same in-flight pipeline load instead of disposing/recreating', () => {
+    it('accepts gpuVendorHint from host for Firefox hidden adapter.info', () => {
         const code = __getWhisperWorkerCodeForTests();
 
-        expect(code).toContain('let loadingModel = null;');
-        expect(code).toContain('const sameLoading = !currentModel');
-        expect(code).toContain('if (pipelinePromise && (sameLoaded || sameLoading))');
+        expect(code).toContain("let gpuVendorHint = ''");
+        expect(code).toContain('msg.gpuVendorHint');
+        expect(code).toContain('Using host GPU vendor hint');
+    });
+
+    it('uses chunked streaming mode for web transcription', () => {
+        const code = __getWhisperWorkerCodeForTests();
+
+        expect(code).toContain('chunk_length_s: msg.chunkLengthS');
+        expect(code).toContain('stride_length_s: msg.strideLengthS');
+    });
+
+    it('filters hallucinated non-speech annotations', () => {
+        const code = __getWhisperWorkerCodeForTests();
+
+        expect(code).toContain('HALLUCINATION_RE');
+        expect(code).toContain('SUBTITLE_HALLUCINATION_RE');
+        expect(code).toContain('cleanHallucinatedChunks');
+    });
+
+    it('groups word-level timestamps into segments', () => {
+        const code = __getWhisperWorkerCodeForTests();
+
+        expect(code).toContain('groupWordsToSegments');
+        expect(code).toContain('isWordLevelChunks');
+        expect(code).toContain('buildSegmentFromWords');
+        expect(code).toContain('SEGMENT_GAP_S');
+    });
+
+    it('enables word timestamps on all backends with retry fallback', () => {
+        const code = __getWhisperWorkerCodeForTests();
+
+        expect(code).toContain('const useWordTimestamps = true');
+    });
+
+    it('detects WebGPU adapter with power preference scoring', () => {
+        const code = __getWhisperWorkerCodeForTests();
+
+        expect(code).toContain('navigator.gpu.requestAdapter(');
+        expect(code).toContain('scoreAdapter');
+        expect(code).toContain('sortAdaptersByScore');
+    });
+
+    it('reuses existing pipeline when model matches', () => {
+        const code = __getWhisperWorkerCodeForTests();
+
+        expect(code).toContain('pipelinePromise && currentModel === modelName');
+    });
+
+    it('supports host control messages for backend/queue lifecycle', () => {
+        const code = __getWhisperWorkerCodeForTests();
+
+        expect(code).toContain("if (msg.type === 'skip-webgpu')");
+        expect(code).toContain("if (msg.type === 'flush-queue')");
+        expect(code).toContain("if (msg.type === 'reset')");
+    });
+
+    it('emits status lifecycle messages needed by Whisper controller', () => {
+        const code = __getWhisperWorkerCodeForTests();
+
+        expect(code).toContain("status: 'initiate'");
+        expect(code).toContain("status: 'ready'");
+        expect(code).toContain("status: 'update'");
+        expect(code).toContain("status: 'complete'");
+        expect(code).toContain("status: 'error'");
     });
 });

@@ -73,7 +73,6 @@ export class TranslatedTags {
         }
 
         const next = new TranslatedTags();
-        (next as TranslatedTags & { __asmrTranslatedTagsVersion?: string }).__asmrTranslatedTagsVersion = TRANSLATED_TAGS_VERSION;
         globalWindow.__ASMR_TRANSLATED_TAGS__ = next;
         globalWindow.__ASMR_TRANSLATED_TAGS_VERSION__ = TRANSLATED_TAGS_VERSION;
         TranslatedTags.instance = next;

@@ -1,8 +1,8 @@
 /**
  * WhisperWorkerLoader - WebGPU Whisper worker (Transformers.js)
  *
- * Runs whisper models in a Web Worker. Prefers WebGPU with fp16/fp32 encoder
- * + fp32 decoder, falls back to WASM. Dynamic import with CDN fallback for resilience.
+ * Runs whisper models in a Web Worker. Prefers WebGPU with fp32+q4 dtype,
+ * falls back to WASM. Dynamic import with CDN fallback for resilience.
  * Supports word-level timestamps and real-time streaming.
  */
 
@@ -11,22 +11,10 @@ function getWorkerCode(): string {
 let gpuDeviceLost = false;
 const GPU_ERROR_RE = /WebGPU Context Provider|context.*provider|device lost|GPUDevice|createComputePipeline|createShaderModule|createBuffer|mapAsync|mapping webgpu buffer|invalid buffer|Instance reference|AbortError|release session|invalid session/i;
 const EXPLICIT_DEVICE_LOSS_RE = /device lost|Instance reference|release session|invalid session/i;
-const RECOVERABLE_GPU_REJECTION_RE = /index out of bounds|table index is out of bounds|inference timed out|timed out/i;
-const SUPPRESS_RECOVERABLE_REJECTIONS_WINDOW_MS = 120000;
-let suppressRecoverableGpuRejectionsUntil = 0;
 
 self.addEventListener('unhandledrejection', (event) => {
     const reason = event.reason;
     const message = reason && reason.message ? reason.message : String(reason || 'Unknown error');
-    const looksNumericGpuCode = /^\\d+$/.test(message);
-    if (Date.now() < suppressRecoverableGpuRejectionsUntil
-        && (RECOVERABLE_GPU_REJECTION_RE.test(message) || looksNumericGpuCode)) {
-        // After timeout/fallback, stale GPU promises can still reject in the background.
-        // Suppress these so host state is not poisoned by late async failures.
-        event.preventDefault();
-        console.warn('[Whisper Worker] Suppressed late recoverable GPU rejection:', message);
-        return;
-    }
     if (GPU_ERROR_RE.test(message)) {
         event.preventDefault();
         // Fatal GPU device loss — notify host so it can show crash UI
@@ -49,6 +37,7 @@ let pipeline;
 let env;
 
 const TRANSFORMER_URLS = [
+    'https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.0.0-next.4',
     'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.1',
     'https://esm.sh/@huggingface/transformers@3.8.1',
     'https://unpkg.com/@huggingface/transformers@3.8.1?module',
@@ -64,7 +53,10 @@ async function loadTransformers() {
     if (transformersLoaded) return;
     for (const url of TRANSFORMER_URLS) {
         try {
-            const mod = await import(url);
+            const mod = await Promise.race([
+                import(url),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('CDN import timeout')), 30000))
+            ]);
             pipeline = mod.pipeline;
             env = mod.env;
             if (!pipeline || !env) throw new Error('Missing pipeline/env');
@@ -90,15 +82,16 @@ function isUnauthorizedError(err) {
 // Backend / dtype selection
 // ------------------------------------------------------------
 
+// GPU vendor hint from host (detected via WebGL on main thread).
+// Some browsers hide adapter.info for fingerprinting protection; this fills the gap.
+let gpuVendorHint = '';
+
 let currentBackend = 'wasm';
 let currentVendor = '';
 let currentDtype = '';
 let skipWebgpu = false;
 let preferLowPowerAdapter = false;
 let minWebgpuBufferBytes = 268435456;
-// GPU vendor hint from host (detected via WebGL on main thread).
-// Firefox hides adapter.info for fingerprinting; this fills the gap.
-let gpuVendorHint = '';
 
 function scoreAdapter(vendor, maxBuf, powerPreference, preferredPower) {
     const v = (vendor || '').toLowerCase();
@@ -189,43 +182,12 @@ async function detectBackend() {
     return { device: 'wasm', vendor: '', maxBuf: 0 };
 }
 
-function getDtypeCandidates(device, vendor) {
+function getDtypeCandidates(device) {
     if (device !== 'webgpu') return null;
     // Per HuggingFace docs: encoder-decoder models like Whisper need per-module dtype.
-    // Decoder constraints on WebGPU:
-    //   fp16 decoder FAILS (Transformers.js #894)
-    //   q8 decoder gibberish on WebGPU (Transformers.js #1317)
-    //   q4 decoder produces empty output on Firefox WebGPU
-    // → decoder MUST be fp32 on WebGPU. Encoder can try fp16 first for speed.
-
-    const isIntelArc = /intel.*arc|\\barc\\b/i.test(vendor);
-    const isIntel = /intel|xe|iris|uhd|gen-9|gen9/i.test(vendor);
-    const isQualcomm = /qualcomm|adreno/i.test(vendor);
-
-    // Firefox WebGPU remains fragile on Whisper decoder cache paths.
-    // Keep dtype deterministic and conservative.
-    if (IS_FIREFOX) {
-        return [{ encoder_model: 'fp32', decoder_model_merged: 'fp32' }];
-    }
-
-    // Arc dGPU on Chromium: fp16 encoder is much faster; keep fp32 fallback for stability.
-    if (isIntelArc) {
-        return [
-            { encoder_model: 'fp16', decoder_model_merged: 'fp32' },
-            { encoder_model: 'fp32', decoder_model_merged: 'fp32' },
-        ];
-    }
-
-    // Intel / Qualcomm: pin to fp32 for output stability.
-    if (isIntel || isQualcomm) {
-        return [{ encoder_model: 'fp32', decoder_model_merged: 'fp32' }];
-    }
-
-    // Others (Apple, NVIDIA, AMD on Chrome/Edge): fp16 encoder first
-    return [
-        { encoder_model: 'fp16', decoder_model_merged: 'fp32' },
-        { encoder_model: 'fp32', decoder_model_merged: 'fp32' },
-    ];
+    // fp16 decoder FAILS (Transformers.js #894), q8 decoder gibberish on WebGPU (#1317).
+    // q4 decoder is fastest for WebGPU. fp32 decoder too slow on Firefox wgpu (~3-5x slower).
+    return [{ encoder_model: 'fp32', decoder_model_merged: 'q4' }];
 }
 
 function resolveModelName(model, multilingual) {
@@ -244,12 +206,9 @@ async function releaseGpuResources() {
     await new Promise(r => setTimeout(r, 250));
 }
 
-// Inference timeout — keep a small, deterministic model across browsers.
-const IS_FIREFOX = typeof navigator !== 'undefined' && /firefox/i.test(navigator.userAgent || '');
+// Inference timeout — detect hangs quickly and fail over without long stalls.
 const INFERENCE_TIMEOUT_MS = 45_000;
 const FAST_BOOTSTRAP_TIMEOUT_MS = 30_000;
-const FIRST_GPU_INFERENCE_TIMEOUT_MS = IS_FIREFOX ? 45_000 : 90_000;
-const ENABLE_SHADER_WARMUP = false;
 const GPU_INFERENCE_ERROR_RE = /createBuffer|RangeError|out of memory|OOM|allocation|device lost|GPUDevice|createComputePipeline|createShaderModule|mapAsync|mapping webgpu buffer|invalid buffer|Instance reference|AbortError|release session|invalid session|index out of bounds|timed out/i;
 function toErrorMessage(error) {
     return error && error.message ? error.message : String(error || 'Unknown error');
@@ -260,43 +219,22 @@ function postChunkError(chunkId, message, gpuFallback = false) {
     self.postMessage({ status: 'error', data, chunkId });
 }
 
-function armRecoverableRejectionSuppression() {
-    suppressRecoverableGpuRejectionsUntil = Date.now() + SUPPRESS_RECOVERABLE_REJECTIONS_WINDOW_MS;
-}
-
 function withInferenceTimeout(promise, ms) {
     let timer;
-    let timedOut = false;
-    const guarded = Promise.resolve(promise).catch((error) => {
-        const message = toErrorMessage(error);
-        if (timedOut && GPU_INFERENCE_ERROR_RE.test(message)) {
-            // The timeout branch already recovered (usually to WASM). Ignore late
-            // WebGPU rejections from the stale in-flight inference.
-            console.warn('[Whisper Worker] Ignoring late WebGPU rejection after timeout:', message);
-            return null;
-        }
-        throw error;
-    });
     const timeout = new Promise((_, reject) => {
-        timer = setTimeout(() => {
-            timedOut = true;
-            armRecoverableRejectionSuppression();
-            reject(new Error('WebGPU inference timed out after ' + (ms / 1000) + 's'));
-        }, ms);
+        timer = setTimeout(() => reject(new Error('WebGPU inference timed out after ' + (ms / 1000) + 's')), ms);
     });
-    return Promise.race([guarded, timeout]).finally(() => clearTimeout(timer));
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
 function getInferenceTimeoutMs(currentBackend, chunkLengthS) {
     if (currentBackend !== 'webgpu') return INFERENCE_TIMEOUT_MS;
-    // First GPU inference may include residual shader compilation if warmup
-    // was skipped or only partially compiled shaders. Give it much more time.
-    if (!gpuShadersCompiled) return FIRST_GPU_INFERENCE_TIMEOUT_MS;
-    let timeoutMs = INFERENCE_TIMEOUT_MS;
-    if (Number(chunkLengthS) <= 8) {
-        timeoutMs = Math.min(timeoutMs, FAST_BOOTSTRAP_TIMEOUT_MS);
-    }
-    return timeoutMs;
+    // Scale timeout proportionally to chunk length. Autoregressive decoding speed
+    // varies widely across GPU backends (Dawn vs wgpu, discrete vs integrated).
+    // A fixed 45s timeout is too short for long chunks on slower backends —
+    // premature timeouts corrupt GPU buffer state ("Buffer unmapped").
+    const chunkS = Number(chunkLengthS) || 30;
+    return Math.max(INFERENCE_TIMEOUT_MS, chunkS * 5 * 1000);
 }
 
 // ------------------------------------------------------------
@@ -306,32 +244,20 @@ function getInferenceTimeoutMs(currentBackend, chunkLengthS) {
 let pipelinePromise = null;
 let currentModel = null;
 let currentMultilingual = null;
-let gpuShadersCompiled = false;
-let loadingModel = null;
-let loadingMultilingual = null;
 
 async function ensurePipeline(settings, progressCb) {
     await loadTransformers();
 
     const modelName = resolveModelName(settings.model, settings.multilingual);
-    const sameLoaded = currentModel === modelName && currentMultilingual === settings.multilingual;
-    const sameLoading = !currentModel
-        && loadingModel === modelName
-        && loadingMultilingual === settings.multilingual;
 
-    // Reuse in-flight load for same model/settings instead of disposing/recreating.
-    if (pipelinePromise && (sameLoaded || sameLoading)) {
+    if (pipelinePromise && currentModel === modelName && currentMultilingual === settings.multilingual) {
         return pipelinePromise;
     }
 
-    // Dispose previous pipeline only when switching to different settings.
+    // Dispose previous pipeline if needed
     if (pipelinePromise) {
         try { await (await pipelinePromise).dispose?.(); } catch {}
         pipelinePromise = null;
-        currentModel = null;
-        currentMultilingual = null;
-        loadingModel = null;
-        loadingMultilingual = null;
     }
 
     const backend = await detectBackend();
@@ -344,14 +270,11 @@ async function ensurePipeline(settings, progressCb) {
 
     // --- WebGPU path: try dtype candidates ---
     if (currentBackend === 'webgpu') {
-        const dtypeCandidates = getDtypeCandidates(currentBackend, currentVendor);
+        const dtypeCandidates = getDtypeCandidates(currentBackend);
         if (dtypeCandidates) {
             for (const dtype of dtypeCandidates) {
-                if (skipWebgpu) break; // Context error detected — abort remaining dtypes
                 for (let hubIdx = 0; hubIdx < HUB_BASE_URLS.length; hubIdx++) {
-                    env.hub = env.hub || {};
-                    env.hub.baseUrl = HUB_BASE_URLS[hubIdx];
-                    env.hub.allowRemoteModels = true;
+                    env.remoteHost = HUB_BASE_URLS[hubIdx];
 
                     const opts = {
                         progress_callback: progressCb,
@@ -359,8 +282,6 @@ async function ensurePipeline(settings, progressCb) {
                         device: 'webgpu',
                         dtype,
                     };
-                    loadingModel = modelName;
-                    loadingMultilingual = settings.multilingual;
                     pipelinePromise = pipeline('automatic-speech-recognition', modelName, opts);
                     try {
                         await pipelinePromise;
@@ -368,17 +289,9 @@ async function ensurePipeline(settings, progressCb) {
                         currentMultilingual = settings.multilingual;
                         currentDtype = JSON.stringify(dtype);
                         console.log('[Whisper Worker] Model loaded on webgpu [' + currentDtype + ']:', modelName);
-
-                        // Keep startup simple and let first real inference compile shaders lazily.
-                        if (!gpuShadersCompiled && !ENABLE_SHADER_WARMUP) {
-                            console.log('[Whisper Worker] Warmup disabled; first inference may include shader compilation');
-                        }
-
                         return pipelinePromise;
                     } catch (err) {
                         pipelinePromise = null;
-                        loadingModel = null;
-                        loadingMultilingual = null;
                         const msg = String(err?.message || err || '');
                         const isMemErr = /allocation|out of memory|OOM|RangeError|createbuffer/i.test(msg);
                         const isContextErr = /WebGPU Context Provider|context.*provider|device lost|GPUDevice|createComputePipeline|createShaderModule|mapping webgpu buffer|invalid buffer/i.test(msg);
@@ -421,12 +334,8 @@ async function ensurePipeline(settings, progressCb) {
 
     let lastErr = null;
     for (let hubIdx = 0; hubIdx < HUB_BASE_URLS.length; hubIdx++) {
-        env.hub = env.hub || {};
-        env.hub.baseUrl = HUB_BASE_URLS[hubIdx];
-        env.hub.allowRemoteModels = true;
+        env.remoteHost = HUB_BASE_URLS[hubIdx];
 
-        loadingModel = modelName;
-        loadingMultilingual = settings.multilingual;
         pipelinePromise = pipeline('automatic-speech-recognition', modelName, wasmOpts);
         try {
             await pipelinePromise;
@@ -438,8 +347,6 @@ async function ensurePipeline(settings, progressCb) {
         } catch (err) {
             lastErr = err;
             pipelinePromise = null;
-            loadingModel = null;
-            loadingMultilingual = null;
             if (!isUnauthorizedError(err)) {
                 throw err;
             }
@@ -566,11 +473,9 @@ async function transcribe(msg) {
     const updateIntervalMs = Number.isFinite(requestedUpdateInterval)
         ? Math.max(100, Math.min(1000, Math.floor(requestedUpdateInterval)))
         : 200;
-    // Root-cause fix:
-    // Word timestamps on WebGPU are the unstable path causing hangs/timeouts/index errors.
-    // Keep WebGPU on segment timestamps for both Chrome and Firefox.
-    // WASM can still use word timestamps.
-    const useWordTimestamps = currentBackend !== 'webgpu';
+    // Word-level timestamps enabled on all backends.
+    // If they fail on WebGPU, the retry logic below falls back to segment timestamps.
+    const useWordTimestamps = true;
 
     let wordBuffer = [];
     let lastUpdateAt = 0;
@@ -635,9 +540,9 @@ async function transcribe(msg) {
         if (currentBackend === 'wasm') throw new Error(reasonMsg);
 
         console.warn('[Whisper Worker] GPU inference failed, falling back to WASM:', reasonMsg);
-        armRecoverableRejectionSuppression();
-        // Keep this worker on WASM after a GPU inference failure. This avoids
-        // webgpu<->wasm thrash loops and stale timeout rejections poisoning the queue.
+        // GPU failure (timeout, OOM, shader error) — skip WebGPU permanently.
+        // Timeouts kill inference mid-execution but orphaned GPU work keeps running,
+        // corrupting buffer state. Retrying WebGPU cascades into "Buffer unmapped" errors.
         skipWebgpu = true;
         if (pipelinePromise) {
             try { await (await pipelinePromise).dispose?.(); } catch {}
@@ -645,8 +550,9 @@ async function transcribe(msg) {
         pipelinePromise = null;
         currentModel = null;
         currentMultilingual = null;
-        loadingModel = null;
-        loadingMultilingual = null;
+
+        // Let orphaned GPU work drain before loading WASM pipeline
+        await releaseGpuResources();
 
         self.postMessage({ status: 'initiate', backend: 'wasm', vendor: '' });
         const wasmPipe = await ensurePipeline(msg, (data) => self.postMessage(data));
@@ -662,7 +568,6 @@ async function transcribe(msg) {
     let result = null;
     try {
         result = await runInference(pipe, pipeOpts, currentBackend);
-        if (currentBackend === 'webgpu') gpuShadersCompiled = true;
     } catch (initialError) {
         const initialMsg = toErrorMessage(initialError);
         const canRetryWithoutWords = pipeOpts.return_timestamps === 'word';
@@ -799,19 +704,16 @@ self.addEventListener('message', async (event) => {
         }
         currentModel = null;
         currentMultilingual = null;
-        loadingModel = null;
-        loadingMultilingual = null;
-        gpuShadersCompiled = false;
         return;
     }
 
     if (msg.type === 'init') {
+        if (msg.gpuVendorHint) gpuVendorHint = String(msg.gpuVendorHint).toLowerCase();
         const requestedMinBuffer = Number(msg.minWebgpuBufferBytes);
         minWebgpuBufferBytes = Number.isFinite(requestedMinBuffer) && requestedMinBuffer > 0
             ? Math.floor(requestedMinBuffer)
             : 268435456;
         preferLowPowerAdapter = msg.preferLowPowerAdapter === true;
-        if (msg.gpuVendorHint) gpuVendorHint = String(msg.gpuVendorHint).toLowerCase();
         try {
             await ensurePipeline(msg, (data) => self.postMessage(data));
             self.postMessage({ status: 'ready', backend: currentBackend, vendor: currentVendor });

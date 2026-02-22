@@ -173,6 +173,17 @@ function isBarVisible(el: HTMLElement | null): boolean {
 }
 
 /**
+ * Escape HTML special characters for safe text interpolation into HTML strings.
+ */
+export function escapeHtml(value: string): string {
+    return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+}
+
+/**
  * Measure the total height of fixed bars stacked above the q-footer
  * (collapsed subs, JOI bar, visualizer) and publish the result as
  * `--asmr-stacked-bottom-height` so page content can add padding.
@@ -188,6 +199,64 @@ export function syncStackedBottomHeight(): void {
     if (isBarVisible(vizBar)) extra += vizBar!.offsetHeight;
 
     document.documentElement.style.setProperty('--asmr-stacked-bottom-height', `${extra}px`);
+}
+
+interface BottomOffsetOptions {
+    includePlayerBar?: boolean;
+    includeSubsBar?: boolean;
+    includeJoiBar?: boolean;
+    includeVizBar?: boolean;
+    playerFallbackPx?: number;
+}
+
+/**
+ * Calculate stacked bottom offset for floating UI bars.
+ */
+export function calculateBottomOffset(options: BottomOffsetOptions = {}): number {
+    const {
+        includePlayerBar = true,
+        includeSubsBar = true,
+        includeJoiBar = true,
+        includeVizBar = true,
+        playerFallbackPx = 60,
+    } = options;
+
+    let bottomOffset = 0;
+
+    if (includePlayerBar) {
+        const playerBar = getPlayerBar();
+        bottomOffset += playerBar?.offsetHeight || playerFallbackPx;
+    }
+
+    if (includeSubsBar) {
+        const subsBar = document.querySelector('body > .learner-subs-collapsed') as HTMLElement | null;
+        if (isBarVisible(subsBar)) bottomOffset += subsBar!.offsetHeight;
+    }
+
+    if (includeJoiBar) {
+        const joiBar = document.querySelector('body > .asmr-joi-bar-collapsed') as HTMLElement | null;
+        if (isBarVisible(joiBar)) bottomOffset += joiBar!.offsetHeight;
+    }
+
+    if (includeVizBar) {
+        const vizBar = document.querySelector('body > .asmr-viz-bar') as HTMLElement | null;
+        if (isBarVisible(vizBar)) bottomOffset += vizBar!.offsetHeight;
+    }
+
+    return bottomOffset;
+}
+
+/**
+ * Toggle active visual state for overflow menu buttons.
+ */
+export function syncOverflowButtonState(selector: string, active: boolean): void {
+    document.querySelectorAll(selector).forEach((btn) => {
+        const icon = btn.querySelector('.material-icons');
+        if (icon) {
+            icon.classList.toggle('asmr-accent', active);
+        }
+        btn.classList.toggle('learner-btn-active', active);
+    });
 }
 
 /** Start a 500ms poll that keeps --asmr-stacked-bottom-height in sync. */

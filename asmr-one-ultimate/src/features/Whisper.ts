@@ -42,7 +42,6 @@ const DEFAULT_WORKER_UPDATE_INTERVAL_MS = 200;
 const DEFAULT_MIN_WEBGPU_BUFFER_BYTES = 256 * 1024 * 1024;
 const CHUNK_STALL_TIMEOUT_FLOOR_MS = 25_000;
 const CHUNK_STALL_TIMEOUT_MULTIPLIER = 3;
-const FIRST_CHUNK_STALL_TIMEOUT_MS = 20_000;
 const INITIAL_BOOTSTRAP_CHUNK_LENGTH_S = 6;
 const TRANSLATE_AHEAD_MAX_SEGMENTS_PER_RUN = 50;
 const GPU_ERROR_PATTERN =
@@ -187,7 +186,6 @@ export class Whisper {
     private chunkGenerations = new Map<number, number>();
     private chunkOffsets = new Map<number, number>();
     private chunkLastActivity = new Map<number, number>();
-    private chunkTimeoutMs = new Map<number, number>();
 
     private statusEl: HTMLElement | null = null;
     private errorDismissTimer: number | null = null;
@@ -196,7 +194,6 @@ export class Whisper {
     private autoWarmupStarted = false;
     private modelLoadTimer: number | null = null;
     private modelReady = false;
-    private workerInitPending = false;
     private autoTranscribeWorkId: string | null = null;
 
     private finalizeOnIdle = false;
@@ -409,6 +406,10 @@ export class Whisper {
         this.resetState('track-change');
         EventBus.emit('whisper:clear', undefined);
 
+        // Immediately check cache and emit snapshot so LearnerSubtitles can render
+        // without waiting for the 500ms scheduleAutoStart delay.
+        this.emitCachedSnapshotIfAvailable(newSrc);
+
         // If we were auto-transcribing and still on the same work, restart transcription
         if (sameWork) {
             Logger.debug('[Whisper] Auto-restarting transcription for same work');
@@ -438,7 +439,7 @@ export class Whisper {
             if (this.autoTranscribeWorkId === workId || Config.get('alwaysTranscribe')) {
                 this.startTranscription().catch(err => Logger.error('[Whisper] Auto-start failed:', err));
             }
-        }, 200);
+        }, 500);
     }
 
     private clearAutoStartTimer(): void {
@@ -766,7 +767,6 @@ export class Whisper {
         this.chunkGenerations.clear();
         this.chunkOffsets.clear();
         this.chunkLastActivity.clear();
-        this.chunkTimeoutMs.clear();
         this.hasWorkerChunkActivity = false;
         if (resetRecovery) {
             this.chunkStallRecoveryCount = 0;
@@ -798,7 +798,6 @@ export class Whisper {
         this.chunkGenerations.delete(chunkId);
         this.chunkOffsets.delete(chunkId);
         this.chunkLastActivity.delete(chunkId);
-        this.chunkTimeoutMs.delete(chunkId);
     }
 
     private resetState(reason: string): void {
@@ -1085,6 +1084,22 @@ export class Whisper {
 
     private maybeProcessNextChunk(): void {
         if (!this.transcribing || !this.pcmBuffer) return;
+        if (!this.modelReady) return;
+
+        // Guard: if the cursor is below lastSegmentEnd AND within the contiguous
+        // segment range, clamp it forward to avoid re-processing already-transcribed
+        // regions. But if it's before the first segment, the cursor was intentionally
+        // placed there to fill an untranscribed gap — leave it alone.
+        if (this.transcribedUpTo < this.lastSegmentEnd && this.segments.length > 0) {
+            const coverageStart = this.segments[0].start;
+            if (this.transcribedUpTo >= coverageStart - 2) {
+                Logger.debug('[Whisper] transcribedUpTo regression detected, clamping', {
+                    was: this.transcribedUpTo.toFixed(2),
+                    clampTo: this.lastSegmentEnd.toFixed(2),
+                });
+                this.transcribedUpTo = this.lastSegmentEnd;
+            }
+        }
 
         // Sentinel: detect track changes that EventBus missed
         // Resolve blob URLs so comparison isn't fooled by AudioCache URL mutation
@@ -1165,11 +1180,8 @@ export class Whisper {
         this.transcribedUpTo += chunkLengthS - overlapSec;
     }
 
-    private getChunkStallTimeoutMs(chunkLengthS: number, hasActivity: boolean): number {
-        if (!hasActivity) {
-            return Math.max(FIRST_CHUNK_STALL_TIMEOUT_MS, Math.round(chunkLengthS * 2500));
-        }
-        const scaledTimeout = Math.round(chunkLengthS * 1000 * CHUNK_STALL_TIMEOUT_MULTIPLIER);
+    private getChunkStallTimeoutMs(settings: WhisperSettings): number {
+        const scaledTimeout = Math.round(settings.chunkLengthS * 1000 * CHUNK_STALL_TIMEOUT_MULTIPLIER);
         const floorTimeout = DeviceCapabilities.profile.isMobile
             ? CHUNK_STALL_TIMEOUT_FLOOR_MS * 2
             : CHUNK_STALL_TIMEOUT_FLOOR_MS;
@@ -1178,36 +1190,27 @@ export class Whisper {
 
     private checkForStalledChunks(settings: WhisperSettings): void {
         if (!this.transcribing || this.pendingChunks <= 0 || this.chunkSendTimes.size === 0) return;
+        // Avoid resetting during cold-start when the very first chunk is still in-flight.
+        if (!this.hasWorkerChunkActivity && this.pendingChunks <= 1) return;
+        const timeoutMs = this.getChunkStallTimeoutMs(settings);
         const now = performance.now();
         let stalledChunkId: number | null = null;
         let stalledForMs = 0;
-        let stalledTimeoutMs = 0;
-        let worstOverdueMs = 0;
 
         for (const [chunkId, sentAt] of this.chunkSendTimes.entries()) {
             const lastActivity = this.chunkLastActivity.get(chunkId) ?? sentAt;
             const ageMs = now - lastActivity;
-            const timeoutMs = this.chunkTimeoutMs.get(chunkId)
-                ?? this.getChunkStallTimeoutMs(settings.chunkLengthS, this.hasWorkerChunkActivity);
-            const overdueMs = ageMs - timeoutMs;
-            if (overdueMs > worstOverdueMs) {
-                worstOverdueMs = overdueMs;
-                stalledChunkId = chunkId;
+            if (ageMs > stalledForMs) {
                 stalledForMs = ageMs;
-                stalledTimeoutMs = timeoutMs;
+                stalledChunkId = chunkId;
             }
         }
 
-        if (stalledChunkId === null || worstOverdueMs <= 0) return;
-        this.recoverFromStalledChunks(settings, stalledChunkId, stalledForMs, stalledTimeoutMs);
+        if (stalledChunkId === null || stalledForMs < timeoutMs) return;
+        this.recoverFromStalledChunks(settings, stalledChunkId, stalledForMs);
     }
 
-    private recoverFromStalledChunks(
-        settings: WhisperSettings,
-        stalledChunkId: number,
-        stalledForMs: number,
-        timeoutMs: number,
-    ): void {
+    private recoverFromStalledChunks(settings: WhisperSettings, stalledChunkId: number, stalledForMs: number): void {
         const now = performance.now();
         if (now - this.lastChunkStallRecoveryAt < Whisper.CHUNK_STALL_RECOVERY_COOLDOWN_MS) return;
         this.lastChunkStallRecoveryAt = now;
@@ -1222,7 +1225,6 @@ export class Whisper {
         Logger.warn('[Whisper] Chunk processing stalled; resetting worker', {
             stalledChunkId,
             stalledForMs: Math.round(stalledForMs),
-            timeoutMs: Math.round(timeoutMs),
             pendingChunks: this.pendingChunks,
             recoveries: this.chunkStallRecoveryCount,
             resumeFrom,
@@ -1231,7 +1233,9 @@ export class Whisper {
 
         this.resetWorker('chunk-stall-timeout');
         this.clearChunkTracking({ resetRecovery: false, resetChunkCounter: false });
-        this.transcribedUpTo = resumeFrom;
+        // Don't rewind into regions we've already transcribed — existing segments
+        // are still valid and re-processing creates duplicates.
+        this.transcribedUpTo = Math.max(resumeFrom, this.lastSegmentEnd);
         this.modelReady = false;
         this.initWorker(settings);
 
@@ -1269,23 +1273,47 @@ export class Whisper {
             const seekTime = this.audio!.currentTime;
             Logger.debug('[Whisper] Seek settled:', seekTime.toFixed(2));
 
-            // Flush stale jobs from the worker queue so new playhead chunks process immediately
-            if (this.worker) this.worker.postMessage({ type: 'flush-queue' });
-
             // Rewind processing window on backward scrubs, jump on forward scrubs.
             // Keep all existing segments — they're already transcribed correctly.
             // Only adjust the processing cursor so new chunks fill gaps.
+            let cursorChanged = false;
             if (seekTime < this.transcribedUpTo - 0.25) {
-                this.transcribedUpTo = Math.max(0, seekTime - SEEK_BACKFILL_SEC);
-                this.clearChunkTracking({ resetRecovery: true, resetChunkCounter: false });
-                this.lastSegmentEnd = Math.min(this.lastSegmentEnd, seekTime);
-            }
-            if (seekTime > this.transcribedUpTo) {
+                const newTarget = Math.max(0, seekTime - SEEK_BACKFILL_SEC);
+                // Check if the seek lands in an untranscribed gap before the first segment.
+                // If segments start at, say, 270s but user seeks to 10s, we must rewind
+                // transcribedUpTo so the processing loop fills the 0-270s gap.
+                const coverageStart = this.segments.length > 0 ? this.segments[0].start : Infinity;
+                const isWithinCoverage = newTarget >= coverageStart - 2 && newTarget < this.lastSegmentEnd;
+                if (isWithinCoverage) {
+                    // Seek is within existing transcription coverage — no cursor change,
+                    // no flush needed. Ahead-of-playhead chunks are still useful for LRC.
+                } else {
+                    // Gap detected — either before the first segment or past lastSegmentEnd.
+                    // Rewind cursor to fill the untranscribed region.
+                    this.transcribedUpTo = newTarget;
+                    this.clearChunkTracking({ resetRecovery: true, resetChunkCounter: false });
+                    // Flush stale jobs since queued chunks are from the old cursor position.
+                    if (this.worker) this.worker.postMessage({ type: 'flush-queue' });
+                    cursorChanged = true;
+                    Logger.debug('[Whisper] Seek to untranscribed gap, rewinding cursor', {
+                        seekTime: seekTime.toFixed(2),
+                        newTarget: newTarget.toFixed(2),
+                        coverageStart: coverageStart.toFixed(2),
+                        lastSegmentEnd: this.lastSegmentEnd.toFixed(2),
+                    });
+                }
+            } else if (seekTime > this.transcribedUpTo) {
+                // Forward seek past processed territory — flush stale jobs so the
+                // worker can start on chunks near the new playhead immediately.
                 this.transcribedUpTo = seekTime;
                 this.clearChunkTracking({ resetRecovery: true, resetChunkCounter: false });
+                if (this.worker) this.worker.postMessage({ type: 'flush-queue' });
+                cursorChanged = true;
             }
 
-            this.emitWhisperSnapshot('seek');
+            // Only re-emit snapshot if cursor changed — for within-transcript seeks
+            // the RAF already emitted the correct snapshot at the new playhead.
+            if (cursorChanged) this.emitWhisperSnapshot('seek');
             this.maybeProcessNextChunk();
             this.seekDebounceTimer = null;
         }, 100);
@@ -1356,7 +1384,6 @@ export class Whisper {
             this.worker.postMessage({ type: 'skip-webgpu' });
         }
         this.worker.onerror = (e: ErrorEvent) => {
-            this.workerInitPending = false;
             if (this.gpuCrashed) return; // Already showing crash UI
             const errObj = (e as ErrorEvent & { error?: unknown }).error;
             const errorMsg = e.message || (errObj instanceof Error ? errObj.message : '') || 'Unknown worker error';
@@ -1429,7 +1456,6 @@ export class Whisper {
 
     private resetWorker(reason: string): void {
         this.releaseLoadLease();
-        this.workerInitPending = false;
         if (this.worker) {
             // Send reset so worker can dispose GPU pipeline before we kill it
             try { this.worker.postMessage({ type: 'reset' }); } catch { /* ignore */ }
@@ -1457,17 +1483,8 @@ export class Whisper {
             this.gpuCrashed = false;
             this.maybeReenableWebgpu('init-worker');
         }
-        if (this.worker && this.modelReady) {
-            Logger.debug('[Whisper] initWorker skipped: model already ready');
-            return;
-        }
-        if (this.workerInitPending) {
-            Logger.debug('[Whisper] initWorker skipped: model init already pending');
-            return;
-        }
         MLCrashGuard.initStarted('whisper');
         this.ensureWorker();
-        this.workerInitPending = true;
         this.modelReady = false;
         this.dispatchProgress(I18n.t('whisperLoading'), 5, 'model');
 
@@ -1481,7 +1498,6 @@ export class Whisper {
                 // Worker was terminated while waiting for lease
                 release();
                 this.loadLeaseRelease = null;
-                this.workerInitPending = false;
                 return;
             }
             // No timeout - large models can take a while to download
@@ -1530,7 +1546,6 @@ export class Whisper {
         this.chunkLastActivity.set(chunkId, sentAt);
         this.chunkOffsets.set(chunkId, timeOffset);
         this.chunkGenerations.set(chunkId, this.transcriptionGeneration);
-        this.chunkTimeoutMs.set(chunkId, this.getChunkStallTimeoutMs(chunkLengthS, this.hasWorkerChunkActivity));
         Logger.debug(`[Whisper] Sending chunk ${chunkId}, offset=${timeOffset.toFixed(2)}s, priority=${priority}, samples=${audio.length}`);
         this.worker!.postMessage({
             type: 'transcribe',
@@ -1565,7 +1580,6 @@ export class Whisper {
                 // Model ready - clear loading status and hide transcribing indicator
                 MLCrashGuard.initComplete('whisper');
                 this.releaseLoadLease();
-                this.workerInitPending = false;
                 this.clearModelLoadTimer();
                 this.modelReady = true;
                 SharedCache.set(CacheKeys.whisperModelReady(this.getWhisperSettings().model), true, MODEL_READY_TTL_MS);
@@ -1578,12 +1592,6 @@ export class Whisper {
                 }
                 if (this.transcribing && this.pcmBuffer) {
                     this.maybeProcessNextChunk();
-                } else if (!this.transcribing && Config.get('alwaysTranscribe')) {
-                    const audio = getAudioElement();
-                    if (audio && !audio.paused) {
-                        Logger.debug('[Whisper] Auto-start safeguard: worker ready while playback is active');
-                        this.startTranscription().catch(err => Logger.error('[Whisper] Auto-start safeguard failed:', err));
-                    }
                 }
                 break;
 
@@ -1730,7 +1738,6 @@ export class Whisper {
 
             case 'error': {
                 this.releaseLoadLease();
-                this.workerInitPending = false;
                 // If GPU already crashed fatally, don't overwrite the persistent crash message
                 if (this.gpuCrashed) {
                     Logger.debug('[Whisper] Ignoring error after GPU crash:', message.data?.message);
@@ -1972,6 +1979,23 @@ export class Whisper {
                 continue;
             }
 
+            // Reverse containment: remove existing shorter segments that the
+            // new (longer) segment fully contains. This handles the case where
+            // a short fragment was added first, then a longer chunk arrives later
+            // covering the same audio region.
+            const nDur = seg.end - seg.start;
+            if (nDur > 2) {
+                for (let i = this.segments.length - 1; i >= 0; i--) {
+                    const existing = this.segments[i];
+                    const eDur = existing.end - existing.start;
+                    if (nDur > eDur * 2
+                        && existing.start >= seg.start - 0.5
+                        && existing.end <= seg.end + 0.5) {
+                        this.segments.splice(i, 1);
+                    }
+                }
+            }
+
             this.segments.push(seg);
             this.lastSegmentEnd = Math.max(this.lastSegmentEnd, seg.end);
         }
@@ -2123,17 +2147,75 @@ export class Whisper {
 
         // Common ASMR/Whisper hallucination patterns
         const noisePatterns = [
-            /^音+$/, /^音楽+$/, /^声+$/, /^笑+$/, /^拍手+$/,
-            /^効果音+$/, /^呼吸+$/, /^息+$/, /^music+$/, /^laughter+$/,
-            /^silence+$/, /^inaudible+$/, /^noise+$/,
+            /^音+$/, /^(音楽)+$/, /^声+$/, /^笑+$/, /^(拍手)+$/,
+            /^(効果音)+$/, /^(呼吸)+$/, /^息+$/, /^(music)+$/, /^(laughter)+$/,
+            /^(silence)+$/, /^(inaudible)+$/, /^(noise)+$/,
+            /^(ドラゴンの音)+$/, /^(スタッフ)+$/,
         ];
 
-        return noisePatterns.some((re) => re.test(cleaned));
+        if (noisePatterns.some((re) => re.test(cleaned))) return true;
+
+        // Generic repetition detector: a phrase repeated 3+ times is almost
+        // certainly Whisper hallucinating on silence/music.
+        // Unit length minimum 3 chars to avoid false-positives on legitimate
+        // repeated Japanese speech like はいはいはい (hai-hai-hai) or うんうんうん.
+        if (cleaned.length >= 9) {
+            for (let len = 3; len <= Math.min(20, Math.floor(cleaned.length / 3)); len++) {
+                const unit = cleaned.slice(0, len);
+                const repeated = unit.repeat(Math.floor(cleaned.length / len));
+                if (repeated === cleaned.slice(0, repeated.length) && cleaned.length / len >= 3) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     // ------------------------------------------------------------------------
     // Cache handling
     // ------------------------------------------------------------------------
+
+    /**
+     * Check cache for a track and emit whisper:update immediately if found.
+     * Called from handleTrackChange() to avoid the 500ms scheduleAutoStart delay
+     * for cached transcripts — LearnerSubtitles can render in the same microtask.
+     */
+    private emitCachedSnapshotIfAvailable(src: string): void {
+        const settings = this.getWhisperSettings();
+        if (!settings.cacheTranscripts) return;
+
+        const identity = this.buildCacheIdentity(src, settings);
+        const key = this.buildCacheKey(src, settings);
+        const cached = SharedCache.get<CachedTranscript>(key);
+        if (!cached?.segments?.length) return;
+
+        // Verify identity (collision check) — old entries without sourceIdentity are accepted
+        if (cached.sourceIdentity && cached.sourceIdentity !== identity) return;
+
+        // Apply hallucination corrections (same as startTranscription cache path)
+        for (const seg of cached.segments) {
+            const corrected = correctWhisperText(seg.text);
+            if (corrected !== seg.text) seg.text = corrected;
+        }
+
+        // Pre-populate Whisper state so startTranscription() finds segments ready
+        this.segments = cached.segments;
+        this.lastSegmentEnd = cached.segments[cached.segments.length - 1]?.end || 0;
+        this.currentCacheKey = key;
+        this.currentCacheIdentity = identity;
+
+        const latest = cached.segments[cached.segments.length - 1];
+        EventBus.emit('whisper:update', {
+            text: latest?.text || cached.text,
+            segments: cached.segments,
+            final: !!cached.complete,
+            fromCache: true,
+            live: false,
+            source: 'cache',
+        });
+        Logger.debug('[Whisper] Emitted cached snapshot immediately on track change');
+    }
 
     /** Build the identity string (pre-hash) for a transcript cache entry. */
     private buildCacheIdentity(src: string, settings: WhisperSettings): string {

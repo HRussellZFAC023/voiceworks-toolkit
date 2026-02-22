@@ -17,8 +17,8 @@ import { Logger } from '../core/Utils';
 import { EventBus } from '../core/EventBus';
 import { CentralObserver } from '../core/CentralObserver';
 import { mountApp, type MountedApp } from '../core/MountApp';
-import { getAudioElement } from '../core/DomUtils';
-import { getOrCreateSourceNode } from '../core/AudioAnalysis';
+import { calculateBottomOffset, getAudioElement, syncOverflowButtonState } from '../core/DomUtils';
+import { connectAudioAnalyser as connectSharedAudioAnalyser } from '../core/AudioAnalysis';
 import { AppStore } from '../store/AppStore';
 import type { WhisperUpdatePayload } from '../types';
 import JoiBarVue from './components/JoiBar.vue';
@@ -547,39 +547,26 @@ export class JoiTool {
     // ------------------------------------------------------------------------
 
     private connectAudioAnalyser(): void {
-        const audio = getAudioElement();
-        if (!audio) {
-            Logger.debug('[JoiTool] No audio element found for volume analysis');
+        const currentAudio = getAudioElement();
+        if (currentAudio && this.connectedAudioEl === currentAudio && this.analyser) return;
+
+        const connected = connectSharedAudioAnalyser({
+            fftSize: 256,
+            smoothingTimeConstant: 0.3,
+            tag: 'JoiTool',
+            requireValidSource: false,
+        });
+        if (!connected) {
             this.volumeAvailable = false;
             return;
         }
 
-        // Already connected to this element
-        if (this.connectedAudioEl === audio && this.analyser) return;
-
-        const result = getOrCreateSourceNode(audio);
-        if (!result) {
-            Logger.debug('[JoiTool] Audio analyser failed (cross-origin?), using text-only mode');
-            this.volumeAvailable = false;
-            return;
-        }
-
-        try {
-            this.audioCtx = result.ctx;
-            this.sourceNode = result.source;
-
-            this.analyser = this.audioCtx.createAnalyser();
-            this.analyser.fftSize = 256;
-            this.analyser.smoothingTimeConstant = 0.3;
-            this.sourceNode.connect(this.analyser);
-
-            this.connectedAudioEl = audio;
-            this.volumeAvailable = true;
-            Logger.debug('[JoiTool] Audio analyser connected');
-        } catch (err) {
-            Logger.debug('[JoiTool] Audio analyser failed:', err);
-            this.volumeAvailable = false;
-        }
+        this.audioCtx = connected.ctx;
+        this.sourceNode = connected.source;
+        this.analyser = connected.analyser;
+        this.connectedAudioEl = connected.audio;
+        this.volumeAvailable = true;
+        Logger.debug('[JoiTool] Audio analyser connected');
     }
 
     private sampleVolume(): number {
@@ -1173,16 +1160,10 @@ export class JoiTool {
             // Minimized player: collapsed bar above mini player bar (+ subs if visible)
             collapsedBar.style.display = '';
 
-            const subsBar = document.querySelector('body > .learner-subs-collapsed') as HTMLElement | null;
-            const playerBar = document.querySelector('.q-footer, .player-bar-container') as HTMLElement | null;
-
-            let bottomOffset = playerBar?.offsetHeight || 60;
-
-            // Stack above collapsed subs if truly visible (not opacity-hidden)
-            if (subsBar && subsBar.style.display !== 'none' && !subsBar.classList.contains('hidden') && subsBar.offsetHeight > 0) {
-                bottomOffset += subsBar.offsetHeight;
-            }
-
+            const bottomOffset = calculateBottomOffset({
+                includeJoiBar: false,
+                includeVizBar: false,
+            });
             collapsedBar.style.bottom = `${bottomOffset}px`;
 
             if (expandedBar?.isConnected) {
@@ -1202,14 +1183,7 @@ export class JoiTool {
     // ------------------------------------------------------------------------
 
     private syncOverflowButton(active: boolean): void {
-        const btns = document.querySelectorAll('.asmr-joi-btn');
-        btns.forEach(btn => {
-            const icon = btn.querySelector('.material-icons');
-            if (icon) {
-                icon.classList.toggle('asmr-accent', active);
-            }
-            btn.classList.toggle('learner-btn-active', active);
-        });
+        syncOverflowButtonState('.asmr-joi-btn', active);
     }
 
     // ------------------------------------------------------------------------

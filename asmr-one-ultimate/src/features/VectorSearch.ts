@@ -729,17 +729,6 @@ export class VectorSearch {
         Logger.warn(`[VectorSearch] Rate limited by Jina. Cooling down for ${waitSecs}s (backoff: ${backoffMultiplier}x)`);
     }
 
-    private checkPersistedRateLimit(): void {
-        const persistedCooldown = Number(Config.get('vectorRateLimitCooldownUntil') || 0);
-        if (persistedCooldown > Date.now()) {
-            this.embeddingCooldownUntil = persistedCooldown;
-            this.embeddingRateLimited = true;
-        } else if (persistedCooldown > 0) {
-            Config.set('vectorRateLimitBackoff', 1);
-            Config.set('vectorRateLimitCooldownUntil', 0);
-        }
-    }
-
     private resetRateLimitBackoff(): void {
         if (Config.get('vectorRateLimitBackoff') !== 1) {
             Config.set('vectorRateLimitBackoff', 1);

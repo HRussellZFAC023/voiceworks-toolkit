@@ -24,8 +24,7 @@ import './styles/components/_jpdb.css';
 import './styles/components/_cards.css';
 
 import { KikoeruBridge } from './infrastructure/KikoeruBridge';
-import { getAudioElement, hasPlayerBar, startStackedBottomHeightWatch } from './core/DomUtils';
-import { resumeAudioContext } from './core/AudioAnalysis';
+import { hasPlayerBar, startStackedBottomHeightWatch } from './core/DomUtils';
 import { AudioCache } from './infrastructure/AudioCache';
 import { StorageManager } from './infrastructure/StorageManager';
 import { WorkTreeCopy } from './features/WorkTreeCopy';
@@ -77,6 +76,7 @@ import { JoiTool } from './features/JoiTool';
 import { VisualizerController } from './features/VisualizerController';
 import { VisitCounter } from './features/VisitCounter';
 import { ContinueListeningController } from './features/ContinueListeningController';
+import { setupAudioRecovery } from './features/audioRecovery';
 
 
 declare const unsafeWindow: Window & typeof globalThis;
@@ -105,7 +105,6 @@ interface ASMRUltAPI {
     skipRadio: () => void;
     toggleShuffle: () => void;
     isRadioActive: () => boolean;
-    updateRadioStatus: (on: boolean) => void;
     search: (term: string) => void;
     // Playlist API
     playlistNext: () => void;
@@ -125,7 +124,6 @@ const apiRef: ASMRUltAPI = {
     skipRadio: notReady,
     toggleShuffle: notReady,
     isRadioActive: () => false,
-    updateRadioStatus: notReady,
     search: notReady,
     playlistNext: notReady,
     playlistPrev: notReady,
@@ -489,9 +487,8 @@ async function initializeAIFeatures(): Promise<void> {
             transcriptInstance.enable();
         },
         disable() {
+            whisperInstance.disable();
             transcriptInstance.disable();
-            // Whisper is heavyweight; just disable transcript injector.
-            // Full Whisper teardown would kill the worker — acceptable for toggle-off.
         },
     });
 
@@ -568,9 +565,6 @@ function updateGlobalAPI(
         },
         skipRadio: () => radioMode.skipToNext(),
         isRadioActive: () => radioMode.isActive,
-        updateRadioStatus: () => {
-            // No-op: radio status is now managed reactively via EventBus in the SFC
-        },
         search: (term: string) => bridge.dispatch('Works/search', { keywords: term }),
         // Playlist API
         playlistNext: () => playlistMode.next(),
@@ -583,115 +577,6 @@ function updateGlobalAPI(
 
     Object.assign(apiRef, updates);
     Object.assign(globalWindow.ASMRUlt!, updates);
-}
-
-function isValidAudioSrc(src: string): boolean {
-    if (!src) return false;
-    try {
-        const url = new URL(src);
-        // Just a bare origin (e.g. "https://asmr.one/") is not a real audio file
-        return url.pathname.length > 1;
-    } catch {
-        return false;
-    }
-}
-
-function setupAudioRecovery(): void {
-    const audio = getAudioElement();
-    if (!audio) {
-        Logger.warn('[AudioRecovery] No <audio> element found, skipping recovery setup');
-        return;
-    }
-    Logger.debug('[AudioRecovery] Setting up audio recovery listeners');
-
-    let audioRecoveryAttempts = 0;
-    const MAX_RECOVERY_ATTEMPTS = 3;
-    const RECOVERY_COOLDOWN = 30000; // 30 seconds
-    let lastRecoveryTime = 0;
-    let lastKnownGoodSrc = '';
-    let waitingTimer: ReturnType<typeof setTimeout> | null = null;
-
-    // Reset recovery state when the source genuinely changes to a valid URL
-    const srcObserver = new MutationObserver(() => {
-        const src = audio.getAttribute('src') || audio.src;
-        if (isValidAudioSrc(src) && src !== lastKnownGoodSrc) {
-            lastKnownGoodSrc = src;
-            audioRecoveryAttempts = 0;
-            if (waitingTimer !== null) {
-                clearTimeout(waitingTimer);
-                waitingTimer = null;
-            }
-        }
-    });
-    srcObserver.observe(audio, { attributes: true, attributeFilter: ['src'] });
-
-    audio.addEventListener('stalled', () => {
-        if (!isValidAudioSrc(audio.src)) return; // Don't retry invalid src
-        Logger.warn('[AudioRecovery] Audio stalled, retrying playback...', { src: audio.src, readyState: audio.readyState, currentTime: audio.currentTime });
-        audio.play().catch(err => Logger.debug('[AudioRecovery] Stalled retry failed:', err));
-    });
-
-    audio.addEventListener('waiting', () => {
-        Logger.debug('[AudioRecovery] Audio waiting', { src: audio.src, readyState: audio.readyState, paused: audio.paused });
-        if (waitingTimer !== null) clearTimeout(waitingTimer);
-        waitingTimer = setTimeout(() => {
-            waitingTimer = null;
-            if (audio.readyState < 3 && !audio.paused && isValidAudioSrc(audio.src)) {
-                const now = Date.now();
-
-                // Reset counter after cooldown period
-                if (now - lastRecoveryTime > RECOVERY_COOLDOWN) {
-                    audioRecoveryAttempts = 0;
-                }
-
-                if (audioRecoveryAttempts >= MAX_RECOVERY_ATTEMPTS) {
-                    Logger.warn('[AudioRecovery] Max recovery attempts reached, skipping reload');
-                    return;
-                }
-
-                audioRecoveryAttempts++;
-                lastRecoveryTime = now;
-
-                Logger.warn('[AudioRecovery] Audio stuck in waiting. Reloading source...', { src: audio.src, readyState: audio.readyState, attempt: audioRecoveryAttempts });
-                const current = audio.src;
-                const savedTime = audio.currentTime;
-                audio.src = '';
-                audio.src = current;
-                audio.currentTime = savedTime;
-                audio.play().catch(err => Logger.debug('[AudioRecovery] Reload retry failed:', err));
-            }
-        }, 5000);
-    });
-
-    audio.addEventListener('error', () => {
-        Logger.error('[AudioRecovery] Audio error event', { src: audio.src, error: audio.error });
-
-        // If the src is invalid (e.g. bare origin after rapid skipping), try to
-        // restore the last known good source so playback isn't permanently broken.
-        if (!isValidAudioSrc(audio.src) && lastKnownGoodSrc) {
-            Logger.warn('[AudioRecovery] Invalid src after error, restoring last good source', { lastKnownGoodSrc });
-            audio.src = lastKnownGoodSrc;
-            audio.play().catch(err => Logger.debug('[AudioRecovery] Restore retry failed:', err));
-        }
-    });
-
-    audio.addEventListener('play', () => {
-        Logger.debug('[AudioRecovery] Audio play', { src: audio.src, currentTime: audio.currentTime });
-    });
-
-    audio.addEventListener('pause', () => {
-        Logger.debug('[AudioRecovery] Audio pause', { src: audio.src, currentTime: audio.currentTime });
-    });
-
-    // Resume AudioContext when page becomes visible again.
-    // On desktop, the browser may suspend the AudioContext when the tab is
-    // backgrounded; resuming it when the user returns prevents silent playback
-    // if the Visualizer/JoiTool had connected via createMediaElementSource().
-    document.addEventListener('visibilitychange', () => {
-        if (document.visibilityState === 'visible') {
-            resumeAudioContext(audio);
-        }
-    });
 }
 
 // Start initialization (only if not already initialized)

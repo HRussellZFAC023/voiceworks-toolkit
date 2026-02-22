@@ -13,6 +13,7 @@ import { CacheKeys, SharedCache } from '../../core/Cache';
 import { Logger } from '../../core/Utils';
 import { Whisper } from '../Whisper';
 import { DeviceCapabilities } from '../../core/DeviceCapabilities';
+import type { ConfigKey } from '../../types';
 // @ts-ignore – Vite ?raw import
 import PROXY_WORKER_CODE from '../../../dlsite-proxy-worker.js?raw';
 
@@ -39,6 +40,51 @@ const sectionVisibility = computed(() => ({
     storage: enableStoreBackup.value,
 }));
 
+interface FeatureToggleItem {
+    key: ConfigKey;
+    labelKey: string;
+    sublabelKey: string;
+    icon: string;
+    hideOnIPhone?: boolean;
+}
+
+const featureToggleItems: FeatureToggleItem[] = [
+    { key: 'enablePlaylistDiscovery', labelKey: 'enablePlaylistDiscovery', sublabelKey: 'enablePlaylistDiscoverySub', icon: 'manage_search' },
+    { key: 'enableContinueListening', labelKey: 'enableContinueListening', sublabelKey: 'enableContinueListeningSub', icon: 'headset' },
+    { key: 'enableVisitCounter', labelKey: 'enableVisitCounter', sublabelKey: 'enableVisitCounterSub', icon: 'visibility' },
+    { key: 'enableLearnerMode', labelKey: 'enableLearnerMode', sublabelKey: 'enableLearnerModeSub', icon: 'school' },
+    { key: 'enableJpdb', labelKey: 'enableJpdb', sublabelKey: 'enableJpdbSub', icon: 'menu_book' },
+    { key: 'learnerBlur', labelKey: 'learnerBlurLabel', sublabelKey: 'learnerBlurSub', icon: 'blur_on' },
+    { key: 'karaokeMode', labelKey: 'karaokeMode', sublabelKey: 'karaokeModeSub', icon: 'music_note' },
+    { key: 'segmentMode', labelKey: 'segmentMode', sublabelKey: 'segmentModeSub', icon: 'segment' },
+    { key: 'enableAdvancedSearch', labelKey: 'enableAdvancedSearch', sublabelKey: 'enableAdvancedSearchSub', icon: 'search' },
+    { key: 'enableWorkMetadata', labelKey: 'enableWorkMetadata', sublabelKey: 'enableWorkMetadataSub', icon: 'info' },
+    { key: 'enablePlayerTranslator', labelKey: 'enablePlayerTranslator', sublabelKey: 'enablePlayerTranslatorSub', icon: 'translate' },
+    { key: 'enableSupportButton', labelKey: 'enableSupportButton', sublabelKey: 'enableSupportButtonSub', icon: 'favorite' },
+    { key: 'enableWorkTreeManager', labelKey: 'enableWorkTreeManager', sublabelKey: 'enableWorkTreeManagerSub', icon: 'folder' },
+    { key: 'enableTagFilters', labelKey: 'enableTagFilters', sublabelKey: 'enableTagFiltersSub', icon: 'label_off' },
+    { key: 'enableVectorSearch', labelKey: 'enableVectorSearch', sublabelKey: 'enableVectorSearchSub', icon: 'saved_search', hideOnIPhone: true },
+    { key: 'enableWhisper', labelKey: 'enableWhisper', sublabelKey: 'enableWhisperSub', icon: 'record_voice_over', hideOnIPhone: true },
+    { key: 'enableFavicon', labelKey: 'enableFavicon', sublabelKey: 'enableFaviconSub', icon: 'image' },
+    { key: 'enableMediaSession', labelKey: 'enableMediaSession', sublabelKey: 'enableMediaSessionSub', icon: 'play_circle' },
+    { key: 'enableMenuIconFixer', labelKey: 'enableMenuIconFixer', sublabelKey: 'enableMenuIconFixerSub', icon: 'build' },
+    { key: 'enableStoreBackup', labelKey: 'enableStoreBackup', sublabelKey: 'enableStoreBackupSub', icon: 'save' },
+    { key: 'enableHVDBLink', labelKey: 'enableHVDBLink', sublabelKey: 'enableHVDBLinkSub', icon: 'link' },
+    { key: 'enableInterfaceTranslator', labelKey: 'enableInterfaceTranslator', sublabelKey: 'enableInterfaceTranslatorSub', icon: 'language' },
+    { key: 'enablePageTitleManager', labelKey: 'enablePageTitleManager', sublabelKey: 'enablePageTitleManagerSub', icon: 'title' },
+    { key: 'enableKeyboardManager', labelKey: 'enableKeyboardManager', sublabelKey: 'enableKeyboardManagerSub', icon: 'keyboard' },
+    { key: 'enableRouteStateSync', labelKey: 'enableRouteStateSync', sublabelKey: 'enableRouteStateSyncSub', icon: 'sync' },
+    { key: 'enableMediaViewer', labelKey: 'enableMediaViewer', sublabelKey: 'enableMediaViewerSub', icon: 'photo_library' },
+    { key: 'enableWorkTreeCopy', labelKey: 'enableWorkTreeCopy', sublabelKey: 'enableWorkTreeCopySub', icon: 'content_copy' },
+    { key: 'enableCommentSection', labelKey: 'enableCommentSection', sublabelKey: 'enableCommentSectionSub', icon: 'comment' },
+    { key: 'enableInfiniteScroll', labelKey: 'enableInfiniteScroll', sublabelKey: 'enableInfiniteScrollSub', icon: 'autorenew' },
+    { key: 'enableJoiTool', labelKey: 'enableJoiTool', sublabelKey: 'enableJoiToolSub', icon: 'casino' },
+    { key: 'alwaysShowJoi', labelKey: 'alwaysShowJoi', sublabelKey: 'alwaysShowJoiSub', icon: 'casino' },
+    { key: 'enableVisualizer', labelKey: 'enableVisualizer', sublabelKey: 'enableVisualizerSub', icon: 'graphic_eq' },
+    { key: 'alwaysShowVisualizer', labelKey: 'alwaysShowVisualizer', sublabelKey: 'alwaysShowVisualizerSub', icon: 'graphic_eq' },
+    { key: 'galleryAutoSlideshow', labelKey: 'galleryAutoSlideshow', sublabelKey: 'galleryAutoSlideshowSub', icon: 'slideshow' },
+];
+
 // ============================================================================
 // Whisper status
 // ============================================================================
@@ -54,71 +100,74 @@ const whisperDownloadStatus = ref({
 const whisperModelStatusText = ref(t('whisperReady'));
 const whisperModelStatusColor = ref('');
 
-const whisperDownloadLabel = computed(() => {
+function computeWhisperUiState() {
     const status = whisperDownloadStatus.value;
     const whisperState = AppStore.state.whisper;
-    const isLoading = whisperState.isLoadingModel || status.isLoading;
+    const cachedReady = SharedCache.get<boolean>(CacheKeys.whisperModelReady(WHISPER_MODEL)) === true;
     const progress = status.isLoading ? status.progress : whisperState.progress;
-    const message = status.message || whisperState.progressMessage || '';
-    const hasError = !isLoading && !whisperState.isTranscribing && (status.message || whisperState.progressMessage) && whisperState.progress === 0;
+    const message = (status.message || whisperState.progressMessage || '').trim();
+    const isLoading = whisperState.isLoadingModel || (status.isLoading && progress < 100);
+    const isTranscribing = whisperState.isTranscribing;
+    const isReady = !isLoading && (whisperState.progress === 100 || progress === 100 || cachedReady);
+    const isError = !isLoading && !isTranscribing && !isReady && !!message && whisperState.progress === 0;
 
-    if (isLoading) {
-        const capped = Math.min(99, Math.max(0, progress || 0));
+    return {
+        progress,
+        message,
+        isLoading,
+        isTranscribing,
+        isReady,
+        isError,
+    };
+}
+
+const whisperDownloadLabel = computed(() => {
+    const ui = computeWhisperUiState();
+
+    if (ui.isLoading) {
+        const capped = Math.min(99, Math.max(0, ui.progress || 0));
         const baseMessage = t('downloadWhisperModelLoading');
         const modelLabel = WHISPER_MODEL;
         const progressSuffix = capped > 0 ? ` (${Math.round(capped)}%)` : '';
         return `${baseMessage} - ${modelLabel}${progressSuffix}`;
-    } else if (progress === 100) {
-        return t('downloadWhisperModelReady') || 'Ready';
-    } else if (hasError) {
-        return format('downloadWhisperModelFailed', { message: message || t('whisperUnknownError') });
     }
+    if (ui.isReady) {
+        return t('downloadWhisperModelReady') || 'Ready';
+    }
+    if (ui.isError) return format('downloadWhisperModelFailed', { message: ui.message || t('whisperUnknownError') });
     return t('downloadWhisperModelSub');
 });
 
 const whisperDownloadIcon = computed(() => {
-    const status = whisperDownloadStatus.value;
-    const whisperState = AppStore.state.whisper;
-    const isLoading = whisperState.isLoadingModel || status.isLoading;
-    const progress = status.isLoading ? status.progress : whisperState.progress;
-    const message = status.message || whisperState.progressMessage || '';
-    const hasError = !isLoading && !whisperState.isTranscribing && (status.message || whisperState.progressMessage) && whisperState.progress === 0;
+    const ui = computeWhisperUiState();
 
-    if (isLoading) return 'hourglass_empty';
-    if (progress === 100) return 'check';
-    if (hasError) return 'warning';
+    if (ui.isLoading) return 'hourglass_empty';
+    if (ui.isReady) return 'check';
+    if (ui.isError) return 'warning';
     return 'download';
 });
 
 const whisperDownloadDisabled = computed(() => {
-    const status = whisperDownloadStatus.value;
-    return AppStore.state.whisper.isLoadingModel || status.isLoading;
+    return computeWhisperUiState().isLoading;
 });
 
 const whisperDownloadLabelColor = computed(() => {
-    const status = whisperDownloadStatus.value;
-    const whisperState = AppStore.state.whisper;
-    const isLoading = whisperState.isLoadingModel || status.isLoading;
-    const hasError = !isLoading && !whisperState.isTranscribing && (status.message || whisperState.progressMessage) && whisperState.progress === 0;
-    return hasError ? '#e57373' : '';
+    return computeWhisperUiState().isError ? '#e57373' : '';
 });
 
 function updateWhisperModelStatus() {
-    const state = AppStore.state.whisper;
-    const cachedReady = SharedCache.get<boolean>(CacheKeys.whisperModelReady(WHISPER_MODEL)) === true;
-    const isErrorState = !state.isLoadingModel && !state.isTranscribing && state.progress === 0 && !!state.progressMessage;
-
-    if (state.isLoadingModel && !cachedReady) {
+    const ui = computeWhisperUiState();
+    if (ui.isLoading) {
         whisperModelStatusText.value = t('whisperLoading');
         whisperModelStatusColor.value = '';
-    } else if (state.isTranscribing) {
+    } else if (ui.isTranscribing) {
         whisperModelStatusText.value = t('whisperTranscribing');
         whisperModelStatusColor.value = '';
-    } else if (state.progress === 100) {
+    } else if (ui.isReady) {
         whisperModelStatusText.value = t('whisperReady') || 'Ready';
         whisperModelStatusColor.value = '';
-    } else if (isErrorState) {
-        whisperModelStatusText.value = state.progressMessage;
+    } else if (ui.isError) {
+        whisperModelStatusText.value = ui.message;
         whisperModelStatusColor.value = '#e57373';
     } else {
         whisperModelStatusText.value = t('whisperReady') || 'Ready';
@@ -171,6 +220,12 @@ on('whisper:progress', (payload) => {
             progressMessage: '',
             currentTrackSrc: AppStore.state.whisper.currentTrackSrc,
         });
+        updateWhisperModelStatus();
+        return;
+    }
+    if (payload?.stage === 'transcribing') {
+        // Clear stale loading message as soon as model enters transcribing state.
+        whisperDownloadStatus.value = { isLoading: false, progress: 100, message: '' };
         updateWhisperModelStatus();
         return;
     }
@@ -341,76 +396,17 @@ const credits = [
         <!-- ============================================================ -->
         <span class="text-weight-medium text-center flex q-my-md asmr-settings-header" id="asmr-feature-settings-section-header">{{ t('featureToggles') }}</span>
         <div id="asmr-feature-settings-section" class="asmr-settings-section rounded-borders q-list q-list--bordered q-list--dark bg-black" role="group" aria-labelledby="asmr-feature-settings-section-header">
-            <SettingsToggle config-key="enablePlaylistDiscovery" :label="t('enablePlaylistDiscovery')" :sublabel="t('enablePlaylistDiscoverySub')" icon="manage_search" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
-            <SettingsToggle config-key="enableContinueListening" :label="t('enableContinueListening')" :sublabel="t('enableContinueListeningSub')" icon="headset" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
-            <SettingsToggle config-key="enableVisitCounter" :label="t('enableVisitCounter')" :sublabel="t('enableVisitCounterSub')" icon="visibility" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
-            <SettingsToggle config-key="enableLearnerMode" :label="t('enableLearnerMode')" :sublabel="t('enableLearnerModeSub')" icon="school" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
-            <SettingsToggle config-key="enableJpdb" :label="t('enableJpdb')" :sublabel="t('enableJpdbSub')" icon="menu_book" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
-            <SettingsToggle config-key="learnerBlur" :label="t('learnerBlurLabel')" :sublabel="t('learnerBlurSub')" icon="blur_on" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
-            <SettingsToggle config-key="karaokeMode" :label="t('karaokeMode')" :sublabel="t('karaokeModeSub')" icon="music_note" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
-            <SettingsToggle config-key="segmentMode" :label="t('segmentMode')" :sublabel="t('segmentModeSub')" icon="segment" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
-            <SettingsToggle config-key="enableAdvancedSearch" :label="t('enableAdvancedSearch')" :sublabel="t('enableAdvancedSearchSub')" icon="search" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
-            <SettingsToggle config-key="enableWorkMetadata" :label="t('enableWorkMetadata')" :sublabel="t('enableWorkMetadataSub')" icon="info" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
-            <SettingsToggle config-key="enablePlayerTranslator" :label="t('enablePlayerTranslator')" :sublabel="t('enablePlayerTranslatorSub')" icon="translate" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
-            <SettingsToggle config-key="enableSupportButton" :label="t('enableSupportButton')" :sublabel="t('enableSupportButtonSub')" icon="favorite" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
-            <SettingsToggle config-key="enableWorkTreeManager" :label="t('enableWorkTreeManager')" :sublabel="t('enableWorkTreeManagerSub')" icon="folder" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
-            <SettingsToggle config-key="enableTagFilters" :label="t('enableTagFilters')" :sublabel="t('enableTagFiltersSub')" icon="label_off" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
-            <template v-if="!isIPhone">
-            <SettingsToggle config-key="enableVectorSearch" :label="t('enableVectorSearch')" :sublabel="t('enableVectorSearchSub')" icon="saved_search" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
-            <SettingsToggle config-key="enableWhisper" :label="t('enableWhisper')" :sublabel="t('enableWhisperSub')" icon="record_voice_over" />
+            <template v-for="item in featureToggleItems" :key="item.key">
+                <template v-if="!item.hideOnIPhone || !isIPhone">
+                    <SettingsToggle
+                        :config-key="item.key"
+                        :label="t(item.labelKey)"
+                        :sublabel="t(item.sublabelKey)"
+                        :icon="item.icon"
+                    />
+                    <hr class="q-separator q-separator--horizontal q-separator--dark">
+                </template>
             </template>
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
-            <SettingsToggle config-key="enableFavicon" :label="t('enableFavicon')" :sublabel="t('enableFaviconSub')" icon="image" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
-            <SettingsToggle config-key="enableMediaSession" :label="t('enableMediaSession')" :sublabel="t('enableMediaSessionSub')" icon="play_circle" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
-            <SettingsToggle config-key="enableMenuIconFixer" :label="t('enableMenuIconFixer')" :sublabel="t('enableMenuIconFixerSub')" icon="build" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
-            <SettingsToggle config-key="enableStoreBackup" :label="t('enableStoreBackup')" :sublabel="t('enableStoreBackupSub')" icon="save" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
-            <SettingsToggle config-key="enableHVDBLink" :label="t('enableHVDBLink')" :sublabel="t('enableHVDBLinkSub')" icon="link" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
-            <SettingsToggle config-key="enableInterfaceTranslator" :label="t('enableInterfaceTranslator')" :sublabel="t('enableInterfaceTranslatorSub')" icon="language" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
-            <SettingsToggle config-key="enablePageTitleManager" :label="t('enablePageTitleManager')" :sublabel="t('enablePageTitleManagerSub')" icon="title" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
-            <SettingsToggle config-key="enableKeyboardManager" :label="t('enableKeyboardManager')" :sublabel="t('enableKeyboardManagerSub')" icon="keyboard" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
-            <SettingsToggle config-key="enableRouteStateSync" :label="t('enableRouteStateSync')" :sublabel="t('enableRouteStateSyncSub')" icon="sync" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
-            <SettingsToggle config-key="enableMediaViewer" :label="t('enableMediaViewer')" :sublabel="t('enableMediaViewerSub')" icon="photo_library" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
-            <SettingsToggle config-key="enableWorkTreeCopy" :label="t('enableWorkTreeCopy')" :sublabel="t('enableWorkTreeCopySub')" icon="content_copy" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
-            <SettingsToggle config-key="enableCommentSection" :label="t('enableCommentSection')" :sublabel="t('enableCommentSectionSub')" icon="comment" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
-            <SettingsToggle config-key="enableInfiniteScroll" :label="t('enableInfiniteScroll')" :sublabel="t('enableInfiniteScrollSub')" icon="autorenew" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
-            <SettingsToggle config-key="enableJoiTool" :label="t('enableJoiTool')" :sublabel="t('enableJoiToolSub')" icon="casino" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
-            <SettingsToggle config-key="alwaysShowJoi" :label="t('alwaysShowJoi')" :sublabel="t('alwaysShowJoiSub')" icon="casino" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
-            <SettingsToggle config-key="enableVisualizer" :label="t('enableVisualizer')" :sublabel="t('enableVisualizerSub')" icon="graphic_eq" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
-            <SettingsToggle config-key="alwaysShowVisualizer" :label="t('alwaysShowVisualizer')" :sublabel="t('alwaysShowVisualizerSub')" icon="graphic_eq" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
-            <SettingsToggle config-key="galleryAutoSlideshow" :label="t('galleryAutoSlideshow')" :sublabel="t('galleryAutoSlideshowSub')" icon="slideshow" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
             <SettingsInput config-key="galleryAutoSlideshowInterval" :label="t('galleryAutoSlideshowInterval')" :sublabel="t('galleryAutoSlideshowIntervalSub')" placeholder="6" icon="timer" />
         </div>
 
@@ -828,104 +824,8 @@ const credits = [
 </template>
 
 <style scoped>
-/* Settings Panel Components
-   Theme-reactive styling using CSS variables
-   Matches kikoeru-quasar Quasar styling patterns */
+/* Base settings styles are in src/styles/components/_settings.css */
 
-/* Settings Section Containers */
-.asmr-settings-section {
-    border-radius: 4px;
-    overflow: visible !important;
-    background: var(--asmr-bg-secondary) !important;
-    color: var(--asmr-text-primary) !important;
-}
-
-/* Settings headers */
-.asmr-settings-header {
-    color: var(--asmr-text-primary) !important;
-}
-
-/* Settings Items (q-item style) */
-.asmr-settings-section :deep(.q-item) {
-    background: transparent;
-    color: var(--asmr-text-primary);
-}
-
-.asmr-settings-section :deep(.q-item__label) {
-    color: var(--asmr-text-primary);
-}
-
-.asmr-settings-section :deep(.q-item__label--caption),
-.asmr-settings-section :deep(.text-caption) {
-    color: var(--asmr-text-secondary) !important;
-}
-
-.asmr-settings-section :deep(.q-icon) {
-    color: var(--asmr-text-primary);
-}
-
-/* Toggle Switch */
-.asmr-settings-section :deep(.q-toggle__inner--truthy) {
-    color: var(--asmr-accent);
-}
-
-.asmr-settings-section :deep(.q-toggle__inner--truthy .q-toggle__track) {
-    opacity: 0.5;
-}
-
-.asmr-settings-section :deep(.q-toggle__inner--truthy .q-toggle__thumb:after) {
-    background-color: currentColor;
-}
-
-.asmr-settings-section :deep(.q-field) {
-    background: transparent;
-}
-
-.asmr-settings-section :deep(.q-field__control) {
-    background: var(--asmr-input-bg, rgba(255, 255, 255, 0.07));
-    border-radius: 4px;
-    min-height: 40px;
-}
-
-.asmr-settings-section :deep(.q-field__native) {
-    color: inherit;
-    padding: 8px 12px;
-}
-
-/* Focus state */
-.asmr-settings-section :deep(.q-field--focused .q-field__control) {
-    border: 1px solid var(--q-primary, var(--asmr-accent));
-}
-
-/* Icons */
-.asmr-settings-section :deep(.asmr-settings-icon) {
-    font-size: 28px;
-}
-
-/* Hint Text */
-.asmr-settings-hint {
-    margin-top: -8px;
-}
-
-.asmr-settings-hint-text {
-    font-size: 0.85em;
-}
-
-.asmr-settings-link {
-    text-decoration: underline;
-}
-
-/* Danger / Factory Reset */
-.asmr-nuke-btn {
-    background: var(--q-negative, #c62828);
-    color: white;
-}
-
-.asmr-nuke-btn:hover:not(.disabled) {
-    filter: brightness(1.15);
-}
-
-/* Donate button */
 .asmr-donate-btn {
     background: linear-gradient(135deg, #e57373, #ef5350);
     color: white;
@@ -937,3 +837,5 @@ const credits = [
     transform: scale(1.05);
 }
 </style>
+
+

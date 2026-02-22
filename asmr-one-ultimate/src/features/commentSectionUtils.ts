@@ -1,4 +1,5 @@
 import type { DLsiteUserReview } from '../types/dlsite';
+import { escapeHtml } from '../core/DomUtils';
 import {
     extractEmbeddedRjCode,
     extractPrimaryRjCode,
@@ -62,14 +63,6 @@ const STOP_MARKERS = [
     '\u63a1\u7528\u30b5\u30a4\u30c8\u3078',
     '\u63a8\u5968\u74b0\u5883\uff1a\u6700\u65b0\u7248',
 ];
-
-function escapeHtml(s: string): string {
-    return s
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;');
-}
 
 export function sanitizeReviewText(text: string): string {
     let s = text;

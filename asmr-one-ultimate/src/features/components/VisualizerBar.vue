@@ -13,8 +13,8 @@ import {
 
 import { useEventBus } from '../../composables/useEventBus';
 import { useI18n } from '../../composables/useI18n';
-import { getAudioElement, getPlayerBar, hasValidAudioSource } from '../../core/DomUtils';
-import { getOrCreateSourceNode } from '../../core/AudioAnalysis';
+import { calculateBottomOffset, getAudioElement, hasValidAudioSource, syncOverflowButtonState } from '../../core/DomUtils';
+import { connectAudioAnalyser as connectSharedAudioAnalyser } from '../../core/AudioAnalysis';
 import { AppStore } from '../../store/AppStore';
 import { Logger } from '../../core/Utils';
 
@@ -127,38 +127,26 @@ function deactivate() {
 // ---------------------------------------------------------------------------
 
 function connectAudioAnalyser() {
-    const audio = getAudioElement();
-    if (!audio || !hasValidAudioSource(audio)) {
-        Logger.debug('[Visualizer] No valid audio source found');
+    const currentAudio = getAudioElement();
+    if (currentAudio && connectedAudioEl === currentAudio && analyser) return;
+
+    const connected = connectSharedAudioAnalyser({
+        fftSize: 256,
+        smoothingTimeConstant: 0.7,
+        tag: 'Visualizer',
+        requireValidSource: true,
+    });
+    if (!connected) {
         analyserAvailable = false;
         return;
     }
 
-    if (connectedAudioEl === audio && analyser) return;
-
-    const result = getOrCreateSourceNode(audio);
-    if (!result) {
-        Logger.debug('[Visualizer] Audio analyser failed (cross-origin?)');
-        analyserAvailable = false;
-        return;
-    }
-
-    try {
-        audioCtx = result.ctx;
-        sourceNode = result.source;
-
-        analyser = audioCtx.createAnalyser();
-        analyser.fftSize = 256;
-        analyser.smoothingTimeConstant = 0.7;
-        sourceNode.connect(analyser);
-
-        connectedAudioEl = audio;
-        analyserAvailable = true;
-        Logger.debug('[Visualizer] Audio analyser connected');
-    } catch (err) {
-        Logger.debug('[Visualizer] Audio analyser failed:', err);
-        analyserAvailable = false;
-    }
+    audioCtx = connected.ctx;
+    sourceNode = connected.source;
+    analyser = connected.analyser;
+    connectedAudioEl = connected.audio;
+    analyserAvailable = true;
+    Logger.debug('[Visualizer] Audio analyser connected');
 }
 
 // ---------------------------------------------------------------------------
@@ -543,19 +531,7 @@ function updatePosition() {
     if (!bar?.isConnected || !isActive.value) return;
 
     if (isPlayerMinimized.value) {
-        const playerBar = getPlayerBar();
-        const subsBar = document.querySelector('body > .learner-subs-collapsed') as HTMLElement | null;
-        const joiBar = document.querySelector('body > .asmr-joi-bar-collapsed') as HTMLElement | null;
-
-        let bottomOffset = playerBar?.offsetHeight || 60;
-
-        if (subsBar && subsBar.style.display !== 'none' && !subsBar.classList.contains('hidden') && subsBar.offsetHeight > 0) {
-            bottomOffset += subsBar.offsetHeight;
-        }
-        if (joiBar && joiBar.style.display !== 'none' && !joiBar.classList.contains('hidden') && joiBar.offsetHeight > 0) {
-            bottomOffset += joiBar.offsetHeight;
-        }
-
+        const bottomOffset = calculateBottomOffset({ includeVizBar: false });
         bar.style.bottom = `${bottomOffset}px`;
     }
 }
@@ -565,11 +541,7 @@ function updatePosition() {
 // ---------------------------------------------------------------------------
 
 function syncOverflowButton(active: boolean) {
-    document.querySelectorAll('.asmr-viz-btn').forEach(btn => {
-        const icon = btn.querySelector('.material-icons');
-        if (icon) icon.classList.toggle('asmr-accent', active);
-        btn.classList.toggle('learner-btn-active', active);
-    });
+    syncOverflowButtonState('.asmr-viz-btn', active);
 }
 
 // ---------------------------------------------------------------------------

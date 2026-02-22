@@ -60,7 +60,6 @@ export interface HttpRequestConfig {
     timeout?: number;
     cache?: { key: string; ttlMs: number };
     retry?: RetryConfig;
-    useCorsProxy?: boolean;
 }
 
 export interface HttpResponse<T> {
