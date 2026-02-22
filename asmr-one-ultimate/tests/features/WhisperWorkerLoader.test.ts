@@ -76,7 +76,15 @@ describe('WhisperWorkerLoader', () => {
 
         expect(code).toContain('if (IS_FIREFOX) {');
         expect(code).toContain("return [{ encoder_model: 'fp32', decoder_model_merged: 'fp32' }];");
-        expect(code).not.toContain('isIntelArc');
+    });
+
+    it('uses fp16->fp32 fallback path for Intel Arc on Chromium', () => {
+        const code = __getWhisperWorkerCodeForTests();
+
+        expect(code).toContain('const isIntelArc =');
+        expect(code).toContain('if (isIntelArc) {');
+        expect(code).toContain("{ encoder_model: 'fp16', decoder_model_merged: 'fp32' }");
+        expect(code).toContain("{ encoder_model: 'fp32', decoder_model_merged: 'fp32' }");
     });
 
     it('uses simplified timeout model with shader warmup disabled', () => {

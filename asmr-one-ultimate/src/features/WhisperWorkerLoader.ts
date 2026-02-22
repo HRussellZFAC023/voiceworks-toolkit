@@ -198,6 +198,7 @@ function getDtypeCandidates(device, vendor) {
     //   q4 decoder produces empty output on Firefox WebGPU
     // → decoder MUST be fp32 on WebGPU. Encoder can try fp16 first for speed.
 
+    const isIntelArc = /intel.*arc|\\barc\\b/i.test(vendor);
     const isIntel = /intel|xe|iris|uhd|gen-9|gen9/i.test(vendor);
     const isQualcomm = /qualcomm|adreno/i.test(vendor);
 
@@ -205,6 +206,14 @@ function getDtypeCandidates(device, vendor) {
     // Keep dtype deterministic and conservative.
     if (IS_FIREFOX) {
         return [{ encoder_model: 'fp32', decoder_model_merged: 'fp32' }];
+    }
+
+    // Arc dGPU on Chromium: fp16 encoder is much faster; keep fp32 fallback for stability.
+    if (isIntelArc) {
+        return [
+            { encoder_model: 'fp16', decoder_model_merged: 'fp32' },
+            { encoder_model: 'fp32', decoder_model_merged: 'fp32' },
+        ];
     }
 
     // Intel / Qualcomm: pin to fp32 for output stability.
