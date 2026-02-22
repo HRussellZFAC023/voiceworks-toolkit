@@ -751,3 +751,8 @@ export function createWhisperWorker(): Worker {
         URL.revokeObjectURL(blobUrl);
     }
 }
+
+// Test-only helper: exposes generated worker code for unit assertions.
+export function __getWhisperWorkerCodeForTests(): string {
+    return getWorkerCode();
+}

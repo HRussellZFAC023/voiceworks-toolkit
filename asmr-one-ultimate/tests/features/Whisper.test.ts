@@ -377,6 +377,62 @@ describe('Whisper', () => {
         });
     });
 
+    describe('worker timeout handling', () => {
+        it('does not permanently mark WebGPU failed on inference timeout errors', () => {
+            const whisper = new Whisper();
+            const markWebgpuFailedSpy = vi.spyOn(whisper as any, 'markWebgpuFailed').mockImplementation(() => {});
+            const resetWorkerSpy = vi.spyOn(whisper as any, 'resetWorker').mockImplementation(() => {});
+            vi.spyOn(whisper as any, 'clearModelLoadTimer').mockImplementation(() => {});
+
+            (whisper as any).transcribing = false;
+            (whisper as any).pendingChunks = 1;
+            (whisper as any).chunkSendTimes.set(42, performance.now());
+            (whisper as any).chunkGenerations.set(42, (whisper as any).transcriptionGeneration);
+            (whisper as any).chunkOffsets.set(42, 0);
+            (whisper as any).chunkLastActivity.set(42, performance.now());
+
+            (whisper as any).handleWorkerMessage({
+                data: {
+                    status: 'error',
+                    data: { message: 'WebGPU inference timed out after 45s' },
+                    chunkId: 42,
+                },
+            } as any);
+
+            expect(markWebgpuFailedSpy).not.toHaveBeenCalled();
+            expect((whisper as any).pendingChunks).toBe(0);
+            expect((whisper as any).chunkSendTimes.has(42)).toBe(false);
+            expect((whisper as any).chunkGenerations.has(42)).toBe(false);
+            expect((whisper as any).chunkOffsets.has(42)).toBe(false);
+            expect((whisper as any).chunkLastActivity.has(42)).toBe(false);
+            expect(resetWorkerSpy).toHaveBeenCalledWith('error');
+        });
+
+        it('marks WebGPU failed for non-timeout GPU errors from worker fallback', () => {
+            const whisper = new Whisper();
+            const markWebgpuFailedSpy = vi.spyOn(whisper as any, 'markWebgpuFailed').mockImplementation(() => {});
+            vi.spyOn(whisper as any, 'resetWorker').mockImplementation(() => {});
+            vi.spyOn(whisper as any, 'clearModelLoadTimer').mockImplementation(() => {});
+
+            (whisper as any).transcribing = false;
+            (whisper as any).pendingChunks = 1;
+            (whisper as any).chunkSendTimes.set(7, performance.now());
+            (whisper as any).chunkGenerations.set(7, (whisper as any).transcriptionGeneration);
+            (whisper as any).chunkOffsets.set(7, 24);
+            (whisper as any).chunkLastActivity.set(7, performance.now());
+
+            (whisper as any).handleWorkerMessage({
+                data: {
+                    status: 'error',
+                    data: { message: 'createBuffer failed', gpuFallback: true },
+                    chunkId: 7,
+                },
+            } as any);
+
+            expect(markWebgpuFailedSpy).toHaveBeenCalledWith('worker-message');
+        });
+    });
+
     describe('parseSegments', () => {
         it('parses chunks with timestamps into segments', () => {
             const whisper = new Whisper();

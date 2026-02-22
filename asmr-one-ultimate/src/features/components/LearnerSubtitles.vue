@@ -1442,8 +1442,33 @@ function cyclePlaybackRate() {
 
 function syncDrawerWidth() {
     const drawer = document.querySelector('.q-drawer--left') as HTMLElement | null;
-    const width = drawer ? `${drawer.getBoundingClientRect().width}px` : '0px';
+    const isDesktop = typeof window.matchMedia === 'function'
+        ? window.matchMedia('(min-width: 601px)').matches
+        : window.innerWidth >= 601;
+    const isOverlayDrawer = !!drawer && (
+        drawer.classList.contains('q-drawer--on-top')
+        || drawer.classList.contains('q-drawer--mobile')
+    );
+    const drawerVisible = !!drawer && (() => {
+        const style = window.getComputedStyle(drawer);
+        return style.display !== 'none' && style.visibility !== 'hidden';
+    })();
+    const width = drawer && isDesktop && drawerVisible && !isOverlayDrawer
+        ? `${Math.round(drawer.getBoundingClientRect().width)}px`
+        : '0px';
     document.documentElement.style.setProperty('--asmr-drawer-width', width);
+
+    // Keep collapsed subtitles on the same stacking layer as the mini-player.
+    const bar = getPlayerBar();
+    const playerBar = bar?.matches('.player-bar, .q-footer, .player-bar-container')
+        ? bar
+        : bar?.querySelector('.player-bar, .q-footer, .player-bar-container') as HTMLElement | null;
+    const zIndex = Number.parseInt(playerBar ? window.getComputedStyle(playerBar).zIndex : '', 10);
+    if (Number.isFinite(zIndex) && zIndex > 0) {
+        document.documentElement.style.setProperty('--asmr-player-bar-z-index', String(zIndex));
+    } else {
+        document.documentElement.style.removeProperty('--asmr-player-bar-z-index');
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1975,6 +2000,7 @@ onMounted(() => {
             rafPlayerObserver = 0;
             injectExpandedControls();
             injectCollapsedControls();
+            syncDrawerWidth();
         });
     });
     playerObserver.observe(document.body, { childList: true, subtree: true });
@@ -2023,6 +2049,7 @@ onUnmounted(() => {
     playerObserver = null;
     drawerResizeObserver?.disconnect();
     drawerResizeObserver = null;
+    document.documentElement.style.removeProperty('--asmr-player-bar-z-index');
     teardownCoverAdjustment();
     restoreControls();
     storeWatcherCleanups.forEach(fn => fn());

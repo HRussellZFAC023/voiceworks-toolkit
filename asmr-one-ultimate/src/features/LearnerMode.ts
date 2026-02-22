@@ -938,8 +938,33 @@ export class LearnerMode {
     /** Sync --asmr-drawer-width so learner-subs-collapsed doesn't overshoot into the sidebar */
     private syncDrawerWidth() {
         const drawer = document.querySelector('.q-drawer--left') as HTMLElement | null;
-        const width = drawer ? `${drawer.getBoundingClientRect().width}px` : '0px';
+        const isDesktop = typeof window.matchMedia === 'function'
+            ? window.matchMedia('(min-width: 601px)').matches
+            : window.innerWidth >= 601;
+        const isOverlayDrawer = !!drawer && (
+            drawer.classList.contains('q-drawer--on-top')
+            || drawer.classList.contains('q-drawer--mobile')
+        );
+        const drawerVisible = !!drawer && (() => {
+            const style = window.getComputedStyle(drawer);
+            return style.display !== 'none' && style.visibility !== 'hidden';
+        })();
+        const width = drawer && isDesktop && drawerVisible && !isOverlayDrawer
+            ? `${Math.round(drawer.getBoundingClientRect().width)}px`
+            : '0px';
         document.documentElement.style.setProperty('--asmr-drawer-width', width);
+
+        // Keep collapsed subtitles aligned with the mini-player stacking layer.
+        const bar = getPlayerBar();
+        const playerBar = bar?.matches('.player-bar, .q-footer, .player-bar-container')
+            ? bar
+            : bar?.querySelector('.player-bar, .q-footer, .player-bar-container') as HTMLElement | null;
+        const zIndex = Number.parseInt(playerBar ? window.getComputedStyle(playerBar).zIndex : '', 10);
+        if (Number.isFinite(zIndex) && zIndex > 0) {
+            document.documentElement.style.setProperty('--asmr-player-bar-z-index', String(zIndex));
+        } else {
+            document.documentElement.style.removeProperty('--asmr-player-bar-z-index');
+        }
     }
 
     private createSubsContainer(className: string): HTMLElement {
@@ -1974,6 +1999,7 @@ export class LearnerMode {
         this.invalidateCachedEls();
         // collapsed subtitle container no longer exists; controls are cleaned up via class selector below
         document.querySelectorAll('.learner-controls, .learner-collapsed-controls').forEach(el => el.remove());
+        document.documentElement.style.removeProperty('--asmr-player-bar-z-index');
 
         // Reset active state in store
         AppStore.setLearnerState({ isActive: false });

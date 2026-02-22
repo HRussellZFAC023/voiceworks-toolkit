@@ -40,7 +40,8 @@
     backdrop-filter: blur(20px);
     border-top: 1px solid var(--asmr-border-color);
     padding: 13px 21px;
-    z-index: var(--z-subs, 9993);
+    /* Match mini-player stacking by default; media-viewer overrides below. */
+    z-index: var(--asmr-player-bar-z-index, var(--z-subs, 9993));
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -337,7 +338,9 @@ button.learner-en:focus-visible {
     .learner-subs-collapsed {
         padding: 12px 16px;
         left: var(--asmr-drawer-width, 0px);
-        width: auto;
+        right: 0;
+        width: calc(100vw - var(--asmr-drawer-width, 0px));
+        max-width: none;
     }
 
     .learner-jp {
