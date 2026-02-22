@@ -40,9 +40,12 @@ const SEEK_BACKFILL_SEC = 15;
 const DEFAULT_POLL_INTERVAL_MS = 250;
 const DEFAULT_WORKER_UPDATE_INTERVAL_MS = 200;
 const DEFAULT_MIN_WEBGPU_BUFFER_BYTES = 256 * 1024 * 1024;
+const CHUNK_STALL_TIMEOUT_FLOOR_MS = 25_000;
+const CHUNK_STALL_TIMEOUT_MULTIPLIER = 3;
+const INITIAL_BOOTSTRAP_CHUNK_LENGTH_S = 6;
 const TRANSLATE_AHEAD_MAX_SEGMENTS_PER_RUN = 50;
 const GPU_ERROR_PATTERN =
-    /createBuffer|RangeError|out of memory|OOM|allocation|device lost|GPUDevice|createComputePipeline|createShaderModule|mapAsync|mapping webgpu buffer|invalid buffer|Instance reference|AbortError|release session|invalid session/i;
+    /createBuffer|RangeError|out of memory|OOM|allocation|device lost|GPUDevice|createComputePipeline|createShaderModule|mapAsync|mapping webgpu buffer|invalid buffer|Instance reference|AbortError|release session|invalid session|index out of bounds/i;
 const EXPLICIT_DEVICE_LOSS_PATTERN = /device lost|Instance reference|release session|invalid session/i;
 
 // ============================================================================
@@ -82,7 +85,7 @@ type WorkerReadyMessage = { status: 'ready'; backend?: string; vendor?: string }
 
 type WorkerInitMessage = { status: 'initiate'; backend?: string; vendor?: string };
 
-type WorkerErrorMessage = { status: 'error'; data?: { message?: string } };
+type WorkerErrorMessage = { status: 'error'; data?: { message?: string; gpuFallback?: boolean }; chunkId?: number };
 
 type WorkerDeviceLostMessage = { status: 'gpu-device-lost'; data?: { message?: string } };
 
@@ -181,6 +184,8 @@ export class Whisper {
     private currentCacheIdentity: string | null = null;
     private chunkSendTimes = new Map<number, number>();
     private chunkGenerations = new Map<number, number>();
+    private chunkOffsets = new Map<number, number>();
+    private chunkLastActivity = new Map<number, number>();
 
     private statusEl: HTMLElement | null = null;
     private errorDismissTimer: number | null = null;
@@ -203,6 +208,8 @@ export class Whisper {
     private static webgpuFailed = false;
     private static webgpuRetryNotBefore = 0;
     private static readonly WEBGPU_RETRY_COOLDOWN_MS = 60 * 1000;
+    private static readonly CHUNK_STALL_RECOVERY_COOLDOWN_MS = 10_000;
+    private static readonly MAX_CHUNK_STALL_RECOVERIES = 4;
     private gpuCrashed = false; // GPU device loss — cleared on next transcription attempt
     private static crashRecoveries = 0;
     private static readonly MAX_CRASH_RECOVERIES = 10;
@@ -214,6 +221,9 @@ export class Whisper {
     private _audioCache: AudioCache | null = null;
     private autoStartTimer: number | null = null;
     private fetchAbortController: AbortController | null = null;
+    private chunkStallRecoveryCount = 0;
+    private lastChunkStallRecoveryAt = 0;
+    private hasWorkerChunkActivity = false;
 
     private getAudioCache(): AudioCache | null {
         if (!AudioCache.objectUrls) return null;
@@ -450,10 +460,6 @@ export class Whisper {
         return EXPLICIT_DEVICE_LOSS_PATTERN.test(message);
     }
 
-    private isFirefoxBrowser(): boolean {
-        return /firefox/i.test(navigator.userAgent || '');
-    }
-
     private getWasmPolicyReason(): string | null {
         if (Config.get('forceWhisperWasm') === true) return 'forceWhisperWasm';
         return null;
@@ -554,10 +560,7 @@ export class Whisper {
         this.segments = [];
         this.loggedTranscriptKeys.clear();
         this.lastSegmentEnd = 0;
-        this.nextChunkId = 0;
-        this.pendingChunks = 0;
-        this.chunkSendTimes.clear();
-        this.chunkGenerations.clear();
+        this.clearChunkTracking({ resetRecovery: true, resetChunkCounter: true });
         this.finalizeOnIdle = false;
         this.lastTranslatedSegmentCount = 0;
         this.translateAheadUpTo = 0;
@@ -703,9 +706,7 @@ export class Whisper {
             this.setButtonsActive(false);
         }
         this.clearStatus();
-        this.pendingChunks = 0;
-        this.chunkSendTimes.clear();
-        this.chunkGenerations.clear();
+        this.clearChunkTracking({ resetRecovery: true, resetChunkCounter: false });
         this.loggedTranscriptKeys.clear();
         AppStore.setWhisperState({ isTranscribing: false, isLoadingModel: false, progress: 0, progressMessage: '', currentTrackSrc: this.currentTrackSrc });
 
@@ -754,18 +755,56 @@ export class Whisper {
         }
     }
 
+    private clearChunkTracking(options?: { resetRecovery?: boolean; resetChunkCounter?: boolean }): void {
+        const resetRecovery = options?.resetRecovery ?? true;
+        const resetChunkCounter = options?.resetChunkCounter ?? false;
+        this.pendingChunks = 0;
+        this.chunkSendTimes.clear();
+        this.chunkGenerations.clear();
+        this.chunkOffsets.clear();
+        this.chunkLastActivity.clear();
+        this.hasWorkerChunkActivity = false;
+        if (resetRecovery) {
+            this.chunkStallRecoveryCount = 0;
+            this.lastChunkStallRecoveryAt = 0;
+        }
+        if (resetChunkCounter) {
+            this.nextChunkId = 0;
+        }
+    }
+
+    private isCurrentChunkMessage(chunkId?: number): boolean {
+        if (typeof chunkId !== 'number') return true;
+        if (!this.chunkSendTimes.has(chunkId)) return false;
+        return this.chunkGenerations.get(chunkId) === this.transcriptionGeneration;
+    }
+
+    private markChunkActivity(chunkId?: number): void {
+        if (typeof chunkId === 'number') {
+            this.chunkLastActivity.set(chunkId, performance.now());
+        }
+        this.hasWorkerChunkActivity = true;
+        this.chunkStallRecoveryCount = 0;
+    }
+
+    private dropChunk(chunkId?: number): void {
+        this.pendingChunks = Math.max(0, this.pendingChunks - 1);
+        if (typeof chunkId !== 'number') return;
+        this.chunkSendTimes.delete(chunkId);
+        this.chunkGenerations.delete(chunkId);
+        this.chunkOffsets.delete(chunkId);
+        this.chunkLastActivity.delete(chunkId);
+    }
+
     private resetState(reason: string): void {
         Logger.debug('[Whisper] Reset state:', reason);
         this.transcriptionGeneration++;
-        this.pendingChunks = 0;
-        this.nextChunkId = 0;
+        this.clearChunkTracking({ resetRecovery: true, resetChunkCounter: true });
         this.lastSegmentEnd = 0;
         this.segments = [];
         this.loggedTranscriptKeys.clear();
         this.currentCacheKey = null;
         this.currentCacheIdentity = null;
-        this.chunkSendTimes.clear();
-        this.chunkGenerations.clear();
         this.finalizeOnIdle = false;
         this.modelLoadingKey = '';
         this.lastTranslatedSegmentCount = 0;
@@ -1074,9 +1113,17 @@ export class Whisper {
         if (!audio) return;
 
         const settings = this.getWhisperSettings();
-        if (this.pendingChunks >= settings.maxPendingChunks) return;
-        const chunkSamples = Math.floor(settings.chunkLengthS * TARGET_SAMPLE_RATE);
-        const overlapSec = settings.strideLengthS;
+        this.checkForStalledChunks(settings);
+        const maxPending = this.hasWorkerChunkActivity ? settings.maxPendingChunks : 1;
+        if (this.pendingChunks >= maxPending) return;
+        const bootstrapMode = !this.hasWorkerChunkActivity;
+        const chunkLengthS = bootstrapMode
+            ? Math.min(settings.chunkLengthS, INITIAL_BOOTSTRAP_CHUNK_LENGTH_S)
+            : settings.chunkLengthS;
+        const overlapSec = bootstrapMode
+            ? 0
+            : Math.min(settings.strideLengthS, Math.max(1, chunkLengthS - 1));
+        const chunkSamples = Math.floor(chunkLengthS * TARGET_SAMPLE_RATE);
         const playhead = audio.currentTime;
 
         // Don't process past the end of the audio
@@ -1095,7 +1142,7 @@ export class Whisper {
 
         // Skip silence
         if (settings.silenceThreshold > 0 && this.computeRms(chunk) < settings.silenceThreshold) {
-            this.transcribedUpTo += settings.chunkLengthS - overlapSec;
+            this.transcribedUpTo += chunkLengthS - overlapSec;
             return;
         }
 
@@ -1109,8 +1156,70 @@ export class Whisper {
         // Chunks near the playhead get high priority for responsive scrubbing
         const distFromPlayhead = Math.abs(this.transcribedUpTo - playhead);
         const priority = distFromPlayhead <= 30 ? 1 : 0;
-        this.sendChunk(chunk, this.transcribedUpTo, settings, priority);
-        this.transcribedUpTo += settings.chunkLengthS - overlapSec;
+        this.sendChunk(chunk, this.transcribedUpTo, settings, priority, chunkLengthS, overlapSec);
+        this.transcribedUpTo += chunkLengthS - overlapSec;
+    }
+
+    private getChunkStallTimeoutMs(settings: WhisperSettings): number {
+        const scaledTimeout = Math.round(settings.chunkLengthS * 1000 * CHUNK_STALL_TIMEOUT_MULTIPLIER);
+        const floorTimeout = DeviceCapabilities.profile.isMobile
+            ? CHUNK_STALL_TIMEOUT_FLOOR_MS * 2
+            : CHUNK_STALL_TIMEOUT_FLOOR_MS;
+        return Math.max(floorTimeout, scaledTimeout);
+    }
+
+    private checkForStalledChunks(settings: WhisperSettings): void {
+        if (!this.transcribing || this.pendingChunks <= 0 || this.chunkSendTimes.size === 0) return;
+        // Avoid resetting during cold-start when the very first chunk is still in-flight.
+        if (!this.hasWorkerChunkActivity && this.pendingChunks <= 1) return;
+        const timeoutMs = this.getChunkStallTimeoutMs(settings);
+        const now = performance.now();
+        let stalledChunkId: number | null = null;
+        let stalledForMs = 0;
+
+        for (const [chunkId, sentAt] of this.chunkSendTimes.entries()) {
+            const lastActivity = this.chunkLastActivity.get(chunkId) ?? sentAt;
+            const ageMs = now - lastActivity;
+            if (ageMs > stalledForMs) {
+                stalledForMs = ageMs;
+                stalledChunkId = chunkId;
+            }
+        }
+
+        if (stalledChunkId === null || stalledForMs < timeoutMs) return;
+        this.recoverFromStalledChunks(settings, stalledChunkId, stalledForMs);
+    }
+
+    private recoverFromStalledChunks(settings: WhisperSettings, stalledChunkId: number, stalledForMs: number): void {
+        const now = performance.now();
+        if (now - this.lastChunkStallRecoveryAt < Whisper.CHUNK_STALL_RECOVERY_COOLDOWN_MS) return;
+        this.lastChunkStallRecoveryAt = now;
+        this.chunkStallRecoveryCount += 1;
+
+        const queuedOffsets = Array.from(this.chunkOffsets.values());
+        const earliestOffset = queuedOffsets.length > 0
+            ? Math.min(...queuedOffsets)
+            : Math.max(0, this.transcribedUpTo - SEEK_BACKFILL_SEC);
+        const resumeFrom = Math.max(0, earliestOffset - SEEK_BACKFILL_SEC);
+
+        Logger.warn('[Whisper] Chunk processing stalled; resetting worker', {
+            stalledChunkId,
+            stalledForMs: Math.round(stalledForMs),
+            pendingChunks: this.pendingChunks,
+            recoveries: this.chunkStallRecoveryCount,
+            resumeFrom,
+        });
+        this.dispatchProgress(I18n.t('whisperRecovering'), 0, 'transcribing');
+
+        this.resetWorker('chunk-stall-timeout');
+        this.clearChunkTracking({ resetRecovery: false, resetChunkCounter: false });
+        this.transcribedUpTo = resumeFrom;
+        this.modelReady = false;
+        this.initWorker(settings);
+
+        if (this.chunkStallRecoveryCount > Whisper.MAX_CHUNK_STALL_RECOVERIES) {
+            Logger.warn('[Whisper] Repeated chunk stalls detected; continuing in recovery mode');
+        }
     }
 
     private seekDebounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1150,16 +1259,12 @@ export class Whisper {
             // Only adjust the processing cursor so new chunks fill gaps.
             if (seekTime < this.transcribedUpTo - 0.25) {
                 this.transcribedUpTo = Math.max(0, seekTime - SEEK_BACKFILL_SEC);
-                this.pendingChunks = 0;
-                this.chunkSendTimes.clear();
-                this.chunkGenerations.clear();
+                this.clearChunkTracking({ resetRecovery: true, resetChunkCounter: false });
                 this.lastSegmentEnd = Math.min(this.lastSegmentEnd, seekTime);
             }
             if (seekTime > this.transcribedUpTo) {
                 this.transcribedUpTo = seekTime;
-                this.pendingChunks = 0;
-                this.chunkSendTimes.clear();
-                this.chunkGenerations.clear();
+                this.clearChunkTracking({ resetRecovery: true, resetChunkCounter: false });
             }
 
             this.emitWhisperSnapshot('seek');
@@ -1317,9 +1422,7 @@ export class Whisper {
         if (this.errorDismissTimer) { clearTimeout(this.errorDismissTimer); this.errorDismissTimer = null; }
         this.modelLoadingKey = '';
         this.modelReady = false;
-        this.pendingChunks = 0;
-        this.chunkSendTimes.clear();
-        this.chunkGenerations.clear();
+        this.clearChunkTracking({ resetRecovery: false, resetChunkCounter: false });
         Logger.warn('[Whisper] Worker reset:', reason);
     }
 
@@ -1380,11 +1483,21 @@ export class Whisper {
         }
     }
 
-    private sendChunk(audio: Float32Array, timeOffset: number, settings: WhisperSettings, priority = 0): void {
+    private sendChunk(
+        audio: Float32Array,
+        timeOffset: number,
+        settings: WhisperSettings,
+        priority = 0,
+        chunkLengthS = settings.chunkLengthS,
+        strideLengthS = settings.strideLengthS,
+    ): void {
         if (!this.worker) return;
         const chunkId = this.nextChunkId++;
         this.pendingChunks++;
-        this.chunkSendTimes.set(chunkId, performance.now());
+        const sentAt = performance.now();
+        this.chunkSendTimes.set(chunkId, sentAt);
+        this.chunkLastActivity.set(chunkId, sentAt);
+        this.chunkOffsets.set(chunkId, timeOffset);
         this.chunkGenerations.set(chunkId, this.transcriptionGeneration);
         Logger.debug(`[Whisper] Sending chunk ${chunkId}, offset=${timeOffset.toFixed(2)}s, priority=${priority}, samples=${audio.length}`);
         this.worker!.postMessage({
@@ -1395,8 +1508,8 @@ export class Whisper {
             subtask: settings.subtask,
             language: settings.language,
             timeOffset,
-            chunkLengthS: settings.chunkLengthS,
-            strideLengthS: settings.strideLengthS,
+            chunkLengthS,
+            strideLengthS,
             chunkId,
             priority,
             updateIntervalMs: settings.workerUpdateIntervalMs,
@@ -1429,6 +1542,9 @@ export class Whisper {
                 } else {
                     this.clearStatus();
                     AppStore.setWhisperState({ isTranscribing: this.transcribing, progress: 100, progressMessage: '', isLoadingModel: false });
+                }
+                if (this.transcribing && this.pcmBuffer) {
+                    this.maybeProcessNextChunk();
                 }
                 break;
 
@@ -1476,10 +1592,8 @@ export class Whisper {
                 Whisper.crashRecoveries = 0;
                 GpuScheduler.onGpuSuccess('whisper');
                 const update = message as WorkerUpdateMessage;
-                if (typeof update.chunkId === 'number') {
-                    if (!this.chunkSendTimes.has(update.chunkId)) return;
-                    if (this.chunkGenerations.get(update.chunkId) !== this.transcriptionGeneration) return;
-                }
+                if (!this.isCurrentChunkMessage(update.chunkId)) return;
+                this.markChunkActivity(update.chunkId);
                 const segments = this.parseSegments(update.data?.[1]?.chunks);
                 this.mergeSegments(segments, { preferNew: false });
                 this.logNewTranscriptSegments('update');
@@ -1499,15 +1613,9 @@ export class Whisper {
             case 'complete': {
                 if (!this.transcribing) return;
                 const complete = message as WorkerCompleteMessage;
-                if (typeof complete.chunkId === 'number') {
-                    if (!this.chunkSendTimes.has(complete.chunkId)) return;
-                    if (this.chunkGenerations.get(complete.chunkId) !== this.transcriptionGeneration) return;
-                }
-                this.pendingChunks = Math.max(0, this.pendingChunks - 1);
-                if (complete.chunkId !== undefined) {
-                    this.chunkSendTimes.delete(complete.chunkId);
-                    this.chunkGenerations.delete(complete.chunkId);
-                }
+                if (!this.isCurrentChunkMessage(complete.chunkId)) return;
+                this.dropChunk(complete.chunkId);
+                this.markChunkActivity();
                 const segments = this.parseSegments(complete.data?.chunks);
                 Logger.debug(`[Whisper] Complete chunk ${complete.chunkId}: ${segments.length} segments, text="${complete.data?.text?.slice(0, 50)}"`);
                 const chunkText = String(complete.data?.text || '').trim();
@@ -1589,7 +1697,13 @@ export class Whisper {
                     break;
                 }
                 const errMsg = message.data?.message || I18n.t('whisperUnknownError');
-                const isGpuError = this.isGpuErrorMessage(errMsg);
+                const errorChunkId = (message as WorkerErrorMessage).chunkId;
+                if (typeof errorChunkId === 'number') {
+                    this.dropChunk(errorChunkId);
+                }
+                const requestedGpuFallback = (message as WorkerErrorMessage).data?.gpuFallback === true;
+                const isInferenceTimeout = /inference timed out/i.test(errMsg);
+                const isGpuError = this.isGpuErrorMessage(errMsg) || requestedGpuFallback;
                 // "WebGPU is required" means worker tried WebGPU, it failed, but WASM
                 // fallback is disabled. This is a terminal GPU failure — do NOT retry.
                 const isWebgpuRequiredError = /WebGPU is required/i.test(errMsg);
@@ -1599,17 +1713,22 @@ export class Whisper {
                 const isExplicitDeviceLoss = this.isExplicitDeviceLossMessage(errMsg);
 
                 if (isGpuError || isTerminalGpuFailure) {
-                    const firstFailure = !Whisper.webgpuFailed;
-                    this.markWebgpuFailed(isTerminalGpuFailure ? 'terminal-worker-message' : 'worker-message');
-                    if (firstFailure) {
-                        EventBus.emit('webgpu:failed', { source: 'whisper' });
-                    }
-                    if (isExplicitDeviceLoss || isTerminalGpuFailure) {
-                        // Broadcast only on explicit/terminal device-loss class failures.
-                        EventBus.emit('gpu:device-lost', { worker: 'whisper' as const });
-                        Logger.warn('[Whisper] GPU failure — broadcasting device-lost:', errMsg);
+                    // Timeout can be transient: keep WebGPU enabled for retry.
+                    if (!isInferenceTimeout) {
+                        const firstFailure = !Whisper.webgpuFailed;
+                        this.markWebgpuFailed(isTerminalGpuFailure ? 'terminal-worker-message' : 'worker-message');
+                        if (firstFailure) {
+                            EventBus.emit('webgpu:failed', { source: 'whisper' });
+                        }
+                        if (isExplicitDeviceLoss || isTerminalGpuFailure) {
+                            // Broadcast only on explicit/terminal device-loss class failures.
+                            EventBus.emit('gpu:device-lost', { worker: 'whisper' as const });
+                            Logger.warn('[Whisper] GPU failure — broadcasting device-lost:', errMsg);
+                        } else {
+                            Logger.warn('[Whisper] Recoverable GPU failure — keeping device-loss local:', errMsg);
+                        }
                     } else {
-                        Logger.warn('[Whisper] Recoverable GPU failure — keeping device-loss local:', errMsg);
+                        Logger.warn('[Whisper] WebGPU inference timeout; keeping WebGPU enabled for retry:', errMsg);
                     }
                 }
 
@@ -1740,9 +1859,21 @@ export class Whisper {
             const key = this.transcriptLogKey(seg);
             if (this.loggedTranscriptKeys.has(key)) continue;
             this.loggedTranscriptKeys.add(key);
+
             const start = Number.isFinite(seg.start) ? seg.start.toFixed(2) : '?';
             const end = Number.isFinite(seg.end) ? seg.end.toFixed(2) : '?';
-            Logger.log(`[Whisper][Transcript][${source}] [${start}-${end}] ${seg.text}`);
+            const line = `[Whisper][Transcript][${source}] [${start}-${end}s] ${seg.text}`;
+            Logger.log(line);
+            // Keep transcript visibility even when debug logging is disabled.
+            console.log(line);
+
+            // Log word timings if available
+            if (seg.words && seg.words.length > 0) {
+                const wordTimings = seg.words.map(w =>
+                    `${w.text}(${w.start.toFixed(1)}-${w.end.toFixed(1)})`
+                ).join(' ');
+                Logger.debug(`[Whisper][Words] ${wordTimings}`);
+            }
         }
     }
 
@@ -1811,6 +1942,7 @@ export class Whisper {
         // Collapse near-duplicate segments (overlapping updates)
         if (this.segments.length > 1) {
             const deduped: WhisperSegment[] = [];
+
             for (const seg of this.segments) {
                 const prev = deduped[deduped.length - 1];
                 if (prev && Math.abs(prev.start - seg.start) < 0.25) {
@@ -1859,6 +1991,14 @@ export class Whisper {
         const last = this.segments[this.segments.length - 1];
         if (last) {
             this.lastSegmentEnd = Math.max(this.lastSegmentEnd, last.end);
+        }
+
+        // Final summary
+        if (newSegments.length > 0) {
+            Logger.debug(
+                `[Whisper] Merge complete: ${this.segments.length} total segments, ` +
+                `${this.lastSegmentEnd.toFixed(1)}s transcribed`
+            );
         }
     }
 

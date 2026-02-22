@@ -241,7 +241,6 @@ describe('Whisper', () => {
             vi.spyOn(GpuScheduler, 'getMemoryPressure').mockReturnValue('low');
 
             const whisper = new Whisper();
-            vi.spyOn(whisper as any, 'isFirefoxBrowser').mockReturnValue(true);
             const settings = (whisper as any).getWhisperSettings();
 
             expect(settings.forceWasm).toBe(false);
@@ -275,7 +274,6 @@ describe('Whisper', () => {
             vi.spyOn(GpuScheduler, 'getMemoryPressure').mockReturnValue('low');
 
             const whisper = new Whisper();
-            vi.spyOn(whisper as any, 'isFirefoxBrowser').mockReturnValue(true);
             const settings = (whisper as any).getWhisperSettings();
 
             expect(settings.forceWasm).toBe(false);
@@ -310,7 +308,6 @@ describe('Whisper', () => {
             vi.spyOn(GpuScheduler, 'getMemoryPressure').mockReturnValue('low');
 
             const whisper = new Whisper();
-            vi.spyOn(whisper as any, 'isFirefoxBrowser').mockReturnValue(true);
             const settings = (whisper as any).getWhisperSettings();
 
             expect(settings.forceWasm).toBe(false);
@@ -449,6 +446,119 @@ describe('Whisper', () => {
             } finally {
                 vi.useRealTimers();
             }
+        });
+    });
+
+    describe('chunk stall watchdog', () => {
+        const settings = {
+            model: 'onnx-community/whisper-small_timestamped',
+            subtask: 'transcribe',
+            language: 'ja',
+            multilingual: true,
+            chunkLengthS: 29,
+            strideLengthS: 5,
+            cacheTranscripts: true,
+            autoWarmup: true,
+            silenceThreshold: 0,
+            maxPendingChunks: 6,
+            pollIntervalMs: 250,
+            workerUpdateIntervalMs: 200,
+            idleUnloadMs: 600_000,
+            forceWasm: false,
+            preferLowPowerAdapter: false,
+            minWebgpuBufferBytes: 256 * 1024 * 1024,
+        };
+
+        it('detects stalled in-flight chunks and triggers recovery', () => {
+            const whisper = new Whisper();
+            const recoverSpy = vi.spyOn(whisper as any, 'recoverFromStalledChunks').mockImplementation(() => {});
+
+            (whisper as any).transcribing = true;
+            (whisper as any).pendingChunks = 1;
+            (whisper as any).hasWorkerChunkActivity = true;
+            (whisper as any).chunkSendTimes.set(7, performance.now() - 260_000);
+            (whisper as any).chunkLastActivity.set(7, performance.now() - 260_000);
+
+            (whisper as any).checkForStalledChunks(settings);
+
+            expect(recoverSpy).toHaveBeenCalledTimes(1);
+            expect(recoverSpy.mock.calls[0]?.[1]).toBe(7);
+        });
+
+        it('resets stalled worker state and rewinds transcription cursor', () => {
+            const whisper = new Whisper();
+            const resetSpy = vi.spyOn(whisper as any, 'resetWorker').mockImplementation(() => {});
+            const initSpy = vi.spyOn(whisper as any, 'initWorker').mockImplementation(() => {});
+            const progressSpy = vi.spyOn(whisper as any, 'dispatchProgress').mockImplementation(() => {});
+
+            (whisper as any).pendingChunks = 3;
+            (whisper as any).chunkSendTimes.set(1, performance.now() - 150_000);
+            (whisper as any).chunkSendTimes.set(2, performance.now() - 120_000);
+            (whisper as any).chunkGenerations.set(1, 2);
+            (whisper as any).chunkGenerations.set(2, 2);
+            (whisper as any).chunkOffsets.set(1, 84);
+            (whisper as any).chunkOffsets.set(2, 96);
+            (whisper as any).chunkLastActivity.set(1, performance.now() - 150_000);
+            (whisper as any).chunkLastActivity.set(2, performance.now() - 120_000);
+            (whisper as any).transcribedUpTo = 120;
+            (whisper as any).modelReady = true;
+            (whisper as any).lastChunkStallRecoveryAt = -1_000_000;
+
+            (whisper as any).recoverFromStalledChunks(settings, 1, 150_000);
+
+            expect(resetSpy).toHaveBeenCalledWith('chunk-stall-timeout');
+            expect(initSpy).toHaveBeenCalledWith(settings);
+            expect(progressSpy).toHaveBeenCalled();
+            expect((whisper as any).pendingChunks).toBe(0);
+            expect((whisper as any).chunkSendTimes.size).toBe(0);
+            expect((whisper as any).chunkGenerations.size).toBe(0);
+            expect((whisper as any).chunkOffsets.size).toBe(0);
+            expect((whisper as any).chunkLastActivity.size).toBe(0);
+            expect((whisper as any).transcribedUpTo).toBeCloseTo(69, 5); // minOffset(84) - SEEK_BACKFILL(15)
+            expect((whisper as any).modelReady).toBe(false);
+        });
+
+        it('limits startup to one in-flight chunk until first worker activity', () => {
+            const whisper = new Whisper();
+            const sendSpy = vi.spyOn(whisper as any, 'sendChunk').mockImplementation(() => {});
+            vi.spyOn((whisper as any).bridge, 'currentTrack', 'get').mockReturnValue(null);
+
+            const audio = document.createElement('audio');
+            audio.currentTime = 0;
+            (whisper as any).audio = audio;
+            (whisper as any).transcribing = true;
+            (whisper as any).modelReady = true;
+            (whisper as any).hasWorkerChunkActivity = false;
+            (whisper as any).pendingChunks = 1;
+            (whisper as any).pcmBuffer = new Float32Array(16_000 * 120);
+            (whisper as any).pcmDuration = 120;
+            (whisper as any).transcribedUpTo = 0;
+
+            (whisper as any).maybeProcessNextChunk();
+
+            expect(sendSpy).not.toHaveBeenCalled();
+        });
+
+        it('uses a shorter bootstrap chunk before first worker activity', () => {
+            const whisper = new Whisper();
+            const sendSpy = vi.spyOn(whisper as any, 'sendChunk').mockImplementation(() => {});
+            vi.spyOn((whisper as any).bridge, 'currentTrack', 'get').mockReturnValue(null);
+
+            const audio = document.createElement('audio');
+            audio.currentTime = 0;
+            (whisper as any).audio = audio;
+            (whisper as any).transcribing = true;
+            (whisper as any).modelReady = true;
+            (whisper as any).hasWorkerChunkActivity = false;
+            (whisper as any).pendingChunks = 0;
+            (whisper as any).pcmBuffer = new Float32Array(16_000 * 120);
+            (whisper as any).pcmDuration = 120;
+            (whisper as any).transcribedUpTo = 0;
+
+            (whisper as any).maybeProcessNextChunk();
+
+            expect(sendSpy).toHaveBeenCalledTimes(1);
+            expect(sendSpy.mock.calls[0]?.[4]).toBe(6);
         });
     });
 

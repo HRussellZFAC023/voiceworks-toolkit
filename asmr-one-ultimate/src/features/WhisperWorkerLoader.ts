@@ -84,6 +84,7 @@ let currentDtype = '';
 let skipWebgpu = false;
 let preferLowPowerAdapter = false;
 let minWebgpuBufferBytes = 268435456;
+let transientWebgpuFallbackUsed = false;
 
 function scoreAdapter(vendor, maxBuf, powerPreference, preferredPower) {
     const v = (vendor || '').toLowerCase();
@@ -191,6 +192,36 @@ async function releaseGpuResources() {
     // Multiple yields to event loop so browser GC can reclaim orphaned GPU buffers
     await new Promise(r => setTimeout(r, 250));
     await new Promise(r => setTimeout(r, 250));
+}
+
+// Inference timeout — detect hangs quickly and fail over without long stalls.
+const INFERENCE_TIMEOUT_MS = 45_000;
+const FAST_BOOTSTRAP_TIMEOUT_MS = 30_000;
+const GPU_INFERENCE_ERROR_RE = /createBuffer|RangeError|out of memory|OOM|allocation|device lost|GPUDevice|createComputePipeline|createShaderModule|mapAsync|mapping webgpu buffer|invalid buffer|Instance reference|AbortError|release session|invalid session|index out of bounds|timed out/i;
+function toErrorMessage(error) {
+    return error && error.message ? error.message : String(error || 'Unknown error');
+}
+
+function postChunkError(chunkId, message, gpuFallback = false) {
+    const data = gpuFallback ? { message, gpuFallback: true } : { message };
+    self.postMessage({ status: 'error', data, chunkId });
+}
+
+function withInferenceTimeout(promise, ms) {
+    let timer;
+    const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error('WebGPU inference timed out after ' + (ms / 1000) + 's')), ms);
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+function getInferenceTimeoutMs(currentBackend, chunkLengthS) {
+    if (currentBackend !== 'webgpu') return INFERENCE_TIMEOUT_MS;
+    let timeoutMs = INFERENCE_TIMEOUT_MS;
+    if (Number(chunkLengthS) <= 8) {
+        timeoutMs = Math.min(timeoutMs, FAST_BOOTSTRAP_TIMEOUT_MS);
+    }
+    return timeoutMs;
 }
 
 // ------------------------------------------------------------
@@ -433,10 +464,15 @@ async function transcribe(msg) {
     const updateIntervalMs = Number.isFinite(requestedUpdateInterval)
         ? Math.max(100, Math.min(1000, Math.floor(requestedUpdateInterval)))
         : 200;
+    // Root-cause fix:
+    // Word timestamps on WebGPU are the unstable path causing hangs/timeouts/index errors.
+    // Keep WebGPU on segment timestamps for both Chrome and Firefox.
+    // WASM can still use word timestamps.
+    const useWordTimestamps = currentBackend !== 'webgpu';
 
     let wordBuffer = [];
     let lastUpdateAt = 0;
-    let detectedWordLevel = null;
+    let detectedWordLevel = useWordTimestamps ? null : false;
 
     function chunk_callback(chunk) {
         wordBuffer.push(chunk);
@@ -474,55 +510,104 @@ async function transcribe(msg) {
         stride_length_s: msg.strideLengthS,
         language: msg.language,
         task: msg.subtask,
-        // Always try word-level timestamps first. If the run fails, we retry
-        // that run with segment timestamps only.
-        return_timestamps: 'word',
+        return_timestamps: useWordTimestamps ? 'word' : true,
         chunk_callback,
     };
 
-    let result = null;
-    try {
-        result = await pipe(msg.audio, pipeOpts);
-    } catch (error) {
-        const errMsg = error.message || String(error);
-        const isGpuError = /createBuffer|RangeError|out of memory|OOM|allocation|device lost|GPUDevice|createComputePipeline|createShaderModule|mapAsync|mapping webgpu buffer|invalid buffer|Instance reference|AbortError|release session|invalid session/i.test(errMsg);
+    const resetStreamState = (wordLevel) => {
+        wordBuffer = [];
+        lastUpdateAt = 0;
+        detectedWordLevel = wordLevel ? null : false;
+    };
 
-        if (isGpuError && currentBackend !== 'wasm') {
-            console.warn('[Whisper Worker] GPU inference failed, falling back to WASM:', errMsg);
-            skipWebgpu = true;
+    const runInference = async (targetPipe, opts, backendName, timeoutOverrideMs) => {
+        const useTimeout = backendName === 'webgpu';
+        const timeoutMs = timeoutOverrideMs ?? getInferenceTimeoutMs(backendName, msg.chunkLengthS);
+        console.log('[Whisper Worker] Starting inference on ' + backendName + (useTimeout ? ' (timeout=' + timeoutMs / 1000 + 's)' : ''));
+        return useTimeout
+            ? withInferenceTimeout(targetPipe(msg.audio, opts), timeoutMs)
+            : targetPipe(msg.audio, opts);
+    };
+
+    const fallbackToWasmAndRetry = async (reasonMsg) => {
+        if (currentBackend === 'wasm') throw new Error(reasonMsg);
+
+        console.warn('[Whisper Worker] GPU inference failed, falling back to WASM:', reasonMsg);
+        const isTimeoutFallback = /timed out/i.test(reasonMsg);
+        // Timeout is often transient. Allow one temporary WASM fallback, then retry WebGPU on next chunk.
+        // Non-timeout GPU failures remain sticky and disable WebGPU for this worker lifetime.
+        const useTemporaryFallback = isTimeoutFallback && !transientWebgpuFallbackUsed;
+        skipWebgpu = !useTemporaryFallback;
+        if (useTemporaryFallback) {
+            transientWebgpuFallbackUsed = true;
+        }
+        if (pipelinePromise) {
+            try { await (await pipelinePromise).dispose?.(); } catch {}
+        }
+        pipelinePromise = null;
+        currentModel = null;
+        currentMultilingual = null;
+
+        self.postMessage({ status: 'initiate', backend: 'wasm', vendor: '' });
+        const wasmPipe = await ensurePipeline(msg, (data) => self.postMessage(data));
+        self.postMessage({ status: 'ready', backend: currentBackend, vendor: currentVendor });
+
+        resetStreamState(false);
+        const fallbackOpts = { ...pipeOpts, return_timestamps: true };
+        const fallbackResult = await runInference(wasmPipe, fallbackOpts, 'wasm');
+        self.postMessage({ status: 'gpu-degraded', data: { message: reasonMsg } });
+
+        if (useTemporaryFallback) {
+            // Force a fresh backend probe on next chunk (prefer WebGPU again).
             if (pipelinePromise) {
                 try { await (await pipelinePromise).dispose?.(); } catch {}
             }
             pipelinePromise = null;
             currentModel = null;
-            self.postMessage({ status: 'initiate', backend: 'wasm', vendor: '' });
-            self.postMessage({ status: 'error', data: { message: errMsg, gpuFallback: true }, chunkId });
-            return null;
+            currentMultilingual = null;
+            currentDtype = '';
+            console.log('[Whisper Worker] Temporary WASM fallback complete; retrying WebGPU on next chunk');
         }
+        return fallbackResult;
+    };
 
-        // If word-level timestamps failed, retry with segment-level for this run.
-        if (pipeOpts.return_timestamps === 'word') {
-            console.warn('[Whisper Worker] Word-level timestamps failed (' + errMsg + '), retrying with segment timestamps');
-            wordBuffer = [];
-            lastUpdateAt = 0;
-            detectedWordLevel = null;
+    let result = null;
+    try {
+        result = await runInference(pipe, pipeOpts, currentBackend);
+    } catch (initialError) {
+        const initialMsg = toErrorMessage(initialError);
+        const canRetryWithoutWords = pipeOpts.return_timestamps === 'word';
+
+        if (canRetryWithoutWords) {
+            console.warn('[Whisper Worker] Word-level timestamps failed (' + initialMsg + '), retrying with segment timestamps');
+            resetStreamState(false);
             pipeOpts.return_timestamps = true;
             try {
-                result = await pipe(msg.audio, pipeOpts);
-                // Retry succeeded, but if original failure was GPU-related (e.g. createBuffer),
-                // report degradation so host can warn other workers (Embedding, Translation)
-                // to switch to WASM before they hit the same dead device.
-                if (isGpuError && !gpuDeviceLost) {
-                    console.warn('[Whisper Worker] GPU degraded — createBuffer failed during word timestamps');
-                    self.postMessage({ status: 'gpu-degraded', data: { message: errMsg } });
-                }
+                const retryTimeoutMs = Math.max(getInferenceTimeoutMs(currentBackend, msg.chunkLengthS), FAST_BOOTSTRAP_TIMEOUT_MS);
+                result = await runInference(pipe, pipeOpts, currentBackend, retryTimeoutMs);
             } catch (retryError) {
-                const retryMsg = retryError.message || String(retryError);
-                self.postMessage({ status: 'error', data: { message: retryMsg }, chunkId });
+                const retryMsg = toErrorMessage(retryError);
+                if (currentBackend !== 'wasm' && GPU_INFERENCE_ERROR_RE.test(retryMsg)) {
+                    try {
+                        result = await fallbackToWasmAndRetry(retryMsg);
+                    } catch (fallbackError) {
+                        postChunkError(chunkId, toErrorMessage(fallbackError), true);
+                        return null;
+                    }
+                } else {
+                    postChunkError(chunkId, retryMsg);
+                    return null;
+                }
+            }
+        } else if (currentBackend !== 'wasm' && GPU_INFERENCE_ERROR_RE.test(initialMsg)) {
+            try {
+                result = await fallbackToWasmAndRetry(initialMsg);
+            } catch (fallbackError) {
+                postChunkError(chunkId, toErrorMessage(fallbackError), true);
                 return null;
             }
         } else {
-            self.postMessage({ status: 'error', data: { message: errMsg }, chunkId });
+            postChunkError(chunkId, initialMsg);
             return null;
         }
     }
@@ -625,6 +710,7 @@ self.addEventListener('message', async (event) => {
         }
         currentModel = null;
         currentMultilingual = null;
+        transientWebgpuFallbackUsed = false;
         return;
     }
 
