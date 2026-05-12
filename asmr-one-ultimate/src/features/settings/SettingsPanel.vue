@@ -11,6 +11,7 @@ import { StorageManager } from '../../infrastructure/StorageManager';
 import { TranslationService } from '../../services/TranslationService';
 import { CacheKeys, SharedCache } from '../../core/Cache';
 import { Logger } from '../../core/Utils';
+import { gmRequest } from '../../infrastructure/HttpClient';
 import { Whisper } from '../Whisper';
 import { DeviceCapabilities } from '../../core/DeviceCapabilities';
 import type { ConfigKey } from '../../types';
@@ -186,6 +187,44 @@ function clearTranslationCache() {
     if (!window.confirm(t('clearTranslationCacheConfirm'))) return;
     const count = TranslationService.clearCache();
     alert(format('clearTranslationCacheSuccess', { count }));
+}
+
+// ============================================================================
+// External access permission
+// ============================================================================
+
+type ExternalAccessStatus = 'idle' | 'requesting' | 'granted' | 'failed';
+
+const externalAccessStatus = ref<ExternalAccessStatus>('idle');
+const externalAccessMessage = ref('');
+
+const externalAccessIcon = computed(() => {
+    if (externalAccessStatus.value === 'requesting') return 'hourglass_empty';
+    if (externalAccessStatus.value === 'granted') return 'check';
+    if (externalAccessStatus.value === 'failed') return 'warning';
+    return 'public';
+});
+
+const externalAccessDisabled = computed(() => externalAccessStatus.value === 'requesting');
+const externalAccessMessageColor = computed(() => externalAccessStatus.value === 'failed' ? '#e57373' : '');
+
+async function requestExternalPageAccess() {
+    externalAccessStatus.value = 'requesting';
+    externalAccessMessage.value = t('externalPageAccessRequesting');
+
+    try {
+        await gmRequest({
+            method: 'GET',
+            url: `https://example.com/?asmr_access_check=${Date.now()}`,
+            timeout: 15000,
+        });
+        externalAccessStatus.value = 'granted';
+        externalAccessMessage.value = t('externalPageAccessGranted');
+    } catch (e) {
+        externalAccessStatus.value = 'failed';
+        externalAccessMessage.value = t('externalPageAccessFailed');
+        Logger.warn('[SettingsPanel] External page access request failed:', e);
+    }
 }
 
 // ============================================================================
@@ -380,6 +419,35 @@ const credits = [
         <span class="text-weight-medium text-center flex q-my-md asmr-settings-header" id="asmr-general-settings-section-header">{{ t('generalSettings') }}</span>
         <div id="asmr-general-settings" class="asmr-settings-section rounded-borders q-list q-list--bordered q-list--dark bg-black" role="group" aria-labelledby="asmr-general-settings-section-header">
             <SettingsToggle config-key="enableLogging" :label="t('enableLogging')" :sublabel="t('enableLoggingSub')" icon="terminal" />
+            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <div role="listitem" class="q-py-sm q-item q-item-type row no-wrap q-item--dark">
+                <div class="q-item__section column q-item__section--avatar q-item__section--side justify-center">
+                    <i class="q-icon notranslate material-icons asmr-settings-icon" aria-hidden="true" role="presentation">public</i>
+                </div>
+                <div class="q-item__section column q-item__section--main justify-center">
+                    <div class="q-item__label"><span class="text-weight-medium">{{ t('externalPageAccess') }}</span></div>
+                    <div class="q-item__label q-item__label--caption text-caption">
+                        <span :style="{ color: externalAccessMessageColor }">{{ externalAccessMessage || t('externalPageAccessSub') }}</span>
+                    </div>
+                </div>
+                <div class="q-item__section column q-item__section--side justify-center">
+                    <button
+                        tabindex="0"
+                        type="button"
+                        class="q-btn q-btn-item non-selectable no-outline q-btn--standard q-btn--rectangle q-btn--actionable q-focusable q-hoverable"
+                        :class="{ disabled: externalAccessDisabled }"
+                        :disabled="externalAccessDisabled"
+                        :aria-label="t('externalPageAccess') || 'External page access'"
+                        :title="t('externalPageAccess') || 'External page access'"
+                        @click="requestExternalPageAccess"
+                    >
+                        <span class="q-focus-helper"></span>
+                        <span class="q-btn__content text-center col items-center q-anchor--skip justify-center row">
+                            <i class="q-icon notranslate material-icons" aria-hidden="true" role="presentation">{{ externalAccessIcon }}</i>
+                        </span>
+                    </button>
+                </div>
+            </div>
         </div>
 
         <!-- ============================================================ -->
@@ -837,5 +905,4 @@ const credits = [
     transform: scale(1.05);
 }
 </style>
-
 

@@ -9,6 +9,12 @@
 !voiceworks-renamer/
 !voiceworks-renamer/**
 
+# Whitelist kotoba userscript
+!kotoba/
+!kotoba/**
+kotoba/node_modules/
+kotoba/dist-reader/
+
 # Whitelist docs (GitHub Pages)
 !docs/
 !docs/**
@@ -21,4 +27,3 @@
 !.gitignore
 !README.md
 !CLAUDE.md
-

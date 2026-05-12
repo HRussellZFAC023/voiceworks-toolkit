@@ -86,6 +86,11 @@ export const zhLocale: Record<string, string> = {
         generalSettings: '常规设置',
         enableLogging: '启用控制台日志',
         enableLoggingSub: '在控制台输出技术信息（建议在调试时开启）',
+        externalPageAccess: '外部页面访问',
+        externalPageAccessSub: '预先授权跨站媒体和元数据请求。Tampermonkey 弹窗出现时，请选择始终允许所有域名的选项。',
+        externalPageAccessRequesting: '正在请求访问权限... 如果出现 Tampermonkey 弹窗，请允许。',
+        externalPageAccessGranted: '外部访问检查已完成。之后音频和元数据请求应该不会逐个弹窗。',
+        externalPageAccessFailed: '访问检查失败或被拒绝。请重试，并在 Tampermonkey 弹窗中允许所有域名。',
 
         // DLsite Proxy
         dlsiteProxy: 'DLsite 代理',
@@ -624,4 +629,3 @@ export const zhLocale: Record<string, string> = {
         jpdbCredits: '注音与词汇功能由 jpdb.io 提供',
         jpdbCreditsReader: '基于 chinokusari 的 anki-jpdb.reader',
 };
-

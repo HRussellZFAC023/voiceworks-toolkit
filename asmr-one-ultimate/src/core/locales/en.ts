@@ -86,6 +86,11 @@ export const enLocale: Record<string, string> = {
         generalSettings: 'General Settings',
         enableLogging: 'Enable Console Logging',
         enableLoggingSub: 'Log technical info to console (recommended for debugging)',
+        externalPageAccess: 'External Page Access',
+        externalPageAccessSub: 'Pre-authorize cross-site media and metadata requests. When Tampermonkey asks, choose the option that always allows all domains.',
+        externalPageAccessRequesting: 'Requesting access... approve the Tampermonkey prompt if it appears.',
+        externalPageAccessGranted: 'External access check completed. Future audio and metadata requests should stop asking one by one.',
+        externalPageAccessFailed: 'Access check failed or was denied. Try again and allow all domains in the Tampermonkey prompt.',
 
         // DLsite Proxy
         dlsiteProxy: 'DLsite Proxy',
@@ -624,4 +629,3 @@ export const enLocale: Record<string, string> = {
         jpdbCredits: 'Furigana & vocabulary powered by jpdb.io',
         jpdbCreditsReader: 'Reading parser based on anki-jpdb.reader by chinokusari',
 };
-

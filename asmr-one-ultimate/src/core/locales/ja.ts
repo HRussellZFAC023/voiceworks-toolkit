@@ -86,6 +86,11 @@ export const jaLocale: Record<string, string> = {
         generalSettings: '一般設定',
         enableLogging: 'コンソールログ有効化',
         enableLoggingSub: '技術情報をコンソールに出力（デバッグ推奨）',
+        externalPageAccess: '外部ページアクセス',
+        externalPageAccessSub: '外部メディアとメタデータのリクエストを事前許可します。Tampermonkey の確認が出たら、すべてのドメインを常に許可する選択肢を選んでください。',
+        externalPageAccessRequesting: 'アクセスをリクエスト中... Tampermonkey の確認が出たら許可してください。',
+        externalPageAccessGranted: '外部アクセス確認が完了しました。今後の音声やメタデータのリクエスト確認が減るはずです。',
+        externalPageAccessFailed: 'アクセス確認に失敗したか拒否されました。もう一度試して、Tampermonkey ですべてのドメインを許可してください。',
 
         // DLsite Proxy
         dlsiteProxy: 'DLsite プロキシ',
@@ -624,4 +629,3 @@ export const jaLocale: Record<string, string> = {
         jpdbCredits: 'ふりがな・語彙機能はjpdb.ioを使用',
         jpdbCreditsReader: 'chinokusariのanki-jpdb.readerに基づく',
 };
-
