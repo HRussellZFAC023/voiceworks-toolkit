@@ -9,11 +9,11 @@
 !voiceworks-renamer/
 !voiceworks-renamer/**
 
-# Whitelist kotoba userscript
-!kotoba/
-!kotoba/**
-kotoba/node_modules/
-kotoba/dist-reader/
+# Whitelist yomu userscript
+!yomu/
+!yomu/**
+yomu/node_modules/
+yomu/dist-reader/
 
 # Whitelist docs (GitHub Pages)
 !docs/

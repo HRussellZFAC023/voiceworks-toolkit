@@ -2,7 +2,7 @@
 
 Tools for Japanese language learning and library management with native voiceworks from DLsite and [asmr.one](https://as.mr).
 
-## [ことば](kotoba/) — JPDB/Yomitan Popup Reader
+## [よむ](yomu/) — JPDB/Yomitan Popup Reader
 
 Standalone Tampermonkey userscript for Japanese lookup and mining on any website.
 
