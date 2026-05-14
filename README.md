@@ -9,7 +9,7 @@ Standalone Tampermonkey userscript for Japanese lookup and mining on any website
 - **JPDB popups** — Tap scanned words, mine to decks, review with JPDB grades, and open the matching JPDB page.
 - **Yomitan dictionaries** — Import Yomitan settings, dictionary ZIPs, and Dexie exports for local term, kanji, frequency, and pitch lookup.
 - **Manga OCR** — Auto-scan nearby images through a YomiNinja-style OCR endpoint and tap recognized text to mine it.
-- **Video mining** — ASB-style Japanese/native subtitle overlay, transcript side panel, local subtitle files, and optional MPV bridge mining.
+- **Video mining** — ASB-style Japanese/native subtitle overlay, transcript side panel, local subtitle files, and a hosted local video player.
 - **iOS-first audio** — Yomitan-compatible audio sources, Blob playback, auto-play, and random/first source selection.
 
 ## [Voiceworks Ultimate](asmr-one-ultimate/) — Browser Enhancement Suite
