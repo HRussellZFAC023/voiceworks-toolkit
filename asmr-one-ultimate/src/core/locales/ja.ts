@@ -92,6 +92,23 @@ export const jaLocale: Record<string, string> = {
         externalPageAccessGranted: '外部アクセス確認が完了しました。今後の音声やメタデータのリクエスト確認が減るはずです。',
         externalPageAccessFailed: 'アクセス確認に失敗したか拒否されました。もう一度試して、Tampermonkey ですべてのドメインを許可してください。',
 
+        // Emergency playlist backup
+        emergencyExport: '緊急バックアップ',
+        emergencyExportTitle: 'プレイリストをバックアップ',
+        emergencyExportSub: 'サイトが停止した場合に備えて、プレイリスト名と RJ コードをオフライン保存します。自分のプレイリストとコミュニティのプレイリストは別々にエクスポートされます。',
+        emergencyExportJson: 'JSON',
+        emergencyExportCsv: 'CSV',
+        emergencyExportTxt: 'TXT',
+        emergencyExportRunning: 'プレイリストをエクスポート中...',
+        emergencyExportStageOwn: '自分のプレイリスト',
+        emergencyExportStagePublic: 'コミュニティのプレイリスト',
+        emergencyExportDone: '自分のプレイリスト {own} 件とコミュニティのプレイリスト {public} 件をバックアップしました。',
+        emergencyExportFailed: 'エクスポートに失敗しました',
+
+        // ASMR API Proxy
+        apiProxyUrl: 'ASMR API プロキシ URL',
+        apiProxyUrlSub: 'API に接続できない、または地域制限された場合のフォールバックに使う Cloudflare Worker。空欄なら内蔵プロキシを使用します。',
+
         // DLsite Proxy
         dlsiteProxy: 'DLsite プロキシ',
         dlsiteProxySub: '地域制限を回避するための Cloudflare Worker プロキシ URL',

@@ -2,7 +2,8 @@ import { KikoeruBridge } from '../../infrastructure/KikoeruBridge';
 import { Logger } from '../../core/Utils';
 import { HttpClient, HttpError } from '../../infrastructure/HttpClient';
 
-import { DEFAULT_API_SERVER } from '../../core/Constants';
+import { DEFAULT_API_SERVER, DEFAULT_API_PROXY } from '../../core/Constants';
+import { Config } from '../../core/Config';
 
 /**
  * Get the API base URL from the host app's axios baseURL (set by "Select server" setting)
@@ -85,6 +86,45 @@ export async function apiRequest<T>(endpoint: string, params?: Record<string, st
             Logger.warn(`[PlaylistDiscovery] 401 for ${endpoint}, retrying without auth...`);
             return await run({ Accept: 'application/json' });
         }
+        const proxied = await proxyRequest<T>(endpoint, params);
+        if (proxied !== null) return proxied;
         throw error;
+    }
+}
+
+/**
+ * Get the API proxy base URL (Cloudflare Worker relaying the asmr API).
+ * A user-configured URL wins; empty config falls back to the default worker.
+ */
+export function getApiProxyUrl(): string {
+    try {
+        const configured = Config.get('apiProxyUrl');
+        if (typeof configured === 'string' && configured.trim().startsWith('http')) {
+            return configured.trim().replace(/\/$/, '');
+        }
+    } catch { /* config not ready yet — use default */ }
+    return DEFAULT_API_PROXY;
+}
+
+/**
+ * Last-resort API route: relay the request through the Cloudflare Worker proxy,
+ * pinning the currently-selected API mirror via `__host`.
+ * Returns null when the proxy also fails.
+ */
+export async function proxyRequest<T>(endpoint: string, params?: Record<string, string | number>): Promise<T | null> {
+    const proxyBase = getApiProxyUrl();
+    if (!proxyBase) return null;
+
+    const apiHost = getApiBaseUrl().replace(/^https?:\/\//, '');
+    try {
+        const res = await HttpClient.getJsonViaCors<T>(`${proxyBase}${endpoint}`, {
+            params: { ...(params || {}), __host: apiHost },
+            headers: { Accept: 'application/json', ...getAuthHeader() },
+            retry: { attempts: 2, backoffMs: 500 },
+        });
+        return res.data;
+    } catch (proxyError) {
+        Logger.warn(`[PlaylistDiscovery] Proxy fallback failed for ${endpoint}: ${(proxyError as Error)?.message || proxyError}`);
+        return null;
     }
 }

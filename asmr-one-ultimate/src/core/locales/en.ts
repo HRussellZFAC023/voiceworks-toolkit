@@ -92,6 +92,23 @@ export const enLocale: Record<string, string> = {
         externalPageAccessGranted: 'External access check completed. Future audio and metadata requests should stop asking one by one.',
         externalPageAccessFailed: 'Access check failed or was denied. Try again and allow all domains in the Tampermonkey prompt.',
 
+        // Emergency playlist backup
+        emergencyExport: 'Emergency Backup',
+        emergencyExportTitle: 'Backup Playlists',
+        emergencyExportSub: 'Save playlist names and their RJ codes offline in case the site goes down. Your own playlists and community playlists are exported as separate sections.',
+        emergencyExportJson: 'JSON',
+        emergencyExportCsv: 'CSV',
+        emergencyExportTxt: 'TXT',
+        emergencyExportRunning: 'Exporting playlists...',
+        emergencyExportStageOwn: 'Your playlists',
+        emergencyExportStagePublic: 'Community playlists',
+        emergencyExportDone: 'Backed up {own} of your playlists and {public} community playlists.',
+        emergencyExportFailed: 'Export failed',
+
+        // ASMR API Proxy
+        apiProxyUrl: 'ASMR API Proxy URL',
+        apiProxyUrlSub: 'Cloudflare Worker used as a fallback when the API is unreachable or region-blocked. Leave blank to use the built-in proxy.',
+
         // DLsite Proxy
         dlsiteProxy: 'DLsite Proxy',
         dlsiteProxySub: 'URL of your Cloudflare Worker proxy to bypass region blocks',

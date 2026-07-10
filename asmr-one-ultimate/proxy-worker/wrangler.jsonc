@@ -1,0 +1,9 @@
+{
+    "$schema": "node_modules/wrangler/config-schema.json",
+    "name": "asmr-api-proxy",
+    "main": "asmr-api-proxy.js",
+    "compatibility_date": "2026-07-01",
+    // Run in Japan so the asmr API's region gate sees an allowed country.
+    "placement": { "mode": "targeted", "region": "azure:japaneast" },
+    "observability": { "enabled": true }
+}

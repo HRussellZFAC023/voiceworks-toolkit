@@ -13,6 +13,7 @@ import { CacheKeys, SharedCache } from '../../core/Cache';
 import { Logger } from '../../core/Utils';
 import { gmRequest } from '../../infrastructure/HttpClient';
 import { Whisper } from '../Whisper';
+import { runEmergencyExport, type ExportFormat } from '../EmergencyExport';
 import { DeviceCapabilities } from '../../core/DeviceCapabilities';
 import type { ConfigKey } from '../../types';
 // @ts-ignore – Vite ?raw import
@@ -233,6 +234,35 @@ async function requestExternalPageAccess() {
 
 function backupSettings() {
     StorageManager.downloadBackup();
+}
+
+// ============================================================================
+// Emergency playlist export
+// ============================================================================
+
+const emergencyExportBusy = ref(false);
+const emergencyExportStatus = ref('');
+
+async function emergencyExport(fmt: ExportFormat) {
+    if (emergencyExportBusy.value) return;
+    emergencyExportBusy.value = true;
+    emergencyExportStatus.value = t('emergencyExportRunning');
+    try {
+        const doc = await runEmergencyExport(fmt, (p) => {
+            if (p.stage === 'done') return;
+            const stageLabel = p.stage === 'own' ? t('emergencyExportStageOwn') : t('emergencyExportStagePublic');
+            emergencyExportStatus.value = `${stageLabel} ${Math.min(p.done + 1, p.total)}/${p.total} — ${p.label}`;
+        });
+        emergencyExportStatus.value = format('emergencyExportDone', {
+            own: doc.ownPlaylists.length,
+            public: doc.publicPlaylists.length,
+        });
+    } catch (error) {
+        emergencyExportStatus.value = `${t('emergencyExportFailed')}: ${(error as Error)?.message || error}`;
+        Logger.warn('[EmergencyExport] Export failed', error);
+    } finally {
+        emergencyExportBusy.value = false;
+    }
 }
 
 async function restoreSettings() {
@@ -772,10 +802,49 @@ const credits = [
         </template>
 
         <!-- ============================================================ -->
+        <!-- Emergency Playlist Backup                                    -->
+        <!-- ============================================================ -->
+        <span class="text-weight-medium text-center flex q-my-md asmr-settings-header" id="asmr-emergency-export-section-header">{{ t('emergencyExport') }}</span>
+        <div id="asmr-emergency-export-section" class="asmr-settings-section rounded-borders q-list q-list--bordered q-list--dark bg-black" role="group" aria-labelledby="asmr-emergency-export-section-header">
+            <div role="listitem" class="q-py-sm q-item q-item-type row no-wrap q-item--dark">
+                <div class="q-item__section column q-item__section--avatar q-item__section--side justify-center">
+                    <i class="q-icon notranslate material-icons asmr-settings-icon" aria-hidden="true">medical_services</i>
+                </div>
+                <div class="q-item__section column q-item__section--main justify-center">
+                    <div class="q-item__label"><span class="text-weight-medium">{{ t('emergencyExportTitle') }}</span></div>
+                    <div class="q-item__label q-item__label--caption text-caption">{{ t('emergencyExportSub') }}</div>
+                </div>
+            </div>
+            <div class="q-px-md q-pb-md row q-gutter-sm">
+                <button type="button" data-testid="emergency-export-json" class="q-btn q-btn-item non-selectable no-outline q-btn--standard q-btn--rectangle q-btn--actionable q-focusable q-hoverable q-btn--dense" :disabled="emergencyExportBusy" @click="emergencyExport('json')">
+                    <span class="q-btn__content text-center col items-center q-anchor--skip justify-center row">
+                        <i class="q-icon notranslate material-icons q-mr-xs" aria-hidden="true" role="presentation" style="font-size: 16px">download</i>
+                        {{ t('emergencyExportJson') }}
+                    </span>
+                </button>
+                <button type="button" data-testid="emergency-export-csv" class="q-btn q-btn-item non-selectable no-outline q-btn--standard q-btn--rectangle q-btn--actionable q-focusable q-hoverable q-btn--dense" :disabled="emergencyExportBusy" @click="emergencyExport('csv')">
+                    <span class="q-btn__content text-center col items-center q-anchor--skip justify-center row">
+                        <i class="q-icon notranslate material-icons q-mr-xs" aria-hidden="true" role="presentation" style="font-size: 16px">table_view</i>
+                        {{ t('emergencyExportCsv') }}
+                    </span>
+                </button>
+                <button type="button" data-testid="emergency-export-txt" class="q-btn q-btn-item non-selectable no-outline q-btn--standard q-btn--rectangle q-btn--actionable q-focusable q-hoverable q-btn--dense" :disabled="emergencyExportBusy" @click="emergencyExport('txt')">
+                    <span class="q-btn__content text-center col items-center q-anchor--skip justify-center row">
+                        <i class="q-icon notranslate material-icons q-mr-xs" aria-hidden="true" role="presentation" style="font-size: 16px">notes</i>
+                        {{ t('emergencyExportTxt') }}
+                    </span>
+                </button>
+            </div>
+            <div v-if="emergencyExportStatus" class="q-px-md q-pb-md text-caption" data-testid="emergency-export-status">{{ emergencyExportStatus }}</div>
+        </div>
+
+        <!-- ============================================================ -->
         <!-- Proxy Settings                                               -->
         <!-- ============================================================ -->
         <span class="text-weight-medium text-center flex q-my-md asmr-settings-header" id="asmr-proxy-settings-section-header">{{ t('dlsiteProxy') }}</span>
         <div id="asmr-proxy-settings-section" class="asmr-settings-section rounded-borders q-list q-list--bordered q-list--dark bg-black" role="group" aria-labelledby="asmr-proxy-settings-section-header">
+            <SettingsInput config-key="apiProxyUrl" :label="t('apiProxyUrl')" :sublabel="t('apiProxyUrlSub')" placeholder="https://asmr-api-proxy.your-name.workers.dev" icon="cloud_sync" />
+            <hr class="q-separator q-separator--horizontal q-separator--dark">
             <SettingsInput config-key="dlsiteProxyUrl" :label="t('dlsiteProxyUrl')" :sublabel="t('dlsiteProxyUrlSub')" placeholder="https://your-worker.workers.dev" icon="vpn_lock" />
             <div class="q-px-md q-pb-md">
                 <details class="asmr-setup-guide">

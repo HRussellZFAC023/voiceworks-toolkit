@@ -16,6 +16,8 @@ const __dirname = path.dirname(__filename);
 const USERSCRIPT_PATH = path.join(__dirname, '../../dist/asmr-one-ultimate.user.js');
 const AUTH_PATH = path.join(__dirname, '.auth.json');
 const isRealE2E = process.env.E2E_REAL === '1' || process.env.E2E_NO_MOCKS === '1';
+const viaProxy = process.env.E2E_PROXY === '1';
+const E2E_PROXY_URL = (process.env.E2E_PROXY_URL || 'https://asmr-api-proxy.henry-robert-christopher-russell.workers.dev').replace(/\/$/, '');
 const requireAuth = process.env.E2E_REQUIRE_AUTH === '1';
 const TEST_IMAGE_BODY = Buffer.from(
     'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMB/6XGD2sAAAAASUVORK5CYII=',
@@ -319,6 +321,31 @@ export const test = base.extend<Fixtures>({
         // Store worker index in context for subdomain rotation
         (context as any)._workerIndex = (testInfo as any).workerIndex || 0;
 
+        // Region-block bypass: when E2E_PROXY=1, load the asmr.one frontend
+        // (document + JS/CSS) through the Tokyo-placed Cloudflare Worker so
+        // the suite runs from networks the site 403s ("remember, no english").
+        // Registered FIRST so all later routes (API mocks, resource blocks)
+        // take precedence over it.
+        if (viaProxy) {
+            await context.route(url => /^https:\/\/([a-z0-9-]+\.)*asmr(-\d+)?\.(one|com)\//.test(url.toString()), async (route) => {
+                const request = route.request();
+                if (request.method() !== 'GET') return route.continue();
+                const u = new URL(request.url());
+                u.searchParams.set('__host', u.hostname);
+                const proxied = `${E2E_PROXY_URL}${u.pathname}${u.search}`;
+                try {
+                    const resp = await context.request.get(proxied, { timeout: 30000 });
+                    return route.fulfill({
+                        status: resp.status(),
+                        contentType: resp.headers()['content-type'] || 'text/html',
+                        body: await resp.body(),
+                    });
+                } catch {
+                    return route.continue();
+                }
+            });
+        }
+
         // Serve a tiny placeholder image for tests that need media preview
         await context.route('**/test-image-*.png', (route) => {
             route.fulfill({
@@ -464,7 +491,9 @@ export const test = base.extend<Fixtures>({
                 return route.fulfill({ status: 200, contentType: 'application/json', body });
             }
 
-            return route.continue();
+            // In proxy mode, unmocked API calls fall back to the region proxy
+            // route (registered first); route.continue() would go direct and 403.
+            return viaProxy ? route.fallback() : route.continue();
         });
 
         // Mock Google Translate to avoid flaky network + console errors

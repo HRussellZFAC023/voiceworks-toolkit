@@ -92,6 +92,23 @@ export const zhLocale: Record<string, string> = {
         externalPageAccessGranted: '外部访问检查已完成。之后音频和元数据请求应该不会逐个弹窗。',
         externalPageAccessFailed: '访问检查失败或被拒绝。请重试，并在 Tampermonkey 弹窗中允许所有域名。',
 
+        // Emergency playlist backup
+        emergencyExport: '紧急备份',
+        emergencyExportTitle: '备份播放列表',
+        emergencyExportSub: '离线保存播放列表名称及其 RJ 号，以防网站无法访问。您自己的播放列表和社区播放列表将分开导出。',
+        emergencyExportJson: 'JSON',
+        emergencyExportCsv: 'CSV',
+        emergencyExportTxt: 'TXT',
+        emergencyExportRunning: '正在导出播放列表...',
+        emergencyExportStageOwn: '您的播放列表',
+        emergencyExportStagePublic: '社区播放列表',
+        emergencyExportDone: '已备份您的 {own} 个播放列表和 {public} 个社区播放列表。',
+        emergencyExportFailed: '导出失败',
+
+        // ASMR API Proxy
+        apiProxyUrl: 'ASMR API 代理 URL',
+        apiProxyUrlSub: '当 API 无法访问或被地区屏蔽时使用的 Cloudflare Worker 备用通道。留空则使用内置代理。',
+
         // DLsite Proxy
         dlsiteProxy: 'DLsite 代理',
         dlsiteProxySub: 'Cloudflare Worker 代理 URL，用于绕过地区限制',

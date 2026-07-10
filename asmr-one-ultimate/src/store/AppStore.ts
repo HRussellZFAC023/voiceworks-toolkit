@@ -196,6 +196,7 @@ const CONFIG_DEFAULTS: PluginConfig = {
     debug: false,
     enableLogging: false,
     dlsiteProxyUrl: '',
+    apiProxyUrl: '',
 };
 
 // ============================================================================

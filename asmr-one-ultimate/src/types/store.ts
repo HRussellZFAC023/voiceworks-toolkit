@@ -331,6 +331,9 @@ export interface PluginConfig {
 
     // DLsite Proxy
     dlsiteProxyUrl: string;
+
+    // ASMR API proxy (Cloudflare Worker fallback route; empty = built-in default)
+    apiProxyUrl: string;
 }
 
 export type ConfigKey = keyof PluginConfig;

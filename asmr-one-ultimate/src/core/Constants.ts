@@ -11,6 +11,13 @@
 /** Default API server URL — used as fallback when the host app's axios baseURL is unavailable. */
 export const DEFAULT_API_SERVER = 'https://api.asmr-200.com';
 
+/**
+ * Default Cloudflare Worker relaying the asmr API (CORS + mirror failover).
+ * Used only after direct requests fail; users can point the `apiProxyUrl`
+ * setting at their own deployment of proxy-worker/asmr-api-proxy.js.
+ */
+export const DEFAULT_API_PROXY = 'https://asmr-api-proxy.henry-robert-christopher-russell.workers.dev';
+
 // =============================================================================
 // Timing
 // =============================================================================
