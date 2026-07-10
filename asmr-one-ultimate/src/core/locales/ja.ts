@@ -105,6 +105,14 @@ export const jaLocale: Record<string, string> = {
         emergencyExportDone: '自分のプレイリスト {own} 件とコミュニティのプレイリスト {public} 件をバックアップしました。',
         emergencyExportFailed: 'エクスポートに失敗しました',
 
+        // Proxy donation banner
+        proxyBannerTitle: '無料の地域制限回避プロキシを使用中です',
+        proxyBannerMsg: 'サイトがお住まいの地域をブロックしているため、リクエストは私たちが資金提供するプロキシサーバー経由で中継されています。運用には実費がかかります — 寄付目標が達成されない場合、プロキシサービスは停止されます。',
+        proxyBannerGoal: '寄付目標：',
+        proxyBannerVpn: 'ヒント：プロキシの代わりに中国/日本への VPN を利用することもできます。',
+        proxyBannerDonate: '寄付する',
+        proxyBannerYomuAd: 'よむ Yomu の作者より — ウェブ/漫画/PDF/字幕の日本語リーダー',
+
         // ASMR API Proxy
         apiProxyUrl: 'ASMR API プロキシ URL',
         apiProxyUrlSub: 'API に接続できない、または地域制限された場合のフォールバックに使う Cloudflare Worker。空欄なら内蔵プロキシを使用します。',
@@ -349,6 +357,7 @@ export const jaLocale: Record<string, string> = {
         whisperBtnLabel: 'AI文字起こし',
         whisperBtnTitle: 'Whisper AIで音声を文字起こし',
         whisperTranscriptDownload: 'LRC',
+        whisperTranscriptDownloadTxt: '文字起こし原文（TXT）',
         whisperTranscriptDownloadLang: 'LRC（{lang}）',
         vttDownload: 'VTT',
         vttDownloadTranslated: 'VTT（翻訳済み）',
@@ -362,6 +371,8 @@ export const jaLocale: Record<string, string> = {
         whisperLoadingModelAudio: 'モデルを読み込み中 + 音声取得中...',
         whisperFetchingAudio: '音声を取得中...',
         whisperDecodingAudio: '音声をデコード中...',
+        whisperDecodeTimeout: '音声のデコードが {seconds} 秒でタイムアウトしました。小さい／低品質のファイル、または別のブラウザをお試しください。',
+        whisperDecodeInvalidAudio: '音声ファイルのデコード結果が空または無効です。',
         whisperWaitingForModel: 'モデルを待機中...',
         whisperPreparingFirstChunk: '最初のチャンクを準備中...',
         whisperStreamingAudio: 'ストリーミング中... {loaded}/{total} MB',
@@ -426,6 +437,12 @@ export const jaLocale: Record<string, string> = {
         translateModeSub: 'タグ、タイトル、UI要素を翻訳する（リロードが必要）',
         translateCnToJp: '中国語 → 日本語',
         translateCnToJpSub: '翻訳のオン/オフに関係なく中国語テキストを日本語に置換',
+        translationApiEndpoint: 'カスタム翻訳 API',
+        translationApiEndpointSub: '任意の OpenAI 互換 Chat Completions エンドポイント。失敗時は Google 翻訳にフォールバックします。',
+        translationApiModel: 'カスタム翻訳モデル',
+        translationApiModelSub: 'カスタムエンドポイントへ送信するモデル名',
+        translationApiKey: 'カスタム翻訳 API キー',
+        translationApiKeySub: '任意の Bearer トークン。このユーザースクリプトのローカル設定にのみ保存されます。',
 
         // Feature Toggles (Global)
         featureToggles: '機能切り替え',

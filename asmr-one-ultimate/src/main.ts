@@ -77,6 +77,7 @@ import { VisualizerController } from './features/VisualizerController';
 import { VisitCounter } from './features/VisitCounter';
 import { ContinueListeningController } from './features/ContinueListeningController';
 import { setupAudioRecovery } from './features/audioRecovery';
+import { ProxyDonationBanner } from './features/ProxyDonationBanner';
 
 
 declare const unsafeWindow: Window & typeof globalThis;
@@ -530,6 +531,9 @@ function initializeInfrastructure(bridge: KikoeruBridge): void {
     Logger.debug('[Init] StorageManager enabled');
 
     registerFeature('enableStoreBackup', new StoreBackup());
+
+    // Funding notice for users whose traffic needed the region-bypass proxy.
+    new ProxyDonationBanner().enable();
 
     // Enable audio caching (sets up Vuex watcher for track changes)
     audioCache.enable();

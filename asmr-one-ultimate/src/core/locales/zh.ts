@@ -105,6 +105,14 @@ export const zhLocale: Record<string, string> = {
         emergencyExportDone: '已备份您的 {own} 个播放列表和 {public} 个社区播放列表。',
         emergencyExportFailed: '导出失败',
 
+        // Proxy donation banner
+        proxyBannerTitle: '您正在使用免费的地区解锁代理',
+        proxyBannerMsg: '该网站屏蔽了您所在的地区，您的请求正通过我们出资运营的代理服务器中转。运营代理需要实际成本——如果未达到捐赠目标，代理服务将停止。',
+        proxyBannerGoal: '捐赠目标：',
+        proxyBannerVpn: '提示：您也可以使用 VPN 连接到中国/日本来代替代理。',
+        proxyBannerDonate: '捐赠',
+        proxyBannerYomuAd: '出自 よむ Yomu 作者 — 网页/漫画/PDF/字幕日语阅读器',
+
         // ASMR API Proxy
         apiProxyUrl: 'ASMR API 代理 URL',
         apiProxyUrlSub: '当 API 无法访问或被地区屏蔽时使用的 Cloudflare Worker 备用通道。留空则使用内置代理。',
@@ -349,6 +357,7 @@ export const zhLocale: Record<string, string> = {
         whisperBtnLabel: 'AI 转录',
         whisperBtnTitle: '使用 Whisper AI 转录音频',
         whisperTranscriptDownload: 'LRC',
+        whisperTranscriptDownloadTxt: '原始转录（TXT）',
         whisperTranscriptDownloadLang: 'LRC（{lang}）',
         vttDownload: 'VTT',
         vttDownloadTranslated: 'VTT（翻译）',
@@ -362,6 +371,8 @@ export const zhLocale: Record<string, string> = {
         whisperLoadingModelAudio: '加载模型并获取音频...',
         whisperFetchingAudio: '正在获取音频...',
         whisperDecodingAudio: '正在解码音频...',
+        whisperDecodeTimeout: '音频解码在 {seconds} 秒后超时。请尝试更小或较低质量的文件，或更换浏览器。',
+        whisperDecodeInvalidAudio: '音频文件解码为空或无效流。',
         whisperWaitingForModel: '等待模型就绪...',
         whisperPreparingFirstChunk: '准备首个分段...',
         whisperStreamingAudio: '正在流式下载... {loaded}/{total} MB',
@@ -426,6 +437,12 @@ export const zhLocale: Record<string, string> = {
         translateModeSub: '翻译标签、标题和界面元素（需要重新加载）',
         translateCnToJp: '中文 → 日本語',
         translateCnToJpSub: '无论翻译开关状态，均将中文文本静默替换为日语',
+        translationApiEndpoint: '自定义翻译 API',
+        translationApiEndpointSub: '可选的 OpenAI 兼容聊天补全接口。失败时自动回退到 Google 翻译。',
+        translationApiModel: '自定义翻译模型',
+        translationApiModelSub: '发送到自定义接口的模型名称',
+        translationApiKey: '自定义翻译 API 密钥',
+        translationApiKeySub: '可选的 Bearer 令牌，仅保存在此用户脚本的本地设置中。',
 
         // Feature Toggles (Global)
         featureToggles: '功能开关',

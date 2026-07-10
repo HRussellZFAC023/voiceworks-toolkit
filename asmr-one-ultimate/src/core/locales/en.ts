@@ -105,6 +105,14 @@ export const enLocale: Record<string, string> = {
         emergencyExportDone: 'Backed up {own} of your playlists and {public} community playlists.',
         emergencyExportFailed: 'Export failed',
 
+        // Proxy donation banner
+        proxyBannerTitle: 'You are using the free region-bypass proxy',
+        proxyBannerMsg: 'The site blocks your region, so your requests are being relayed through our funded proxy server. Running it costs real money — if the donation goal is not met, the proxy service will be stopped.',
+        proxyBannerGoal: 'Donation goal:',
+        proxyBannerVpn: 'Tip: you can always use a VPN to China/Japan instead of the proxy.',
+        proxyBannerDonate: 'Donate',
+        proxyBannerYomuAd: 'From the maker of よむ Yomu — Japanese reader for web, manga, PDFs & subtitles',
+
         // ASMR API Proxy
         apiProxyUrl: 'ASMR API Proxy URL',
         apiProxyUrlSub: 'Cloudflare Worker used as a fallback when the API is unreachable or region-blocked. Leave blank to use the built-in proxy.',
@@ -349,6 +357,7 @@ export const enLocale: Record<string, string> = {
         whisperBtnLabel: 'AI Transcribe',
         whisperBtnTitle: 'Transcribe audio with Whisper AI',
         whisperTranscriptDownload: 'LRC',
+        whisperTranscriptDownloadTxt: 'Raw transcript (TXT)',
         whisperTranscriptDownloadLang: 'LRC ({lang})',
         vttDownload: 'VTT',
         vttDownloadTranslated: 'VTT (translated)',
@@ -362,6 +371,8 @@ export const enLocale: Record<string, string> = {
         whisperLoadingModelAudio: 'Loading model + fetching audio...',
         whisperFetchingAudio: 'Fetching audio...',
         whisperDecodingAudio: 'Decoding audio...',
+        whisperDecodeTimeout: 'Audio decoding timed out after {seconds}s. Try a smaller/lower-quality file or another browser.',
+        whisperDecodeInvalidAudio: 'The audio file decoded to an empty or invalid stream.',
         whisperWaitingForModel: 'Waiting for model...',
         whisperPreparingFirstChunk: 'Preparing first chunk...',
         whisperStreamingAudio: 'Streaming audio... {loaded}/{total} MB',
@@ -426,6 +437,12 @@ export const enLocale: Record<string, string> = {
         translateModeSub: 'Translate tags, titles, and UI elements (reload required)',
         translateCnToJp: 'Chinese → Japanese',
         translateCnToJpSub: 'Silently replace Chinese text with Japanese, with or without translations',
+        translationApiEndpoint: 'Custom Translation API',
+        translationApiEndpointSub: 'Optional OpenAI-compatible chat-completions endpoint. Falls back to Google Translate if it fails.',
+        translationApiModel: 'Custom Translation Model',
+        translationApiModelSub: 'Model name sent to the custom endpoint',
+        translationApiKey: 'Custom Translation API Key',
+        translationApiKeySub: 'Optional bearer token. Stored only in this userscript\'s local settings.',
 
         // Feature Toggles (Global)
         featureToggles: 'Feature Toggles',
