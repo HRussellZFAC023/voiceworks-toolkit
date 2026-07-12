@@ -163,6 +163,93 @@ describe('TranslationService CN->JP preference', () => {
         expect(mocks.gmRequestMock.mock.calls[0][0].url).toContain('tl=en');
     });
 
+    it('builds a Japanese-primary display and derives English from that Japanese text', async () => {
+        mocks.configState.translateCnToJp = true;
+        mocks.gmRequestMock
+            .mockResolvedValueOnce({ responseText: JSON.stringify([[['日本語の題名', '', '']]]), response: undefined as unknown })
+            .mockResolvedValueOnce({ responseText: JSON.stringify([[['English title', '', '']]]), response: undefined as unknown });
+
+        const out = await TranslationService.translateForDisplay('中文标题', 'en', {
+            sourceLanguageHint: 'zh',
+        });
+
+        expect(out).toMatchObject({
+            sourceText: '中文标题',
+            sourceLanguage: 'zh',
+            primaryText: '日本語の題名',
+            primaryLanguage: 'ja',
+            secondaryText: 'English title',
+            secondaryLanguage: 'en',
+        });
+        expect(mocks.gmRequestMock).toHaveBeenCalledTimes(2);
+        expect(mocks.gmRequestMock.mock.calls[0][0].url).toContain('sl=zh');
+        expect(mocks.gmRequestMock.mock.calls[0][0].url).toContain('tl=ja');
+        expect(mocks.gmRequestMock.mock.calls[1][0].url).toContain('sl=ja');
+        expect(mocks.gmRequestMock.mock.calls[1][0].url).toContain('tl=en');
+        expect(mocks.gmRequestMock.mock.calls[1][0].url).toContain(encodeURIComponent('日本語の題名'));
+    });
+
+    it('treats ambiguous Han-only auto input as Japanese unless metadata confirms Chinese', async () => {
+        mocks.configState.translateCnToJp = true;
+
+        const out = await TranslationService.translateForDisplay('限界集落', 'en', {
+            sourceLanguageHint: 'auto',
+        });
+
+        expect(out.sourceLanguage).toBe('ja');
+        expect(out.primaryLanguage).toBe('ja');
+        expect(mocks.gmRequestMock).toHaveBeenCalledOnce();
+        expect(mocks.gmRequestMock.mock.calls[0][0].url).toContain('sl=ja');
+        expect(mocks.gmRequestMock.mock.calls[0][0].url).toContain('tl=en');
+    });
+
+    it('does not attempt English when the Chinese-to-Japanese stage echoes the source', async () => {
+        mocks.configState.translateCnToJp = true;
+        mocks.gmRequestMock.mockResolvedValue({
+            responseText: JSON.stringify([[['中文标题', '', '']]]),
+            response: undefined as unknown,
+        });
+
+        const out = await TranslationService.translateForDisplay('中文标题', 'en', {
+            sourceLanguageHint: 'zh',
+        });
+
+        expect(out.primaryText).toBe('中文标题');
+        expect(out.primaryLanguage).toBe('zh');
+        expect(out.secondaryText).toBeUndefined();
+        expect(mocks.gmRequestMock.mock.calls.every(([request]) => !request.url.includes('tl=en'))).toBe(true);
+    });
+
+    it('keeps batched CN-to-JA and JA-to-EN stages ordered', async () => {
+        mocks.configState.translateCnToJp = true;
+        mocks.gmRequestMock.mockImplementation(async (opts: { url: string }) => {
+            const url = new URL(opts.url);
+            const target = url.searchParams.get('tl');
+            const input = url.searchParams.get('q');
+            const translations: Record<string, string> = {
+                'ja:中文一': '日本語一',
+                'ja:中文二': '日本語二',
+                'en:日本語一': 'English one',
+                'en:日本語二': 'English two',
+            };
+            return {
+                responseText: JSON.stringify([[[translations[`${target}:${input}`], '', '']]]),
+                response: undefined as unknown,
+            };
+        });
+
+        const out = await TranslationService.translateForDisplayBatch(['中文一', '中文二'], 'en', {
+            sourceLanguageHint: 'zh',
+        });
+
+        expect(out.map((item) => [item.primaryText, item.secondaryText])).toEqual([
+            ['日本語一', 'English one'],
+            ['日本語二', 'English two'],
+        ]);
+        const targets = mocks.gmRequestMock.mock.calls.map(([request]) => new URL(request.url).searchParams.get('tl'));
+        expect(targets).toEqual(['ja', 'ja', 'en', 'en']);
+    });
+
     it('keeps non-Chinese text on requested English target when translateCnToJp is enabled', async () => {
         mocks.configState.translateCnToJp = true;
         const out = await TranslationService.translate('今日は雨です', 'en');

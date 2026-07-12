@@ -1,4 +1,4 @@
-import { TranslationService } from '../services/TranslationService';
+import { TranslationService, type DisplayTranslationResult } from '../services/TranslationService';
 import { KikoeruBridge } from '../infrastructure/KikoeruBridge';
 import { Logger } from '../core/Logger';
 import { Config, I18n } from '../core/Config';
@@ -23,7 +23,7 @@ interface PendingTranslationItem {
     scopeKey?: string;
     format: 'pair' | 'raw' | 'worktree';
     fileExt?: string;
-    apply: (value: string) => void;
+    apply: (value: string, display?: DisplayTranslationResult) => void;
 }
 
 declare const unsafeWindow: Window & typeof globalThis;
@@ -283,6 +283,7 @@ export class TranslatedTags {
         el.dataset.asmrtag = original;
         el.dataset.asmrtagState = 'pending';
         delete el.dataset.asmrtagTranslation;
+        delete el.dataset.asmrtagPrimary;
         el.classList.remove('asmr-worktree-translation');
         if (scopeKey) {
             el.dataset.asmrtagScope = scopeKey;
@@ -298,8 +299,13 @@ export class TranslatedTags {
         if (restoreOriginal && original && el.classList.contains('asmr-translated')) {
             const currentText = (el.textContent || '').trim();
             const applied = el.dataset.asmrtagTranslation?.trim();
+            const primary = el.dataset.asmrtagPrimary?.trim();
             // Only restore if current text is different from original (was modified by translation)
-            if (currentText !== original && (currentText.includes(original) || (!!applied && currentText === applied))) {
+            if (currentText !== original && (
+                currentText.includes(original)
+                || (!!applied && currentText === applied)
+                || (!!primary && currentText === primary)
+            )) {
                 el.textContent = original;
             }
         }
@@ -309,6 +315,7 @@ export class TranslatedTags {
         delete el.dataset.asmrtagUntil;
         delete el.dataset.asmrtagScope;
         delete el.dataset.asmrtagTranslation;
+        delete el.dataset.asmrtagPrimary;
         el.classList.remove('asmr-translated');
         el.classList.remove('asmr-worktree-translation');
         // Clean up card/list translation subtitle if present
@@ -499,7 +506,16 @@ export class TranslatedTags {
                 if (isWorkTree) {
                     const fileInfo = this.getFileTranslationInfo(text);
                     const translateKey = fileInfo ? fileInfo.input : text;
-                    pending.push({ el: item, originalText: text, translateKey, format: 'worktree', fileExt: fileInfo?.ext || '', scopeKey, apply: (v) => { this.applyWorkTreeTranslation(item, text, v); } });
+                    pending.push({ el: item, originalText: text, translateKey, format: 'worktree', fileExt: fileInfo?.ext || '', scopeKey, apply: (v, display) => {
+                        if (display?.sourceLanguage === 'zh' && display.primaryLanguage === 'ja') {
+                            item.textContent = v;
+                            item.title = `${text} (${v})`;
+                            item.classList.remove('asmr-worktree-translation');
+                            delete item.dataset.asmrtagTranslation;
+                        } else {
+                            this.applyWorkTreeTranslation(item, text, v);
+                        }
+                    } });
                 } else if (!this.shouldSkipAutoTranslate(text, targetLang)) {
                     pending.push({ el: item, originalText: text, translateKey: text, format: cnOnlyMode ? 'raw' : 'pair', scopeKey, apply: (v) => { item.textContent = v; } });
                 }
@@ -526,7 +542,16 @@ export class TranslatedTags {
                 if (cnOnlyMode) {
                     pending.push({ el: span, originalText: text, translateKey: text, format: 'raw', scopeKey, apply: (v) => { span.textContent = v; } });
                 } else {
-                    pending.push({ el: span, originalText: text, translateKey: text, format: 'worktree', scopeKey, apply: (v) => { this.applyWorkTreeTranslation(span, text, v); } });
+                    pending.push({ el: span, originalText: text, translateKey: text, format: 'worktree', scopeKey, apply: (v, display) => {
+                        if (display?.sourceLanguage === 'zh' && display.primaryLanguage === 'ja') {
+                            span.textContent = v;
+                            span.title = `${text} (${v})`;
+                            span.classList.remove('asmr-worktree-translation');
+                            delete span.dataset.asmrtagTranslation;
+                        } else {
+                            this.applyWorkTreeTranslation(span, text, v);
+                        }
+                    } });
                 }
             }
 
@@ -576,8 +601,9 @@ export class TranslatedTags {
                     // CN→JP: silently replace title text with Japanese
                     pending.push({ el, originalText: text, translateKey: text, format: 'raw', apply: (v) => { el.textContent = v; } });
                 } else {
-                    pending.push({ el, originalText: text, translateKey: text, format: 'raw', apply: (v) => {
-                        // Keep original text in the anchor, add translated subtitle after the clamped container
+                    pending.push({ el, originalText: text, translateKey: text, format: 'raw', apply: (v, display) => {
+                        const promotedChinese = display?.sourceLanguage === 'zh' && display.primaryLanguage === 'ja';
+                        if (promotedChinese) el.textContent = display.primaryText;
                         const container = el.closest('.ellipsis-3-lines, .ellipsis-2-lines, .text-h6') as HTMLElement;
                         if (container && container.parentElement) {
                             let sub = container.nextElementSibling as HTMLElement;
@@ -587,9 +613,13 @@ export class TranslatedTags {
                                 sub.className = 'asmr-card-translation';
                                 container.after(sub);
                             }
-                            this.setExpandableCardTranslation(sub, v);
+                            const secondary = promotedChinese ? display.secondaryText : v;
+                            if (secondary) this.setExpandableCardTranslation(sub, secondary);
+                            else sub.remove();
                         }
-                        el.title = v;
+                        el.title = promotedChinese
+                            ? `${text} (${display.primaryText}${display.secondaryText ? ` — ${display.secondaryText}` : ''})`
+                            : v;
                     } });
                 }
             }
@@ -614,7 +644,9 @@ export class TranslatedTags {
                 if (cnOnlyMode) {
                     pending.push({ el, originalText: text, translateKey: text, format: 'raw', apply: (v) => { el.textContent = v; } });
                 } else {
-                    pending.push({ el, originalText: text, translateKey: text, format: 'raw', apply: (v) => {
+                    pending.push({ el, originalText: text, translateKey: text, format: 'raw', apply: (v, display) => {
+                        const promotedChinese = display?.sourceLanguage === 'zh' && display.primaryLanguage === 'ja';
+                        if (promotedChinese) el.textContent = display.primaryText;
                         let sub = el.nextElementSibling as HTMLElement;
                         if (!sub || !sub.classList.contains('asmr-card-translation')) {
                             sub = document.createElement('button');
@@ -622,8 +654,12 @@ export class TranslatedTags {
                             sub.className = 'asmr-card-translation';
                             el.after(sub);
                         }
-                        this.setExpandableCardTranslation(sub, v);
-                        el.title = v;
+                        const secondary = promotedChinese ? display.secondaryText : v;
+                        if (secondary) this.setExpandableCardTranslation(sub, secondary);
+                        else sub.remove();
+                        el.title = promotedChinese
+                            ? `${text} (${display.primaryText}${display.secondaryText ? ` — ${display.secondaryText}` : ''})`
+                            : v;
                     } });
                 }
             }
@@ -693,7 +729,7 @@ export class TranslatedTags {
                 }
             }
 
-            TranslationService.translateBatch(uniqueKeys, targetLang, {
+            TranslationService.translateForDisplayBatch(uniqueKeys, targetLang, {
                 priority: TAG_TRANSLATION_PRIORITY,
                 cancellable: true,
                 cancellableKey: queueKey,
@@ -702,34 +738,54 @@ export class TranslatedTags {
                 if (!this.isEnabled || generation !== this.translationGeneration || this.activeQueueKey !== queueKey) {
                     return;
                 }
-                const translationMap = new Map<string, string>();
+                const translationMap = new Map<string, DisplayTranslationResult>();
                 for (let i = 0; i < uniqueKeys.length; i++) {
                     if (results[i]) translationMap.set(uniqueKeys[i], results[i]);
                 }
 
                 for (const item of sourceItems) {
-                    const translated = translationMap.get(item.translateKey);
-                    if (!translated) {
+                    const display = translationMap.get(item.translateKey);
+                    if (!display) {
                         this.finalizeTranslation(item.el, item.originalText, null, item.apply, item.scopeKey);
                         continue;
                     }
 
+                    const promotedChinese = display.sourceLanguage === 'zh'
+                        && display.primaryLanguage === 'ja'
+                        && display.primaryText !== item.translateKey;
+                    const translated = display.secondaryText || display.primaryText;
+
                     let formatted: string;
                     switch (item.format) {
                         case 'pair':
-                            formatted = TranslationService.formatPair(item.translateKey, translated);
+                            formatted = promotedChinese
+                                ? (display.secondaryText
+                                    ? TranslationService.formatPair(display.primaryText, display.secondaryText)
+                                    : display.primaryText)
+                                : TranslationService.formatPair(item.translateKey, translated);
                             break;
                         case 'worktree': {
-                            const cleaned = TranslationService.cleanQuotes(translated);
-                            formatted = cleaned + (item.fileExt || '');
+                            const cleaned = TranslationService.cleanQuotes(
+                                promotedChinese ? display.primaryText : translated,
+                            ) + (item.fileExt || '');
+                            formatted = promotedChinese && display.secondaryText
+                                ? TranslationService.formatPair(cleaned, display.secondaryText)
+                                : cleaned;
                             break;
                         }
                         case 'raw':
-                            formatted = translated;
+                            formatted = promotedChinese ? display.primaryText : translated;
                             break;
                     }
 
-                    this.finalizeTranslation(item.el, item.originalText, formatted, item.apply, item.scopeKey);
+                    this.finalizeTranslation(
+                        item.el,
+                        item.originalText,
+                        formatted,
+                        (value) => item.apply(value, display),
+                        item.scopeKey,
+                        promotedChinese ? display.primaryText : undefined,
+                    );
                 }
             }).catch(err => {
                 if (!this.isEnabled || generation !== this.translationGeneration || this.activeQueueKey !== queueKey) {
@@ -823,7 +879,8 @@ export class TranslatedTags {
         original: string,
         translated: string | null | undefined,
         apply: (value: string) => void,
-        scopeKey?: string
+        scopeKey?: string,
+        primaryText?: string,
     ): void {
         if (!translated || translated === original) {
             const retryDelay = TranslationService.isRateLimited() ? 60000 : 15000;
@@ -859,6 +916,8 @@ export class TranslatedTags {
             apply(translated);
             el.dataset.asmrtag = original;
             el.dataset.asmrtagTranslation = translated;
+            if (primaryText) el.dataset.asmrtagPrimary = primaryText;
+            else delete el.dataset.asmrtagPrimary;
             el.dataset.asmrtagState = 'done';
             delete el.dataset.asmrtagUntil;
             if (scopeKey) {

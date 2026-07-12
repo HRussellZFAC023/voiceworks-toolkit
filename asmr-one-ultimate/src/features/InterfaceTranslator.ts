@@ -169,6 +169,7 @@ export class InterfaceTranslator {
 
         const cnOnlyMode = !translateMode && cnToJp;
         const uiLang = I18n.lang.toLowerCase().split('-')[0];
+        const japaneseFirstEnglish = translateMode && cnToJp && uiLang === 'en';
         const map = cnOnlyMode || uiLang === 'ja'
             ? this.cnToJpMap
             : uiLang === 'zh'
@@ -204,6 +205,18 @@ export class InterfaceTranslator {
             }
 
             // Direct mapping
+            if (japaneseFirstEnglish && this.cnToJpMap[text]) {
+                const japanese = this.cnToJpMap[text];
+                const english = this.translationMap[japanese] || this.translationMap[text];
+                const translated = english && english !== japanese
+                    ? `${japanese} (${english})`
+                    : japanese;
+                htmlEl.textContent = translated;
+                htmlEl.dataset.asmritran = translated;
+                htmlEl.dataset.asmritranSource = text;
+                this.processedElements.add(htmlEl);
+                return;
+            }
             if (map[text]) {
                 const translated = map[text];
                 htmlEl.textContent = translated;
@@ -217,7 +230,28 @@ export class InterfaceTranslator {
             let newText = text;
             let matched = false;
 
-            for (const pattern of pats) {
+            if (japaneseFirstEnglish) {
+                for (const jpPattern of this.cnToJpPatterns) {
+                    jpPattern.regex.lastIndex = 0;
+                    const japanese = text.replace(jpPattern.regex, jpPattern.replace);
+                    if (japanese !== text) {
+                        let english = text;
+                        for (const enPattern of this.patterns) {
+                            enPattern.regex.lastIndex = 0;
+                            const candidate = text.replace(enPattern.regex, enPattern.replace);
+                            if (candidate !== text) {
+                                english = candidate;
+                                break;
+                            }
+                        }
+                        newText = english && english !== text ? `${japanese} (${english})` : japanese;
+                        matched = true;
+                        break;
+                    }
+                }
+            }
+
+            for (const pattern of matched ? [] : pats) {
                 pattern.regex.lastIndex = 0;
                 const replaced = newText.replace(pattern.regex, pattern.replace);
                 if (replaced !== newText) {

@@ -70,6 +70,12 @@ describe('InterfaceTranslator locale targeting', () => {
         expect(translateLabel('リリース日')).toBe('Release Date');
     });
 
+    it('replaces Chinese controls with Japanese primary plus English when both modes are enabled', () => {
+        mocks.config.translateCnToJp = true;
+        expect(translateLabel('发布时间')).toBe('リリース日 (Release Date)');
+        expect(translateLabel('🔥 热门作品')).toBe('🔥 人気作品 (🔥 Popular works)');
+    });
+
     it('restores host text when the feature is disabled', () => {
         document.body.innerHTML = '<div class="q-btn__content"><span>リリース日</span></div>';
         const translator = InterfaceTranslator.getInstance();

@@ -29,6 +29,17 @@ vi.mock('../../src/services/TranslationService', () => ({
         getUiTargetLang: () => mocks.targetLang,
         isUserLang: vi.fn(() => false),
         translate: mocks.translate,
+        translateForDisplay: vi.fn(async (text: string, targetLang: string, options?: { sourceLanguageHint?: string }) => {
+            const translated = await mocks.translate(text, targetLang, options);
+            return {
+                sourceText: text,
+                sourceLanguage: options?.sourceLanguageHint || 'ja',
+                primaryText: text,
+                primaryLanguage: options?.sourceLanguageHint || 'ja',
+                secondaryText: translated !== text ? translated : undefined,
+                secondaryLanguage: translated !== text ? targetLang : undefined,
+            };
+        }),
     },
 }));
 

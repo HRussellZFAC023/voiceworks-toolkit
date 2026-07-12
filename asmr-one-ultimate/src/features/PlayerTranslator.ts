@@ -154,11 +154,15 @@ export class PlayerTranslator {
             for (const el of els) {
                 const source = el.dataset.asmrSource;
                 const translated = el.dataset.asmrTranslatedText;
+                const primary = el.dataset.asmrPrimaryText;
                 // CN→JP mode replaces textContent rather than using the
                 // translation-pair pseudo-element. Restore that exact
                 // replacement when the feature is disabled or reset.
-                if (source && translated && !el.classList.contains('asmr-translation-pair')
-                    && (el.textContent || '').trim() === translated.trim()) {
+                if (source && (
+                    (!!primary && (el.textContent || '').trim() === primary.trim())
+                    || (!!translated && !el.classList.contains('asmr-translation-pair')
+                        && (el.textContent || '').trim() === translated.trim())
+                )) {
                     el.textContent = source;
                 }
                 // With ::after approach we never modify textContent for translations,
@@ -168,23 +172,25 @@ export class PlayerTranslator {
                 delete el.dataset.asmrTranslated;
                 delete el.dataset.asmrSource;
                 delete el.dataset.asmrTranslatedText;
+                delete el.dataset.asmrPrimaryText;
             }
 
             // Also clear TranslatedTags state in player surfaces.
             // Footer/player rows can be DOM-reused between track changes, and stale
             // data-asmrtag* attributes keep old translated titles visible via ::after.
             const translatedTagEls = container.querySelectorAll<HTMLElement>(
-                '[data-asmrtag], [data-asmrtag-state], [data-asmrtag-scope], [data-asmrtag-translation], .asmr-translated, .asmr-worktree-translation'
+                '[data-asmrtag], [data-asmrtag-primary], [data-asmrtag-state], [data-asmrtag-scope], [data-asmrtag-translation], .asmr-translated, .asmr-worktree-translation'
             );
             for (const el of translatedTagEls) {
                 const original = el.dataset.asmrtag;
-                if (original && el.classList.contains('asmr-translated')) {
+                if (original && (el.classList.contains('asmr-translated') || el.dataset.asmrtagPrimary)) {
                     const currentText = (el.textContent || '').trim();
-                    if (currentText !== original && currentText.includes(original)) {
+                    if (currentText !== original) {
                         el.textContent = original;
                     }
                 }
                 delete el.dataset.asmrtag;
+                delete el.dataset.asmrtagPrimary;
                 delete el.dataset.asmrtagState;
                 delete el.dataset.asmrtagUntil;
                 delete el.dataset.asmrtagScope;
@@ -421,36 +427,43 @@ export class PlayerTranslator {
         if (el.dataset.asmrTranslated === 'true' && source && translatedText) {
             if (rawText === source) return;
         }
+        if (el.dataset.asmrTranslated === 'true' && source && el.dataset.asmrPrimaryText === rawText) return;
 
         const text = source && rawText === source ? source : rawText;
         if (!text) return;
 
         const epoch = this._epoch;
         const targetLang = cnOnlyMode ? 'ja' : (I18n.lang === 'zh' ? 'zh-CN' : I18n.lang);
+        const workSourceHint = this.getCurrentWorkSourceHint();
         const sourceLanguageHint = cnOnlyMode
             ? 'zh'
             : type === 'title'
-                ? this.getCurrentWorkSourceHint()
-                : 'auto';
+                ? workSourceHint
+                : workSourceHint === 'zh' && isChinese(text) ? 'zh' : 'auto';
         try {
-            const translated = await TranslationService.translate(text, targetLang, {
+            const display = await TranslationService.translateForDisplay(text, targetLang, {
                 sourceLanguageHint,
             });
             if (!this._enabled || this._epoch !== epoch || !el.isConnected) return;
             const currentText = getCleanText(el);
             if (currentText !== text && currentText !== rawText) return;
-            if (translated && translated !== text) {
-                if (cnOnlyMode) {
-                    // CN→JP: silently replace text content
-                    el.textContent = translated;
+            const promotedChinese = display.sourceLanguage === 'zh'
+                && display.primaryLanguage === 'ja'
+                && display.primaryText !== text;
+            const translated = display.secondaryText;
+            if (promotedChinese) {
+                    el.textContent = display.primaryText;
                     el.dataset.asmrTranslated = 'true';
                     el.dataset.asmrSource = text;
-                    el.dataset.asmrTranslatedText = translated;
-                    el.title = `${text} (${translated})`;
+                    el.dataset.asmrPrimaryText = display.primaryText;
+                    el.dataset.asmrTranslatedText = translated || '';
+                    el.classList.toggle('asmr-translation-pair', !!translated);
+                    el.title = translated
+                        ? `${text} (${display.primaryText} — ${translated})`
+                        : `${text} (${display.primaryText})`;
                     this.applyStableMiniTitleLayout(el);
-                } else {
-                    this.updateElement(el, text, translated);
-                }
+            } else if (translated && translated !== text) {
+                this.updateElement(el, text, translated);
             } else {
                 this.markOriginal(el, text);
             }
@@ -474,6 +487,8 @@ export class PlayerTranslator {
         if (el.dataset.asmrTranslated === 'true') {
             const source = el.dataset.asmrSource;
             const translated = el.dataset.asmrTranslatedText;
+            const primary = el.dataset.asmrPrimaryText;
+            if (source && primary && rawText === primary) return;
             if (source && translated && rawText === source) {
                 // CN→JP: Vue may re-render original CN text, re-apply substitution
                 if (cnOnlyMode) el.textContent = translated;
@@ -496,26 +511,31 @@ export class PlayerTranslator {
         const epoch = this._epoch;
         const targetLang = cnOnlyMode ? 'ja' : (I18n.lang === 'zh' ? 'zh-CN' : I18n.lang);
         try {
-            const translated = await TranslationService.translate(stripped, targetLang, {
+            const display = await TranslationService.translateForDisplay(stripped, targetLang, {
                 sourceLanguageHint: cnOnlyMode ? 'zh' : this.getCurrentWorkSourceHint(),
             });
             if (!this._enabled || this._epoch !== epoch || !el.isConnected) return;
             if (getCleanText(el) !== rawText) return;
-            if (translated && translated !== stripped) {
-                const cleaned = TranslationService.cleanQuotes(translated);
-                if (cnOnlyMode) {
-                    // CN→JP: reconstruct with prefix/extension but JP core text
+            const promotedChinese = display.sourceLanguage === 'zh'
+                && display.primaryLanguage === 'ja'
+                && display.primaryText !== stripped;
+            const translated = display.secondaryText;
+            if (promotedChinese) {
+                    const cleanedPrimary = TranslationService.cleanQuotes(display.primaryText);
                     const prefix = rawText.match(/^\d+[\s.,、\-_·]+/)?.[0] || '';
                     const ext = rawText.match(/\.[a-z0-9]{2,5}$/i)?.[0] || '';
-                    el.textContent = prefix + cleaned + ext;
+                    el.textContent = prefix + cleanedPrimary + ext;
                     el.dataset.asmrTranslated = 'true';
                     el.dataset.asmrSource = rawText;
-                    el.dataset.asmrTranslatedText = el.textContent;
-                    el.title = `${rawText} (${el.textContent})`;
+                    el.dataset.asmrPrimaryText = el.textContent;
+                    el.dataset.asmrTranslatedText = translated ? TranslationService.cleanQuotes(translated) : '';
+                    el.classList.toggle('asmr-translation-pair', !!translated);
+                    el.title = translated
+                        ? `${rawText} (${el.textContent} — ${translated})`
+                        : `${rawText} (${el.textContent})`;
                     this.applyStableMiniTitleLayout(el);
-                } else {
-                    this.updateElement(el, rawText, cleaned);
-                }
+            } else if (translated && translated !== stripped) {
+                this.updateElement(el, rawText, TranslationService.cleanQuotes(translated));
             } else {
                 this.markOriginal(el, rawText);
             }
@@ -539,12 +559,14 @@ export class PlayerTranslator {
         el.dataset.asmrTranslated = 'false';
         el.dataset.asmrSource = original;
         el.dataset.asmrTranslatedText = '';
+        delete el.dataset.asmrPrimaryText;
     }
 
     private updateElement(el: HTMLElement, original: string, translated: string) {
         el.dataset.asmrTranslated = 'true';
         el.dataset.asmrSource = original;
         el.dataset.asmrTranslatedText = translated;
+        delete el.dataset.asmrPrimaryText;
         el.classList.add('asmr-translation-pair');
         el.title = `${original} (${translated})`;
         this.applyStableMiniTitleLayout(el);

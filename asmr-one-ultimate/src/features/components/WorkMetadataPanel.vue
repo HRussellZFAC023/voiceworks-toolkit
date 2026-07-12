@@ -44,7 +44,9 @@ const meta = ref<DLsiteMetadata | null>(null);
 const scrapeCode = ref('');
 const detailsExpanded = ref(false);
 const descriptionTranslated = ref('');
+const descriptionPrimary = ref('');
 const bodyTranslations = ref<Map<number, string>>(new Map());
+const bodyPrimaryTranslations = ref<Map<number, string>>(new Map());
 const chipTranslations = ref<Map<string, string>>(new Map());
 const currentWorkId = ref('');
 let loadRequestVersion = 0;
@@ -170,7 +172,21 @@ function chipDisplayLabel(chip: { label: string; key: string }): string {
 }
 
 function chipTitle(chip: { label: string; key: string }): string {
-    return chipTranslations.value.has(chip.key) ? chip.label : '';
+    const displayed = chipTranslations.value.get(chip.key);
+    return displayed ? `${chip.label} (${displayed})` : '';
+}
+
+function fileTranslationKey(fileName: string, index: number): string {
+    return `file-${index}-${fileName}`;
+}
+
+function fileDisplayName(fileName: string, index: number): string {
+    return chipTranslations.value.get(fileTranslationKey(fileName, index)) || fileName;
+}
+
+function fileTitle(fileName: string, index: number): string {
+    const displayed = chipTranslations.value.get(fileTranslationKey(fileName, index));
+    return displayed ? `${fileName} (${displayed})` : fileName;
 }
 
 // ============================================================================
@@ -354,13 +370,14 @@ function applyTranslatedTitleToDom(
     expectedLoadVersion: number,
     expectedWorkId: string,
     titleRequestId: number,
+    hideOriginal = false,
 ): boolean {
     if (!isTitleRequestCurrent(expectedLoadVersion, expectedWorkId, titleRequestId)) return false;
 
     const h1 = findWorkTitleElement(originalTitle);
     if (!h1 || !h1.parentElement) return false;
 
-    if (cnOnlyMode.value) {
+    if (cnOnlyMode.value || hideOriginal) {
         h1.parentElement.querySelector('.asmr-original-title')?.remove();
         let transEl = h1.parentElement.querySelector('.asmr-translated-title') as HTMLElement | null;
         if (!transEl) {
@@ -459,7 +476,9 @@ async function handleRefresh(): Promise<void> {
     // Reset state and reload
     meta.value = null;
     descriptionTranslated.value = '';
+    descriptionPrimary.value = '';
     bodyTranslations.value = new Map();
+    bodyPrimaryTranslations.value = new Map();
     chipTranslations.value = new Map();
     officialTagTranslations.value = new Map();
     metadataSourceHint.value = 'auto';
@@ -658,7 +677,8 @@ function bodyParagraphPlainText(para: string): string {
 }
 
 function displayedBodyParagraphHtml(para: string, index: number): string {
-    const translated = cnOnlyMode.value ? bodyTranslations.value.get(index) : '';
+    const translated = bodyPrimaryTranslations.value.get(index)
+        || (cnOnlyMode.value ? bodyTranslations.value.get(index) : '');
     // Custom translation providers are remote input too. Re-sanitize before
     // the only v-html sink even though the original scraped paragraph was
     // already sanitized by sanitizeBody().
@@ -693,28 +713,38 @@ async function translateTitle(
     }
 
     try {
-        const translated = cnOnlyMode.value
-            ? await TranslationService.translate(originalTitle, 'ja', {
+        const display = await TranslationService.translateForDisplay(
+            originalTitle,
+            cnOnlyMode.value ? 'ja' : TranslationService.getUiTargetLang(),
+            {
                 priority: METADATA_TRANSLATION_PRIORITY,
-                sourceLanguageHint: 'zh',
-            })
-            : await TranslationService.translate(originalTitle, TranslationService.getUiTargetLang(), {
-                priority: METADATA_TRANSLATION_PRIORITY,
-                sourceLanguageHint,
-            });
+                sourceLanguageHint: cnOnlyMode.value ? 'zh' : sourceLanguageHint,
+            },
+        );
         if (!isTitleRequestCurrent(expectedLoadVersion, expectedWorkId, titleRequestId)) {
             return;
         }
-        if (!translated || translated === originalTitle) {
+        if (display.primaryText === originalTitle && !display.secondaryText) {
             resetInjectedTitleElements();
             emit('title:update', { title: originalTitle, sourceLanguageHint });
             return;
         }
 
+        const promotedChinese = display.sourceLanguage === 'zh' && display.primaryLanguage === 'ja';
+        const translatedTitle = display.secondaryText
+            ? `${display.primaryText} — ${display.secondaryText}`
+            : display.primaryText;
         for (const delay of TITLE_REAPPLY_DELAYS_MS) {
             const run = () => {
                 if (!isTitleRequestCurrent(expectedLoadVersion, expectedWorkId, titleRequestId)) return;
-                applyTranslatedTitleToDom(originalTitle, translated, expectedLoadVersion, expectedWorkId, titleRequestId);
+                applyTranslatedTitleToDom(
+                    originalTitle,
+                    translatedTitle,
+                    expectedLoadVersion,
+                    expectedWorkId,
+                    titleRequestId,
+                    promotedChinese,
+                );
             };
             if (delay === 0) {
                 run();
@@ -723,8 +753,10 @@ async function translateTitle(
             }
         }
         emit('title:update', {
-            title: translated,
-            sourceLanguageHint: cnOnlyMode.value ? 'ja' : TranslationService.getUiTargetLang() as TranslationSourceHint,
+            title: translatedTitle,
+            sourceLanguageHint: display.secondaryText
+                ? TranslationService.getUiTargetLang() as TranslationSourceHint
+                : display.primaryLanguage,
             translated: true,
         });
     } catch (e) {
@@ -747,7 +779,7 @@ async function translateDescription(expectedLoadVersion: number, expectedWorkId:
     lastDescriptionSignature.value = signature;
 
     try {
-        const translated = await TranslationService.translate(source, targetLang, {
+        const display = await TranslationService.translateForDisplay(source, targetLang, {
             priority: Priority.NORMAL,
             sourceLanguageHint,
         });
@@ -759,11 +791,10 @@ async function translateDescription(expectedLoadVersion: number, expectedWorkId:
         ) {
             return;
         }
-        if (translated && translated !== source) {
-            descriptionTranslated.value = translated;
-        } else {
-            descriptionTranslated.value = '';
-        }
+        const promotedChinese = display.sourceLanguage === 'zh' && display.primaryLanguage === 'ja';
+        descriptionPrimary.value = promotedChinese ? display.primaryText : '';
+        descriptionTranslated.value = display.secondaryText
+            || (!promotedChinese && display.primaryText !== source ? display.primaryText : '');
     } catch {
         // Silently fail
     }
@@ -773,7 +804,7 @@ async function translateChips(expectedLoadVersion: number, expectedWorkId: strin
     if (!shouldTranslate.value && !cnToJp.value) return;
     const targetLang = cnOnlyMode.value ? 'ja' : TranslationService.getUiTargetLang();
     // Chips may mix DLsite JP fields with host-edition fallbacks.
-    const sourceLanguageHint: TranslationSourceHint = cnOnlyMode.value ? 'zh' : 'auto';
+    const sourceLanguageHint: TranslationSourceHint = cnOnlyMode.value ? 'zh' : metadataSourceHint.value;
     const chipSignature = `${sourceLanguageHint}:${targetLang}:${chips.value.map(chip => `${chip.key}:${chip.label}`).join('|')}`;
     if (chipSignature === lastChipSignature.value) return;
     lastChipSignature.value = chipSignature;
@@ -806,10 +837,17 @@ async function translateChips(expectedLoadVersion: number, expectedWorkId: strin
         labelsToTranslate.push({ key: chip.key, text });
     }
 
+    for (const [index, file] of (meta.value?.contents || []).entries()) {
+        const text = String(file.file_name || '').trim();
+        if (!text || !/[\u3040-\u30ff\u4e00-\u9faf]/.test(text)) continue;
+        if (cnOnlyMode.value && !isChinese(text)) continue;
+        labelsToTranslate.push({ key: fileTranslationKey(text, index), text });
+    }
+
     if (labelsToTranslate.length === 0) return;
 
     try {
-        const results = await TranslationService.translateBatch(labelsToTranslate.map(l => l.text), targetLang, {
+        const results = await TranslationService.translateForDisplayBatch(labelsToTranslate.map(l => l.text), targetLang, {
             priority: METADATA_TRANSLATION_PRIORITY,
             sourceLanguageHint,
         });
@@ -821,14 +859,17 @@ async function translateChips(expectedLoadVersion: number, expectedWorkId: strin
             return;
         }
         const nextMap = new Map(chipTranslations.value);
-        results.forEach((translated, i) => {
+        results.forEach((display, i) => {
             const item = labelsToTranslate[i];
-            if (translated && translated !== item.text) {
-                if (cnOnlyMode.value) {
-                    nextMap.set(item.key, translated);
-                } else {
-                    nextMap.set(item.key, TranslationService.formatPair(item.text, translated));
-                }
+            const promotedChinese = display.sourceLanguage === 'zh' && display.primaryLanguage === 'ja';
+            if (promotedChinese) {
+                nextMap.set(item.key, display.secondaryText
+                    ? TranslationService.formatPair(display.primaryText, display.secondaryText)
+                    : display.primaryText);
+            } else if (display.secondaryText) {
+                nextMap.set(item.key, TranslationService.formatPair(item.text, display.secondaryText));
+            } else if (display.primaryText !== item.text) {
+                nextMap.set(item.key, display.primaryText);
             }
         });
         chipTranslations.value = nextMap;
@@ -851,21 +892,27 @@ async function translateBodyParagraphs(expectedLoadVersion: number, expectedWork
     lastBodySignature.value = bodySignature;
 
     try {
-        const applyChunkResults = (chunkTexts: string[], offset: number, translatedResults: string[]) => {
-            const newMap = new Map(bodyTranslations.value);
-            translatedResults.forEach((translated, idx) => {
+        const applyChunkResults = (chunkTexts: string[], offset: number, results: Awaited<ReturnType<typeof TranslationService.translateForDisplayBatch>>) => {
+            const secondaryMap = new Map(bodyTranslations.value);
+            const primaryMap = new Map(bodyPrimaryTranslations.value);
+            results.forEach((display, idx) => {
                 const source = chunkTexts[idx];
-                if (translated && translated !== source) {
-                    newMap.set(offset + idx, translated);
-                }
+                const promotedChinese = display.sourceLanguage === 'zh' && display.primaryLanguage === 'ja';
+                if (promotedChinese) primaryMap.set(offset + idx, display.primaryText);
+                else primaryMap.delete(offset + idx);
+                const secondary = display.secondaryText
+                    || (!promotedChinese && display.primaryText !== source ? display.primaryText : '');
+                if (secondary) secondaryMap.set(offset + idx, secondary);
+                else secondaryMap.delete(offset + idx);
             });
-            bodyTranslations.value = newMap;
+            bodyPrimaryTranslations.value = primaryMap;
+            bodyTranslations.value = secondaryMap;
         };
 
         const firstCount = Math.min(METADATA_BODY_FIRST_BATCH, texts.length);
         if (firstCount > 0) {
             const firstChunk = texts.slice(0, firstCount);
-            const firstResults = await TranslationService.translateBatch(firstChunk, targetLang, {
+            const firstResults = await TranslationService.translateForDisplayBatch(firstChunk, targetLang, {
                 priority: METADATA_TRANSLATION_PRIORITY,
                 sourceLanguageHint,
             });
@@ -881,7 +928,7 @@ async function translateBodyParagraphs(expectedLoadVersion: number, expectedWork
 
         for (let start = firstCount; start < texts.length; start += METADATA_BODY_STREAM_BATCH) {
             const chunk = texts.slice(start, start + METADATA_BODY_STREAM_BATCH);
-            const chunkResults = await TranslationService.translateBatch(chunk, targetLang, {
+            const chunkResults = await TranslationService.translateForDisplayBatch(chunk, targetLang, {
                 priority: METADATA_TRANSLATION_PRIORITY,
                 sourceLanguageHint,
             });
@@ -988,6 +1035,7 @@ async function loadMetadata(id: string): Promise<void> {
             lastDescriptionSignature.value = '';
             lastChipSignature.value = '';
             descriptionTranslated.value = '';
+            descriptionPrimary.value = '';
             chipTranslations.value = new Map();
             translateDescription(version, id);
             translateChips(version, id);
@@ -1007,8 +1055,10 @@ async function loadMetadata(id: string): Promise<void> {
 
         meta.value = merged;
         descriptionTranslated.value = '';
+        descriptionPrimary.value = '';
         chipTranslations.value = new Map();
         bodyTranslations.value = new Map();
+        bodyPrimaryTranslations.value = new Map();
         lastDescriptionSignature.value = '';
         lastChipSignature.value = '';
         lastBodySignature.value = '';
@@ -1035,7 +1085,9 @@ function applyWorkChange(newId: string, oldId = ''): void {
     // Reset state for new work
     meta.value = null;
     descriptionTranslated.value = '';
+    descriptionPrimary.value = '';
     bodyTranslations.value = new Map();
+    bodyPrimaryTranslations.value = new Map();
     chipTranslations.value = new Map();
     officialTagTranslations.value = new Map();
     metadataSourceHint.value = 'auto';
@@ -1057,7 +1109,9 @@ watch([lang, translateMode, cnToJpConfig], () => {
     const id = currentWorkId.value;
     if (!id) return;
     descriptionTranslated.value = '';
+    descriptionPrimary.value = '';
     bodyTranslations.value = new Map();
+    bodyPrimaryTranslations.value = new Map();
     chipTranslations.value = new Map();
     lastDescriptionSignature.value = '';
     lastChipSignature.value = '';
@@ -1170,7 +1224,7 @@ onUnmounted(() => {
             <!-- Brief description (above the fold) -->
             <div v-if="meta.description" class="asmr-meta-description">
                 <div class="asmr-meta-description-cell asmr-meta-description-cell--original">
-                    {{ meta.description }}
+                    {{ descriptionPrimary || meta.description }}
                 </div>
                 <div
                     v-if="descriptionTranslated"
@@ -1248,7 +1302,7 @@ onUnmounted(() => {
                                 :key="idx"
                                 class="asmr-meta-file-row"
                             >
-                                <span class="asmr-meta-file-name">{{ file.file_name }}</span>
+                                <span class="asmr-meta-file-name" :title="fileTitle(file.file_name, idx)">{{ fileDisplayName(file.file_name, idx) }}</span>
                                 <span class="asmr-meta-file-size">{{ file.file_size }}</span>
                             </div>
                         </div>

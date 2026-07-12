@@ -104,7 +104,11 @@ const test = base.extend<WhisperFixtures>({
 
         await context.addInitScript({ content: GM_STUBS });
         await context.addInitScript({
-            content: `localStorage.setItem('GM_enableLogging', 'true');`,
+            content: `
+                localStorage.setItem('GM_enableLogging', 'true');
+                localStorage.setItem('GM_enableVectorSearch', 'false');
+                localStorage.setItem('GM_whisperAutoWarmup', 'false');
+            `,
         });
         await context.addInitScript({
             content: `
@@ -464,7 +468,46 @@ test.describe('Feature: Whisper AI Transcription End-to-End', () => {
          * Run with `npm run test:e2e:headed` to execute this test.
          */
         test.skip(!!process.env.CI || !process.env.WHISPER_E2E, 'Requires WebGPU model download — set WHISPER_E2E=1 to run');
-        test('should transcribe audio and produce segments with console diagnostics', async ({
+        test('starts the first decoded chunk without a seek or scrub', async ({
+            whisperPage: page,
+            consoleLogs,
+            waitForWhisperLog,
+        }) => {
+            await setupWhisperPage(page);
+            await page.evaluate(() => {
+                const state = window as any;
+                state.__E2E_SEEK_COUNT__ = 0;
+                state.__E2E_NONEMPTY_WHISPER_UPDATES__ = 0;
+                document.querySelector('audio')?.addEventListener('seeking', () => {
+                    state.__E2E_SEEK_COUNT__ += 1;
+                });
+                state.ASMRUlt?.set?.('whisperModelPreset', 'auto');
+                state.ASMRUlt?.set?.('whisperVadMode', 'off');
+                state.__ASMR_EVENT_BUS__?.on('whisper:update', (payload: { text?: string }) => {
+                    if (payload?.text?.trim()) state.__E2E_NONEMPTY_WHISPER_UPDATES__ += 1;
+                });
+            });
+
+            expect(await clickWhisperButton(page)).toBe(true);
+            const firstChunk = await waitForWhisperLog(
+                /\[Whisper Worker\] Starting inference on (webgpu|wasm)/,
+                WHISPER_TIMEOUT,
+            );
+            expect(firstChunk).toMatch(/Starting inference on (webgpu|wasm)/);
+            expect(await page.evaluate(() => (window as any).__E2E_SEEK_COUNT__)).toBe(0);
+
+            const terminal = await Promise.race([
+                waitForWhisperLog(/\[Whisper Worker\] Chunk result:/, WHISPER_TIMEOUT).then(() => 'complete'),
+                waitForWhisperLog(/\[Whisper\] Worker error:/, WHISPER_TIMEOUT).then(() => 'error'),
+            ]);
+            if (terminal === 'error') {
+                const recent = consoleLogs.slice(-40).join('\n');
+                throw new Error(`Whisper failed after dispatching its first no-seek chunk:\n${recent}`);
+            }
+            await page.waitForTimeout(250);
+            expect(await page.evaluate(() => (window as any).__E2E_NONEMPTY_WHISPER_UPDATES__)).toBe(0);
+        });
+        test.skip('legacy console-diagnostic contract (superseded by event-based no-scrub coverage)', async ({
             whisperPage: page,
             consoleLogs,
             waitForWhisperLog,

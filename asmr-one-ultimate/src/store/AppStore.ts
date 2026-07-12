@@ -64,6 +64,8 @@ const CONFIG_DEFAULTS: PluginConfig = {
 
     // AI Features
     whisperModel: 'onnx-community/whisper-small_timestamped',
+    whisperModelPreset: 'auto',
+    whisperVadMode: 'off',
     whisperLanguage: 'auto',
     whisperTask: 'transcribe',
     whisperQuantized: false,

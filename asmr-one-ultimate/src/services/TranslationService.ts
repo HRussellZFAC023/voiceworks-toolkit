@@ -28,6 +28,15 @@ interface TranslationTaskOptions {
     preserveRequestedTarget?: boolean;
 }
 
+export interface DisplayTranslationResult {
+    sourceText: string;
+    sourceLanguage: 'ja' | 'zh' | 'en';
+    primaryText: string;
+    primaryLanguage: 'ja' | 'zh' | 'en';
+    secondaryText?: string;
+    secondaryLanguage?: string;
+}
+
 interface GlossaryResult {
     full: string | null;
     preprocessed: string;
@@ -748,6 +757,137 @@ export const TranslationService = {
         } finally {
             translateInFlight.delete(flightKey);
         }
+    },
+
+    /**
+     * Resolve text for a user-facing, bilingual surface.
+     *
+     * Confirmed Chinese content is translated to Japanese first. Any requested
+     * secondary translation is then made from that Japanese output, never from
+     * the original Chinese source. This preserves Japanese as the canonical
+     * display text while retaining the source separately for restoration.
+     */
+    async translateForDisplay(
+        text: string,
+        secondaryLang = 'en',
+        options?: TranslationTaskOptions,
+    ): Promise<DisplayTranslationResult> {
+        const explicitSource = options?.sourceLanguageHint && options.sourceLanguageHint !== 'auto'
+            ? options.sourceLanguageHint
+            : null;
+        const detectedSource = detectSourceLanguage(text);
+        // Han-only text is valid Japanese as well as Chinese. Never promote that
+        // ambiguous case to Chinese without edition/metadata confirmation: doing
+        // so corrupts ordinary Japanese titles such as 「限界集落」.
+        const sourceLanguage = explicitSource ?? (detectedSource === 'zh' ? 'ja' : detectedSource);
+        const requestedSecondary = normalizeTargetLang(secondaryLang);
+        let primaryText = text;
+        let primaryLanguage: DisplayTranslationResult['primaryLanguage'] = sourceLanguage;
+
+        const japaneseFirst = Config.get('translateCnToJp') === true
+            && options?.sourceLanguageHint === 'zh';
+        if (japaneseFirst) {
+            primaryText = await this.translate(text, 'ja', {
+                ...options,
+                sourceLanguageHint: 'zh',
+                preserveRequestedTarget: true,
+            });
+            if (!primaryText || primaryText === text) {
+                return {
+                    sourceText: text,
+                    sourceLanguage: 'zh',
+                    primaryText: text,
+                    primaryLanguage: 'zh',
+                };
+            }
+            primaryLanguage = 'ja';
+        }
+
+        if (!requestedSecondary || requestedSecondary === primaryLanguage) {
+            return { sourceText: text, sourceLanguage, primaryText, primaryLanguage };
+        }
+
+        const secondaryText = await this.translate(primaryText, requestedSecondary, {
+            ...options,
+            sourceLanguageHint: primaryLanguage,
+            preserveRequestedTarget: true,
+        });
+        return {
+            sourceText: text,
+            sourceLanguage,
+            primaryText,
+            primaryLanguage,
+            secondaryText: secondaryText && secondaryText !== primaryText ? secondaryText : undefined,
+            secondaryLanguage: secondaryText && secondaryText !== primaryText ? requestedSecondary : undefined,
+        };
+    },
+
+    async translateForDisplayBatch(
+        texts: string[],
+        secondaryLang = 'en',
+        options?: TranslationTaskOptions,
+    ): Promise<DisplayTranslationResult[]> {
+        if (texts.length === 0) return [];
+        const sourceLanguage = options?.sourceLanguageHint && options.sourceLanguageHint !== 'auto'
+            ? options.sourceLanguageHint
+            : null;
+        const requestedSecondary = normalizeTargetLang(secondaryLang);
+        const japaneseFirst = Config.get('translateCnToJp') === true && sourceLanguage === 'zh';
+
+        if (!japaneseFirst) {
+            return Promise.all(texts.map((text) => this.translateForDisplay(text, requestedSecondary, options)));
+        }
+
+        const primaryTexts = await this.translateBatch(texts, 'ja', {
+            ...options,
+            sourceLanguageHint: 'zh',
+            preserveRequestedTarget: true,
+        });
+        const secondaryInputs: string[] = [];
+        const secondaryIndices: number[] = [];
+        if (requestedSecondary && requestedSecondary !== 'ja') {
+            for (let i = 0; i < texts.length; i++) {
+                const primary = primaryTexts[i];
+                if (primary && primary !== texts[i]) {
+                    secondaryInputs.push(primary);
+                    secondaryIndices.push(i);
+                }
+            }
+        }
+
+        const secondaryTexts = secondaryInputs.length > 0
+            ? await this.translateBatch(secondaryInputs, requestedSecondary, {
+                ...options,
+                sourceLanguageHint: 'ja',
+                preserveRequestedTarget: true,
+            })
+            : [];
+        const secondaryByIndex = new Map<number, string>();
+        secondaryIndices.forEach((sourceIndex, index) => {
+            const secondary = secondaryTexts[index];
+            if (secondary && secondary !== secondaryInputs[index]) secondaryByIndex.set(sourceIndex, secondary);
+        });
+
+        return texts.map((text, index) => {
+            const primary = primaryTexts[index];
+            if (!primary || primary === text) {
+                return {
+                    sourceText: text,
+                    sourceLanguage: 'zh',
+                    primaryText: text,
+                    primaryLanguage: 'zh',
+                };
+            }
+            const secondary = secondaryByIndex.get(index);
+            return {
+                sourceText: text,
+                sourceLanguage: 'zh',
+                primaryText: primary,
+                primaryLanguage: 'ja',
+                secondaryText: secondary,
+                secondaryLanguage: secondary ? requestedSecondary : undefined,
+            };
+        });
     },
 
     async _translateInner(

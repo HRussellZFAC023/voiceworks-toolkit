@@ -2,6 +2,7 @@
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import SettingsToggle from './SettingsToggle.vue';
 import SettingsInput from './SettingsInput.vue';
+import SettingsSelect from './SettingsSelect.vue';
 import SettingsHotkeyInput from './SettingsHotkeyInput.vue';
 import { useI18n } from '../../composables/useI18n';
 import { useConfig } from '../../composables/useConfig';
@@ -100,7 +101,38 @@ const featureToggleItems: FeatureToggleItem[] = [
 // Whisper status
 // ============================================================================
 
-const WHISPER_MODEL = 'onnx-community/whisper-small_timestamped';
+// The effective/requested model tracks the preset selector, force-WASM, and
+// device capabilities so download/status/cache-key display stay accurate.
+function resolveEffectiveWhisperModel(): string {
+    try {
+        return Whisper.getInstance().getEffectiveModelId();
+    } catch (e) {
+        Logger.warn('[SettingsPanel] Failed to resolve effective Whisper model:', e);
+        return AppStore.getConfig('whisperModel');
+    }
+}
+
+const whisperEffectiveModel = ref(resolveEffectiveWhisperModel());
+function refreshEffectiveWhisperModel() {
+    whisperEffectiveModel.value = resolveEffectiveWhisperModel();
+}
+
+const whisperModelPreset = useConfig('whisperModelPreset');
+
+const whisperPresetOptions = computed(() => [
+    { value: 'auto', label: t('whisperPresetAuto') },
+    { value: 'small', label: t('whisperPresetSmall') },
+    { value: 'medium', label: t('whisperPresetMedium') },
+    { value: 'large-v3-turbo', label: t('whisperPresetLargeTurbo') },
+]);
+
+const whisperPresetHint = computed(() =>
+    whisperModelPreset.value === 'large-v3-turbo' ? t('whisperPresetLargeTurboWarning') : '');
+
+const whisperVadOptions = computed(() => [
+    { value: 'off', label: t('whisperVadOff') },
+    { value: 'conservative', label: t('whisperVadConservative') },
+]);
 
 const whisperDownloadStatus = ref({
     isLoading: false,
@@ -114,7 +146,7 @@ const whisperModelStatusColor = ref('');
 function computeWhisperUiState() {
     const status = whisperDownloadStatus.value;
     const whisperState = AppStore.state.whisper;
-    const cachedReady = SharedCache.get<boolean>(CacheKeys.whisperModelReady(WHISPER_MODEL)) === true;
+    const cachedReady = SharedCache.get<boolean>(CacheKeys.whisperModelReady(whisperEffectiveModel.value)) === true;
     const progress = status.isLoading ? status.progress : whisperState.progress;
     const message = (status.message || whisperState.progressMessage || '').trim();
     const isLoading = whisperState.isLoadingModel || (status.isLoading && progress < 100);
@@ -138,7 +170,7 @@ const whisperDownloadLabel = computed(() => {
     if (ui.isLoading) {
         const capped = Math.min(99, Math.max(0, ui.progress || 0));
         const baseMessage = t('downloadWhisperModelLoading');
-        const modelLabel = WHISPER_MODEL;
+        const modelLabel = whisperEffectiveModel.value.split('/').pop() || whisperEffectiveModel.value;
         const progressSuffix = capped > 0 ? ` (${Math.round(capped)}%)` : '';
         return `${baseMessage} - ${modelLabel}${progressSuffix}`;
     }
@@ -384,6 +416,14 @@ on('whisper:progress', (payload) => {
     updateWhisperModelStatus();
 });
 
+// Model preset, force-WASM, and whisperModel all change the effective model.
+on('config:change', ({ key }) => {
+    if (key === 'whisperModelPreset' || key === 'whisperModel' || key === 'forceWhisperWasm') {
+        refreshEffectiveWhisperModel();
+        updateWhisperModelStatus();
+    }
+});
+
 on('whisper:error', (payload) => {
     whisperDownloadStatus.value = {
         isLoading: false,
@@ -403,6 +443,7 @@ on('whisper:fallback', (payload) => {
         progress: 10,
         message: format('whisperFallbackApplied', { model: modelShort, reason: reasonShort }),
     };
+    refreshEffectiveWhisperModel();
     updateWhisperModelStatus();
 });
 
@@ -412,7 +453,8 @@ on('whisper:fallback', (payload) => {
 
 onMounted(() => {
     // Check if whisper model is cached
-    if (SharedCache.get<boolean>(CacheKeys.whisperModelReady(WHISPER_MODEL))) {
+    refreshEffectiveWhisperModel();
+    if (SharedCache.get<boolean>(CacheKeys.whisperModelReady(whisperEffectiveModel.value))) {
         whisperDownloadStatus.value = { isLoading: false, progress: 100, message: '' };
     }
     updateWhisperModelStatus();
@@ -717,6 +759,24 @@ const credits = [
                 </div>
                 <hr class="q-separator q-separator--horizontal asmr-settings-separator">
                 <SettingsToggle config-key="alwaysTranscribe" :label="t('alwaysTranscribe')" :sublabel="t('alwaysTranscribeSub')" icon="auto_fix_high" />
+                <hr class="q-separator q-separator--horizontal asmr-settings-separator">
+                <SettingsSelect
+                    config-key="whisperModelPreset"
+                    :label="t('whisperModelPreset')"
+                    :sublabel="t('whisperModelPresetSub')"
+                    :options="whisperPresetOptions"
+                    :hint="whisperPresetHint"
+                    hint-color="#e0a030"
+                    icon="tune"
+                />
+                <hr class="q-separator q-separator--horizontal asmr-settings-separator">
+                <SettingsSelect
+                    config-key="whisperVadMode"
+                    :label="t('whisperVadMode')"
+                    :sublabel="t('whisperVadModeSub')"
+                    :options="whisperVadOptions"
+                    icon="graphic_eq"
+                />
                 <hr class="q-separator q-separator--horizontal asmr-settings-separator">
                 <SettingsInput config-key="whisperLanguage" :label="t('whisperLanguage')" :sublabel="t('whisperLanguageSub')" placeholder="auto, ja, zh" icon="record_voice_over" />
                 <hr class="q-separator q-separator--horizontal asmr-settings-separator">

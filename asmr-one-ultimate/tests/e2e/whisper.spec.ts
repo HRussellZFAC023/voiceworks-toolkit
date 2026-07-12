@@ -287,6 +287,22 @@ test.describe('Whisper Settings', () => {
     await expect(section.locator('.asmr-settings-hint-text')).not.toHaveText('');
   });
 
+  test('Whisper model quality and silence-skipping selectors are discoverable', async ({ injectedPage, isScriptLoaded }) => {
+    await helpers.gotoSettings(injectedPage);
+    await isScriptLoaded();
+    await injectedPage.waitForTimeout(3000);
+
+    const section = injectedPage.locator('#asmr-whisper-settings-section');
+    await expect(section).toBeVisible({ timeout: 15000 });
+    const model = section.locator('[data-asmr-select="whisperModelPreset"]');
+    const vad = section.locator('[data-asmr-select="whisperVadMode"]');
+    await expect(model).toBeVisible();
+    await expect(vad).toBeVisible();
+    await expect(model).toHaveValue('auto');
+    await expect(vad).toHaveValue('off');
+    await expect(model.locator('option')).toHaveCount(4);
+  });
+
   test('Force Whisper WASM toggle exists', async ({ injectedPage, isScriptLoaded }) => {
     await helpers.gotoSettings(injectedPage);
     await isScriptLoaded();

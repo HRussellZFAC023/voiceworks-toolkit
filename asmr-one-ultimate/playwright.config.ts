@@ -22,6 +22,7 @@ const slowMo = parseInt(process.env.PW_SLOWMO || '', 10) || 0;
 const isRealE2E = process.env.E2E_REAL === '1' || process.env.E2E_NO_MOCKS === '1';
 const skipWebServer = process.env.E2E_SKIP_WEBSERVER === '1';
 const baseURL = process.env.E2E_BASE_URL || 'https://www.asmr.one';
+const includeFirefox = process.env.E2E_FIREFOX === '1';
 
 export default defineConfig({
     testDir: './tests/e2e',
@@ -73,6 +74,13 @@ export default defineConfig({
             name: 'chromium',
             use: { ...devices['Desktop Chrome'] },
         },
+        ...(includeFirefox ? [{
+            name: 'firefox',
+            use: {
+                ...devices['Desktop Firefox'],
+                launchOptions: { slowMo },
+            },
+        }] : []),
     ],
     // Start dev server automatically if not running (not needed for real-site E2E).
     webServer: isRealE2E || skipWebServer ? undefined : {

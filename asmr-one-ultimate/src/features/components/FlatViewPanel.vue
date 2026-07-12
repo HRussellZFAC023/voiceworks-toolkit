@@ -15,6 +15,7 @@ import { ref, computed, watch, onMounted, onUnmounted, nextTick, type Ref } from
 import { useBridge } from '../../composables/useBridge';
 import { useI18n } from '../../composables/useI18n';
 import { useEventBus } from '../../composables/useEventBus';
+import { useConfig } from '../../composables/useConfig';
 import { isDarkMode } from '../../core/DomUtils';
 import { Priority } from '../../core/GpuScheduler';
 import { WorkService } from '../../services/WorkService';
@@ -50,6 +51,8 @@ const props = defineProps<{
 const bridge = useBridge();
 const { t, format, lang } = useI18n();
 const { emit: busEmit } = useEventBus();
+const translateMode = useConfig('translateMode');
+const translateCnToJp = useConfig('translateCnToJp');
 
 // ---------------------------------------------------------------------------
 // Reactive State
@@ -149,13 +152,13 @@ const listClasses = computed(() => ({
 
 function getDisplayTitle(item: FlatItem): string {
     const tr = translations.value[item.title];
-    return tr ? `${item.title} (${tr})` : item.title;
+    return tr || item.title;
 }
 
 function getDisplayFolder(item: FlatItem): string {
     if (!item.folderPath) return '';
     const tr = translations.value[item.folderPath];
-    return tr ? `${item.folderPath} (${tr})` : item.folderPath;
+    return tr || item.folderPath;
 }
 
 function isItemActive(item: FlatItem): boolean {
@@ -292,6 +295,7 @@ async function renderFlatList(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 async function translateVisibleItems(): Promise<void> {
+    if (!translateMode.value && !translateCnToJp.value) return;
     const generation = translationGeneration;
     const textsToTranslate: string[] = [];
 
@@ -316,13 +320,21 @@ async function translateVisibleItems(): Promise<void> {
         }
         activeTranslationQueueKey = queueKey;
         TranslationService.cancelPending({ cancellableKey: queueKey });
-        const translated = await TranslationService.translateBatch(
+        const work = bridge.currentWork as { translation_info?: { lang?: string; is_original?: boolean } } | undefined;
+        const sourceCode = String(work?.translation_info?.lang || '').toUpperCase();
+        const sourceLanguageHint = sourceCode.includes('CHI') || sourceCode.includes('ZH')
+            ? 'zh'
+            : sourceCode.includes('JPN') || sourceCode.includes('JA') || work?.translation_info?.is_original
+                ? 'ja'
+                : 'auto';
+        const translated = await TranslationService.translateForDisplayBatch(
             textsToTranslate,
             targetLang,
             {
                 priority: FLATVIEW_TRANSLATION_PRIORITY,
                 cancellable: true,
                 cancellableKey: queueKey,
+                sourceLanguageHint,
             },
         );
         if (generation !== translationGeneration) return;
@@ -330,8 +342,15 @@ async function translateVisibleItems(): Promise<void> {
         for (let i = 0; i < textsToTranslate.length; i++) {
             const original = textsToTranslate[i];
             const result = translated[i];
-            if (result && result !== original) {
-                newTranslations[original] = result;
+            const promotedChinese = result?.sourceLanguage === 'zh' && result.primaryLanguage === 'ja';
+            if (promotedChinese) {
+                newTranslations[original] = result.secondaryText
+                    ? TranslationService.formatPair(result.primaryText, result.secondaryText)
+                    : result.primaryText;
+            } else if (result?.secondaryText) {
+                newTranslations[original] = TranslationService.formatPair(original, result.secondaryText);
+            } else if (result?.primaryText && result.primaryText !== original) {
+                newTranslations[original] = result.primaryText;
             }
         }
         translations.value = { ...translations.value, ...newTranslations };
@@ -608,7 +627,7 @@ onMounted(() => {
     watchWork();
 });
 
-watch(lang, () => {
+watch([lang, translateMode, translateCnToJp], () => {
     translationGeneration++;
     TranslationService.cancelPending({ cancellableKey: activeTranslationQueueKey });
     activeTranslationQueueKey = '';

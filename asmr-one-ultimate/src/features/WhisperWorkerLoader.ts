@@ -122,6 +122,10 @@ async function detectWebGPU() {
             vendor = gpuVendorHint;
             console.log('[Whisper Worker] Using host GPU vendor hint:', vendor);
         }
+        if (/swiftshader|llvmpipe|software|softpipe/i.test(vendor)) {
+            console.warn('[Whisper Worker] Rejected software WebGPU adapter:', vendor);
+            return null;
+        }
         const maxBuf = adapter.limits?.maxBufferSize || 0;
         if (maxBuf > 0 && maxBuf < minWebgpuBufferBytes) {
             console.warn('[Whisper Worker] Rejected adapter — maxBufferSize too small:', maxBuf);
@@ -217,6 +221,19 @@ async function loadPipelineForModel(settings, progressCb) {
 
     self.postMessage({ status: 'initiate', backend: currentBackend, vendor: currentVendor });
 
+    // A host-level GPU probe can succeed while the worker ultimately lands on
+    // WASM. Keep that backend bounded instead of loading a large model first.
+    if (currentBackend === 'wasm' && settings.model !== FALLBACK_MODEL) {
+        fallbackModelOverride = FALLBACK_MODEL;
+        self.postMessage({
+            status: 'fallback',
+            originalModel: settings.model,
+            fallbackModel: FALLBACK_MODEL,
+            reason: 'WASM backend requires the bounded tiny model',
+        });
+        return loadPipelineForModel({ ...settings, model: FALLBACK_MODEL }, progressCb);
+    }
+
     const revision = 'main';
 
     // --- WebGPU path ---
@@ -266,6 +283,16 @@ async function loadPipelineForModel(settings, progressCb) {
             currentBackend = 'wasm';
             currentVendor = '';
             self.postMessage({ status: 'initiate', backend: 'wasm', vendor: '' });
+            if (settings.model !== FALLBACK_MODEL) {
+                fallbackModelOverride = FALLBACK_MODEL;
+                self.postMessage({
+                    status: 'fallback',
+                    originalModel: settings.model,
+                    fallbackModel: FALLBACK_MODEL,
+                    reason: 'WebGPU model load failed; WASM requires the bounded tiny model',
+                });
+                return loadPipelineForModel({ ...settings, model: FALLBACK_MODEL }, progressCb);
+            }
         }
     }
 
@@ -370,7 +397,7 @@ async function transcribe(msg) {
                 c.timestamp?.[1] != null ? c.timestamp[1] + timeOffset : null,
             ],
         }));
-        self.postMessage({ status: 'update', data: { rawChunks: raw }, chunkId });
+        self.postMessage({ status: 'update', data: { rawChunks: raw, inputRms: msg.inputRms }, chunkId });
     }
 
     const pipeOpts = {
@@ -480,6 +507,7 @@ async function transcribe(msg) {
     return {
         text: (result.text || '').trim(),
         rawChunks,
+        inputRms: msg.inputRms,
     };
 }
 

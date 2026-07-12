@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { Whisper, resolveWhisperLanguage } from '../../src/features/Whisper';
+import { Whisper, resolveWhisperLanguage, resolveWhisperModelPreset } from '../../src/features/Whisper';
 import { DeviceCapabilities } from '../../src/core/DeviceCapabilities';
 import { GpuScheduler, Priority } from '../../src/core/GpuScheduler';
 import { Config } from '../../src/core/Utils';
@@ -762,10 +762,25 @@ describe('Whisper', () => {
                 const audio = document.createElement('audio');
                 audio.crossOrigin = 'anonymous';
                 audio.src = 'https://raw.kiko-play-niptan.one/audio/track.mp3';
+                Object.defineProperty(audio, 'paused', { configurable: true, value: false });
 
                 trustedCorsSpy.mockReturnValue(true);
                 expect((whisper as any).canUseLiveAudioCapture(audio)).toBe(true);
                 expect(trustedCorsSpy).toHaveBeenCalledWith(audio);
+            } finally {
+                vi.unstubAllGlobals();
+            }
+        });
+
+        it('uses compatibility decode instead of an empty live tap when audio is paused', () => {
+            vi.spyOn(DeviceCapabilities, 'profile', 'get').mockReturnValue({ isMobile: false } as any);
+            vi.stubGlobal('AudioContext', class {});
+            try {
+                const whisper = new Whisper();
+                const audio = document.createElement('audio');
+                audio.src = `${window.location.origin}/track.mp3`;
+                expect(audio.paused).toBe(true);
+                expect((whisper as any).canUseLiveAudioCapture(audio)).toBe(false);
             } finally {
                 vi.unstubAllGlobals();
             }
@@ -1384,6 +1399,36 @@ describe('Whisper', () => {
     });
 
     describe('parseSegments', () => {
+        it('preserves recognized output when VAD is off even for a low-RMS final chunk', () => {
+            const whisper = new Whisper();
+            (whisper as any).transcribing = true;
+            (whisper as any).pendingChunks = 1;
+            (whisper as any).chunkGenerations.set(12, (whisper as any).transcriptionGeneration);
+            (whisper as any).chunkSendTimes.set(12, performance.now());
+            (whisper as any).chunkOffsets.set(12, 0);
+            (whisper as any).chunkLastActivity.set(12, performance.now());
+            const merge = vi.spyOn(whisper as any, 'mergeSegments');
+            const finalize = vi.spyOn(whisper as any, 'maybeFinalizeTranscript');
+            vi.spyOn(whisper as any, 'translateAhead').mockResolvedValue(undefined);
+
+            (whisper as any).handleWorkerMessage({
+                data: {
+                    status: 'complete',
+                    chunkId: 12,
+                    data: {
+                        text: 'お気に入りしさせると',
+                        rawChunks: [{ text: 'お気に入りしさせると', timestamp: [0, 2] }],
+                        inputRms: 0,
+                    },
+                },
+            } as any);
+
+            expect(merge).toHaveBeenCalledOnce();
+            expect((whisper as any).segments).toHaveLength(1);
+            expect((whisper as any).pendingChunks).toBe(0);
+            expect(finalize).toHaveBeenCalled();
+        });
+
         it('does not apply Japanese glossary rewrites to explicit Chinese transcription', () => {
             vi.spyOn(Config, 'get').mockImplementation((key) => {
                 if (key === 'whisperLanguage') return 'zh-CN';
@@ -1973,6 +2018,189 @@ describe('Whisper', () => {
             const whisper = new Whisper();
             expect((whisper as any).cleanText('')).toBe('');
             expect((whisper as any).cleanText(null)).toBe('');
+        });
+    });
+
+    describe('resolveWhisperModelPreset', () => {
+        it('maps explicit presets to official browser-compatible model IDs', () => {
+            expect(resolveWhisperModelPreset('small', 'ignored'))
+                .toBe('onnx-community/whisper-small_timestamped');
+            expect(resolveWhisperModelPreset('medium', 'ignored'))
+                .toBe('onnx-community/whisper-medium_timestamped');
+            expect(resolveWhisperModelPreset('large-v3-turbo', 'ignored'))
+                .toBe('onnx-community/whisper-large-v3-turbo');
+        });
+
+        it('defers auto (or unknown) to the configured compatibility model', () => {
+            expect(resolveWhisperModelPreset('auto', 'onnx-community/whisper-small_timestamped'))
+                .toBe('onnx-community/whisper-small_timestamped');
+            expect(resolveWhisperModelPreset('bogus', 'onnx-community/custom-model'))
+                .toBe('onnx-community/custom-model');
+            expect(resolveWhisperModelPreset('', '')).toBe('onnx-community/whisper-small_timestamped');
+        });
+    });
+
+    describe('model preset + VAD resolution', () => {
+        function mockConfig(overrides: Record<string, string | number | boolean>) {
+            const map: Record<string, string | number | boolean> = {
+                whisperModel: 'onnx-community/whisper-small_timestamped',
+                whisperModelPreset: 'auto',
+                whisperVadMode: 'off',
+                whisperLanguage: 'auto',
+                whisperTask: 'transcribe',
+                whisperAutoWarmup: false,
+                whisperCacheTranscripts: true,
+                forceWhisperWasm: false,
+                ...overrides,
+            };
+            vi.spyOn(Config, 'get').mockImplementation((key) => map[key as string] ?? false);
+        }
+
+        function mockDevice(profile: Record<string, unknown>) {
+            vi.spyOn(DeviceCapabilities, 'profile', 'get').mockReturnValue(profile as any);
+            vi.spyOn(DeviceCapabilities, 'shouldWarmup', 'get').mockReturnValue(false);
+            vi.spyOn(DeviceCapabilities, 'budget', 'get').mockReturnValue({ whisperIdleMs: 60_000 } as any);
+            vi.spyOn(GpuScheduler, 'getMemoryPressure').mockReturnValue('low');
+        }
+
+        const fullProfile = {
+            tier: 'full', hasGpu: true, memory: 16, cores: 8,
+            isTouch: false, isMobile: false, screenWidth: 1920, reason: 'full',
+        };
+
+        it('defaults config to auto preset and off VAD (silenceThreshold 0)', () => {
+            mockConfig({});
+            mockDevice(fullProfile);
+            const settings = (new Whisper() as any).getWhisperSettings();
+            expect(settings.model).toBe('onnx-community/whisper-small_timestamped');
+            expect(settings.silenceThreshold).toBe(0);
+        });
+
+        it('resolves an explicit medium preset to the official medium model', () => {
+            mockConfig({ whisperModelPreset: 'medium' });
+            mockDevice(fullProfile);
+            expect((new Whisper() as any).getWhisperSettings().model)
+                .toBe('onnx-community/whisper-medium_timestamped');
+        });
+
+        it('honors an explicit higher preset on unknown-memory Apple Silicon (no silent tiny downgrade)', () => {
+            mockConfig({ whisperModelPreset: 'large-v3-turbo' });
+            mockDevice({
+                tier: 'full', hasGpu: true, memory: -1, cores: 10,
+                isTouch: false, isMobile: false, screenWidth: 1728,
+                gpuVendor: 'mozilla apple m1, or similar', reason: 'full, GPU, 10 cores',
+            });
+            // auto would downgrade this profile to tiny; an explicit preset must not.
+            expect((new Whisper() as any).getWhisperSettings().model)
+                .toBe('onnx-community/whisper-large-v3-turbo');
+        });
+
+        it('keeps auto conservative downgrade to tiny on the same constrained profile', () => {
+            mockConfig({ whisperModelPreset: 'auto' });
+            mockDevice({
+                tier: 'full', hasGpu: true, memory: -1, cores: 10,
+                isTouch: false, isMobile: false, screenWidth: 1728,
+                gpuVendor: 'mozilla apple m1, or similar', reason: 'full, GPU, 10 cores',
+            });
+            expect((new Whisper() as any).getWhisperSettings().model)
+                .toBe('onnx-community/whisper-tiny');
+        });
+
+        it('force-WASM deterministically falls back to tiny even for an explicit preset, with a localized warning', () => {
+            mockConfig({ whisperModelPreset: 'large-v3-turbo', forceWhisperWasm: true });
+            mockDevice(fullProfile);
+            const fallback = vi.fn();
+            EventBus.on('whisper:fallback', fallback);
+            try {
+                const settings = (new Whisper() as any).getWhisperSettings();
+                expect(settings.model).toBe('onnx-community/whisper-tiny');
+                expect(fallback).toHaveBeenCalledWith(expect.objectContaining({
+                    originalModel: 'onnx-community/whisper-large-v3-turbo',
+                    fallbackModel: 'onnx-community/whisper-tiny',
+                    reason: expect.any(String),
+                }));
+            } finally {
+                EventBus.off('whisper:fallback', fallback);
+            }
+        });
+
+        it('no-GPU device deterministically falls back to tiny for an explicit preset', () => {
+            mockConfig({ whisperModelPreset: 'medium' });
+            mockDevice({
+                tier: 'limited', hasGpu: false, memory: -1, cores: 8,
+                isTouch: false, isMobile: false, screenWidth: 1440, gpuVendor: '', reason: 'no-GPU',
+            });
+            expect((new Whisper() as any).getWhisperSettings().model)
+                .toBe('onnx-community/whisper-tiny');
+        });
+
+        it('conservative VAD sets a very low, non-zero silence threshold', () => {
+            mockConfig({ whisperVadMode: 'conservative' });
+            mockDevice(fullProfile);
+            const settings = (new Whisper() as any).getWhisperSettings();
+            expect(settings.silenceThreshold).toBeGreaterThan(0);
+            expect(settings.silenceThreshold).toBeLessThanOrEqual(0.002);
+        });
+    });
+
+    describe('default VAD off never drops low-RMS chunks', () => {
+        it('sends a near-silent chunk when silenceThreshold is 0', () => {
+            const whisper = new Whisper();
+            const audio = document.createElement('audio');
+            audio.currentTime = 0;
+            (whisper as any).audio = audio;
+            (whisper as any).transcribing = true;
+            (whisper as any).modelReady = true;
+            (whisper as any).liveCaptureActive = false;
+            const buffer = new Float32Array(6 * 16_000);
+            buffer.fill(0.00005); // ~ -85 dBFS, far below any conservative threshold
+            (whisper as any).pcmBuffer = buffer;
+            (whisper as any).pcmDuration = 6;
+            (whisper as any).pcmBufferStartTime = 0;
+            (whisper as any).transcribedUpTo = 0;
+            vi.spyOn((whisper as any).bridge, 'currentTrack', 'get').mockReturnValue(undefined);
+            vi.spyOn(whisper as any, 'getWhisperSettings').mockReturnValue({
+                chunkLengthS: 29, strideLengthS: 5, silenceThreshold: 0,
+                maxPendingChunks: 6, pollIntervalMs: 250,
+            });
+            const send = vi.spyOn(whisper as any, 'sendChunk').mockImplementation(() => {});
+
+            (whisper as any).maybeProcessNextChunk();
+
+            expect(send).toHaveBeenCalledTimes(1);
+        });
+    });
+
+    describe('decode-ready race (model ready before pcmBuffer)', () => {
+        it('kicks a chunk synchronously when the loop starts, without a timer tick or seek', () => {
+            const whisper = new Whisper();
+            const audio = document.createElement('audio');
+            audio.currentTime = 0;
+            (whisper as any).audio = audio;
+            // Model reported ready first (compatibility decode only now supplies PCM).
+            (whisper as any).modelReady = true;
+            (whisper as any).transcribing = true;
+            (whisper as any).liveCaptureActive = false;
+            const buffer = new Float32Array(29 * 16_000);
+            buffer.fill(0.5);
+            (whisper as any).pcmBuffer = buffer;
+            (whisper as any).pcmDuration = 29;
+            (whisper as any).pcmBufferStartTime = 0;
+            (whisper as any).transcribedUpTo = 0;
+            vi.spyOn((whisper as any).bridge, 'currentTrack', 'get').mockReturnValue(undefined);
+            vi.spyOn(whisper as any, 'getWhisperSettings').mockReturnValue({
+                chunkLengthS: 29, strideLengthS: 5, silenceThreshold: 0,
+                maxPendingChunks: 6, pollIntervalMs: 100_000,
+            });
+            const send = vi.spyOn(whisper as any, 'sendChunk').mockImplementation(() => {});
+
+            (whisper as any).startProcessingLoop();
+            try {
+                // No fake timers advanced, no seek() called — the synchronous kick alone must send.
+                expect(send).toHaveBeenCalledTimes(1);
+            } finally {
+                (whisper as any).stopProcessingLoop();
+            }
         });
     });
 });

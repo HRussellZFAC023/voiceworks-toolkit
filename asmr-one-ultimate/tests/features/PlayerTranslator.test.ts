@@ -10,7 +10,7 @@ const mocks = vi.hoisted(() => {
             return false;
         }),
         currentTrack: { title: 'old-track.mp4' },
-        currentWork: { title: 'New Work Title' },
+        currentWork: { title: 'New Work Title', translation_info: undefined as { lang?: string } | undefined },
     };
     return { appStoreMock };
 });
@@ -41,6 +41,12 @@ vi.mock('../../src/core/Utils', () => ({
 vi.mock('../../src/services/TranslationService', () => ({
     TranslationService: {
         translate: vi.fn(async (text: string) => text),
+        translateForDisplay: vi.fn(async (text: string) => ({
+            sourceText: text,
+            sourceLanguage: 'ja',
+            primaryText: text,
+            primaryLanguage: 'ja',
+        })),
         cleanQuotes: (text: string) => text,
     },
 }));
@@ -48,6 +54,7 @@ vi.mock('../../src/services/TranslationService', () => ({
 vi.mock('../../src/infrastructure/KikoeruBridge', () => ({
     KikoeruBridge: {
         getInstance: () => ({
+            get currentWork() { return mocks.appStoreMock.currentWork; },
             store: {
                 watch: vi.fn(() => () => {}),
             },
@@ -56,12 +63,13 @@ vi.mock('../../src/infrastructure/KikoeruBridge', () => ({
 }));
 
 import { PlayerTranslator } from '../../src/features/PlayerTranslator';
+import { TranslationService } from '../../src/services/TranslationService';
 
 describe('PlayerTranslator', () => {
     beforeEach(() => {
         document.body.innerHTML = '';
         mocks.appStoreMock.currentTrack = { title: 'old-track.mp4' };
-        mocks.appStoreMock.currentWork = { title: 'New Work Title' };
+        mocks.appStoreMock.currentWork = { title: 'New Work Title', translation_info: undefined };
         vi.clearAllMocks();
     });
 
@@ -130,11 +138,12 @@ describe('PlayerTranslator', () => {
                 <div
                     class="q-item__label asmr-translated asmr-worktree-translation"
                     data-asmrtag="n20_07_安眠用耳かき（左）.wav"
+                    data-asmrtag-primary="20_07_安眠用耳かき（左）.wav"
                     data-asmrtag-state="done"
                     data-asmrtag-scope="01534375|/work/RJ01534375?path=%5B%22WAV%22%5D"
                     data-asmrtag-translation="Track 1: Extra-large elf's sweet embrace, hug kiss & ear licking.mp3"
                 >
-                    n20_07_安眠用耳かき（左）.wav
+                    20_07_安眠用耳かき（左）.wav
                 </div>
             </div>
         `;
@@ -144,6 +153,8 @@ describe('PlayerTranslator', () => {
 
         const el = document.querySelector('.audio-player .q-item__label') as HTMLElement;
         expect(el.hasAttribute('data-asmrtag')).toBe(false);
+        expect(el.hasAttribute('data-asmrtag-primary')).toBe(false);
+        expect(el.textContent?.trim()).toBe('n20_07_安眠用耳かき（左）.wav');
         expect(el.hasAttribute('data-asmrtag-state')).toBe(false);
         expect(el.hasAttribute('data-asmrtag-scope')).toBe(false);
         expect(el.hasAttribute('data-asmrtag-translation')).toBe(false);
@@ -198,6 +209,35 @@ describe('PlayerTranslator', () => {
         expect(stableRule).toContain('white-space: nowrap !important');
         expect(stableRule).toContain('text-overflow: ellipsis !important');
         expect(stableRule).toContain('animation: none !important');
+    });
+
+    it('renders confirmed Chinese as Japanese primary with English secondary and restores the source', async () => {
+        mocks.appStoreMock.currentWork = {
+            title: '晚安耳语',
+            translation_info: { lang: 'CHI_HANS' },
+        };
+        vi.mocked(TranslationService.translateForDisplay).mockResolvedValueOnce({
+            sourceText: '晚安耳语',
+            sourceLanguage: 'zh',
+            primaryText: 'おやすみ耳語り',
+            primaryLanguage: 'ja',
+            secondaryText: 'Goodnight whispers',
+            secondaryLanguage: 'en',
+        });
+        document.body.innerHTML = '<div class="audio-player"><div class="text-h6">晚安耳语</div></div>';
+        const translator = new PlayerTranslator();
+        (translator as any)._enabled = true;
+        const el = document.querySelector('.text-h6') as HTMLElement;
+
+        await (translator as any).translateElement(el, 'title');
+
+        expect(el.textContent).toBe('おやすみ耳語り');
+        expect(el.dataset.asmrPrimaryText).toBe('おやすみ耳語り');
+        expect(el.dataset.asmrTranslatedText).toBe('Goodnight whispers');
+        expect(el.classList.contains('asmr-translation-pair')).toBe(true);
+        expect(el.title).toContain('晚安耳语');
+        (translator as any).resetTranslationState();
+        expect(el.textContent).toBe('晚安耳语');
     });
 
     it('cancels and rejects a queued animation-frame translation after disable', () => {

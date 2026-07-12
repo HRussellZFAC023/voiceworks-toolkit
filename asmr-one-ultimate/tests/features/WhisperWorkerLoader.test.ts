@@ -138,6 +138,7 @@ describe('WhisperWorkerLoader', () => {
         expect(code).not.toContain('HALLUCINATION_RE');
         expect(code).not.toContain('groupWordsToSegments');
         expect(code).toContain('rawChunks');
+        expect(code).toContain('inputRms: msg.inputRms');
     });
 
     it('enables word timestamps on all backends with retry fallback', () => {
@@ -153,6 +154,15 @@ describe('WhisperWorkerLoader', () => {
         expect(code).toContain('powerPreference');
         // Scoring removed — simplified to preferred + fallback
         expect(code).not.toContain('scoreAdapter');
+    });
+
+    it('rejects software WebGPU adapters and bounds WASM to tiny', () => {
+        const code = __getWhisperWorkerCodeForTests();
+
+        expect(code).toContain('swiftshader|llvmpipe|software|softpipe');
+        expect(code).toContain('Rejected software WebGPU adapter');
+        expect(code).toContain("currentBackend === 'wasm' && settings.model !== FALLBACK_MODEL");
+        expect(code).toContain('WASM backend requires the bounded tiny model');
     });
 
     it('reuses existing pipeline when model matches', () => {

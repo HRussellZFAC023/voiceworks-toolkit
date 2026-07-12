@@ -37,6 +37,34 @@ const TARGET_SAMPLE_RATE = 16000;
 const DEFAULT_MAX_PENDING_CHUNKS = 6;
 const DEFAULT_MODEL = 'onnx-community/whisper-small_timestamped';
 const FALLBACK_MODEL = 'onnx-community/whisper-tiny';
+
+// Discoverable, browser-compatible Whisper model presets. `auto` defers to the
+// legacy `whisperModel` config (safe adaptive behavior). Explicit presets map to
+// official onnx-community IDs. Large v3 Turbo is experimental/heavy.
+type WhisperModelPreset = 'auto' | 'small' | 'medium' | 'large-v3-turbo';
+
+const WHISPER_PRESET_MODELS: Record<Exclude<WhisperModelPreset, 'auto'>, string> = {
+    small: 'onnx-community/whisper-small_timestamped',
+    medium: 'onnx-community/whisper-medium_timestamped',
+    'large-v3-turbo': 'onnx-community/whisper-large-v3-turbo',
+};
+
+/**
+ * Resolve a model-preset config value to a concrete model ID. `auto` (or any
+ * unknown value) resolves to the configured `whisperModel` compatibility value.
+ */
+export function resolveWhisperModelPreset(preset: string, configuredModel: string): string {
+    const normalized = String(preset || 'auto').trim().toLowerCase();
+    if (normalized in WHISPER_PRESET_MODELS) {
+        return WHISPER_PRESET_MODELS[normalized as keyof typeof WHISPER_PRESET_MODELS];
+    }
+    return String(configuredModel || DEFAULT_MODEL).trim() || DEFAULT_MODEL;
+}
+
+// Conservative VAD: only skip chunks at or below roughly -60 dBFS RMS, i.e.
+// effectively digital silence. Quiet ASMR (breaths, whispers) sits well above
+// this (~-40 dBFS and louder), so it is never dropped. `off` (default) uses 0.
+const CONSERVATIVE_SILENCE_RMS = 0.001;
 const MODEL_LOAD_STALL_TIMEOUT_MS = 120_000;
 const CACHE_TTL_MS = 1000 * 60 * 60 * 24 * 90; // 90 days
 const MODEL_READY_TTL_MS = 1000 * 60 * 60 * 24 * 30; // 30 days
@@ -146,13 +174,13 @@ type ChunkEntry = {
 
 type WorkerUpdateMessage = {
     status: 'update';
-    data: { rawChunks?: RawChunk[] };
+    data: { rawChunks?: RawChunk[]; inputRms?: number };
     chunkId?: number;
 };
 
 type WorkerCompleteMessage = {
     status: 'complete';
-    data: { text?: string; rawChunks?: RawChunk[] };
+    data: { text?: string; rawChunks?: RawChunk[]; inputRms?: number };
     chunkId?: number;
 };
 
@@ -193,6 +221,7 @@ interface WhisperSettings {
     cacheTranscripts: boolean;
     autoWarmup: boolean;
     silenceThreshold: number;
+    vadMode: 'off' | 'conservative';
     maxPendingChunks: number;
     pollIntervalMs: number;
     workerUpdateIntervalMs: number;
@@ -287,6 +316,7 @@ export class Whisper {
     private modelReady = false;
     private workerBackend: 'webgpu' | 'wasm' | null = null;
     private modelOverride: string | null = null;
+    private presetSafetyFallbackNotice: string | null = null;
     private autoTranscribeWorkId: string | null = null;
 
     private finalizeOnIdle = false;
@@ -506,13 +536,21 @@ export class Whisper {
                 if (this.segments.length > 0) void this.translateAhead();
                 return;
             }
-            if (key !== 'forceWhisperWasm' && key !== 'whisperModel' && key !== 'whisperLanguage') return;
+            if (key !== 'forceWhisperWasm' && key !== 'whisperModel'
+                && key !== 'whisperModelPreset' && key !== 'whisperLanguage'
+                && key !== 'whisperVadMode') return;
             const forceWasmEnabled = key === 'forceWhisperWasm' && value === true;
             if (key === 'forceWhisperWasm') {
                 Logger.log(`[Whisper] Force WASM ${forceWasmEnabled ? 'enabled' : 'disabled'} via settings`);
                 if (!forceWasmEnabled) this.clearWebgpuFailure('force-wasm-disabled');
             }
-            if (key === 'whisperModel') this.modelOverride = null;
+            // Changing the model (legacy key or preset) must clear a prior runtime
+            // override and the one-shot safety-fallback notice so the newly
+            // requested model is resolved fresh on the restarted worker.
+            if (key === 'whisperModel' || key === 'whisperModelPreset') {
+                this.modelOverride = null;
+                this.clearPresetSafetyFallbackNotice();
+            }
 
             if (!this.worker) return;
             const wasTranscribing = this.transcribing;
@@ -1081,6 +1119,7 @@ export class Whisper {
     }
 
     private canUseLiveAudioCapture(audio: HTMLAudioElement): boolean {
+        if (audio.paused || audio.ended) return false;
         if (DeviceCapabilities.profile.isMobile || typeof AudioContext === 'undefined') return false;
         if (hasSharedSourceNode(audio)) return true;
         if (AudioCache.hasTrustedCorsPlayback(audio)) return true;
@@ -1656,6 +1695,13 @@ export class Whisper {
     private startProcessingLoop(): void {
         this.stopProcessingLoop();
         const settings = this.getWhisperSettings();
+        // Synchronously attempt the first chunk before relying on the poll
+        // interval. If the model reported ready before the compatibility decode
+        // supplied pcmBuffer, the ready handler's kick was a no-op; kicking here
+        // (once pcmBuffer exists) avoids waiting a full poll cycle — or a seek —
+        // to wake transcription. maybeProcessNextChunk() is itself guarded on
+        // transcribing/pcmBuffer/modelReady, so an early call is a safe no-op.
+        this.maybeProcessNextChunk();
         this.processingLoopId = window.setInterval(() => {
             this.maybeProcessNextChunk();
         }, settings.pollIntervalMs);
@@ -2091,12 +2137,12 @@ export class Whisper {
                 this.gpuRecoveryTimer = window.setTimeout(() => {
                     this.gpuRecoveryTimer = null;
                     const audio = getAudioElement();
-                    if (audio && !audio.paused) {
+                    if (audio) {
                         Logger.warn('[Whisper] Auto-recovery: restarting transcription on WASM backend');
                         this.showStatus(`<span class="whisper-status-text">${I18n.t('whisperRecovering')}</span>`);
                         this.startTranscription().catch(err => Logger.error('[Whisper] Recovery start failed:', err));
                     } else {
-                        Logger.warn('[Whisper] Auto-recovery skipped (audio paused) — showing crash message');
+                        Logger.warn('[Whisper] Auto-recovery skipped (audio element missing) — showing crash message');
                         this.gpuCrashed = true;
                         const crashMsg = I18n.t('whisperGpuCrashed');
                         AppStore.setWhisperState({ isTranscribing: false, isLoadingModel: false, progress: 0, progressMessage: crashMsg });
@@ -2311,6 +2357,7 @@ export class Whisper {
             chunkId,
             priority,
             updateIntervalMs: settings.workerUpdateIntervalMs,
+            inputRms: this.computeRms(audio),
         });
     }
 
@@ -2483,7 +2530,7 @@ export class Whisper {
                 this.resetWorker('gpu-device-lost');
 
                 const audio = getAudioElement();
-                if (wasTranscribing && audio && !audio.paused) {
+                if (wasTranscribing && audio) {
                     this.modelOverride = FALLBACK_MODEL;
                     this.showStatus(`<span class="whisper-status-text">${this.escapeHtml(I18n.t('whisperRecovering'))}</span>`);
                     window.setTimeout(() => {
@@ -2621,13 +2668,12 @@ export class Whisper {
                     this.gpuRecoveryTimer = window.setTimeout(() => {
                         this.gpuRecoveryTimer = null;
                         const audio = getAudioElement();
-                        if (audio && !audio.paused) {
+                        if (audio) {
                             Logger.warn('[Whisper] Auto-recovery: restarting transcription on WASM backend');
                             this.showStatus(`<span class="whisper-status-text">${I18n.t('whisperRecovering')}</span>`);
                             this.startTranscription().catch(err => Logger.error('[Whisper] Recovery start failed:', err));
                         } else {
-                            // Audio paused — show persistent crash message instead of silently giving up
-                            Logger.warn('[Whisper] Auto-recovery skipped (audio paused) — showing crash message');
+                            Logger.warn('[Whisper] Auto-recovery skipped (audio element missing) — showing crash message');
                             this.gpuCrashed = true;
                             const crashMsg = I18n.t('whisperGpuCrashed');
                             AppStore.setWhisperState({ isTranscribing: false, isLoadingModel: false, progress: 0, progressMessage: crashMsg });
@@ -3066,7 +3112,7 @@ export class Whisper {
 
     /** Build the identity string (pre-hash) for a transcript cache entry. */
     private buildCacheIdentity(src: string, settings: WhisperSettings): string {
-        return `${src}|${settings.model}|${settings.subtask}|${settings.language}`;
+        return `${src}|${settings.model}|${settings.subtask}|${settings.language}|vad:${settings.vadMode}`;
     }
 
     private buildCacheKey(src: string, settings: WhisperSettings): string {
@@ -3344,6 +3390,37 @@ export class Whisper {
     // Settings
     // ------------------------------------------------------------------------
 
+    /**
+     * The model ID that will actually be requested for the current device and
+     * config. Used by Settings for download/status/cache-key display so it stays
+     * in sync with preset selection and safety fallbacks.
+     */
+    public getEffectiveModelId(): string {
+        return this.getWhisperSettings().model;
+    }
+
+    /**
+     * Emit a visible, localized warning (once per requested model) when an
+     * explicit preset is deterministically downgraded to the safe tiny model
+     * because the device cannot run WebGPU (forced WASM / no navigator.gpu).
+     */
+    private notifyPresetSafetyFallback(requestedModel: string, reason: 'forceWasm' | 'noGpu'): void {
+        if (this.presetSafetyFallbackNotice === requestedModel) return;
+        this.presetSafetyFallbackNotice = requestedModel;
+        const reasonText = reason === 'forceWasm'
+            ? I18n.t('whisperPresetFallbackWasm')
+            : I18n.t('whisperPresetFallbackNoGpu');
+        EventBus.emit('whisper:fallback', {
+            originalModel: requestedModel,
+            fallbackModel: FALLBACK_MODEL,
+            reason: reasonText,
+        });
+    }
+
+    private clearPresetSafetyFallbackNotice(): void {
+        this.presetSafetyFallbackNotice = null;
+    }
+
     private getWhisperSettings(): WhisperSettings {
         const profile = DeviceCapabilities.profile;
         const memoryPressure = GpuScheduler.getMemoryPressure();
@@ -3390,14 +3467,39 @@ export class Whisper {
         }
 
         const configuredModel = String(Config.get('whisperModel') || DEFAULT_MODEL).trim() || DEFAULT_MODEL;
-        // A desktop without WebGPU (including Apple Silicon in browsers that do
-        // not expose navigator.gpu) must start on the bounded tiny/WASM path.
-        // Loading whisper-small on CPU first can otherwise look permanently hung.
-        const useConservativeModel = forceWasm
-            || !profile.hasGpu
-            || profile.tier === 'constrained'
-            || shouldUseTinyWhisperModel(profile);
-        const model = this.modelOverride || (useConservativeModel ? FALLBACK_MODEL : configuredModel);
+        const presetRaw = String(Config.get('whisperModelPreset') || 'auto').trim().toLowerCase();
+        const preset = (presetRaw === 'auto' || presetRaw in WHISPER_PRESET_MODELS) ? presetRaw : 'auto';
+        const isExplicitPreset = preset !== 'auto';
+        const requestedModel = resolveWhisperModelPreset(preset, configuredModel);
+
+        // Hard safety fallback: a device that cannot run WebGPU at all (forced
+        // WASM, or no navigator.gpu — including Apple Silicon in browsers that do
+        // not expose it) must use the bounded tiny model. Loading a larger model
+        // on CPU first can otherwise look permanently hung. This applies even to
+        // an explicit preset, but is surfaced with a visible localized warning.
+        const hardSafetyFallback = forceWasm || !profile.hasGpu;
+        // Auto-only conservative policy: constrained tiers and unknown-memory
+        // Apple Silicon quietly downgrade to tiny. An explicit preset opts out.
+        const autoConservative = profile.tier === 'constrained' || shouldUseTinyWhisperModel(profile);
+
+        let model: string;
+        if (this.modelOverride) {
+            model = this.modelOverride;
+        } else if (hardSafetyFallback) {
+            model = FALLBACK_MODEL;
+            if (isExplicitPreset && requestedModel !== FALLBACK_MODEL) {
+                this.notifyPresetSafetyFallback(requestedModel, forceWasm ? 'forceWasm' : 'noGpu');
+            } else {
+                this.clearPresetSafetyFallbackNotice();
+            }
+        } else if (isExplicitPreset) {
+            // Honor the user's explicit opt-in; do NOT silently downgrade to tiny.
+            model = requestedModel;
+            this.clearPresetSafetyFallbackNotice();
+        } else {
+            model = autoConservative ? FALLBACK_MODEL : requestedModel;
+            this.clearPresetSafetyFallbackNotice();
+        }
         const configuredLanguage = String(Config.get('whisperLanguage') || 'auto');
         let currentWork: WhisperWorkLanguageContext;
         try {
@@ -3408,6 +3510,10 @@ export class Whisper {
         const language = resolveWhisperLanguage(configuredLanguage, currentWork);
         const configuredTask = String(Config.get('whisperTask') || 'transcribe').toLowerCase();
         const subtask = configuredTask === 'translate' ? 'translate' : 'transcribe';
+        const vadMode: WhisperSettings['vadMode'] = Config.get('whisperVadMode') === 'conservative'
+            ? 'conservative'
+            : 'off';
+        const silenceThreshold = vadMode === 'conservative' ? CONSERVATIVE_SILENCE_RMS : 0;
         const autoWarmupConfigured = Config.get('whisperAutoWarmup') !== false;
         const cacheTranscripts = Config.get('whisperCacheTranscripts') !== false;
         const idleUnloadMs = DeviceCapabilities.budget.whisperIdleMs;
@@ -3421,7 +3527,8 @@ export class Whisper {
             strideLengthS: 5,
             cacheTranscripts,
             autoWarmup: autoWarmupConfigured && DeviceCapabilities.shouldWarmup && !forceWasm,
-            silenceThreshold: 0,
+            silenceThreshold,
+            vadMode,
             maxPendingChunks,
             pollIntervalMs,
             workerUpdateIntervalMs,

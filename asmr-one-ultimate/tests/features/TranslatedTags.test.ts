@@ -49,22 +49,38 @@ vi.mock('../../src/core/Config', () => ({
 }));
 
 // Mock TranslationService
-vi.mock('../../src/services/TranslationService', () => ({
-    TranslationService: {
+vi.mock('../../src/services/TranslationService', () => {
+    const translateBatch = vi.fn().mockResolvedValue([]);
+    return { TranslationService: {
         formatPair: (original: string, translated: string) => {
             if (!translated || translated === original) return original;
             return `${original} (${translated})`;
         },
         autoTranslate: vi.fn().mockResolvedValue(null),
         translate: vi.fn().mockResolvedValue(null),
-        translateBatch: vi.fn().mockResolvedValue([]),
+        translateBatch,
+        translateForDisplayBatch: vi.fn(async (texts: string[], targetLang: string, options?: { sourceLanguageHint?: string }) => {
+            const translated = await translateBatch(texts, targetLang, options);
+            return texts.map((text, index) => {
+                const value = translated[index] || text;
+                const promoted = options?.sourceLanguageHint === 'zh' && value !== text;
+                return {
+                    sourceText: text,
+                    sourceLanguage: options?.sourceLanguageHint === 'zh' ? 'zh' : 'ja',
+                    primaryText: promoted ? value : text,
+                    primaryLanguage: promoted ? 'ja' : (options?.sourceLanguageHint === 'zh' ? 'zh' : 'ja'),
+                    secondaryText: promoted || value === text ? undefined : value,
+                    secondaryLanguage: promoted || value === text ? undefined : targetLang,
+                };
+            });
+        }),
         cancelPending: vi.fn(),
         cleanQuotes: (text: string) => text,
         isUserLang: vi.fn().mockReturnValue(false),
         isTargetLanguage: vi.fn().mockReturnValue(false),
         isRateLimited: vi.fn().mockReturnValue(false),
-    }
-}));
+    } };
+});
 
 // Mock Logger
 vi.mock('../../src/core/Logger', () => ({
@@ -266,7 +282,14 @@ describe('TranslatedTags', () => {
             if (key === 'translateMode' || key === 'translateCnToJp') return true;
             return true;
         });
-        vi.mocked(TranslationService.translateBatch).mockResolvedValue(['おやすみ耳語り']);
+        vi.mocked(TranslationService.translateForDisplayBatch).mockResolvedValueOnce([{
+            sourceText: '晚安耳语',
+            sourceLanguage: 'zh',
+            primaryText: 'おやすみ耳語り',
+            primaryLanguage: 'ja',
+            secondaryText: 'Goodnight whispers',
+            secondaryLanguage: 'en',
+        }]);
 
         document.body.innerHTML += `
             <div class="q-card" lang="zh-CN">
@@ -278,11 +301,12 @@ describe('TranslatedTags', () => {
         (translatedTags as any).isEnabled = true;
         (translatedTags as any).augmentTags();
         await vi.waitFor(() => {
+            expect(document.querySelector('.q-card a')?.textContent).toBe('おやすみ耳語り');
             expect(document.querySelector('.asmr-card-translation')?.textContent)
-                .toContain('おやすみ耳語り');
+                .toContain('Goodnight whispers');
         });
 
-        expect(TranslationService.translateBatch).toHaveBeenCalledWith(
+        expect(TranslationService.translateForDisplayBatch).toHaveBeenCalledWith(
             ['晚安耳语'],
             'en',
             expect.objectContaining({ sourceLanguageHint: 'zh' }),

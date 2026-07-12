@@ -59,6 +59,11 @@ export class PageTitleManager {
         this.cleanups.push(EventBus.on('lang:change', () => {
             if (this.currentTitle) void this.updateTitle(this.currentTitle);
         }));
+        this.cleanups.push(EventBus.on('config:change', ({ key }) => {
+            if ((key === 'translateMode' || key === 'translateCnToJp') && this.currentTitle) {
+                void this.updateTitle(this.currentTitle, this.currentSourceHint);
+            }
+        }));
 
         // Watch route for navigation to non-work pages
         this.routeUnwatch = this.bridge.$watch?.('$route', (to: { path: string }) => {
@@ -121,14 +126,20 @@ export class PageTitleManager {
             && !/[\u3040-\u30ff]/.test(baseTitle);
         if (containsCjk && (ambiguousHanForChinese || !TranslationService.isUserLang(baseTitle))) {
             try {
-                const translated = await TranslationService.translate(
+                const display = await TranslationService.translateForDisplay(
                     baseTitle,
                     targetLang,
                     { sourceLanguageHint },
                 );
                 if (!this.enabled || epoch !== this.titleUpdateEpoch) return;
-                if (translated && translated !== baseTitle) {
-                    this.applyTitle(translated);
+                if (display.primaryText !== baseTitle || display.secondaryText) {
+                    const promotedChinese = display.sourceLanguage === 'zh' && display.primaryLanguage === 'ja';
+                    const title = promotedChinese
+                        ? (display.secondaryText
+                            ? `${display.primaryText} — ${display.secondaryText}`
+                            : display.primaryText)
+                        : (display.secondaryText || display.primaryText);
+                    this.applyTitle(title);
                     return;
                 }
             } catch (e) {
