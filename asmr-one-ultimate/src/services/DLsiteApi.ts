@@ -1,5 +1,6 @@
 import { HttpClient } from '../infrastructure/HttpClient';
 import { Logger, Config } from '../core/Utils';
+import { DEFAULT_DLSITE_PROXY } from '../core/Constants';
 import type {
     DLsiteProductApiResponse,
     DLsiteProductApiParams,
@@ -21,13 +22,13 @@ function isValidProxyUrl(url: string): boolean {
 
 function getProxyBaseUrl(): string {
     let raw = String(Config.get('dlsiteProxyUrl') || '').trim().replace(/\/+$/, '');
-    if (!raw) return '';
+    if (!raw) return DEFAULT_DLSITE_PROXY;
     if (!/^https?:\/\//i.test(raw)) {
         raw = `https://${raw}`;
     }
     if (!isValidProxyUrl(raw)) {
-        Logger.warn('[DLsiteApi] Invalid proxy URL configured, using direct requests:', raw);
-        return '';
+        Logger.warn('[DLsiteApi] Invalid proxy URL configured, using the maintained Japan relay:', raw);
+        return DEFAULT_DLSITE_PROXY;
     }
     return raw;
 }

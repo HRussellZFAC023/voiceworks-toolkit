@@ -1,5 +1,22 @@
 import { test, expect, helpers, TEST_WORKS } from './fixtures';
 
+async function openFirstImage(page: import('@playwright/test').Page) {
+    const flatPanel = helpers.isFlatPanelOpen(page);
+    if (!await flatPanel.isVisible()) {
+        await helpers.toggleFlatView(page);
+    }
+
+    const imageItem = page
+        .locator('.asmr-flat-panel .q-item[data-asmr-flat-type="image"]')
+        .first();
+    await expect(imageItem).toBeVisible({ timeout: 10000 });
+    await imageItem.click();
+
+    const modal = page.locator('#asmr-media-viewer-modal');
+    await expect(modal).toHaveClass(/active/, { timeout: 10000 });
+    return modal;
+}
+
 test.describe('MediaViewer v2.0', () => {
 
     test.beforeEach(async ({ injectedPage: page, isScriptLoaded }) => {
@@ -34,18 +51,8 @@ test.describe('MediaViewer v2.0', () => {
     });
 
     test('modal can be activated and deactivated', async ({ injectedPage: page }) => {
-        const modal = page.locator('#asmr-media-viewer-modal');
-        await expect(modal).toHaveCount(1, { timeout: 10000 });
-
-        // Modal should start inactive
-        await expect(modal).not.toHaveClass(/active/);
-
-        // Activate the modal directly for testing
-        await modal.evaluate(el => el.classList.add('active'));
-        await expect(modal).toHaveClass(/active/);
-
-        // Deactivate
-        await modal.evaluate(el => el.classList.remove('active'));
+        const modal = await openFirstImage(page);
+        await modal.locator('.media-viewer-backdrop').dispatchEvent('click');
         await expect(modal).not.toHaveClass(/active/);
     });
 
@@ -70,12 +77,7 @@ test.describe('MediaViewer v2.0', () => {
     });
 
     test('close button triggers hide', async ({ injectedPage: page }) => {
-        const modal = page.locator('#asmr-media-viewer-modal');
-        await expect(modal).toHaveCount(1, { timeout: 10000 });
-
-        // Activate modal
-        await modal.evaluate(el => el.classList.add('active'));
-        await expect(modal).toHaveClass(/active/);
+        const modal = await openFirstImage(page);
 
         // Click close button
         const closeBtn = modal.locator('.media-viewer-close');
@@ -114,12 +116,7 @@ test.describe('MediaViewer v2.0', () => {
     });
 
     test('keyboard handler is registered', async ({ injectedPage: page }) => {
-        const modal = page.locator('#asmr-media-viewer-modal');
-        await expect(modal).toHaveCount(1, { timeout: 10000 });
-
-        // Activate modal and test Escape key
-        await modal.evaluate(el => el.classList.add('active'));
-        await expect(modal).toHaveClass(/active/);
+        const modal = await openFirstImage(page);
 
         // Press Escape should close the modal
         await page.keyboard.press('Escape');

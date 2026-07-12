@@ -387,20 +387,24 @@ test.describe('Keyboard Shortcuts', () => {
         // Events should have fired (may be caught by LearnerMode or fall through to track nav)
     });
 
-    test('b key toggles learner blur config', async ({ injectedPage, isScriptLoaded }) => {
+    test('b key toggles live learner blur without rewriting the saved default', async ({ injectedPage, isScriptLoaded }) => {
         await helpers.gotoWork(injectedPage, TEST_WORKS.STANDARD);
         await isScriptLoaded();
         await injectedPage.waitForTimeout(2000);
         await injectTestAudio(injectedPage);
 
-        const blurBefore = await helpers.getConfig(injectedPage, 'learnerBlur');
+        const savedBefore = await helpers.getConfig(injectedPage, 'learnerBlur');
+        const translationLine = injectedPage.locator('.learner-en').first();
+        await expect(translationLine).toBeAttached({ timeout: 10000 });
+        const pressedBefore = await translationLine.getAttribute('aria-pressed');
 
         await injectedPage.keyboard.press('b');
-        await injectedPage.waitForTimeout(200);
+        await expect(translationLine).toHaveAttribute(
+            'aria-pressed',
+            pressedBefore === 'true' ? 'false' : 'true',
+        );
 
-        const blurAfter = await helpers.getConfig(injectedPage, 'learnerBlur');
-        // Should have toggled
-        expect(blurAfter).toBe(!blurBefore);
+        expect(await helpers.getConfig(injectedPage, 'learnerBlur')).toBe(savedBefore);
     });
 
     test('volume changes update Vuex store for UI sync', async ({ injectedPage, isScriptLoaded, waitForBridge }) => {

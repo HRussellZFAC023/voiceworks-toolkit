@@ -34,6 +34,10 @@ const globalWindow = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : windo
 // Config Store
 // ============================================================================
 
+function defaultSecondarySubtitleLanguage(): string {
+    return /^(?:zh)(?:-|$)/i.test(navigator.language || '') ? 'zh-CN' : 'en';
+}
+
 const CONFIG_DEFAULTS: PluginConfig = {
     // Radio Mode
     playAllInFolder: false,
@@ -53,13 +57,14 @@ const CONFIG_DEFAULTS: PluginConfig = {
 
     // Learner Mode
     showJP: true,
-    subtitleLang: 'en',
+    subtitleLang: defaultSecondarySubtitleLanguage(),
     primarySubtitleLang: 'ja',
     karaokeMode: true,
     segmentMode: true,
 
     // AI Features
-    whisperModel: 'onnx-community/kotoba-whisper-v2.2-ONNX',
+    whisperModel: 'onnx-community/whisper-small_timestamped',
+    whisperLanguage: 'auto',
     whisperTask: 'transcribe',
     whisperQuantized: false,
     whisperOverrideSubs: true,
@@ -80,6 +85,7 @@ const CONFIG_DEFAULTS: PluginConfig = {
     vectorRateLimitCooldownUntil: 0,
 
     // Cache
+    autoCacheAudio: false,
     cacheLimitGB: 5,
 
     // Transcript Sync
@@ -89,7 +95,11 @@ const CONFIG_DEFAULTS: PluginConfig = {
     transcriptSyncCollection: 'transcripts',
 
     // Translation
-    translateCnToJp: false,
+    translateCnToJp: true,
+    translationApiEndpoint: '',
+    translationApiKey: '',
+    translationApiModel: 'gpt-4o-mini',
+    googleDriveClientId: '166564421003-eo3fts7fh7r1qvhc7oshtlbevsd83k4k.apps.googleusercontent.com',
 
     // Folder Selection
     sePref: true,
@@ -255,6 +265,7 @@ class AppStoreImpl {
 
     constructor() {
         this.migrateSplitModeSettings();
+        this.migrateWhisperDefaults();
     }
 
     // =========================================================================
@@ -332,6 +343,22 @@ class AppStoreImpl {
         }
 
         GM_setValue(MIGRATION_KEY, true);
+    }
+
+    /** Move users who kept the former heavyweight default to the multilingual default. */
+    private migrateWhisperDefaults(): void {
+        if (typeof GM_getValue !== 'function' || typeof GM_setValue !== 'function') return;
+        const migrationKey = '__asmr_whisper_defaults_v2__';
+        try {
+            if (GM_getValue(migrationKey, false)) return;
+            const storedModel = GM_getValue('whisperModel', undefined as unknown as string);
+            if (storedModel === 'onnx-community/kotoba-whisper-v2.2-ONNX') {
+                GM_setValue('whisperModel', CONFIG_DEFAULTS.whisperModel);
+            }
+            GM_setValue(migrationKey, true);
+        } catch {
+            // Storage is optional during early userscript bootstrap/tests.
+        }
     }
 
     // =========================================================================

@@ -6,6 +6,10 @@ export interface MediaFile {
     type?: string;
     mediaStreamUrl?: string;
     media_stream_url?: string;
+    mediaDownloadUrl?: string;
+    media_download_url?: string;
+    /** Expected upstream file size in bytes, when supplied by /api/tracks. */
+    size?: number;
     [key: string]: unknown;
 }
 

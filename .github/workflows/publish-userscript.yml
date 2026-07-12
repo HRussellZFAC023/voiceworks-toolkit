@@ -32,14 +32,35 @@ jobs:
         working-directory: asmr-one-ultimate
         run: npm run test:run
 
+      - name: Type-check
+        working-directory: asmr-one-ultimate
+        run: npm run typecheck
+
       - name: Build userscript
         working-directory: asmr-one-ultimate
         run: npm run build
+
+      - name: Install Playwright Chromium
+        working-directory: asmr-one-ultimate
+        run: npx playwright install --with-deps chromium
+
+      - name: Run browser integration tests
+        working-directory: asmr-one-ultimate
+        env:
+          E2E_PROXY: 1
+        run: npm run test:e2e
 
       - name: Read version
         id: version
         working-directory: asmr-one-ultimate
         run: echo "version=$(node -p 'require("./package.json").version')" >> "$GITHUB_OUTPUT"
+
+      - name: Verify release tag matches package version
+        if: github.event_name == 'release'
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          PACKAGE_VERSION: ${{ steps.version.outputs.version }}
+        run: test "$RELEASE_TAG" = "v$PACKAGE_VERSION"
 
       - name: Upload release asset
         if: github.event_name == 'release'

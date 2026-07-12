@@ -21,6 +21,7 @@ import { WorkService } from '../../services/WorkService';
 import { TranslationService } from '../../services/TranslationService';
 import { Logger } from '../../core/Logger';
 import { flattenTree, type FlatItem } from '../flatViewUtils';
+import { replaceHostPlaybackQueue } from '../audioPlayerQueueUtils';
 import type { TracksResponse } from '../../types/api';
 
 // ---------------------------------------------------------------------------
@@ -47,7 +48,7 @@ const props = defineProps<{
 // ---------------------------------------------------------------------------
 
 const bridge = useBridge();
-const { t, format } = useI18n();
+const { t, format, lang } = useI18n();
 const { emit: busEmit } = useEventBus();
 
 // ---------------------------------------------------------------------------
@@ -70,6 +71,8 @@ let unwatchTrack: (() => void) | null = null;
 let unwatchWork: (() => void) | null = null;
 let bottomOffsetTimer: ReturnType<typeof setInterval> | null = null;
 let escapeHandler: ((e: KeyboardEvent) => void) | null = null;
+let translationGeneration = 0;
+let activeTranslationQueueKey = '';
 
 // Prefetch state managed externally by the controller via exposed methods
 let prefetchedTreeData: TracksResponse | null = null;
@@ -289,6 +292,7 @@ async function renderFlatList(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 async function translateVisibleItems(): Promise<void> {
+    const generation = translationGeneration;
     const textsToTranslate: string[] = [];
 
     for (const item of items.value) {
@@ -305,13 +309,23 @@ async function translateVisibleItems(): Promise<void> {
     if (textsToTranslate.length === 0) return;
 
     try {
-        const queueKey = `flatview:${bridge.currentWorkId || 'unknown'}`;
+        const targetLang = TranslationService.getUiTargetLang();
+        const queueKey = `flatview:${bridge.currentWorkId || 'unknown'}:${targetLang}`;
+        if (activeTranslationQueueKey && activeTranslationQueueKey !== queueKey) {
+            TranslationService.cancelPending({ cancellableKey: activeTranslationQueueKey });
+        }
+        activeTranslationQueueKey = queueKey;
         TranslationService.cancelPending({ cancellableKey: queueKey });
-        const translated = await TranslationService.translateBatch(textsToTranslate, 'en', {
-            priority: FLATVIEW_TRANSLATION_PRIORITY,
-            cancellable: true,
-            cancellableKey: queueKey,
-        });
+        const translated = await TranslationService.translateBatch(
+            textsToTranslate,
+            targetLang,
+            {
+                priority: FLATVIEW_TRANSLATION_PRIORITY,
+                cancellable: true,
+                cancellableKey: queueKey,
+            },
+        );
+        if (generation !== translationGeneration) return;
         const newTranslations: TranslationMap = {};
         for (let i = 0; i < textsToTranslate.length; i++) {
             const original = textsToTranslate[i];
@@ -350,7 +364,7 @@ function playAudio(item: FlatItem): void {
 
     // If already playing this track, toggle play/pause
     if (currentHash === item.hash) {
-        store.commit('AudioPlayer/TOGGLE_PLAYING');
+        bridge.togglePlayback();
         return;
     }
 
@@ -363,11 +377,8 @@ function playAudio(item: FlatItem): void {
     }));
     const index = audioItems.value.findIndex(i => i.hash === item.hash);
 
-    store.commit('AudioPlayer/SET_QUEUE', {
-        queue,
-        index: Math.max(0, index),
-    });
-    store.commit('AudioPlayer/PLAY');
+    const targetIndex = Math.max(0, index);
+    replaceHostPlaybackQueue(store, bridge, queue, targetIndex);
 
     Logger.debug(`[FlatView] Playing: ${item.title} (${index + 1}/${queue.length} in flat queue)`);
 }
@@ -544,6 +555,8 @@ function watchWork(): void {
             () => {
                 // Clear stale items and prefetch cache
                 items.value = [];
+                translationGeneration++;
+                TranslationService.cancelPending({ cancellableKey: activeTranslationQueueKey });
                 translations.value = {};
                 thumbErrors.value = new Set();
                 prefetchedTreeData = null;
@@ -595,8 +608,17 @@ onMounted(() => {
     watchWork();
 });
 
+watch(lang, () => {
+    translationGeneration++;
+    TranslationService.cancelPending({ cancellableKey: activeTranslationQueueKey });
+    activeTranslationQueueKey = '';
+    translations.value = {};
+    if (items.value.length > 0) void translateVisibleItems();
+});
+
 onUnmounted(() => {
-    TranslationService.cancelPending({ cancellableKey: `flatview:${bridge.currentWorkId || 'unknown'}` });
+    translationGeneration++;
+    TranslationService.cancelPending({ cancellableKey: activeTranslationQueueKey });
     if (isActive.value) hide();
     if (unwatchWork) {
         unwatchWork();

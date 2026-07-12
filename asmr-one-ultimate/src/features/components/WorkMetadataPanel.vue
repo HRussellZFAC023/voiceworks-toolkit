@@ -8,6 +8,7 @@ import { useRoute } from '../../composables/useRoute';
 import { DLsiteScraper } from '../DLsiteScraper';
 import type { DLsiteMetadata } from '../../types/dlsite';
 import type { Work, WorkDetail } from '../../types/api';
+import type { TranslationSourceHint } from '../../types/store';
 import { CacheKeys, SharedCache } from '../../core/Cache';
 import { TranslationService } from '../../services/TranslationService';
 import { Priority } from '../../core/GpuScheduler';
@@ -16,14 +17,17 @@ import { MediaViewerController } from '../MediaViewerController';
 import { extractEmbeddedRjCode, extractPrimaryRjCode } from '../rjCodeUtils';
 import { Logger } from '../../core/Utils';
 import { isChinese, getCleanText } from '../../core/DomUtils';
-import { HttpClient } from '../../infrastructure/HttpClient';
+import { sanitizeAllowedHtml, toSafeHttpUrl } from '../../core/SafeHtml';
+import { gmRequest, retryWithBackoff } from '../../infrastructure/HttpClient';
+import { DEFAULT_DLSITE_PROXY } from '../../core/Constants';
+import { fetchVerifiedImageBlob } from '../media/externalImageUtils';
 
 // ============================================================================
 // Composables
 // ============================================================================
 
 const bridge = useBridge();
-const { t, format } = useI18n();
+const { t, format, lang } = useI18n();
 const { emit, on } = useEventBus();
 const route = useRoute();
 const translateMode = useConfig('translateMode');
@@ -55,13 +59,14 @@ const lastBodySignature = ref('');
 const TITLE_REAPPLY_DELAYS_MS = [0, 180, 480, 900];
 let titleApplyTimers: Array<ReturnType<typeof setTimeout>> = [];
 
-/** Image retry counters keyed by URL */
-const imageRetries = ref<Map<string, number>>(new Map());
-const imageSrcs = ref<Map<string, string>>(new Map());
 const imageBlobAttempts = ref<Set<string>>(new Set());
 const imageBlobUrls = ref<Map<string, string>>(new Map());
 const hiddenImageUrls = ref<Set<string>>(new Set());
 const loadedImageUrls = ref<Set<string>>(new Set());
+let imageVerificationGeneration = 0;
+const metadataSourceHint = ref<TranslationSourceHint>('auto');
+let currentWorkTitleSourceHint: TranslationSourceHint = 'auto';
+const officialTagTranslations = ref<Map<number, string>>(new Map());
 
 // ============================================================================
 // Computed
@@ -123,7 +128,11 @@ const chips = computed(() => {
 });
 
 const imageSamples = computed(() => meta.value?.image_samples || []);
-const visibleImageSamples = computed(() => imageSamples.value.filter(url => !hiddenImageUrls.value.has(url)));
+// Never hand an unverified remote image URL to <img>. DLsite sometimes returns
+// an HTTP-200 Cloudflare restriction PNG, which neither @error nor MIME checks
+// can detect. Only verified blob URLs become visible/clickable.
+const visibleImageSamples = computed(() => imageSamples.value.filter(url =>
+    imageBlobUrls.value.has(url) && !hiddenImageUrls.value.has(url)));
 
 const bodyParagraphs = computed(() => {
     if (!meta.value) return [];
@@ -170,163 +179,108 @@ function chipTitle(chip: { label: string; key: string }): string {
 
 function getProxyBaseUrl(): string {
     let raw = String(dlsiteProxyUrl.value || '').trim().replace(/\/+$/, '');
-    if (!raw) return '';
+    if (!raw) return DEFAULT_DLSITE_PROXY;
     if (!/^https?:\/\//i.test(raw)) raw = `https://${raw}`;
     try {
         const parsed = new URL(raw);
-        if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return '';
+        if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return DEFAULT_DLSITE_PROXY;
     } catch {
-        return '';
+        return DEFAULT_DLSITE_PROXY;
     }
     return raw;
 }
 
 function toAbsoluteUrl(url: string): string {
-    if (!url) return '';
-    if (url.startsWith('//')) return `https:${url}`;
-    return url;
-}
-
-function isDlsiteImageUrl(url: string): boolean {
-    try {
-        const host = new URL(url).hostname.toLowerCase();
-        return host.includes('dlsite.com') || host.includes('dlsite.jp');
-    } catch {
-        return false;
-    }
-}
-
-function proxyImageUrl(originalUrl: string, preserveHost = true): string {
-    const normalizedUrl = toAbsoluteUrl(originalUrl);
-    const base = getProxyBaseUrl();
-    if (!base) return normalizedUrl;
-
-    try {
-        const parsed = new URL(normalizedUrl);
-        const host = parsed.hostname.toLowerCase();
-        if (!host.includes('dlsite.com') && !host.includes('dlsite.jp')) return normalizedUrl;
-        const params = new URLSearchParams(parsed.search);
-        if (preserveHost && host !== 'www.dlsite.com') {
-            params.set('__host', host);
-        }
-        const query = params.toString();
-        return `${base}${parsed.pathname}${query ? `?${query}` : ''}`;
-    } catch {
-        return normalizedUrl;
-    }
-}
-
-function getDisplayBaseUrl(url: string): string {
-    return toAbsoluteUrl(url);
-}
-
-function getResolvedImageUrl(url: string): string {
-    return imageSrcs.value.get(url) || getDisplayBaseUrl(url);
+    return toSafeHttpUrl(url) || '';
 }
 
 function getImageSrc(url: string): string {
-    return getResolvedImageUrl(url);
+    return imageBlobUrls.value.get(url) || '';
 }
 
 function isImageLoaded(url: string): boolean {
     return loadedImageUrls.value.has(url);
 }
 
-async function tryBlobFallback(url: string): Promise<boolean> {
-    if (imageBlobAttempts.value.has(url) || imageBlobUrls.value.has(url)) return false;
+async function verifySampleImage(url: string): Promise<boolean> {
+    if (imageBlobUrls.value.has(url)) return true;
+    if (imageBlobAttempts.value.has(url)) return false;
     imageBlobAttempts.value.add(url);
-    let loadedFromBlob = false;
+    const generation = imageVerificationGeneration;
+    const sourceUrl = toAbsoluteUrl(url);
+    if (!sourceUrl) {
+        hiddenImageUrls.value.add(url);
+        hiddenImageUrls.value = new Set(hiddenImageUrls.value);
+        return false;
+    }
 
-    const directUrl = toAbsoluteUrl(url);
-    const hostAwareProxyUrl = proxyImageUrl(url, true);
-    const legacyProxyUrl = proxyImageUrl(url, false);
-    const orderedCandidates = [directUrl, hostAwareProxyUrl, legacyProxyUrl];
-    const candidates = orderedCandidates
-        .filter((candidate, idx, arr) => !!candidate && arr.indexOf(candidate) === idx);
-
-    for (const candidate of candidates) {
-        if (!candidate) continue;
-        Logger.debug(`[WorkMetadataPanel] Image failed, trying blob fetch: ${candidate}`);
-        try {
-            const blob = await HttpClient.getBlob(candidate, {
-                retry: { attempts: 2, backoffMs: 600, multiplier: 2 },
-            });
-            if (!blob) continue;
-
-            const blobUrl = URL.createObjectURL(blob);
-            const previousBlob = imageBlobUrls.value.get(url);
-            if (previousBlob) URL.revokeObjectURL(previousBlob);
-
-            imageBlobUrls.value.set(url, blobUrl);
-            imageSrcs.value.set(url, blobUrl);
-            hiddenImageUrls.value.delete(url);
-            loadedFromBlob = true;
-            return true;
-        } catch (e) {
-            Logger.debug(`[WorkMetadataPanel] Blob fallback failed for sample image: ${candidate}`, e);
+    try {
+        const verified = await fetchVerifiedImageBlob(sourceUrl, {
+            proxyBaseUrl: getProxyBaseUrl(),
+            headers: {
+                Accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+            },
+            dlsiteHeaders: {
+                Referer: 'https://www.dlsite.com/',
+                Origin: 'https://www.dlsite.com',
+            },
+            request: config => retryWithBackoff(
+                () => gmRequest(config),
+                { attempts: 2, backoffMs: 600, multiplier: 2 },
+            ),
+        });
+        if (!verified || generation !== imageVerificationGeneration) {
+            if (generation === imageVerificationGeneration) {
+                hiddenImageUrls.value.add(url);
+                hiddenImageUrls.value = new Set(hiddenImageUrls.value);
+            }
+            return false;
         }
-    }
 
-    // Allow later retries if this fallback cycle failed for every candidate.
-    if (!loadedFromBlob) {
-        imageBlobAttempts.value.delete(url);
+        const blobUrl = URL.createObjectURL(verified.blob);
+        if (generation !== imageVerificationGeneration) {
+            URL.revokeObjectURL(blobUrl);
+            return false;
+        }
+        const previousBlob = imageBlobUrls.value.get(url);
+        if (previousBlob) URL.revokeObjectURL(previousBlob);
+        imageBlobUrls.value.set(url, blobUrl);
+        imageBlobUrls.value = new Map(imageBlobUrls.value);
+        hiddenImageUrls.value.delete(url);
+        hiddenImageUrls.value = new Set(hiddenImageUrls.value);
+        return true;
+    } catch (error) {
+        if (generation === imageVerificationGeneration) {
+            hiddenImageUrls.value.add(url);
+            hiddenImageUrls.value = new Set(hiddenImageUrls.value);
+        }
+        Logger.debug('[WorkMetadataPanel] Verified sample image fetch failed:', error);
+        return false;
     }
-    return loadedFromBlob;
+}
+
+async function verifySampleImages(): Promise<void> {
+    await Promise.allSettled(imageSamples.value.map(url => verifySampleImage(url)));
 }
 
 function onImageError(url: string): void {
-    const baseUrl = toAbsoluteUrl(url);
-    const isDlsite = isDlsiteImageUrl(baseUrl);
-
-    void tryBlobFallback(url).then((ok) => {
-        if (isDlsite && !ok && !imageBlobUrls.value.has(url)) {
-            hiddenImageUrls.value.add(url);
-        }
-    });
-
-    // DLsite image endpoints frequently hard-403 for unavailable samples.
-    // Don't waste time with cache-buster retries; fallback/hide handles it.
-    if (isDlsite) return;
-
-    const count = (imageRetries.value.get(url) || 0) + 1;
-    const maxRetries = 3;
-    if (count > maxRetries) {
-        if (!imageBlobUrls.value.has(url)) {
-            hiddenImageUrls.value.add(url);
-        }
-        return;
-    }
-
-    imageRetries.value.set(url, count);
-    const delay = Math.pow(2, count - 1) * 1000;
-    Logger.debug(`[WorkMetadataPanel] Sample image retry ${count}/${maxRetries} in ${delay}ms`);
-
-    setTimeout(() => {
-        if (imageBlobUrls.value.has(url)) return;
-        const retryBaseUrl = toAbsoluteUrl(url);
-        if (!retryBaseUrl || retryBaseUrl.startsWith('blob:')) {
-            if (count >= maxRetries && !imageBlobUrls.value.has(url)) {
-                hiddenImageUrls.value.add(url);
-            }
-            return;
-        }
-        if (isDlsiteImageUrl(retryBaseUrl) || retryBaseUrl.includes('__host=')) {
-            if (count >= maxRetries && !imageBlobUrls.value.has(url)) {
-                hiddenImageUrls.value.add(url);
-            }
-            return;
-        }
-        const separator = retryBaseUrl.includes('?') ? '&' : '?';
-        imageSrcs.value.set(url, `${retryBaseUrl}${separator}_r=${count}`);
-    }, delay);
+    const blobUrl = imageBlobUrls.value.get(url);
+    if (blobUrl) URL.revokeObjectURL(blobUrl);
+    imageBlobUrls.value.delete(url);
+    imageBlobUrls.value = new Map(imageBlobUrls.value);
+    hiddenImageUrls.value.add(url);
+    hiddenImageUrls.value = new Set(hiddenImageUrls.value);
 }
 
 function onImageLoad(url: string): void {
     loadedImageUrls.value.add(url);
+    loadedImageUrls.value = new Set(loadedImageUrls.value);
     hiddenImageUrls.value.delete(url);
+    hiddenImageUrls.value = new Set(hiddenImageUrls.value);
 }
 
 function resetImageState(): void {
+    imageVerificationGeneration++;
     imageBlobUrls.value.forEach((blobUrl) => {
         try {
             URL.revokeObjectURL(blobUrl);
@@ -334,8 +288,6 @@ function resetImageState(): void {
             // Ignore invalid/revoked object URLs
         }
     });
-    imageRetries.value = new Map();
-    imageSrcs.value = new Map();
     imageBlobAttempts.value = new Set();
     imageBlobUrls.value = new Map();
     hiddenImageUrls.value = new Set();
@@ -462,12 +414,13 @@ function openDlsiteSearch(keyword: string): void {
 }
 
 function openImageViewer(urls: string[], index: number): void {
-    const resolvedUrls = urls.map((url) => imageBlobUrls.value.get(url) || toAbsoluteUrl(url));
+    const resolvedUrls = urls.map((url) => imageBlobUrls.value.get(url) || '').filter(Boolean);
+    if (!resolvedUrls[index]) return;
     try {
         MediaViewerController.getInstance().showExternalImages(resolvedUrls, index);
     } catch (e) {
         Logger.warn('[WorkMetadataPanel] MediaViewer failed, opening in new tab:', e);
-        window.open(resolvedUrls[index], '_blank');
+        window.open(resolvedUrls[index], '_blank', 'noopener,noreferrer');
     }
 }
 
@@ -489,14 +442,14 @@ async function handleRefresh(): Promise<void> {
     const textsToInvalidate = [
         meta.value?.title,
         meta.value?.description,
+        ...bodyParagraphs.value.map(bodyParagraphPlainText),
         meta.value?.circle?.name,
         ...(meta.value?.tags || []).map(t => t.name),
         ...(meta.value?.cvs || []).map(c => c.name),
     ];
     textsToInvalidate.forEach(text => {
         if (!text) return;
-        SharedCache.set(CacheKeys.translation(text, 'en', 'remote'), null, 0);
-        SharedCache.set(CacheKeys.translation(text, 'en', 'auto'), null, 0);
+        TranslationService.invalidate(text);
     });
 
     clearTitleApplyTimers();
@@ -508,6 +461,9 @@ async function handleRefresh(): Promise<void> {
     descriptionTranslated.value = '';
     bodyTranslations.value = new Map();
     chipTranslations.value = new Map();
+    officialTagTranslations.value = new Map();
+    metadataSourceHint.value = 'auto';
+    currentWorkTitleSourceHint = 'auto';
     detailsExpanded.value = false;
     resetImageState();
 
@@ -524,6 +480,26 @@ function extractRjCode(work: Work | WorkDetail, id: string): string {
         workId: id,
         title: work.title,
     }) ?? '';
+}
+
+function inferWorkSourceLanguage(work: Work | WorkDetail): TranslationSourceHint {
+    const lang = String(work.translation_info?.lang || '').toUpperCase();
+    if (lang.includes('CHI') || lang.includes('ZH')) return 'zh';
+    if (lang.includes('JPN') || lang.includes('JA')) return 'ja';
+    if (lang.includes('ENG') || lang.includes('EN')) return 'en';
+    if (work.translation_info?.is_original) return 'ja';
+    return 'auto';
+}
+
+function collectOfficialTagTranslations(work: Work | WorkDetail): Map<number, string> {
+    const target = TranslationService.getUiTargetLang();
+    const localeKey = target === 'zh' ? 'zh-cn' : target === 'ja' ? 'ja-jp' : 'en-us';
+    const translations = new Map<number, string>();
+    for (const tag of work.tags || []) {
+        const name = tag.i18n?.[localeKey]?.name?.trim();
+        if (name) translations.set(Number(tag.id), name);
+    }
+    return translations;
 }
 
 function resolveJpRjCode(work: Work | WorkDetail, currentCode: string): string | null {
@@ -659,6 +635,7 @@ function sanitizeBody(body: string): string {
     s = s.replace(/^---+$/gm, '');
     s = s.replace(/^={3,}$/gm, '');
 
+    s = sanitizeAllowedHtml(s, { allowImages: true });
     s = s.replace(/\n{3,}/g, '\n\n');
     s = s.trim();
 
@@ -669,18 +646,37 @@ function sanitizeBody(body: string): string {
     return s;
 }
 
-/** Convert newlines in a paragraph to <br> for v-html rendering.
- *  sanitizeBody() already strips dangerous tags (script/iframe/object/style),
- *  so the output is safe for v-html without additional escaping. */
+/** Convert newlines in an already allowlist-sanitized paragraph to <br>. */
 function paragraphHtml(para: string): string {
     return para.replace(/\n/g, '<br>');
+}
+
+function bodyParagraphPlainText(para: string): string {
+    const element = document.createElement('div');
+    element.innerHTML = paragraphHtml(para);
+    return element.textContent || '';
+}
+
+function displayedBodyParagraphHtml(para: string, index: number): string {
+    const translated = cnOnlyMode.value ? bodyTranslations.value.get(index) : '';
+    // Custom translation providers are remote input too. Re-sanitize before
+    // the only v-html sink even though the original scraped paragraph was
+    // already sanitized by sanitizeBody().
+    return translated
+        ? sanitizeAllowedHtml(translated)
+        : sanitizeAllowedHtml(paragraphHtml(para), { allowImages: true });
 }
 
 // ============================================================================
 // Title Translation (operates on host DOM, outside Vue scope)
 // ============================================================================
 
-async function translateTitle(originalTitle: string, expectedLoadVersion: number, expectedWorkId: string): Promise<void> {
+async function translateTitle(
+    originalTitle: string,
+    expectedLoadVersion: number,
+    expectedWorkId: string,
+    sourceLanguageHint: TranslationSourceHint = currentWorkTitleSourceHint,
+): Promise<void> {
     if (!originalTitle) return;
 
     const titleRequestId = ++titleTranslationRequestVersion;
@@ -691,7 +687,7 @@ async function translateTitle(originalTitle: string, expectedLoadVersion: number
     if (shouldSkipTranslation) {
         if (isTitleRequestCurrent(expectedLoadVersion, expectedWorkId, titleRequestId)) {
             resetInjectedTitleElements();
-            emit('title:update', { title: originalTitle });
+            emit('title:update', { title: originalTitle, sourceLanguageHint });
         }
         return;
     }
@@ -700,16 +696,18 @@ async function translateTitle(originalTitle: string, expectedLoadVersion: number
         const translated = cnOnlyMode.value
             ? await TranslationService.translate(originalTitle, 'ja', {
                 priority: METADATA_TRANSLATION_PRIORITY,
+                sourceLanguageHint: 'zh',
             })
-            : await TranslationService.translate(originalTitle, 'en', {
+            : await TranslationService.translate(originalTitle, TranslationService.getUiTargetLang(), {
                 priority: METADATA_TRANSLATION_PRIORITY,
+                sourceLanguageHint,
             });
         if (!isTitleRequestCurrent(expectedLoadVersion, expectedWorkId, titleRequestId)) {
             return;
         }
         if (!translated || translated === originalTitle) {
             resetInjectedTitleElements();
-            emit('title:update', { title: originalTitle });
+            emit('title:update', { title: originalTitle, sourceLanguageHint });
             return;
         }
 
@@ -724,7 +722,11 @@ async function translateTitle(originalTitle: string, expectedLoadVersion: number
                 titleApplyTimers.push(setTimeout(run, delay));
             }
         }
-        emit('title:update', { title: translated });
+        emit('title:update', {
+            title: translated,
+            sourceLanguageHint: cnOnlyMode.value ? 'ja' : TranslationService.getUiTargetLang() as TranslationSourceHint,
+            translated: true,
+        });
     } catch (e) {
         Logger.warn('[WorkMetadataPanel] Title translation failed', e);
     }
@@ -738,19 +740,22 @@ async function translateDescription(expectedLoadVersion: number, expectedWorkId:
     if ((!shouldTranslate.value && !cnToJp.value) || !meta.value?.description) return;
     const source = meta.value.description;
     if (cnOnlyMode.value && !isChinese(source)) return;
-    const targetLang = cnOnlyMode.value ? 'ja' : 'en';
-    const signature = `${targetLang}:${source}`;
+    const targetLang = cnOnlyMode.value ? 'ja' : TranslationService.getUiTargetLang();
+    const sourceLanguageHint = cnOnlyMode.value ? 'zh' : metadataSourceHint.value;
+    const signature = `${sourceLanguageHint}:${targetLang}:${source}`;
     if (signature === lastDescriptionSignature.value) return;
     lastDescriptionSignature.value = signature;
 
     try {
         const translated = await TranslationService.translate(source, targetLang, {
             priority: Priority.NORMAL,
+            sourceLanguageHint,
         });
         if (
             expectedLoadVersion !== loadRequestVersion ||
             currentWorkId.value !== expectedWorkId ||
-            meta.value?.description !== source
+            meta.value?.description !== source ||
+            lastDescriptionSignature.value !== signature
         ) {
             return;
         }
@@ -766,8 +771,10 @@ async function translateDescription(expectedLoadVersion: number, expectedWorkId:
 
 async function translateChips(expectedLoadVersion: number, expectedWorkId: string): Promise<void> {
     if (!shouldTranslate.value && !cnToJp.value) return;
-    const targetLang = cnOnlyMode.value ? 'ja' : 'en';
-    const chipSignature = `${targetLang}:${chips.value.map(chip => `${chip.key}:${chip.label}`).join('|')}`;
+    const targetLang = cnOnlyMode.value ? 'ja' : TranslationService.getUiTargetLang();
+    // Chips may mix DLsite JP fields with host-edition fallbacks.
+    const sourceLanguageHint: TranslationSourceHint = cnOnlyMode.value ? 'zh' : 'auto';
+    const chipSignature = `${sourceLanguageHint}:${targetLang}:${chips.value.map(chip => `${chip.key}:${chip.label}`).join('|')}`;
     if (chipSignature === lastChipSignature.value) return;
     lastChipSignature.value = chipSignature;
 
@@ -778,8 +785,16 @@ async function translateChips(expectedLoadVersion: number, expectedWorkId: strin
         if (!text || !/[\u3040-\u30ff\u4e00-\u9faf]/.test(text)) continue;
         if (cnOnlyMode.value && !isChinese(text)) continue;
 
-        // Try tag pre-translation first (skip in CN-only mode)
         if (!cnOnlyMode.value && chip.tagId) {
+            const official = officialTagTranslations.value.get(chip.tagId);
+            if (official && official !== text) {
+                chipTranslations.value.set(chip.key, TranslationService.formatPair(text, official));
+                continue;
+            }
+        }
+
+        // Try tag pre-translation first (skip in CN-only mode)
+        if (!cnOnlyMode.value && targetLang === 'en' && chip.tagId) {
             const tagList = TranslatedTags.getInstance().getTagList();
             const match = tagList.find(t => t.id === chip.tagId || t.ja === text);
             if (match?.en && match.ja && match.en !== match.ja) {
@@ -796,10 +811,12 @@ async function translateChips(expectedLoadVersion: number, expectedWorkId: strin
     try {
         const results = await TranslationService.translateBatch(labelsToTranslate.map(l => l.text), targetLang, {
             priority: METADATA_TRANSLATION_PRIORITY,
+            sourceLanguageHint,
         });
         if (
             expectedLoadVersion !== loadRequestVersion ||
-            currentWorkId.value !== expectedWorkId
+            currentWorkId.value !== expectedWorkId ||
+            lastChipSignature.value !== chipSignature
         ) {
             return;
         }
@@ -824,15 +841,12 @@ async function translateBodyParagraphs(expectedLoadVersion: number, expectedWork
     if ((!shouldTranslate.value && !cnToJp.value) || bodyParagraphs.value.length === 0) return;
 
     // Extract plain text from HTML paragraphs
-    const tempDiv = document.createElement('div');
-    const texts = bodyParagraphs.value.map(para => {
-        tempDiv.innerHTML = paragraphHtml(para);
-        return tempDiv.textContent || '';
-    }).filter(t => t.length > 0);
+    const texts = bodyParagraphs.value.map(bodyParagraphPlainText).filter(t => t.length > 0);
 
     if (texts.length === 0) return;
-    const targetLang = cnOnlyMode.value ? 'ja' : 'en';
-    const bodySignature = `${targetLang}:${texts.join('\u241e')}`;
+    const targetLang = cnOnlyMode.value ? 'ja' : TranslationService.getUiTargetLang();
+    const sourceLanguageHint = cnOnlyMode.value ? 'zh' : metadataSourceHint.value;
+    const bodySignature = `${sourceLanguageHint}:${targetLang}:${texts.join('\u241e')}`;
     if (bodySignature === lastBodySignature.value) return;
     lastBodySignature.value = bodySignature;
 
@@ -853,10 +867,12 @@ async function translateBodyParagraphs(expectedLoadVersion: number, expectedWork
             const firstChunk = texts.slice(0, firstCount);
             const firstResults = await TranslationService.translateBatch(firstChunk, targetLang, {
                 priority: METADATA_TRANSLATION_PRIORITY,
+                sourceLanguageHint,
             });
             if (
                 expectedLoadVersion !== loadRequestVersion ||
-                currentWorkId.value !== expectedWorkId
+                currentWorkId.value !== expectedWorkId ||
+                lastBodySignature.value !== bodySignature
             ) {
                 return;
             }
@@ -867,10 +883,12 @@ async function translateBodyParagraphs(expectedLoadVersion: number, expectedWork
             const chunk = texts.slice(start, start + METADATA_BODY_STREAM_BATCH);
             const chunkResults = await TranslationService.translateBatch(chunk, targetLang, {
                 priority: METADATA_TRANSLATION_PRIORITY,
+                sourceLanguageHint,
             });
             if (
                 expectedLoadVersion !== loadRequestVersion ||
-                currentWorkId.value !== expectedWorkId
+                currentWorkId.value !== expectedWorkId ||
+                lastBodySignature.value !== bodySignature
             ) {
                 return;
             }
@@ -917,6 +935,10 @@ async function loadMetadata(id: string): Promise<void> {
         Logger.warn('[WorkMetadataPanel] Work details missing for', id);
         return;
     }
+    const workSourceHint = inferWorkSourceLanguage(work);
+    currentWorkTitleSourceHint = workSourceHint;
+    metadataSourceHint.value = workSourceHint;
+    officialTagTranslations.value = collectOfficialTagTranslations(work);
 
     const rjCodeStr = extractRjCode(work, id);
     if (!rjCodeStr) {
@@ -936,10 +958,11 @@ async function loadMetadata(id: string): Promise<void> {
 
     // Start title translation early (in parallel with DLsite scrape)
     const titleToTranslate = work.title || fallback?.title || '';
-    if (titleToTranslate) translateTitle(titleToTranslate, version, id);
+    if (titleToTranslate) translateTitle(titleToTranslate, version, id, workSourceHint);
 
     // Phase 0: Render fallback immediately for fast first paint
     if (fallback) {
+        metadataSourceHint.value = workSourceHint;
         meta.value = fallback;
         lastDescriptionSignature.value = '';
         lastChipSignature.value = '';
@@ -954,10 +977,11 @@ async function loadMetadata(id: string): Promise<void> {
 
         const onProgress = (partial: DLsiteMetadata) => {
             if (currentWorkId.value !== id) return;
+            metadataSourceHint.value = 'ja';
             partial.rjcode = rjCodeStr;
             const merged = mergeMeta(partial, fallback);
-            if (merged.title && merged.title !== titleToTranslate) {
-                translateTitle(merged.title, version, id);
+            if (!titleToTranslate && merged.title) {
+                translateTitle(merged.title, version, id, 'ja');
             }
             meta.value = merged;
             // Re-trigger translations on enriched data
@@ -971,13 +995,14 @@ async function loadMetadata(id: string): Promise<void> {
 
         const fullMeta = await scraper.scrapeProgressive(actualScrapeCode, onProgress);
         if (currentWorkId.value !== id) return;
+        metadataSourceHint.value = 'ja';
 
         // Phase 2: Full data with body - final render
         fullMeta.rjcode = rjCodeStr;
         const merged = mergeMeta(fullMeta, fallback);
 
-        if (merged.title && merged.title !== titleToTranslate) {
-            translateTitle(merged.title, version, id);
+        if (!titleToTranslate && merged.title) {
+            translateTitle(merged.title, version, id, 'ja');
         }
 
         meta.value = merged;
@@ -1012,6 +1037,9 @@ function applyWorkChange(newId: string, oldId = ''): void {
     descriptionTranslated.value = '';
     bodyTranslations.value = new Map();
     chipTranslations.value = new Map();
+    officialTagTranslations.value = new Map();
+    metadataSourceHint.value = 'auto';
+    currentWorkTitleSourceHint = 'auto';
     lastDescriptionSignature.value = '';
     lastChipSignature.value = '';
     lastBodySignature.value = '';
@@ -1024,6 +1052,30 @@ function applyWorkChange(newId: string, oldId = ''): void {
 watch(workId, (newId, oldId) => {
     applyWorkChange(newId, oldId);
 }, { immediate: true });
+
+watch([lang, translateMode, cnToJpConfig], () => {
+    const id = currentWorkId.value;
+    if (!id) return;
+    descriptionTranslated.value = '';
+    bodyTranslations.value = new Map();
+    chipTranslations.value = new Map();
+    lastDescriptionSignature.value = '';
+    lastChipSignature.value = '';
+    lastBodySignature.value = '';
+    clearTitleApplyTimers();
+    titleTranslationRequestVersion++;
+    resetInjectedTitleElements();
+    void loadMetadata(id);
+});
+
+watch([detailsExpanded, imageSamples], ([expanded]) => {
+    if (expanded) void verifySampleImages();
+});
+
+watch(dlsiteProxyUrl, () => {
+    resetImageState();
+    if (detailsExpanded.value) void verifySampleImages();
+});
 
 on('work:change', ({ workId: nextWorkId, work }) => {
     const id = String(nextWorkId || '');
@@ -1039,7 +1091,8 @@ on('work:change', ({ workId: nextWorkId, work }) => {
     // Same work id, but host replaced work payload/title; refresh translated title.
     const title = work?.title || meta.value?.title || '';
     if (title) {
-        translateTitle(title, loadRequestVersion, id);
+        const sourceLanguageHint = work ? inferWorkSourceLanguage(work as Work | WorkDetail) : currentWorkTitleSourceHint;
+        translateTitle(title, loadRequestVersion, id, sourceLanguageHint);
     }
 });
 
@@ -1145,6 +1198,7 @@ onUnmounted(() => {
                             @click="openImageViewer(visibleImageSamples, idx)"
                         >
                             <img
+                                v-if="getImageSrc(url)"
                                 :src="getImageSrc(url)"
                                 :class="{ 'asmr-meta-gallery-img--loaded': isImageLoaded(url) }"
                                 loading="lazy"
@@ -1165,7 +1219,7 @@ onUnmounted(() => {
                                 class="asmr-meta-body-row"
                             >
                                 <!-- eslint-disable-next-line vue/no-v-html -->
-                                <div class="asmr-meta-body-cell asmr-meta-body-cell--original" v-html="cnOnlyMode && bodyTranslations.get(idx) ? bodyTranslations.get(idx) : paragraphHtml(para)"></div>
+                                <div class="asmr-meta-body-cell asmr-meta-body-cell--original" v-html="displayedBodyParagraphHtml(para, idx)"></div>
                                 <div
                                     v-if="shouldTranslate && bodyTranslations.get(idx)"
                                     class="asmr-meta-body-cell asmr-meta-body-cell--translated"

@@ -76,6 +76,7 @@ export interface GmRequestConfig {
     data?: string;
     responseType?: 'blob' | 'json' | 'text' | 'arraybuffer';
     timeout?: number;
+    signal?: AbortSignal;
     onprogress?: (event: { loaded: number; total: number; lengthComputable: boolean }) => void;
 }
 
@@ -85,6 +86,7 @@ export interface GmResponse {
     responseText: string;
     response: unknown;
     responseHeaders: string;
+    finalUrl?: string;
 }
 
 /** Alias for fetch RequestCredentials — mirrors the built-in type for clarity */
@@ -100,11 +102,24 @@ const DEFAULT_RETRY: Required<Pick<RetryConfig, 'attempts' | 'backoffMs' | 'mult
     multiplier: 2,
 };
 
+function errorSummary(error: unknown): string {
+    if (error instanceof Error) return error.message;
+    if (typeof error === 'string') return error;
+    if (typeof error === 'number' || typeof error === 'boolean') return String(error);
+    // Network adapters may reject with event/request objects. Do not hand an
+    // opaque object to the logger because it can retain headers or payloads.
+    return 'Unknown request error';
+}
+
 /**
  * Custom error class for HTTP errors that preserves the status code.
  */
 export class HttpError extends Error {
-    constructor(public readonly status: number, message: string) {
+    constructor(
+        public readonly status: number,
+        message: string,
+        public readonly responseText = '',
+    ) {
         super(message);
         this.name = 'HttpError';
     }
@@ -146,7 +161,7 @@ export async function retryWithBackoff<T>(
                 const delay = backoffMs * Math.pow(multiplier, attempt);
                 Logger.warn(
                     `[retry] Attempt ${attempt + 1}/${attempts} failed, retrying in ${delay}ms`,
-                    error instanceof Error ? error.message : error,
+                    errorSummary(error),
                 );
                 await sleep(delay);
             }
@@ -172,26 +187,70 @@ export function gmRequest(config: GmRequestConfig): Promise<GmResponse> {
             return;
         }
 
-        gmXhr({
-            method: config.method || 'GET',
-            url: config.url,
-            headers: config.headers,
-            data: config.data,
-            responseType: config.responseType,
-            timeout: config.timeout ?? TIMING.HTTP_TIMEOUT_MS,
-            onprogress: config.onprogress ? (event: { loaded: number; total: number; lengthComputable: boolean }) => {
-                config.onprogress!(event);
-            } : undefined,
-            onload: (res: GmResponse) => {
-                if (res.status >= 400) {
-                    reject(new HttpError(res.status, `HTTP ${res.status}: ${res.statusText || 'Error'}`));
-                } else {
-                    resolve(res);
-                }
-            },
-            onerror: (err: unknown) => reject(err || new Error('Network error')),
-            ontimeout: () => reject(new Error('Request timeout')),
-        });
+        let settled = false;
+        let request: { abort?: () => void } | undefined;
+        const cleanup = () => config.signal?.removeEventListener('abort', onSignalAbort);
+        const resolveOnce = (response: GmResponse) => {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            resolve(response);
+        };
+        const rejectOnce = (error: unknown) => {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            reject(error);
+        };
+        const onTransportAbort = () => {
+            rejectOnce(new DOMException('Request aborted', 'AbortError'));
+        };
+        const onSignalAbort = () => {
+            if (settled) return;
+            // Settle before asking the transport to abort: Tampermonkey may fire
+            // onabort synchronously from abort(), and that callback must not
+            // recurse into abort() again.
+            rejectOnce(new DOMException('Request aborted', 'AbortError'));
+            try { request?.abort?.(); } catch { /* ignore transport abort errors */ }
+        };
+
+        if (config.signal?.aborted) {
+            onSignalAbort();
+            return;
+        }
+        config.signal?.addEventListener('abort', onSignalAbort, { once: true });
+
+        try {
+            request = gmXhr({
+                method: config.method || 'GET',
+                url: config.url,
+                headers: config.headers,
+                data: config.data,
+                responseType: config.responseType,
+                timeout: config.timeout ?? TIMING.HTTP_TIMEOUT_MS,
+                onprogress: config.onprogress ? (event: { loaded: number; total: number; lengthComputable: boolean }) => {
+                    if (!settled && !config.signal?.aborted) config.onprogress!(event);
+                } : undefined,
+                onload: (res: GmResponse) => {
+                    if (res.status >= 400) {
+                        rejectOnce(new HttpError(
+                            res.status,
+                            `HTTP ${res.status}: ${res.statusText || 'Error'}`,
+                            res.responseText || '',
+                        ));
+                    } else {
+                        resolveOnce(res);
+                    }
+                },
+                onerror: (err: unknown) => rejectOnce(err || new Error('Network error')),
+                ontimeout: () => rejectOnce(new Error('Request timeout')),
+                onabort: onTransportAbort,
+            }) as { abort?: () => void } | undefined;
+            // The signal can fire while GM_xmlhttpRequest is being created.
+            if (config.signal?.aborted) onSignalAbort();
+        } catch (error) {
+            rejectOnce(error);
+        }
     });
 }
 

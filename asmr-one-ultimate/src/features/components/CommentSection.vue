@@ -10,12 +10,14 @@ import { TranslationService } from '../../services/TranslationService';
 import { Priority } from '../../core/GpuScheduler';
 import { Logger } from '../../core/Logger';
 import { isChinese } from '../../core/DomUtils';
+import { runPacedBatches } from '../../core/PacedBatch';
 import type { DLsiteUserReview } from '../../types/dlsite';
 import {
     extractAllRjCodes,
     getAllRelatedWorkIds,
     getReviewParagraphs,
     htmlToPlainText,
+    sanitizeReviewHtml,
     type CommentSectionWorkLike,
 } from '../commentSectionUtils';
 
@@ -24,7 +26,7 @@ import {
 // ---------------------------------------------------------------------------
 
 const bridge = useBridge();
-const { t } = useI18n();
+const { t, lang } = useI18n();
 const translateMode = useConfig('translateMode');
 const cnToJp = useConfig('translateCnToJp');
 const route = useRoute();
@@ -56,6 +58,7 @@ let syncing = false;
 let qRatingCleanup: (() => void) | null = null;
 let savedStatusTimer: ReturnType<typeof setTimeout> | null = null;
 let loadRequestVersion = 0;
+let translationGeneration = 0;
 const COMMENT_TRANSLATION_PRIORITY = Priority.NORMAL;
 
 function getCommentTranslationQueueKey(workId: string | null, scope: 'preload' | 'paragraphs' = 'paragraphs'): string {
@@ -138,7 +141,7 @@ async function fetchCombinedEditionReviewCount(expectedVersion: number, expected
 
     let total = work.review_count || 0;
 
-    const fetches = otherEditions.map(async ed => {
+    const counts = await runPacedBatches(otherEditions, async ed => {
         const edId = ed?.id;
         if (!edId || String(edId) === String(currentWorkId.value)) return 0;
         try {
@@ -148,11 +151,10 @@ async function fetchCombinedEditionReviewCount(expectedVersion: number, expected
             Logger.warn(`[CommentSection] Failed to fetch review count for edition ${edId}`, e);
             return 0;
         }
-    });
-
-    const counts = await Promise.all(fetches);
+    }, { batchSize: 2, delayMs: 300 });
     if (loadRequestVersion !== expectedVersion || currentWorkId.value !== expectedWorkId) return;
-    total += counts.reduce((sum: number, c: number) => sum + c, 0);
+    total += counts.reduce((sum, result) =>
+        sum + (result.status === 'fulfilled' ? result.value : 0), 0);
 
     combinedEditionReviewCount.value = total;
     Logger.debug(`[CommentSection] Combined review count across ${1 + otherEditions.length} editions: ${total}`);
@@ -175,8 +177,10 @@ async function fetchDLsiteReviewsData(expectedVersion = loadRequestVersion): Pro
     }
 
     try {
-        const results = await Promise.allSettled(
-            allCodes.map(code => scraper.scrapeReviews(code))
+        const results = await runPacedBatches(
+            allCodes,
+            code => scraper.scrapeReviews(code),
+            { batchSize: 2, delayMs: 500 },
         );
 
         if (loadRequestVersion !== expectedVersion || currentWorkId.value !== workIdAtStart) {
@@ -226,6 +230,7 @@ function preTranslateReviews(reviews: DLsiteUserReview[]): void {
     if (!translateMode.value && !cnToJp.value) return;
     const queueKey = getCommentTranslationQueueKey(currentWorkId.value, 'preload');
     const cnOnlyMode = !translateMode.value && cnToJp.value;
+    const uiTargetLang = TranslationService.getUiTargetLang();
     const texts: string[] = [];
     const cnTexts: string[] = [];
     for (const review of reviews) {
@@ -243,7 +248,7 @@ function preTranslateReviews(reviews: DLsiteUserReview[]): void {
     }
     if (texts.length > 0) {
         Logger.debug(`[CommentSection] Pre-translating ${texts.length} paragraphs in bulk`);
-        TranslationService.translateBatch(texts, 'en', {
+        TranslationService.translateBatch(texts, uiTargetLang, {
             priority: COMMENT_TRANSLATION_PRIORITY,
             cancellable: true,
             cancellableKey: queueKey,
@@ -270,9 +275,11 @@ async function translateParagraphs(
     paragraphs: string[],
     expectedVersion: number,
     expectedWorkId: string,
-    targetLang?: string
+    targetLang?: string,
+    expectedTranslationGeneration = translationGeneration,
 ): Promise<void> {
     const queueKey = getCommentTranslationQueueKey(expectedWorkId, 'paragraphs');
+    const effectiveTargetLang = targetLang || TranslationService.getUiTargetLang();
     // Translate each paragraph independently so results stream into the UI
     // as they complete (cache hits appear instantly, model results trickle in).
     const promises: Promise<void>[] = [];
@@ -280,15 +287,20 @@ async function translateParagraphs(
         const plain = htmlToPlainText(paragraphs[paraIdx]);
         if (plain.length === 0) continue;
         promises.push(
-            TranslationService.translate(plain, targetLang, {
+            TranslationService.translate(plain, effectiveTargetLang, {
                 priority: COMMENT_TRANSLATION_PRIORITY,
                 cancellable: true,
                 cancellableKey: queueKey,
+                sourceLanguageHint: targetLang === 'ja' ? 'zh' : 'auto',
             }).then(translated => {
-                if (loadRequestVersion !== expectedVersion || currentWorkId.value !== expectedWorkId) return;
+                if (loadRequestVersion !== expectedVersion
+                    || currentWorkId.value !== expectedWorkId
+                    || expectedTranslationGeneration !== translationGeneration) return;
                 translations.value[`${reviewIdx}:${paraIdx}`] = (translated && translated !== plain) ? translated : '';
             }).catch(() => {
-                if (loadRequestVersion !== expectedVersion || currentWorkId.value !== expectedWorkId) return;
+                if (loadRequestVersion !== expectedVersion
+                    || currentWorkId.value !== expectedWorkId
+                    || expectedTranslationGeneration !== translationGeneration) return;
                 translations.value[`${reviewIdx}:${paraIdx}`] = '';
             }),
         );
@@ -306,7 +318,7 @@ function getCnToJpDisplay(para: string, reviewIdx: number, paraIdx: number): str
     const plain = htmlToPlainText(para);
     if (!isChinese(plain)) return para;
     const translation = getTranslation(reviewIdx, paraIdx);
-    return translation || para;
+    return translation ? sanitizeReviewHtml(translation) : para;
 }
 
 // ---------------------------------------------------------------------------
@@ -438,14 +450,17 @@ async function handleSave(): Promise<void> {
     updateSaveStatus('saving');
 
     try {
-        await Promise.all(allIds.map(id =>
+        const results = await runPacedBatches(allIds, id =>
             ReviewApi.updateReview({
                 work_id: id,
                 rating: currentRating.value || undefined,
                 review_text: currentText.value,
                 starOnly: false,
-            })
-        ));
+            }),
+            { batchSize: 2, delayMs: 250 },
+        );
+        const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+        if (failed) throw failed.reason;
         updateSaveStatus('saved');
         Logger.debug('[CommentSection] Review saved for works', allIds);
     } catch (e) {
@@ -462,7 +477,13 @@ async function handleDelete(): Promise<void> {
     if (allIds.length === 0) return;
 
     try {
-        await Promise.all(allIds.map(id => ReviewApi.deleteReview(id)));
+        const results = await runPacedBatches(
+            allIds,
+            id => ReviewApi.deleteReview(id),
+            { batchSize: 2, delayMs: 250 },
+        );
+        const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+        if (failed) throw failed.reason;
         currentRating.value = 0;
         currentText.value = '';
         syncRatingToQRating();
@@ -516,6 +537,7 @@ function onFetchErrorClick(): void {
 // ---------------------------------------------------------------------------
 
 function resetStateForWorkSwitch(): void {
+    translationGeneration++;
     clearCommentTranslationQueues(currentWorkId.value);
     dlsiteReviews.value = [];
     dlsiteLoaded.value = false;
@@ -577,16 +599,27 @@ watch(workIdFromRoute, (newId, oldId) => {
 }, { immediate: true });
 
 // Trigger translations when reviews load and translateMode or cnToJp is on
-watch([dlsiteLoaded, translateMode, cnToJp], ([loaded, shouldTranslate, cnToJpOn]) => {
+watch([dlsiteLoaded, translateMode, cnToJp, lang], ([loaded, shouldTranslate, cnToJpOn]) => {
+    translationGeneration++;
+    clearCommentTranslationQueues(currentWorkId.value);
+    translations.value = {};
     if (loaded && (shouldTranslate || cnToJpOn)) {
         const expectedVersion = loadRequestVersion;
+        const expectedTranslationGeneration = translationGeneration;
         const expectedWorkId = currentWorkId.value;
         if (!expectedWorkId) return;
         const cnOnlyMode = !shouldTranslate && cnToJpOn;
         validDlsiteReviews.value.forEach((review, idx) => {
             const paragraphs = getReviewParagraphs(review);
             if (paragraphs.length > 0) {
-                translateParagraphs(idx, paragraphs, expectedVersion, expectedWorkId, cnOnlyMode ? 'ja' : undefined);
+                translateParagraphs(
+                    idx,
+                    paragraphs,
+                    expectedVersion,
+                    expectedWorkId,
+                    cnOnlyMode ? 'ja' : undefined,
+                    expectedTranslationGeneration,
+                );
             }
         });
     }
@@ -601,6 +634,7 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
+    translationGeneration++;
     clearCommentTranslationQueues(currentWorkId.value);
     loadRequestVersion++;
     teardownQRatingSync();

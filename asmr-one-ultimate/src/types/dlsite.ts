@@ -614,6 +614,8 @@ export interface DLsiteMetadata {
     description?: string;
     /** Full product description body (HTML) scraped from the DLsite page */
     body?: string;
+    /** Version of the HTML detail enrichment pass used for this cache entry. */
+    details_schema_version?: number;
     /** Intro text (from API `intro` field when available, usually null) */
     intro?: string;
     /** Sample image URLs from the DLsite product API */

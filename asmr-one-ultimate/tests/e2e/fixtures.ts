@@ -9,6 +9,7 @@ import { test as base, expect, Page } from '@playwright/test';
 import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
+import { createSilentWav } from './audioFixture';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -23,6 +24,10 @@ const TEST_IMAGE_BODY = Buffer.from(
     'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMB/6XGD2sAAAAASUVORK5CYII=',
     'base64'
 );
+
+// Long enough that playback-state assertions cannot race the media `ended`
+// event, while remaining small enough to serve cheaply in every test context.
+const TEST_AUDIO_BODY = createSilentWav(8000, 30);
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
@@ -50,7 +55,7 @@ function loadAuthConfig(): AuthConfig | null {
     return null;
 }
 
-async function ensureLoggedIn(page: Page): Promise<boolean> {
+export async function ensureLoggedIn(page: Page): Promise<boolean> {
     const context = page.context() as any;
     if (context.__authReady != null) return context.__authReady;
 
@@ -145,11 +150,12 @@ async function gotoWithFallback(page: Page, pathOrUrl: string, waitMs = 0): Prom
             await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 30000 });
             // Wait a beat so anti-bot / CDN error pages can settle.
             await sleep(500);
-            const isBadGateway = await page.evaluate(() => {
+            const isUnavailable = await page.evaluate(() => {
                 const text = (document.body?.innerText || '').toLowerCase();
-                return text.includes('502') || text.includes('bad gateway');
-            }).catch(() => false);
-            if (isBadGateway) throw new Error(`Gateway error on ${target}`);
+                const hasHostApp = !!document.querySelector('#q-app');
+                return text.includes('502') || text.includes('bad gateway') || !hasHostApp;
+            }).catch(() => true);
+            if (isUnavailable) throw new Error(`Host app unavailable on ${target}`);
             if (waitMs > 0) await sleep(waitMs);
             return;
         } catch (err) {
@@ -167,8 +173,28 @@ const FALLBACK_REQUIRE_URLS = [
     "data:application/javascript,%3B(typeof%20System!%3D'undefined')%26%26(System%3Dnew%20System.constructor())%3B",
 ];
 
+const LOCAL_REQUIRE_PATHS = new Map<string, string>([
+    [FALLBACK_REQUIRE_URLS[0], path.join(__dirname, '../../node_modules/vue/dist/vue.global.prod.js')],
+    [FALLBACK_REQUIRE_URLS[1], path.join(__dirname, '../../node_modules/systemjs/dist/system.min.js')],
+    [FALLBACK_REQUIRE_URLS[2], path.join(__dirname, '../../node_modules/systemjs/dist/extras/named-register.min.js')],
+]);
+
+function loadLocalRequireSource(url: string): string | null {
+    if (url.startsWith('data:application/javascript,')) {
+        try {
+            return decodeURIComponent(url.slice(url.indexOf(',') + 1));
+        } catch {
+            return null;
+        }
+    }
+
+    const localPath = LOCAL_REQUIRE_PATHS.get(url);
+    if (!localPath || !fs.existsSync(localPath)) return null;
+    return fs.readFileSync(localPath, 'utf-8');
+}
+
 // GM_* API stubs for running outside Tampermonkey
-const GM_STUBS = `
+export const GM_STUBS = `
 window.GM_getValue = window.GM_getValue || ((key, def) => {
     try {
         const v = localStorage.getItem('GM_' + key);
@@ -192,10 +218,28 @@ window.GM_xmlhttpRequest = window.GM_xmlhttpRequest || ((opts) => {
         body: opts.data,
         credentials: isSameOrigin ? 'include' : 'omit'
     }).then(async (res) => {
-        const text = await res.text();
-        let response = text;
-        try { response = JSON.parse(text); } catch {}
-        opts.onload?.({ responseText: text, response: response, status: res.status, statusText: res.statusText, responseHeaders: '' });
+        let response;
+        let responseText = '';
+        if (opts.responseType === 'blob') {
+            response = await res.blob();
+        } else {
+            responseText = await res.text();
+            response = responseText;
+            try { response = JSON.parse(responseText); } catch {}
+        }
+        const responseHeaders = Array.from(res.headers.entries())
+            .map(([name, value]) => name + ': ' + value)
+            .join('\\r\\n');
+        opts.onload?.({
+            // Real GM_xmlhttpRequest retains raw responseText even when a JSON
+            // response is also exposed as a parsed response value.
+            responseText,
+            response,
+            status: res.status,
+            statusText: res.statusText,
+            responseHeaders,
+            finalUrl: res.url,
+        });
     }).catch(err => {
         opts.onerror?.(err);
     });
@@ -215,15 +259,16 @@ window.GM_info = window.GM_info || { script: { name: 'ASMR Ultimate', version: '
 window.unsafeWindow = window;
 `;
 
-type UserscriptBundle = {
+export type UserscriptBundle = {
     code: string;
     requires: string[];
+    requireSources: Array<string | null>;
 };
 
 // Cache the parsed userscript once per worker process.
 let cachedUserscript: UserscriptBundle | null = null;
 
-function loadUserscript(): UserscriptBundle {
+export function loadUserscript(): UserscriptBundle {
     if (cachedUserscript) return cachedUserscript;
 
     try {
@@ -244,9 +289,11 @@ function loadUserscript(): UserscriptBundle {
         // Remove userscript header (everything before first non-comment code)
         script = script.replace(/^\/\/\s*==UserScript==[\s\S]*?\/\/\s*==\/UserScript==\s*/m, '');
 
+        const effectiveRequires = requires.length > 0 ? requires : FALLBACK_REQUIRE_URLS;
         cachedUserscript = {
             code: script,
-            requires: requires.length > 0 ? requires : FALLBACK_REQUIRE_URLS,
+            requires: effectiveRequires,
+            requireSources: effectiveRequires.map(loadLocalRequireSource),
         };
         return cachedUserscript;
     } catch (e) {
@@ -280,6 +327,7 @@ export const test = base.extend<Fixtures>({
                     if (window !== window.top) return;
                     
                     const REQUIRE_URLS = ${JSON.stringify(userscript.requires)};
+                    const REQUIRE_SOURCES = ${JSON.stringify(userscript.requireSources)};
                     const USERSCRIPT = ${JSON.stringify(userscript.code)};
                     
                     async function init() {
@@ -289,12 +337,26 @@ export const test = base.extend<Fixtures>({
                         console.log('[E2E] Starting script injection...');
 
                         // Load userscript @require dependencies (Vue/SystemJS/etc.) in metadata order.
-                        for (const url of REQUIRE_URLS) {
+                        for (let index = 0; index < REQUIRE_URLS.length; index++) {
+                            const url = REQUIRE_URLS[index];
+                            const localSource = REQUIRE_SOURCES[index];
+                            if (typeof localSource === 'string') {
+                                const script = document.createElement('script');
+                                script.textContent = localSource;
+                                document.head.appendChild(script);
+                                continue;
+                            }
+
                             await new Promise((resolve) => {
                                 const script = document.createElement('script');
                                 script.src = url;
-                                script.onload = resolve;
+                                const timer = setTimeout(() => {
+                                    console.error('[E2E] Timed out loading @require dependency from ' + url);
+                                    resolve();
+                                }, 10000);
+                                script.onload = () => { clearTimeout(timer); resolve(); };
                                 script.onerror = () => {
+                                    clearTimeout(timer);
                                     console.error('[E2E] Failed to load @require dependency from ' + url);
                                     resolve();
                                 };
@@ -367,6 +429,16 @@ export const test = base.extend<Fixtures>({
             await context.route('**/api/**/sentry/**', (route) => route.abort());
             await context.route('**://sentry.asmr.one/**', (route) => route.abort());
         }
+
+        // Flat-view mock tracks point at example.com. Serve valid local audio so
+        // the host PlayerBar mounts instead of failing before learner/Whisper UI.
+        if (!isRealE2E) await context.route('https://example.com/**', (route) => {
+            route.fulfill({
+                status: 200,
+                contentType: 'audio/wav',
+                body: TEST_AUDIO_BODY,
+            });
+        });
 
         // API Mocking for deterministic mode
         if (!isRealE2E) await context.route('**/api/**', async (route) => {
@@ -452,10 +524,18 @@ export const test = base.extend<Fixtures>({
 
             // Playlist APIs - return empty lists to avoid auth flakiness
             if (url.includes('/api/playlists')) {
-                return route.fulfill({ status: 200, contentType: 'application/json', body: '[]' });
+                const body = JSON.stringify({
+                    playlists: [],
+                    pagination: { currentPage: 1, pageSize: 100, totalCount: 0 },
+                });
+                return route.fulfill({ status: 200, contentType: 'application/json', body });
             }
             if (url.includes('/api/playlist/get-playlists')) {
-                return route.fulfill({ status: 200, contentType: 'application/json', body: '[]' });
+                const body = JSON.stringify({
+                    playlists: [],
+                    pagination: { currentPage: 1, pageSize: 100, totalCount: 0 },
+                });
+                return route.fulfill({ status: 200, contentType: 'application/json', body });
             }
             if (url.includes('/api/playlist/get-playlist-metadata')) {
                 const body = JSON.stringify({
@@ -475,6 +555,16 @@ export const test = base.extend<Fixtures>({
                     pagination: { currentPage: 1, pageSize: 100, totalCount: 0 },
                 });
                 return route.fulfill({ status: 200, contentType: 'application/json', body });
+            }
+
+            // The host derives its own stream URL from the track hash even when
+            // the mock track also carries a direct mediaStreamUrl.
+            if (url.includes('/api/media/stream/mock_hash_')) {
+                return route.fulfill({
+                    status: 200,
+                    contentType: 'audio/wav',
+                    body: TEST_AUDIO_BODY,
+                });
             }
 
             // Cover images
@@ -500,6 +590,21 @@ export const test = base.extend<Fixtures>({
         if (!isRealE2E) await context.route('https://translate.googleapis.com/**', async (route) => {
             const body = JSON.stringify([[['Mock translation', '', null, null, 1]], null, 'en']);
             await route.fulfill({ status: 200, contentType: 'application/json', body });
+        });
+
+        // Google Identity Services is dynamically injected when the maintained
+        // Drive client ID is present. Keep settings tests deterministic while
+        // still exercising the real preload path.
+        if (!isRealE2E) await context.route('https://accounts.google.com/gsi/client', async (route) => {
+            await route.fulfill({
+                status: 200,
+                contentType: 'application/javascript',
+                body: `window.google = window.google || {};
+window.google.accounts = window.google.accounts || {};
+window.google.accounts.oauth2 = window.google.accounts.oauth2 || {
+  initTokenClient: () => ({ requestAccessToken() {} })
+};`,
+            });
         });
 
         await use(context);
@@ -633,6 +738,66 @@ export const helpers = {
     },
 
     // Track helpers
+    getPlayableTrackButtons(page: Page) {
+        const buttons = page.locator(
+            '#work-tree .q-item .q-btn--round, ' +
+            '.work-tree .q-item .q-btn--round, ' +
+            '.asmr-flat-panel .q-item .q-btn--round',
+        );
+        return buttons.filter({
+            has: page.locator('.q-icon, .material-icons').filter({ hasText: /^(?:play_arrow|pause)$/ }),
+        });
+    },
+
+    async playFirstTrack(page: Page) {
+        // The global fixture blocks media for memory savings. A real, tiny WAV
+        // lets the host player mount so playback-dependent controls can be tested.
+        await page.route(/\.(?:mp3|wav|flac|ogg|m4a)(?:\?|$)/i, route => route.fulfill({
+            status: 200,
+            contentType: 'audio/wav',
+            body: TEST_AUDIO_BODY,
+        }));
+        const icon = page.locator('.q-icon, .material-icons').filter({ hasText: /^(?:play_arrow|pause)$/ });
+        const flatButton = page.locator('.asmr-flat-panel .q-item .q-btn--round').filter({ has: icon }).first();
+        let openedFlatPanel = false;
+        if (!(await flatButton.isVisible({ timeout: 10000 }).catch(() => false))) {
+            const panel = page.locator('.asmr-flat-panel--open');
+            if (!(await panel.isVisible().catch(() => false))) {
+                await page.locator('.asmr-flat-toggle').click();
+                openedFlatPanel = true;
+            }
+        }
+        const flatReady = await flatButton.waitFor({ state: 'visible', timeout: 15000 })
+            .then(() => true)
+            .catch(() => false);
+        if (!flatReady && openedFlatPanel) {
+            const close = page.locator('.asmr-flat-panel__close');
+            if (await close.isVisible().catch(() => false)) await close.click();
+            await page.locator('.asmr-flat-backdrop--visible').waitFor({ state: 'hidden', timeout: 5000 }).catch(() => {});
+        }
+        const button = flatReady ? flatButton : this.getPlayableTrackButtons(page).first();
+        await button.waitFor({ state: 'visible', timeout: 20000 });
+        await button.click();
+        await page.waitForFunction(() => {
+            const bridge = (window as any).__ASMR_KIKOERU_BRIDGE__;
+            return !!(bridge?.currentTrack || bridge?._app?.$store?.state?.AudioPlayer?.currentTrack);
+        }, { timeout: 10000 });
+        await page.evaluate(() => {
+            const store = (window as any).__ASMR_KIKOERU_BRIDGE__?.store;
+            if (store?.state?.AudioPlayer?.hide) {
+                store.commit?.('AudioPlayer/TOGGLE_HIDE');
+            }
+        });
+        await sleep(500);
+        if (!(await page.locator('.audio-player').isVisible().catch(() => false))) {
+            const nowPlaying = page.locator('.q-footer .q-item, .player-bar .q-item').first();
+            if (await nowPlaying.isVisible().catch(() => false)) {
+                await nowPlaying.click();
+            }
+            await sleep(500);
+        }
+    },
+
     async getCurrentTrack(page: Page) {
         return page.evaluate(() => {
             const w = window as any;
@@ -678,7 +843,7 @@ export const helpers = {
     },
 
     getPlayerBar(page: Page) {
-        return page.locator('.player-bar, .q-footer, .audio-player').first();
+        return page.locator('.player-bar:visible, .q-footer:visible, .audio-player:visible').first();
     },
 
     getWorkTree(page: Page) {
@@ -755,9 +920,10 @@ export const helpers = {
         return {
             radio: await page.locator('#asmr-radio-settings-section').count() > 0,
             playlist: await page.locator('#asmr-playlist-settings-section').count() > 0,
-            magic: await page.locator('#asmr-magic-settings-section').count() > 0,
+            translation: await page.locator('#asmr-translation-settings-section').count() > 0,
             whisper: await page.locator('#asmr-whisper-settings-section').count() > 0,
             storage: await page.locator('#asmr-storage-settings-section').count() > 0,
+            emergency: await page.locator('#asmr-emergency-export-section').count() > 0,
         };
     },
 
@@ -801,7 +967,7 @@ export const helpers = {
 
     // Learner mode helpers
     getLearnerControls(page: Page) {
-        return page.locator('.learner-controls, .asmr-learner-controls');
+        return page.locator('.learner-controls, .learner-collapsed-controls, .asmr-learner-controls');
     },
 
     // Playlist Mode Helpers

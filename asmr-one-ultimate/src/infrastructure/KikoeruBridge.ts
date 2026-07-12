@@ -492,6 +492,80 @@ export class KikoeruBridge {
     }
 
     /**
+     * Check whether the host exposes a Vuex mutation. The host has renamed its
+     * playback-control mutations over time, so callers must not rely on Vuex's
+     * unknown-mutation warning as a detectable failure.
+     */
+    public hasMutation(mutation: string): boolean {
+        return !!this.store._mutations?.[mutation];
+    }
+
+    /** Request playback across current and legacy host store contracts. */
+    public requestPlay(): boolean {
+        if (this.hasMutation('AudioPlayer/WANT_PLAY')) {
+            this.commit('AudioPlayer/WANT_PLAY');
+            return true;
+        }
+        if (this.hasMutation('AudioPlayer/SET_PLAYING')) {
+            this.commit('AudioPlayer/SET_PLAYING', true);
+            return true;
+        }
+        if (this.hasMutation('AudioPlayer/PLAY')) {
+            this.commit('AudioPlayer/PLAY');
+            return true;
+        }
+        if (this.hasAction('AudioPlayer/play')) {
+            void this.dispatch('AudioPlayer/play').catch(error =>
+                Logger.warn('[KikoeruBridge] AudioPlayer/play failed:', error));
+            return true;
+        }
+        if (!this.store._mutations) {
+            this.commit('AudioPlayer/SET_PLAYING', true);
+            return true;
+        }
+        return false;
+    }
+
+    /** Request pause across current and legacy host store contracts. */
+    public requestPause(): boolean {
+        if (this.hasMutation('AudioPlayer/WANT_PAUSE')) {
+            this.commit('AudioPlayer/WANT_PAUSE');
+            return true;
+        }
+        if (this.hasMutation('AudioPlayer/SET_PLAYING')) {
+            this.commit('AudioPlayer/SET_PLAYING', false);
+            return true;
+        }
+        if (this.hasMutation('AudioPlayer/PAUSE')) {
+            this.commit('AudioPlayer/PAUSE');
+            return true;
+        }
+        if (this.hasAction('AudioPlayer/pause')) {
+            void this.dispatch('AudioPlayer/pause').catch(error =>
+                Logger.warn('[KikoeruBridge] AudioPlayer/pause failed:', error));
+            return true;
+        }
+        if (!this.store._mutations) {
+            this.commit('AudioPlayer/SET_PLAYING', false);
+            return true;
+        }
+        return false;
+    }
+
+    /** Toggle playback across current and legacy host store contracts. */
+    public togglePlayback(): boolean {
+        if (this.hasMutation('AudioPlayer/TOGGLE_WANT_PLAYING')) {
+            this.commit('AudioPlayer/TOGGLE_WANT_PLAYING');
+            return true;
+        }
+        if (this.hasMutation('AudioPlayer/TOGGLE_PLAYING')) {
+            this.commit('AudioPlayer/TOGGLE_PLAYING');
+            return true;
+        }
+        return this.isPlaying ? this.requestPause() : this.requestPlay();
+    }
+
+    /**
      * Watch store state
      */
     public watch<T>(

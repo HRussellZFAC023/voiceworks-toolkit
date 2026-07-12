@@ -15,6 +15,7 @@ import { MLCrashGuard } from '../core/MLCrashGuard';
 const EMBEDDING_MODEL = 'Xenova/multilingual-e5-small';
 const CACHE_TTL_MS = CACHE_TTL.THIRTY_DAYS_MS;
 const IDLE_UNLOAD_MS = 15 * 60 * 1000; // 15 minutes
+const MODEL_LOAD_TIMEOUT_MS = 120_000;
 const SINGLE_TIMEOUT_MS = 30_000;
 const BATCH_TIMEOUT_BASE_MS = 30_000;
 const BATCH_TIMEOUT_PER_ITEM_MS = 200;
@@ -241,6 +242,21 @@ function initWorker(): Promise<void> {
     // Only one worker loads a model at a time (requestAdapter + requestDevice + ONNX compile).
     initPromise = GpuScheduler.acquireLoadLease('embedding').then(releaseLease => {
         return new Promise<void>((resolve, reject) => {
+            let settled = false;
+            let modelLoadTimer: ReturnType<typeof setTimeout> | null = null;
+
+            const settleInit = (callback: () => void): boolean => {
+                if (settled) return false;
+                settled = true;
+                if (modelLoadTimer) {
+                    clearTimeout(modelLoadTimer);
+                    modelLoadTimer = null;
+                }
+                releaseLease();
+                callback();
+                return true;
+            };
+
             try {
                 EventBus.emit('embedding:progress', {
                     percent: 0,
@@ -265,16 +281,18 @@ function initWorker(): Promise<void> {
                 }
 
                 const onReady = (e: MessageEvent) => {
+                    if (settled) return;
                     if (e.data.status === 'ready') {
                         MLCrashGuard.initComplete('vectorSearch');
                         handleMessage(e);
-                        releaseLease();
-                        resolve();
+                        settleInit(resolve);
                     } else if (e.data.status === 'error' && !workerReady) {
                         MLCrashGuard.initFailed('vectorSearch');
                         handleMessage(e);
-                        releaseLease();
-                        reject(new Error(e.data.data?.message || 'Worker init failed'));
+                        settleInit(() => {
+                            terminateWorker();
+                            reject(new Error(e.data.data?.message || 'Worker init failed'));
+                        });
                     } else {
                         handleMessage(e);
                     }
@@ -293,10 +311,23 @@ function initWorker(): Promise<void> {
                 };
 
                 worker.postMessage({ type: 'init', model: EMBEDDING_MODEL, gpuVendorHint: DeviceCapabilities.profile.gpuVendor });
+                if (!settled) {
+                    modelLoadTimer = setTimeout(() => {
+                        settleInit(() => {
+                            Logger.error(`[EmbeddingService] Model load timed out after ${MODEL_LOAD_TIMEOUT_MS / 1000}s`);
+                            // This is a handled timeout rather than a hard tab crash;
+                            // do not leave CrashGuard's sentinel armed.
+                            MLCrashGuard.initComplete('vectorSearch');
+                            terminateWorker();
+                            reject(new Error('Embedding model load timed out'));
+                        });
+                    }, MODEL_LOAD_TIMEOUT_MS);
+                }
             } catch (err) {
-                releaseLease();
-                terminateWorker();
-                reject(err);
+                settleInit(() => {
+                    terminateWorker();
+                    reject(err);
+                });
             }
         });
     });
@@ -401,7 +432,11 @@ export const EmbeddingService = {
      * @param options - priority (default LOW), cancellable (default false)
      * @returns Normalized 384-dim float32 vector
      */
-    async embed(text: string, task: 'query' | 'passage' = 'query', options?: { priority?: Priority; cancellable?: boolean }): Promise<number[]> {
+    async embed(
+        text: string,
+        task: 'query' | 'passage' = 'query',
+        options?: { priority?: Priority; cancellable?: boolean; cancellableKey?: string }
+    ): Promise<number[]> {
         if (serviceDead || !DeviceCapabilities.budget.embeddingEnabled) throw new Error('Embedding service unavailable');
         resetIdleTimer();
         const normalized = normalizeEmbedInput(text);
@@ -419,6 +454,7 @@ export const EmbeddingService = {
                 worker: 'embedding',
                 execute: () => sendToWorker('embed', prefixed, SINGLE_TIMEOUT_MS),
                 cancellable: options?.cancellable,
+                cancellableKey: options?.cancellable ? options.cancellableKey : undefined,
             });
         })();
 

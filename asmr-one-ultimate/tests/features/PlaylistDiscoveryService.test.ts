@@ -147,4 +147,34 @@ describe('PlaylistDiscoveryService cover resolution', () => {
         expect(service.isFailed('playlist-rate-limited')).toBe(false);
         expect(service.isTransientFailed('playlist-rate-limited')).toBe(true);
     });
+
+    it('yields each paced batch before requesting the next one', async () => {
+        vi.useFakeTimers();
+        try {
+            mockApiRequest.mockImplementation(async (endpoint: string, params: { id: string }) => {
+                if (endpoint !== '/api/playlist/get-playlist-metadata') throw new Error(`Unexpected endpoint: ${endpoint}`);
+                return {
+                    id: params.id,
+                    name: params.id,
+                    user_name: 'user',
+                    works_count: 0,
+                    privacy: 2,
+                    main_cover_url: `https://cdn.example.com/${params.id}.jpg`,
+                    works: [],
+                };
+            });
+
+            const service = PlaylistDiscoveryService.getInstance();
+            const iterator = service.fetchMetadataBatch(['one', 'two'], 1, 500);
+            await expect(iterator.next()).resolves.toMatchObject({ value: { id: 'one' }, done: false });
+            expect(mockApiRequest).toHaveBeenCalledTimes(1);
+
+            const second = iterator.next();
+            await vi.advanceTimersByTimeAsync(500);
+            await expect(second).resolves.toMatchObject({ value: { id: 'two' }, done: false });
+            expect(mockApiRequest).toHaveBeenCalledTimes(2);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
 });

@@ -516,7 +516,8 @@ onUnmounted(() => {
         <div class="q-item__section column q-item__section--main justify-center">
             <div class="q-item__label text-subtitle1">{{ t('radioMode') }}</div>
             <div
-                class="q-item__label text-caption"
+                id="asmr-radio-status"
+                class="q-item__label text-caption asmr-radio-status"
                 :class="{ 'asmr-accent': radioActive }"
             >{{ radioStatusText }}</div>
         </div>

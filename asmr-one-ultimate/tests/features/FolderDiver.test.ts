@@ -1,6 +1,10 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { FolderDiver } from '../../src/features/FolderDiver';
 import { Config } from '../../src/core/Config';
+
+let workTreeComponent: { path: string[]; $forceUpdate: ReturnType<typeof vi.fn> } | null = null;
+const updatePath = vi.fn();
+const findWorkTreeComponent = vi.fn(() => workTreeComponent);
 
 vi.mock('../../src/core/Logger', () => ({
     Logger: { log: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn() },
@@ -9,8 +13,8 @@ vi.mock('../../src/core/Logger', () => ({
 vi.mock('../../src/infrastructure/KikoeruBridge', () => ({
     KikoeruBridge: {
         getInstance: () => ({
-            updatePath: vi.fn(),
-            findWorkTreeComponent: () => null,
+            updatePath,
+            findWorkTreeComponent,
         }),
     },
 }));
@@ -32,7 +36,16 @@ describe('FolderDiver', () => {
     beforeEach(() => {
         // Reset singleton between tests
         (FolderDiver as any)._instance = null;
+        workTreeComponent = null;
+        updatePath.mockReset();
+        findWorkTreeComponent.mockClear();
         Config.set('sePref', true);
+    });
+
+    afterEach(() => {
+        FolderDiver.getInstance().reset();
+        vi.clearAllTimers();
+        vi.useRealTimers();
     });
 
     describe('needsDive', () => {
@@ -236,6 +249,41 @@ describe('FolderDiver', () => {
     });
 
     describe('navigation', () => {
+        it('cancels deferred Vue path retries on reset', () => {
+            vi.useFakeTimers();
+            const diver = FolderDiver.getInstance();
+            const deferredDiver = diver as unknown as {
+                scheduleDeferredVueApply(path: string[]): void;
+            };
+
+            deferredDiver.scheduleDeferredVueApply(['Audio']);
+            expect(vi.getTimerCount()).toBe(1);
+
+            diver.reset();
+            expect(vi.getTimerCount()).toBe(0);
+        });
+
+        it('does not apply an obsolete deferred target after host path synchronization', async () => {
+            vi.useFakeTimers();
+            const diver = FolderDiver.getInstance();
+            const deferredDiver = diver as unknown as {
+                scheduleDeferredVueApply(path: string[]): void;
+            };
+
+            deferredDiver.scheduleDeferredVueApply(['Old work', 'Audio']);
+            diver.syncPath(['Manual choice']);
+            workTreeComponent = {
+                path: ['Manual choice'],
+                $forceUpdate: vi.fn(),
+            };
+
+            await vi.advanceTimersByTimeAsync(2_000);
+
+            expect(workTreeComponent.path).toEqual(['Manual choice']);
+            expect(workTreeComponent.$forceUpdate).not.toHaveBeenCalled();
+            expect(vi.getTimerCount()).toBe(0);
+        });
+
         it('getPath returns empty array after reset', () => {
             const diver = FolderDiver.getInstance();
             diver.reset();

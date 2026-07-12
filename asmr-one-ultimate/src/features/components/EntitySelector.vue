@@ -5,6 +5,7 @@
  */
 import { ref, computed } from 'vue';
 import { useI18n } from '../../composables/useI18n';
+import { sortEntitiesWithFavorites } from '../favoriteEntities';
 
 export interface EntityItem {
     id: string | number;
@@ -13,6 +14,7 @@ export interface EntityItem {
 }
 
 const props = defineProps<{
+    kind: 'va' | 'circle';
     label: string;
     filterPlaceholder: string;
     items: EntityItem[];
@@ -21,16 +23,23 @@ const props = defineProps<{
     translationCache: Map<string, string>;
     emptyMessage: string;
     removeAriaLabel: string;
+    favoriteIds: Array<string | number>;
+    favoriteAriaLabel: string;
 }>();
 
 const emit = defineEmits<{
     select: [item: EntityItem];
     clear: [];
+    toggleFavorite: [item: EntityItem];
 }>();
 
 const { t } = useI18n();
 
 const filterText = ref('');
+
+function isFavorite(item: EntityItem): boolean {
+    return props.favoriteIds.some((id) => String(id) === String(item.id));
+}
 
 function getTranslatedName(name: string): string {
     const en = props.translationCache.get(name);
@@ -40,8 +49,9 @@ function getTranslatedName(name: string): string {
 
 const filteredItems = computed(() => {
     const needle = filterText.value.trim().toLowerCase();
-    if (!needle) return props.items.slice(0, 100);
-    return props.items.filter(item => {
+    const ordered = sortEntitiesWithFavorites(props.items, props.favoriteIds);
+    if (!needle) return ordered.slice(0, 100);
+    return ordered.filter(item => {
         const name = item.name.toLowerCase();
         const en = (props.translationCache.get(item.name) || '').toLowerCase();
         return name.includes(needle) || en.includes(needle);
@@ -50,7 +60,8 @@ const filteredItems = computed(() => {
 
 function getItemLabel(item: EntityItem): string {
     const displayName = getTranslatedName(item.name);
-    return item.count ? `${displayName} (${item.count})` : displayName;
+    const label = item.count ? `${displayName} (${item.count})` : displayName;
+    return isFavorite(item) ? `★ ${label}` : label;
 }
 
 function onSelectChange(event: Event): void {
@@ -76,14 +87,14 @@ function onFilterKeydown(event: KeyboardEvent): void {
         <label class="asmr-form-label">{{ label }}</label>
         <input
             type="text"
-            class="asmr-filter-input"
+            :class="['asmr-filter-input', kind === 'circle' ? 'asmr-circle-filter' : 'asmr-va-filter']"
             :placeholder="filterPlaceholder"
             v-model="filterText"
             @keydown="onFilterKeydown"
         />
         <select
             size="5"
-            class="asmr-va-select"
+            :class="kind === 'circle' ? 'asmr-circle-select' : 'asmr-va-select'"
             :aria-label="label"
             @change="onSelectChange"
         >
@@ -98,9 +109,18 @@ function onFilterKeydown(event: KeyboardEvent): void {
                 {{ filterText.trim() ? t('advNoResults') : emptyMessage }}
             </option>
         </select>
-        <div class="asmr-selected-va" aria-live="polite">
+        <div :class="kind === 'circle' ? 'asmr-selected-circle' : 'asmr-selected-va'" aria-live="polite">
             <div v-if="selected" class="asmr-selected-chip">
                 <span>{{ getTranslatedName(selected.name) }}</span>
+                <button
+                    class="chip-favorite"
+                    :class="{ active: isFavorite(selected) }"
+                    :aria-label="favoriteAriaLabel"
+                    :aria-pressed="isFavorite(selected)"
+                    @click="emit('toggleFavorite', selected)"
+                >
+                    <i class="material-icons" aria-hidden="true">{{ isFavorite(selected) ? 'star' : 'star_border' }}</i>
+                </button>
                 <button
                     class="chip-remove"
                     :aria-label="removeAriaLabel"

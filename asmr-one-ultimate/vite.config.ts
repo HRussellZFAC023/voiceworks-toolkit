@@ -5,6 +5,11 @@ import monkey, { cdn } from 'vite-plugin-monkey';
 import pkg from './package.json' with { type: 'json' };
 
 export default defineConfig({
+    build: {
+        // vite-plugin-monkey otherwise keeps the SystemJS payload readable,
+        // pushing the userscript over Greasy Fork's 2 MiB code limit.
+        minify: 'esbuild',
+    },
     plugins: [
         vue(),
         monkey({
@@ -20,11 +25,11 @@ export default defineConfig({
                 namespace: 'http://tampermonkey.net/',
                 version: pkg.version,
                 description: {
-                    '': 'Upgrade asmr.one with an all-in-one power suite: on-device Whisper transcription, local neural JA/CN→EN translation, AI semantic search, radio mode, learner mode with dual-language subtitles, JPDB vocabulary mining, media viewer, audio visualizer, auto-progress tracking, keyboard shortcuts, playlist mode, offline caching, and more. Everything runs locally in your browser with WebGPU acceleration.',
-                    'zh-CN': 'asmr.one 全能增强套件。本地Whisper语音转文字、本地神经网络日/中→英翻译、AI语义向量搜索、电台模式、双语字幕学习模式、JPDB词汇挖掘、媒体查看器、音频可视化、自动进度追踪、键盘快捷键、播放列表模式、离线缓存等，全部在浏览器本地运行，支持WebGPU加速。',
-                    'zh-TW': 'asmr.one 全能增強套件。本地Whisper語音轉文字、本地神經網路日/中→英翻譯、AI語義向量搜尋、電台模式、雙語字幕學習模式、JPDB詞彙挖掘、媒體檢視器、音頻視覺化、自動進度追蹤、鍵盤快捷鍵、播放清單模式、離線快取等，全部在瀏覽器本地執行，支援WebGPU加速。',
-                    'ja': 'asmr.oneの総合拡張スイート。ローカルWhisper音声認識、ローカルニューラル翻訳（日/中→英）、AIセマンティック検索、ラジオモード、デュアル字幕学習モード、JPDB語彙マイニング、メディアビューア、オーディオビジュアライザー、自動進捗追跡、キーボードショートカット、プレイリストモード、オフラインキャッシュなど。すべてブラウザ内でローカル実行、WebGPU対応。',
-                    'ko': 'asmr.one 올인원 확장 스위트. 로컬 Whisper 음성인식, 로컬 신경망 일/중→영 번역, AI 시맨틱 검색, 라디오 모드, 이중 자막 학습 모드, JPDB 어휘 마이닝, 미디어 뷰어, 오디오 비주얼라이저, 자동 진행 추적, 키보드 단축키, 재생목록 모드, 오프라인 캐시 등. 모두 브라우저에서 로컬로 실행, WebGPU 가속 지원.',
+                    '': 'Upgrade asmr.one with on-device Whisper, cached or custom translation, semantic search, radio and learner modes, JPDB, separate playlist backups, and automatic recovery from the English-language gate.',
+                    'zh-CN': 'asmr.one 全能增强：本地 Whisper、缓存或自定义翻译 API、语义搜索、电台与学习模式、JPDB、播放列表分离备份及英文优先语言封锁自动恢复。',
+                    'zh-TW': 'asmr.one 全能增強：本地 Whisper、快取或自訂翻譯 API、語意搜尋、電台與學習模式、JPDB、播放清單分離備份及英文優先語言封鎖自動復原。',
+                    'ja': 'asmr.one総合拡張：オンデバイスWhisper、キャッシュ/カスタム翻訳API、意味検索、ラジオ/学習モード、JPDB、プレイリスト分離バックアップ、英語優先言語ゲートの自動復旧。',
+                    'ko': 'asmr.one 확장 도구: 온디바이스 Whisper, 캐시/사용자 지정 번역 API, 시맨틱 검색, 라디오·학습 모드, JPDB, 재생목록 분리 백업 및 영어 우선 언어 차단 자동 복구.',
                 },
                 author: 'Henry',
                 match: [
@@ -64,7 +69,10 @@ export default defineConfig({
                     'GM_addStyle',
                     'unsafeWindow'
                 ],
-                'run-at': 'document-idle',
+                // Register before the blocked document is painted. main.ts
+                // resolves immediately only for the exact gate signature and
+                // otherwise waits for DOMContentLoaded before normal startup.
+                'run-at': 'document-start',
                 license: 'MIT',
                 downloadURL: 'https://update.greasyfork.org/scripts/563283/ASMRone%20Ultimate%20%28Radio%20%2B%20Learner%29.user.js',
                 updateURL: 'https://update.greasyfork.org/scripts/563283/ASMRone%20Ultimate%20%28Radio%20%2B%20Learner%29.meta.js'

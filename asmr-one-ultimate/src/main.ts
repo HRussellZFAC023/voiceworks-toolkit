@@ -39,7 +39,10 @@ import { EmbeddingService } from './services/EmbeddingService';
 import { CentralObserver } from './core/CentralObserver';
 import { EventBus } from './core/EventBus';
 import { MLCrashGuard } from './core/MLCrashGuard';
-import type { ConfigKey, PlayerTrack } from './types';
+import type { ConfigKey } from './types';
+import { LazyFeatureGate, type ToggleableFeature } from './core/LazyFeatureGate';
+import { redactSensitiveConfig } from './core/configSecrets';
+import { recoverRegionGateIfNeeded, waitForRegionGateOrDomReady } from './core/RegionGateRecovery';
 
 // Features
 import { RadioMode } from './features/radio';
@@ -91,10 +94,6 @@ const globalWindow = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : windo
     __ASMR_ULTIMATE_CLEANUP__?: () => void;
     ASMRUlt?: ASMRUltAPI;
 };
-
-// Track if already initialized to prevent duplicate initialization
-const wasAlreadyInitialized = globalWindow.__ASMR_ULTIMATE_INITIALIZED__ === true;
-globalWindow.__ASMR_ULTIMATE_INITIALIZED__ = true;
 
 // ============================================================================
 // Global API
@@ -173,7 +172,11 @@ async function initialize(): Promise<void> {
         // Populate config cache (first getAllConfig() seeds the L1 in-memory cache)
         const allConfig = AppStore.getAllConfig();
         if (Config.get('debug')) {
-            Logger.debug('[Settings] Config:', JSON.stringify(allConfig, null, 2));
+            Logger.debug('[Settings] Config:', JSON.stringify(
+                redactSensitiveConfig(allConfig as unknown as Record<string, unknown>),
+                null,
+                2,
+            ));
         }
 
         // Initialize core systems
@@ -186,21 +189,6 @@ async function initialize(): Promise<void> {
         const playlistMode = PlaylistMode.getInstance();
         playlistMode.initialize();
         Logger.debug('[Init] PlaylistMode initialized');
-
-        Logger.debug('[Init] Initializing PlaylistDiscoverController...');
-        const playlistDiscovery = new PlaylistDiscoverController();
-        playlistDiscovery.enable();
-        Logger.debug('[Init] PlaylistDiscoverController enabled');
-
-        Logger.debug('[Init] Initializing InfiniteScrollController...');
-        const infiniteScrollController = InfiniteScrollController.getInstance();
-        infiniteScrollController.enable();
-        Logger.debug('[Init] InfiniteScrollController enabled');
-
-        Logger.debug('[Init] Initializing LearnerModeController...');
-        const learnerModeController = new LearnerModeController();
-        learnerModeController.enable();
-        Logger.debug('[Init] LearnerModeController enabled');
 
         Logger.debug('[Init] Initializing SettingsController...');
         const settingsController = new SettingsController();
@@ -220,19 +208,14 @@ async function initialize(): Promise<void> {
         // Track playlist mode
         setupPlaylistModeTracking(bridge);
 
-        // Quality of life features
-        initializeQOLFeatures();
-
-        // Listen for config changes to reactively enable/disable features
-        setupFeatureToggleListener();
-
-        // Detect device capabilities and decide whether to eagerly warm up ML models.
-        // Desktop with GPU ("full" tier) behaves exactly as before.
-        // Mobile / no-GPU devices skip eager warmup — models load on first use.
+        // Establish device and GPU policy before registering any toggleable ML
+        // feature: Whisper may auto-warm as soon as its feature is enabled.
         const device = DeviceCapabilities.detect();
         Logger.log(`[Device] ${device.reason}`);
 
-        // iPhone: force-disable ML features — Safari memory limits are too strict
+        // iPhone: force-disable ML features — Safari memory limits are too strict.
+        // This happens before feature registration, so no controller can start
+        // and then miss the config event while the listener is not yet bound.
         if (DeviceCapabilities.isIPhone) {
             if (Config.get('enableWhisper')) {
                 Config.set('enableWhisper', false);
@@ -244,15 +227,28 @@ async function initialize(): Promise<void> {
             }
         }
 
-        // Crash guard: if ML features crashed repeatedly in recent sessions,
-        // auto-disable them to prevent crash loops
+        // Crash policy and scheduler must be ready before a feature can create a
+        // worker or acquire a model-load lease.
         MLCrashGuard.checkAndDisable();
-
-        // Initialize GPU scheduler before any worker creation
         GpuScheduler.initialize();
 
+        // Quality of life features
+        initializeQOLFeatures();
+
+        // Register AI feature gates before the optional embedding await. Whisper
+        // auto-warmup, when configured, is serialized by the initialized scheduler.
+        await initializeAIFeatures();
+
+        // Listen for config changes to reactively enable/disable features
+        setupFeatureToggleListener();
+
+        // Core controls and recovery paths must not wait for an embedding download.
+        initializeInfrastructure(bridge);
+        updateGlobalAPI(radioMode, bridge);
+        setupAudioRecovery();
+
         // Eagerly warm up remaining ML models — serialized via GpuScheduler load leases.
-        // Whisper loads on first use; translation is remote-only.
+        // Translation is remote-only.
         const budget = DeviceCapabilities.budget;
         const warmEmbedding = Config.get('enableVectorSearch') && budget.embeddingEnabled;
 
@@ -272,19 +268,6 @@ async function initialize(): Promise<void> {
         } else {
             Logger.log('[Warmup] No ML features enabled for warmup');
         }
-
-        // AI features (Whisper, VectorSearch) — starts AFTER warmup to avoid GPU contention
-        Logger.log('[Warmup] Initializing AI features (Whisper loads on first use)...');
-        await initializeAIFeatures();
-
-        // Infrastructure
-        initializeInfrastructure(bridge);
-
-        // Update global API
-        updateGlobalAPI(radioMode, bridge);
-
-        // Setup audio recovery
-        setupAudioRecovery();
 
         Logger.log('All systems operational.');
     } catch (error) {
@@ -333,19 +316,10 @@ function setupPlaylistModeTracking(bridge: KikoeruBridge): void {
 // Feature Registry — enables reactive enable/disable when settings change
 // ============================================================================
 
-interface ToggleableFeature {
-    enable(): void | Promise<void>;
-    disable(): void;
-}
-
 const featureRegistry = new Map<string, ToggleableFeature>();
 
 /** Lazily-imported feature modules (loaded on first enable) */
-const lazyFeatures = new Map<string, {
-    loader: () => Promise<ToggleableFeature>;
-    instance: ToggleableFeature | null;
-    extraGuard?: () => boolean;
-}>();
+const lazyFeatures = new Map<string, { gate: LazyFeatureGate; extraGuard?: () => boolean }>();
 
 function registerFeature(configKey: ConfigKey, feature: ToggleableFeature): void {
     featureRegistry.set(configKey, feature);
@@ -360,13 +334,13 @@ function registerLazyFeature(
     loader: () => Promise<ToggleableFeature>,
     extraGuard?: () => boolean,
 ): void {
-    lazyFeatures.set(configKey, { loader, instance: null, extraGuard });
+    const gate = new LazyFeatureGate(loader, (error) => {
+        Logger.error(`[Init] Failed to load ${configKey}`, error);
+    });
+    lazyFeatures.set(configKey, { gate, extraGuard });
     if (Config.get(configKey) && (!extraGuard || extraGuard())) {
-        loader().then((instance) => {
-            lazyFeatures.get(configKey)!.instance = instance;
-            instance.enable();
-            Logger.debug(`[Init] ${configKey} enabled (lazy)`);
-        });
+        gate.enable();
+        Logger.debug(`[Init] ${configKey} enabled (lazy)`);
     }
 }
 
@@ -392,17 +366,10 @@ function setupFeatureToggleListener(): void {
         const lazy = lazyFeatures.get(key);
         if (lazy) {
             if (value && (!lazy.extraGuard || lazy.extraGuard())) {
-                if (lazy.instance) {
-                    lazy.instance.enable();
-                } else {
-                    lazy.loader().then((instance) => {
-                        lazy.instance = instance;
-                        instance.enable();
-                    });
-                }
+                lazy.gate.enable();
                 Logger.debug(`[Toggle] ${key} enabled (lazy)`);
-            } else if (lazy.instance) {
-                lazy.instance.disable();
+            } else {
+                lazy.gate.disable();
                 Logger.debug(`[Toggle] ${key} disabled (lazy)`);
             }
         }
@@ -413,17 +380,10 @@ function setupFeatureToggleListener(): void {
             if (!jpdb) return;
             const shouldEnable = !!Config.get('enableJpdb') && !!value;
             if (shouldEnable) {
-                if (jpdb.instance) {
-                    jpdb.instance.enable();
-                } else {
-                    jpdb.loader().then((instance) => {
-                        jpdb.instance = instance;
-                        instance.enable();
-                    });
-                }
+                jpdb.gate.enable();
                 Logger.debug('[Toggle] enableJpdb enabled (API key set)');
-            } else if (jpdb.instance) {
-                jpdb.instance.disable();
+            } else {
+                jpdb.gate.disable();
                 Logger.debug('[Toggle] enableJpdb disabled (API key cleared)');
             }
         }
@@ -466,6 +426,9 @@ function initializeQOLFeatures(): void {
     registerFeature('enableVisualizer', new VisualizerController());
     registerFeature('enableVisitCounter', new VisitCounter());
     registerFeature('enableContinueListening', new ContinueListeningController());
+    registerFeature('enableLearnerMode', new LearnerModeController());
+    registerFeature('enablePlaylistDiscovery', new PlaylistDiscoverController());
+    registerFeature('enableInfiniteScroll', InfiniteScrollController.getInstance());
     registerFeature('enableHVDBLink', new HVDBLinkController());
     registerFeature('enableInterfaceTranslator', InterfaceTranslator.getInstance());
     registerFeature('enablePageTitleManager', new PageTitleManager());
@@ -539,20 +502,11 @@ function initializeInfrastructure(bridge: KikoeruBridge): void {
     audioCache.enable();
     Logger.debug('[Init] AudioCache enabled');
 
-    // Intercept playTrack for caching
-    if (bridge.store.dispatch) {
-        const originalDispatch = bridge.store.dispatch.bind(bridge.store);
-        bridge.store.dispatch = async (typeOrAction: string | { type: string;[key: string]: unknown }, payload?: unknown, options?: unknown) => {
-            const actionType = typeof typeOrAction === 'string' ? typeOrAction : typeOrAction?.type;
-            const actionPayload = typeof typeOrAction === 'string' ? payload : typeOrAction;
-            Logger.debug(`[Dispatch] ${actionType}`, actionPayload);
-            if (actionType === 'AudioPlayer/playTrack') {
-                await audioCache.interceptPlay(actionPayload as PlayerTrack | null);
-            }
-            return originalDispatch(typeOrAction as string, payload, options);
-        };
-        Logger.debug('[Init] Store dispatch intercepted for audio caching');
-    }
+    // Hook both the current host's mutation-based SET_QUEUE/SET_TRACK source
+    // selection and the legacy playTrack action. Cache lookup is fail-open;
+    // trusted CORS preparation remains synchronous before media loading begins.
+    audioCache.installPlaybackInterceptors(bridge.store);
+    Logger.debug('[Init] Store playback selection intercepted for audio caching/CORS');
     Logger.debug('[Init] Infrastructure initialized');
 }
 
@@ -583,9 +537,24 @@ function updateGlobalAPI(
     Object.assign(globalWindow.ASMRUlt!, updates);
 }
 
-// Start initialization (only if not already initialized)
-if (wasAlreadyInitialized) {
-    Logger.log('Already initialized, skipping re-initialization (SPA navigation detected)');
-} else {
-    initialize();
+async function start(): Promise<void> {
+    // Resolve on the exact gate signature before first paint; normal pages
+    // still wait for DOMContentLoaded before feature initialization.
+    await waitForRegionGateOrDomReady();
+
+    // The host can reject English-first browser navigation before its SPA is
+    // available. Restore the trusted application shell first; normal bridge
+    // initialization then proceeds against the real asmr.one origin.
+    const regionRecovery = await recoverRegionGateIfNeeded();
+    if (regionRecovery === 'failed') return;
+
+    const wasAlreadyInitialized = globalWindow.__ASMR_ULTIMATE_INITIALIZED__ === true;
+    globalWindow.__ASMR_ULTIMATE_INITIALIZED__ = true;
+    if (wasAlreadyInitialized) {
+        Logger.log('Already initialized, skipping re-initialization (SPA navigation detected)');
+        return;
+    }
+    await initialize();
 }
+
+void start();

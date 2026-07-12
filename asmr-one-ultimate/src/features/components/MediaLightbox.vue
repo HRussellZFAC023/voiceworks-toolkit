@@ -27,9 +27,9 @@ import {
 } from 'vue';
 import { useBridge } from '../../composables/useBridge';
 import { useConfig } from '../../composables/useConfig';
+import { DEFAULT_DLSITE_PROXY } from '../../core/Constants';
 import { useI18n } from '../../composables/useI18n';
 import { Logger, Config } from '../../core/Utils';
-import { I18n } from '../../core/Config';
 import { gmRequest, retryWithBackoff } from '../../infrastructure/HttpClient';
 import { TranslationService } from '../../services/TranslationService';
 import { isChinese } from '../../core/DomUtils';
@@ -42,6 +42,11 @@ import {
     isVideoExtension as isVideo,
 } from '../media/mediaFileUtils';
 import { buildMediaStreamUrl } from '../media/mediaStreamUrlUtils';
+import {
+    fetchVerifiedImageBlob,
+    isSafeRasterImageBlob,
+    normalizeImageUrl,
+} from '../media/externalImageUtils';
 
 declare const unsafeWindow: Window & typeof globalThis;
 
@@ -90,7 +95,7 @@ const emit = defineEmits<{
 // ── Composables ──────────────────────────────────────────────────────────────
 
 const bridge = useBridge();
-const { t, format } = useI18n();
+const { t, format, lang } = useI18n();
 const translateMode = useConfig('translateMode');
 const cnToJp = useConfig('translateCnToJp');
 const galleryAutoSlideshow = useConfig('galleryAutoSlideshow');
@@ -113,6 +118,7 @@ const errorIcon = ref('broken_image');
 const mediaTitle = ref('');
 const translatedTitle = ref('');
 const titleTranslationToken = ref(0);
+let mediaRenderGeneration = 0;
 
 // Media wrapper ref
 const mediaWrapperRef = ref<HTMLElement | null>(null);
@@ -128,9 +134,12 @@ let dragState: DragState = {
     scrollLeft: 0,
     scrollTop: 0,
 };
-let preloadedImages = new Map<string, HTMLImageElement>();
+let preloadedImages = new Map<string, string>();
 let externalBlobUrlCache = new Map<string, string>();
 let externalBlobFetchInFlight = new Map<string, Promise<string | null>>();
+const thumbnailBlobUrls = ref(new Map<string, string>());
+let imageFetchControllers = new Set<AbortController>();
+let imageFetchGeneration = 0;
 let slideshowTimer: ReturnType<typeof setInterval> | null = null;
 let slideshowPaused = false;
 let recoveryTimeout: number | undefined;
@@ -147,7 +156,7 @@ const isZoomInDisabled = computed(() => zoomLevel.value >= ZOOM_MAX);
 const showZoomControls = computed(() => currentMediaType.value === 'image');
 const zoomPercent = computed(() => `${Math.round(zoomLevel.value * 100)}%`);
 const zoomSliderValue = computed(() => Math.round(zoomLevel.value * 100));
-const currentPosition = computed(() => currentMediaIndex.value + 1);
+const currentPosition = computed(() => currentMediaList.value.length > 0 ? currentMediaIndex.value + 1 : 0);
 const totalCount = computed(() => currentMediaList.value.length);
 const hasTitleTranslation = computed(() => !!translatedTitle.value && translatedTitle.value !== mediaTitle.value);
 const currentItem = computed(() => currentMediaList.value[currentMediaIndex.value] || null);
@@ -166,79 +175,26 @@ function getMediaUrl(hash: string, item?: MediaFile): string {
 }
 
 function normalizeExternalUrl(url: string): string {
-    if (!url) return '';
-    const withProtocol = url.startsWith('//') ? `https:${url}` : url;
-    try {
-        const parsed = new URL(withProtocol, window.location.href);
-        parsed.searchParams.delete('_r');
-        return parsed.toString();
-    } catch {
-        return withProtocol;
-    }
-}
-
-function isDlsiteUrl(url: string): boolean {
-    try {
-        const host = new URL(url).hostname.toLowerCase();
-        return host.includes('dlsite.com') || host.includes('dlsite.jp');
-    } catch {
-        return false;
-    }
-}
-
-function shouldAvoidRetryQuery(url: string): boolean {
-    return url.startsWith('blob:') || isDlsiteUrl(url) || url.includes('__host=');
+    return normalizeImageUrl(url);
 }
 
 function getProxyBaseUrl(): string {
     let raw = String(dlsiteProxyUrl.value || '').trim().replace(/\/+$/, '');
-    if (!raw) return '';
+    if (!raw) return DEFAULT_DLSITE_PROXY;
     if (!/^https?:\/\//i.test(raw)) raw = `https://${raw}`;
     try {
         const parsed = new URL(raw);
-        if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return '';
+        if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return DEFAULT_DLSITE_PROXY;
     } catch {
-        return '';
+        return DEFAULT_DLSITE_PROXY;
     }
     return raw;
-}
-
-function proxyDlsiteUrl(url: string, preserveHost = true): string {
-    const base = getProxyBaseUrl();
-    if (!base || !isDlsiteUrl(url)) return url;
-    try {
-        const parsed = new URL(url);
-        const host = parsed.hostname.toLowerCase();
-        const params = new URLSearchParams(parsed.search);
-        if (preserveHost && host !== 'www.dlsite.com') {
-            params.set('__host', host);
-        }
-        const query = params.toString();
-        return `${base}${parsed.pathname}${query ? `?${query}` : ''}`;
-    } catch {
-        return url;
-    }
-}
-
-function getExternalImageCandidates(url: string): string[] {
-    const normalized = normalizeExternalUrl(url);
-    if (!normalized || normalized.startsWith('blob:')) return normalized ? [normalized] : [];
-    const hostAwareProxy = proxyDlsiteUrl(normalized, true);
-    const legacyProxy = proxyDlsiteUrl(normalized, false);
-    return [normalized, hostAwareProxy, legacyProxy]
-        .filter((candidate, idx, arr) => !!candidate && arr.indexOf(candidate) === idx);
-}
-
-function isExternalMediaItem(item: MediaFile, url: string): boolean {
-    if (url.startsWith('http') || url.startsWith('//') || url.startsWith('blob:')) return true;
-    const raw = item.mediaStreamUrl || item.media_stream_url || '';
-    return raw.startsWith('http') || raw.startsWith('//') || raw.startsWith('blob:');
 }
 
 async function fetchExternalBlobUrl(url: string): Promise<string | null> {
     const normalized = normalizeExternalUrl(url);
     if (!normalized) return null;
-    if (normalized.startsWith('blob:')) return normalized;
+    if (normalized.startsWith('data:')) return null;
 
     const cached = externalBlobUrlCache.get(normalized);
     if (cached) return cached;
@@ -246,69 +202,77 @@ async function fetchExternalBlobUrl(url: string): Promise<string | null> {
     const inFlight = externalBlobFetchInFlight.get(normalized);
     if (inFlight) return inFlight;
 
+    const generation = imageFetchGeneration;
+    const controller = new AbortController();
+    imageFetchControllers.add(controller);
     const task = (async (): Promise<string | null> => {
-        const candidates = getExternalImageCandidates(normalized);
-        for (const candidate of candidates) {
-            try {
-                const res = await retryWithBackoff(
-                    () => gmRequest({
-                        url: candidate,
-                        responseType: 'blob',
-                        headers: {
-                            Accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
-                            Referer: 'https://www.dlsite.com/',
-                            Origin: 'https://www.dlsite.com',
-                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                        },
-                    }),
+        let blob: Blob | null = null;
+        if (normalized.startsWith('blob:')) {
+            const response = await fetch(normalized, { signal: controller.signal });
+            if (!response.ok) return null;
+            const candidate = await response.blob();
+            if (await isSafeRasterImageBlob(candidate)) blob = candidate;
+        } else {
+            const verified = await fetchVerifiedImageBlob(normalized, {
+                proxyBaseUrl: getProxyBaseUrl(),
+                signal: controller.signal,
+                headers: {
+                    Accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+                },
+                dlsiteHeaders: {
+                    Referer: 'https://www.dlsite.com/',
+                    Origin: 'https://www.dlsite.com',
+                },
+                request: (config) => retryWithBackoff(
+                    () => gmRequest(config),
                     { attempts: 2, backoffMs: 600, multiplier: 2 },
-                );
-                const blob = res.response as Blob | null;
-                if (!blob || blob.size <= 0) continue;
-
-                const blobUrl = URL.createObjectURL(blob);
-                const prev = externalBlobUrlCache.get(normalized);
-                if (prev) {
-                    try { URL.revokeObjectURL(prev); } catch { /* ignore */ }
-                }
-                externalBlobUrlCache.set(normalized, blobUrl);
-                return blobUrl;
-            } catch {
-                // Try next candidate URL
-            }
+                ),
+            });
+            blob = verified?.blob || null;
         }
-        return null;
+        if (!blob || controller.signal.aborted || generation !== imageFetchGeneration) return null;
+
+        const blobUrl = URL.createObjectURL(blob);
+        if (controller.signal.aborted || generation !== imageFetchGeneration) {
+            URL.revokeObjectURL(blobUrl);
+            return null;
+        }
+
+        const prev = externalBlobUrlCache.get(normalized);
+        if (prev) {
+            try { URL.revokeObjectURL(prev); } catch { /* ignore */ }
+        }
+        externalBlobUrlCache.set(normalized, blobUrl);
+        return blobUrl;
     })();
 
     externalBlobFetchInFlight.set(normalized, task);
     try {
         return await task;
     } finally {
-        externalBlobFetchInFlight.delete(normalized);
+        imageFetchControllers.delete(controller);
+        if (externalBlobFetchInFlight.get(normalized) === task) {
+            externalBlobFetchInFlight.delete(normalized);
+        }
     }
 }
 
 function getThumbnailUrl(item: MediaFile): string {
-    const url = getMediaUrl(item.hash, item);
-    const normalized = normalizeExternalUrl(url);
-    return externalBlobUrlCache.get(normalized) || url;
+    return thumbnailBlobUrls.value.get(item.hash) || '';
 }
 
 function onThumbnailError(item: MediaFile, event: Event): void {
     const target = event.target as HTMLImageElement | null;
     if (!target) return;
-
-    const url = getMediaUrl(item.hash, item);
-    if (!isExternalMediaItem(item, url)) return;
-
-    void fetchExternalBlobUrl(url).then((blobUrl) => {
-        if (blobUrl && target.isConnected) {
-            target.src = blobUrl;
-        }
-    });
+    thumbnailBlobUrls.value.delete(item.hash);
+    thumbnailBlobUrls.value = new Map(thumbnailBlobUrls.value);
+    target.removeAttribute('src');
 }
 
 function clearExternalBlobCache(): void {
+    imageFetchGeneration++;
+    for (const controller of imageFetchControllers) controller.abort();
+    imageFetchControllers.clear();
     externalBlobUrlCache.forEach((blobUrl) => {
         try {
             URL.revokeObjectURL(blobUrl);
@@ -318,6 +282,26 @@ function clearExternalBlobCache(): void {
     });
     externalBlobUrlCache.clear();
     externalBlobFetchInFlight.clear();
+    thumbnailBlobUrls.value = new Map();
+    preloadedImages.clear();
+}
+
+async function fetchMediaImageBlobUrl(item: MediaFile, primaryUrl?: string): Promise<string | null> {
+    const candidates = [
+        primaryUrl || getMediaUrl(item.hash, item),
+        item.mediaStreamUrl,
+        item.media_stream_url,
+        item.mediaDownloadUrl,
+        item.media_download_url,
+    ]
+        .map((value) => normalizeExternalUrl(String(value || '')))
+        .filter((value, index, all) => !!value && all.indexOf(value) === index);
+
+    for (const candidate of candidates) {
+        const resolved = await fetchExternalBlobUrl(candidate);
+        if (resolved) return resolved;
+    }
+    return null;
 }
 
 function getThumbnailIcon(type: 'image' | 'video' | 'pdf' | 'text'): string {
@@ -481,6 +465,7 @@ function hideModal(): void {
 
     // Cancel pending background requests
     activeRequestId++;
+    mediaRenderGeneration++;
     stopRecovery();
     clearExternalBlobCache();
 
@@ -692,98 +677,99 @@ function renderMedia(item: MediaFile, type: 'image' | 'video' | 'pdf' | 'text'):
     wrapper.classList.remove('zoomed');
     isLoading.value = true;
     errorMessage.value = '';
+    const renderGeneration = ++mediaRenderGeneration;
 
     const url = getMediaUrl(item.hash, item);
 
     updateTitle(item.title);
 
     if (type === 'image') {
-        renderImage(wrapper, item, url);
+        void renderImage(wrapper, item, url, renderGeneration);
     } else if (type === 'video') {
         renderVideo(wrapper, item, url);
     } else if (type === 'pdf') {
-        renderPdf(wrapper, item, url);
+        renderPdf(wrapper, item, url, renderGeneration);
     } else {
-        renderText(wrapper, item, url);
+        renderText(wrapper, item, url, renderGeneration);
     }
 }
 
-function renderImage(wrapper: HTMLElement, item: MediaFile, url: string): void {
+async function renderImage(
+    wrapper: HTMLElement,
+    item: MediaFile,
+    url: string,
+    renderGeneration: number,
+): Promise<void> {
     const baseUrl = normalizeExternalUrl(url);
-    const isExternal = isExternalMediaItem(item, baseUrl);
     const img = document.createElement('img');
     img.alt = item.title;
     img.className = 'media-viewer-image';
     img.draggable = false;
-    if (!baseUrl.startsWith('blob:')) {
-        img.referrerPolicy = 'strict-origin-when-cross-origin';
-    }
     img.style.cursor = 'default';
     img.style.width = '';
     img.style.height = '';
     img.style.maxWidth = '100%';
     img.style.maxHeight = '100%';
 
-    const preloaded = preloadedImages.get(item.hash);
-    if (preloaded && preloaded.complete) {
-        img.src = preloaded.src;
-        isLoading.value = false;
-    } else {
-        img.onload = () => { isLoading.value = false; };
-
-        let retryCount = 0;
-        const maxRetries = 3;
-        let blobAttempted = false;
-        let handlingError = false;
-        img.onerror = () => {
-            if (handlingError) return;
-            handlingError = true;
-
-            const processError = async () => {
-                if (isExternal && !blobAttempted) {
-                    blobAttempted = true;
-                    const blobUrl = await fetchExternalBlobUrl(baseUrl);
-                    if (blobUrl && img.isConnected) {
-                        img.src = blobUrl;
-                        return;
-                    }
-                }
-
-                retryCount++;
-                if (retryCount <= maxRetries) {
-                    const delay = Math.pow(2, retryCount - 1) * 1000;
-                    Logger.debug(`[MediaLightbox] Image retry ${retryCount}/${maxRetries} for ${item.title} in ${delay}ms`);
-                    setTimeout(() => {
-                        if (img.isConnected) {
-                            if (shouldAvoidRetryQuery(baseUrl)) {
-                                const candidates = getExternalImageCandidates(baseUrl);
-                                const nextCandidate = candidates[Math.min(retryCount - 1, candidates.length - 1)] || baseUrl;
-                                img.src = nextCandidate;
-                                return;
-                            }
-                            const separator = baseUrl.includes('?') ? '&' : '?';
-                            img.src = `${baseUrl}${separator}_r=${retryCount}`;
-                        }
-                    }, delay);
-                } else {
-                    isLoading.value = false;
-                    errorMessage.value = 'Failed to load image';
-                    errorIcon.value = 'broken_image';
-                    wrapper.innerHTML = '';
-                    startAutoRecovery(item, wrapper);
-                }
-            };
-
-            void processError().finally(() => {
-                handlingError = false;
-            });
-        };
-
-        img.src = baseUrl;
-    }
-
     img.addEventListener('click', (e) => e.stopPropagation());
     wrapper.appendChild(img);
+
+    const displayUrl = preloadedImages.get(item.hash)
+        || await fetchMediaImageBlobUrl(item, baseUrl);
+
+    if (renderGeneration !== mediaRenderGeneration || !img.isConnected) return;
+    if (!displayUrl) {
+        await handleUnavailableImage(item, renderGeneration);
+        return;
+    }
+
+    preloadedImages.set(item.hash, displayUrl);
+    thumbnailBlobUrls.value.set(item.hash, displayUrl);
+    thumbnailBlobUrls.value = new Map(thumbnailBlobUrls.value);
+    img.onload = () => {
+        if (renderGeneration === mediaRenderGeneration) isLoading.value = false;
+    };
+    img.onerror = () => {
+        if (renderGeneration !== mediaRenderGeneration) return;
+        void handleUnavailableImage(item, renderGeneration);
+    };
+    img.src = displayUrl;
+}
+
+async function handleUnavailableImage(item: MediaFile, renderGeneration: number): Promise<void> {
+    if (renderGeneration !== mediaRenderGeneration) return;
+
+    const originalList = currentMediaList.value;
+    const failedIndex = Math.max(0, originalList.findIndex((candidate) => candidate === item || candidate.hash === item.hash));
+    const orderedAlternates = [
+        ...originalList.slice(failedIndex + 1),
+        ...originalList.slice(0, failedIndex),
+    ].filter((candidate) => candidate !== item && candidate.hash !== item.hash);
+
+    for (const candidate of orderedAlternates.slice(0, 2)) {
+        const displayUrl = await fetchMediaImageBlobUrl(candidate);
+        if (renderGeneration !== mediaRenderGeneration) return;
+        if (!displayUrl) continue;
+
+        const remaining = originalList.filter((entry) => entry !== item && entry.hash !== item.hash);
+        const nextIndex = Math.max(0, remaining.findIndex((entry) => entry === candidate || entry.hash === candidate.hash));
+        currentMediaList.value = remaining;
+        currentMediaIndex.value = nextIndex;
+        preloadedImages.set(candidate.hash, displayUrl);
+        resetZoom();
+        renderMedia(candidate, 'image');
+        preloadAdjacentImages();
+        scrollThumbnailIntoView();
+        return;
+    }
+
+    if (renderGeneration !== mediaRenderGeneration) return;
+    currentMediaList.value = originalList.filter((entry) => entry !== item && entry.hash !== item.hash);
+    currentMediaIndex.value = 0;
+    isLoading.value = false;
+    errorMessage.value = t('mediaViewerImageUnavailable');
+    errorIcon.value = 'block';
+    mediaWrapperRef.value?.replaceChildren();
 }
 
 function renderVideo(wrapper: HTMLElement, item: MediaFile, url: string): void {
@@ -893,13 +879,13 @@ function renderVideo(wrapper: HTMLElement, item: MediaFile, url: string): void {
     video.onplay = () => {
         if (syncPlayPending > 0) { syncPlayPending--; return; }
         lastUserAction = Date.now();
-        try { store.commit?.('AudioPlayer/PLAY'); } catch { /* host variant */ }
+        bridge.requestPlay();
     };
 
     video.onpause = () => {
         if (syncPausePending > 0) { syncPausePending--; return; }
         lastUserAction = Date.now();
-        try { store.commit?.('AudioPlayer/PAUSE'); } catch { /* host variant */ }
+        bridge.requestPause();
     };
 
     video.onseeking = () => {
@@ -962,12 +948,13 @@ function renderVideo(wrapper: HTMLElement, item: MediaFile, url: string): void {
     wrapper.appendChild(video);
 }
 
-function renderPdf(wrapper: HTMLElement, item: MediaFile, url: string): void {
+function renderPdf(wrapper: HTMLElement, item: MediaFile, url: string, renderGeneration: number): void {
     const pdfContainer = document.createElement('div');
     pdfContainer.className = 'media-viewer-pdf-container';
     wrapper.appendChild(pdfContainer);
 
     const renderPdfFallback = () => {
+        if (renderGeneration !== mediaRenderGeneration) return;
         pdfContainer.innerHTML = '';
         const iframe = document.createElement('iframe');
         iframe.className = 'media-viewer-pdf';
@@ -984,10 +971,11 @@ function renderPdf(wrapper: HTMLElement, item: MediaFile, url: string): void {
     };
 
     extractPdfText(url).then((text) => {
+        if (renderGeneration !== mediaRenderGeneration) return;
         if (!text) { renderPdfFallback(); return; }
 
         if (translateMode.value) {
-            const targetLang = I18n.lang === 'zh' ? 'zh-CN' : I18n.lang;
+            const targetLang = TranslationService.getUiTargetLang();
             const { grid, translatedCells } = buildTranslationGrid(text);
             pdfContainer.innerHTML = '';
             pdfContainer.appendChild(grid);
@@ -995,6 +983,7 @@ function renderPdf(wrapper: HTMLElement, item: MediaFile, url: string): void {
 
             const fastOptions = text.length > 20000 ? { fastDeadlineMs: 30000, maxLines: 80 } : undefined;
             translateGridCells(text, translatedCells, targetLang, fastOptions).then((ok) => {
+                if (renderGeneration !== mediaRenderGeneration) return;
                 if (!ok) {
                     pdfContainer.innerHTML = '';
                     pdfContainer.appendChild(buildTextLines(text));
@@ -1020,13 +1009,14 @@ function buildTextLines(text: string): HTMLElement {
     return container;
 }
 
-function renderText(wrapper: HTMLElement, item: MediaFile, url: string): void {
+function renderText(wrapper: HTMLElement, item: MediaFile, url: string, renderGeneration: number): void {
     const loadText = async () => {
         try {
             const res = await retryWithBackoff(
                 () => gmRequest({ url, responseType: 'text' }),
                 { attempts: 2, backoffMs: 500 }
             );
+            if (renderGeneration !== mediaRenderGeneration) return;
             const rawText = String(res.response || '');
             const maxChars = 400000;
             const text = rawText.length > maxChars ? rawText.slice(0, maxChars) : rawText;
@@ -1039,7 +1029,7 @@ function renderText(wrapper: HTMLElement, item: MediaFile, url: string): void {
             }
 
             if (translateMode.value) {
-                const targetLang = I18n.lang === 'zh' ? 'zh-CN' : I18n.lang;
+                const targetLang = TranslationService.getUiTargetLang();
                 const { grid, translatedCells } = buildTranslationGrid(text);
                 wrapper.innerHTML = '';
                 wrapper.appendChild(grid);
@@ -1047,6 +1037,7 @@ function renderText(wrapper: HTMLElement, item: MediaFile, url: string): void {
 
                 const fastOptions = text.length > 20000 ? { fastDeadlineMs: 30000, maxLines: 80 } : undefined;
                 const ok = await translateGridCells(text, translatedCells, targetLang, fastOptions);
+                if (renderGeneration !== mediaRenderGeneration) return;
                 if (!ok) {
                     wrapper.innerHTML = '';
                     wrapper.appendChild(buildTextLines(text));
@@ -1084,7 +1075,7 @@ function updateTitle(title: string): void {
     const cnOnlyMode = !translateMode.value && cnToJp.value;
     if (cnOnlyMode) {
         if (!isChinese(title)) return;
-        TranslationService.translate(title, 'ja').then(result => {
+        TranslationService.translate(title, 'ja', { sourceLanguageHint: 'zh' }).then(result => {
             if (!result || result === title) return;
             if (token !== titleTranslationToken.value) return;
             mediaTitle.value = result; // Replace title directly
@@ -1094,8 +1085,8 @@ function updateTitle(title: string): void {
 
     if (!translateMode.value) return;
 
-    const targetLang = I18n.lang === 'zh' ? 'zh-CN' : I18n.lang;
-    TranslationService.translate(title, targetLang).then(result => {
+    const targetLang = TranslationService.getUiTargetLang();
+    TranslationService.translate(title, targetLang, { sourceLanguageHint: 'auto' }).then(result => {
         if (!result || result === title) return;
         if (token !== titleTranslationToken.value) return;
         translatedTitle.value = result;
@@ -1106,33 +1097,27 @@ function updateTitle(title: string): void {
 
 function preloadAdjacentImages(): void {
     if (currentMediaType.value !== 'image') return;
+    const preloadGeneration = imageFetchGeneration;
 
-    for (let delta = -2; delta <= 3; delta++) {
-        if (delta === 0) continue;
+    const preload = (item: MediaFile): void => {
+        if (preloadedImages.has(item.hash)) return;
+        void fetchMediaImageBlobUrl(item).then((blobUrl) => {
+            if (!blobUrl || preloadGeneration !== imageFetchGeneration) return;
+            preloadedImages.set(item.hash, blobUrl);
+            thumbnailBlobUrls.value.set(item.hash, blobUrl);
+            thumbnailBlobUrls.value = new Map(thumbnailBlobUrls.value);
+        });
+    };
+
+    // Only the immediate neighbours are warmed. Each warmup is a full image
+    // blob GET, so broader/background preloading would download an entire
+    // multi-megabyte gallery without user intent.
+    for (const delta of [-1, 1]) {
         const idx = currentMediaIndex.value + delta;
         if (idx >= 0 && idx < currentMediaList.value.length) {
             const item = currentMediaList.value[idx];
-            if (!preloadedImages.has(item.hash)) {
-                const img = new Image();
-                img.referrerPolicy = 'no-referrer';
-                img.src = getMediaUrl(item.hash, item);
-                preloadedImages.set(item.hash, img);
-            }
+            preload(item);
         }
-    }
-
-    // Background-preload rest if small gallery
-    if (currentMediaList.value.length <= 20) {
-        setTimeout(() => {
-            currentMediaList.value.forEach((item) => {
-                if (!preloadedImages.has(item.hash)) {
-                    const img = new Image();
-                    img.referrerPolicy = 'no-referrer';
-                    img.src = getMediaUrl(item.hash, item);
-                    preloadedImages.set(item.hash, img);
-                }
-            });
-        }, 500);
     }
 }
 
@@ -1182,44 +1167,13 @@ function stopRecovery(): void {
     }
 }
 
-function startAutoRecovery(item: MediaFile, wrapper: HTMLElement): void {
-    stopRecovery();
-    const baseUrl = normalizeExternalUrl(getMediaUrl(item.hash, item));
-    const RETRY_DELAY = 5000;
-
-    recoveryTimeout = window.setTimeout(() => {
-        if (!isActive.value) return;
-        const curItem = currentMediaList.value[currentMediaIndex.value];
-        if (curItem.hash !== item.hash) return;
-
-        const img = new Image();
-        img.referrerPolicy = 'no-referrer';
-        img.onload = () => {
-            if (currentMediaList.value[currentMediaIndex.value].hash === item.hash) {
-                renderMedia(item, 'image');
-            }
-        };
-        img.onerror = () => {
-            if (currentMediaList.value[currentMediaIndex.value].hash === item.hash) {
-                startAutoRecovery(item, wrapper);
-            }
-        };
-        if (shouldAvoidRetryQuery(baseUrl)) {
-            const candidates = getExternalImageCandidates(baseUrl);
-            img.src = candidates[0] || baseUrl;
-        } else {
-            img.src = `${baseUrl}${baseUrl.includes('?') ? '&' : '?'}_recover=${Date.now()}`;
-        }
-    }, RETRY_DELAY);
-}
-
 // ── Thumbnail strip ──────────────────────────────────────────────────────────
 
 function scrollThumbnailIntoView(): void {
     nextTick(() => {
         const strip = thumbnailStripRef.value;
         const activeThumb = strip?.querySelector('.media-viewer-thumb-item.active') as HTMLElement;
-        if (activeThumb) {
+        if (activeThumb?.scrollIntoView) {
             activeThumb.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
         }
     });
@@ -1244,6 +1198,25 @@ async function downloadCurrentMedia(): Promise<void> {
         setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
     };
 
+    if (currentMediaType.value === 'image') {
+        const verifiedUrl = preloadedImages.get(item.hash) || await fetchMediaImageBlobUrl(item, url);
+        if (!verifiedUrl) {
+            errorMessage.value = t('mediaViewerImageUnavailable');
+            errorIcon.value = 'block';
+            return;
+        }
+        try {
+            const response = await fetch(verifiedUrl);
+            triggerDownload(await response.blob());
+            return;
+        } catch (err) {
+            Logger.warn('[MediaLightbox] Verified image download failed:', err);
+            errorMessage.value = t('mediaViewerImageUnavailable');
+            errorIcon.value = 'block';
+            return;
+        }
+    }
+
     try {
         const res = await retryWithBackoff(
             () => gmRequest({ url, responseType: 'blob' }),
@@ -1257,15 +1230,25 @@ async function downloadCurrentMedia(): Promise<void> {
             triggerDownload(await response.blob());
         } catch (err) {
             Logger.warn('[MediaLightbox] Download failed:', err);
-            window.open(url, '_blank');
+            window.open(url, '_blank', 'noopener,noreferrer');
         }
     }
 }
 
-function openRawMedia(): void {
+async function openRawMedia(): Promise<void> {
     const item = currentMediaList.value[currentMediaIndex.value];
     if (!item) return;
-    window.open(getMediaUrl(item.hash, item), '_blank');
+    if (currentMediaType.value === 'image') {
+        const verifiedUrl = preloadedImages.get(item.hash) || await fetchMediaImageBlobUrl(item);
+        if (!verifiedUrl) {
+            errorMessage.value = t('mediaViewerImageUnavailable');
+            errorIcon.value = 'block';
+            return;
+        }
+        window.open(verifiedUrl, '_blank', 'noopener,noreferrer');
+        return;
+    }
+    window.open(getMediaUrl(item.hash, item), '_blank', 'noopener,noreferrer');
 }
 
 // ── Player control ───────────────────────────────────────────────────────────
@@ -1483,6 +1466,7 @@ async function showMedia(
     mediaList: MediaFile[],
     startIndex: number
 ): Promise<void> {
+    clearExternalBlobCache();
     currentMediaList.value = mediaList;
     currentMediaIndex.value = startIndex;
     currentMediaType.value = type;
@@ -1522,6 +1506,7 @@ function showExternalImages(urls: string[], startIndex = 0): void {
     if (!urls.length) return;
 
     activeRequestId++;
+    clearExternalBlobCache();
     // External galleries can change order/length across works; clear stale preloads
     // keyed by prior synthetic hashes to avoid slot-to-image mismatches.
     preloadedImages.clear();
@@ -1592,7 +1577,7 @@ function renderResolvedItem(item: MediaFile, type: 'image' | 'video' | 'pdf' | '
  */
 function showResolutionError(): void {
     isLoading.value = false;
-    errorMessage.value = 'Failed to resolve media URL';
+    errorMessage.value = t('mediaViewerResolutionFailed');
     errorIcon.value = 'broken_image';
 }
 
@@ -1617,7 +1602,20 @@ onMounted(() => {
     document.addEventListener('mouseup', handleMouseUp);
 });
 
+watch([lang, translateMode, cnToJp], () => {
+    titleTranslationToken.value += 1;
+    translatedTitle.value = '';
+    const item = currentItem.value;
+    if (!isActive.value || !item) return;
+    if (currentMediaType.value === 'pdf' || currentMediaType.value === 'text') {
+        renderMedia(item, currentMediaType.value);
+    } else {
+        updateTitle(item.title);
+    }
+});
+
 onUnmounted(() => {
+    mediaRenderGeneration++;
     document.removeEventListener('keydown', handleKeydown);
     document.removeEventListener('mousemove', handleMouseMove);
     document.removeEventListener('mouseup', handleMouseUp);
@@ -1682,8 +1680,8 @@ defineExpose({
                             <button
                                 class="media-viewer-action media-viewer-zoom-out"
                                 :class="{ disabled: isZoomOutDisabled }"
-                                aria-label="Zoom out"
-                                title="Zoom out (-)"
+                                :aria-label="t('mediaViewerZoomOut')"
+                                :title="`${t('mediaViewerZoomOut')} (-)`"
                                 @click.stop="zoomOut"
                             >
                                 <span class="material-icons">remove</span>
@@ -1695,14 +1693,15 @@ defineExpose({
                                 max="400"
                                 :value="zoomSliderValue"
                                 step="10"
-                                title="Zoom level"
+                                :aria-label="t('mediaViewerZoomLevel')"
+                                :title="t('mediaViewerZoomLevel')"
                                 @input.stop="onZoomSlider"
                             >
                             <button
                                 class="media-viewer-action media-viewer-zoom-in"
                                 :class="{ disabled: isZoomInDisabled }"
-                                aria-label="Zoom in"
-                                title="Zoom in (+)"
+                                :aria-label="t('mediaViewerZoomIn')"
+                                :title="`${t('mediaViewerZoomIn')} (+)`"
                                 @click.stop="zoomIn"
                             >
                                 <span class="material-icons">add</span>
@@ -1710,8 +1709,8 @@ defineExpose({
                             <div class="media-viewer-zoom-indicator">{{ zoomPercent }}</div>
                             <button
                                 class="media-viewer-action media-viewer-zoom-reset"
-                                aria-label="Reset zoom"
-                                title="Reset zoom (0)"
+                                :aria-label="t('mediaViewerZoomReset')"
+                                :title="`${t('mediaViewerZoomReset')} (0)`"
                                 @click.stop="resetZoom"
                             >
                                 <span class="material-icons">fit_screen</span>
@@ -1720,32 +1719,32 @@ defineExpose({
 
                         <button
                             class="media-viewer-action media-viewer-fullscreen"
-                            aria-label="Toggle fullscreen"
-                            title="Fullscreen (F)"
+                            :aria-label="t(isFullscreen ? 'mediaViewerExitFullscreen' : 'mediaViewerFullscreen')"
+                            :title="`${t(isFullscreen ? 'mediaViewerExitFullscreen' : 'mediaViewerFullscreen')} (F)`"
                             @click.stop="toggleFullscreen"
                         >
                             <span class="material-icons">{{ isFullscreen ? 'fullscreen_exit' : 'fullscreen' }}</span>
                         </button>
                         <button
                             class="media-viewer-action media-viewer-download"
-                            aria-label="Download"
-                            title="Download"
+                            :aria-label="t('mediaViewerDownload')"
+                            :title="t('mediaViewerDownload')"
                             @click.stop="downloadCurrentMedia"
                         >
                             <span class="material-icons">download</span>
                         </button>
                         <button
                             class="media-viewer-action media-viewer-raw"
-                            aria-label="Open raw"
-                            title="Open raw image in new tab"
+                            :aria-label="t('mediaViewerOpenRaw')"
+                            :title="t('mediaViewerOpenRaw')"
                             @click.stop="openRawMedia"
                         >
                             <span class="material-icons">open_in_new</span>
                         </button>
                         <button
                             class="media-viewer-action media-viewer-close"
-                            aria-label="Close"
-                            title="Close (Esc)"
+                            :aria-label="t('mediaViewerClose')"
+                            :title="`${t('mediaViewerClose')} (Esc)`"
                             @click.stop="hideModal"
                         >
                             <span class="material-icons">close</span>
@@ -1766,7 +1765,8 @@ defineExpose({
                             v-show="hasMultipleMedia"
                             class="media-viewer-nav media-viewer-prev"
                             :class="{ disabled: isPrevDisabled }"
-                            aria-label="Previous"
+                            :aria-label="t('mediaViewerPrevious')"
+                            :title="t('mediaViewerPrevious')"
                             @click.stop="navigateMedia(-1)"
                         >
                             <span class="material-icons">chevron_left</span>
@@ -1781,7 +1781,6 @@ defineExpose({
                         <div v-if="errorMessage && !isLoading" class="media-viewer-error">
                             <span class="material-icons">{{ errorIcon }}</span>
                             <span>{{ errorMessage }}</span>
-                            <div class="media-viewer-error-sub">Retrying...</div>
                         </div>
 
                         <!-- Media wrapper (imperative DOM for image/video/pdf/text) -->
@@ -1798,7 +1797,8 @@ defineExpose({
                             v-show="hasMultipleMedia"
                             class="media-viewer-nav media-viewer-next"
                             :class="{ disabled: isNextDisabled }"
-                            aria-label="Next"
+                            :aria-label="t('mediaViewerNext')"
+                            :title="t('mediaViewerNext')"
                             @click.stop="navigateMedia(1)"
                         >
                             <span class="material-icons">chevron_right</span>
@@ -1822,7 +1822,7 @@ defineExpose({
                         @click.stop="goToIndex(index)"
                     >
                         <img
-                            v-if="currentMediaType === 'image'"
+                            v-if="currentMediaType === 'image' && getThumbnailUrl(item)"
                             :src="getThumbnailUrl(item)"
                             :alt="item.title"
                             loading="lazy"

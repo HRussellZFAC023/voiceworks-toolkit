@@ -27,6 +27,8 @@ describe('DLsiteScraper', () => {
         mockDLsiteService.fetchProductPageBody.mockReset();
         mockDLsiteService.fetchProductPageSampleImages.mockReset();
         mockDLsiteService.fetchProductPageReviews.mockReset();
+        mockDLsiteService.fetchProductPageBody.mockResolvedValue(null);
+        mockDLsiteService.fetchProductPageSampleImages.mockResolvedValue([]);
         scraper = DLsiteScraper.getInstance();
     });
 
@@ -76,7 +78,7 @@ describe('DLsiteScraper', () => {
                 rate_count_detail: { '5': 10 },
             });
             mockDLsiteService.fetchDynamicApi.mockResolvedValue(null);
-            mockDLsiteService.fetchProductPageBody.mockResolvedValue(null);
+            mockDLsiteService.fetchProductPageBody.mockResolvedValue('Cached body for repeat lookup');
 
             await scraper.scrape('RJ00001111');
             const callsAfterFirst = mockDLsiteService.fetchProductApi.mock.calls.length;
@@ -685,7 +687,7 @@ describe('DLsiteScraper', () => {
                 price: 100,
             });
             mockDLsiteService.fetchDynamicApi.mockResolvedValue(null);
-            mockDLsiteService.fetchProductPageBody.mockResolvedValue(null);
+            mockDLsiteService.fetchProductPageBody.mockResolvedValue('Cached body text for progressive metadata');
 
             await scraper.scrape('RJ20000001');
             mockDLsiteService.fetchProductApi.mockReset();
@@ -774,6 +776,83 @@ describe('DLsiteScraper', () => {
                 'https://img.dlsite.jp/modpub/images2/work/doujin/RJ01511000/RJ01510683_img_smp2.jpg',
             ]);
             expect(onProgress).not.toHaveBeenCalled();
+        });
+
+        it('upgrades a cached partial entry with the missing description body', async () => {
+            const normalized = 'RJ20000006';
+            SharedCache.set(`asmr-ult:dlsite:${normalized}`, {
+                rjcode: normalized,
+                title: 'Partial metadata',
+                nsfw: true,
+                release: '2025-01-01',
+                tags: [],
+                cvs: [],
+                rating_average: 0,
+                price: 0,
+                age_category_string: 'R18',
+            }, 60_000);
+            mockDLsiteService.fetchProductPageBody.mockResolvedValue('Recovered full DLsite description body');
+            mockDLsiteService.fetchProductApi.mockResolvedValue(null);
+
+            const result = await scraper.scrapeProgressive(normalized, vi.fn());
+
+            expect(result.body).toBe('Recovered full DLsite description body');
+            expect(result.details_schema_version).toBe(2);
+            expect(mockDLsiteService.fetchProductPageBody).toHaveBeenCalledWith(normalized);
+        });
+
+        it('retries cache enrichment after a transient empty details response', async () => {
+            const normalized = 'RJ20000007';
+            SharedCache.set(`asmr-ult:dlsite:${normalized}`, {
+                rjcode: normalized,
+                title: 'Retry metadata',
+                nsfw: true,
+                release: '2025-01-01',
+                tags: [],
+                cvs: [],
+                rating_average: 0,
+                price: 0,
+                age_category_string: 'R18',
+            }, 60_000);
+            mockDLsiteService.fetchProductApi.mockResolvedValue(null);
+            mockDLsiteService.fetchProductPageBody
+                .mockResolvedValueOnce(null)
+                .mockResolvedValueOnce('Recovered on the second request');
+
+            const first = await scraper.scrapeProgressive(normalized, vi.fn());
+            expect(first.details_schema_version).toBeUndefined();
+
+            const second = await scraper.scrapeProgressive(normalized, vi.fn());
+            expect(second.body).toBe('Recovered on the second request');
+            expect(second.details_schema_version).toBe(2);
+            expect(mockDLsiteService.fetchProductPageBody).toHaveBeenCalledTimes(2);
+        });
+
+        it('does not let an API intro pin a transiently missing HTML gallery', async () => {
+            const normalized = 'RJ20000008';
+            const partsUrl = 'https://img.dlsite.jp/modpub/images2/parts/RJ02000000/RJ20000008/sample.jpg';
+            mockDLsiteService.fetchProductApi.mockResolvedValue({
+                work_name: 'API body with delayed gallery',
+                age_category: 3,
+                regist_date: '2025-01-01',
+                genres: [],
+                price: 0,
+                intro: 'Body supplied by the product API',
+            });
+            mockDLsiteService.fetchDynamicApi.mockResolvedValue(null);
+            mockDLsiteService.fetchProductPageBody.mockResolvedValue(null);
+            mockDLsiteService.fetchProductPageSampleImages
+                .mockResolvedValueOnce([])
+                .mockResolvedValueOnce([partsUrl]);
+
+            const first = await scraper.scrapeProgressive(normalized, vi.fn());
+            expect(first.body).toBe('Body supplied by the product API');
+            expect(first.details_schema_version).toBeUndefined();
+
+            const second = await scraper.scrapeProgressive(normalized, vi.fn());
+            expect(second.image_samples).toContain(partsUrl);
+            expect(second.details_schema_version).toBe(2);
+            expect(mockDLsiteService.fetchProductPageSampleImages).toHaveBeenCalledTimes(2);
         });
 
         it('should call onProgress with phase 1 data', async () => {

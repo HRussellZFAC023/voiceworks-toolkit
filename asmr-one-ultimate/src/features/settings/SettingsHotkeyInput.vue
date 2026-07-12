@@ -82,7 +82,7 @@ function resetToDefault() {
 </script>
 
 <template>
-    <div role="listitem" class="q-py-sm q-item q-item-type row no-wrap q-item--dark">
+    <div role="listitem" class="q-py-sm q-item q-item-type row no-wrap asmr-settings-item">
         <div class="q-item__section column q-item__section--avatar q-item__section--side justify-center">
             <i class="q-icon notranslate material-icons asmr-settings-icon">{{ icon }}</i>
         </div>
@@ -126,20 +126,20 @@ function resetToDefault() {
     caret-color: transparent;
 }
 .asmr-hotkey-input:focus {
-    outline: 1px solid rgba(255, 255, 255, 0.5);
+    outline: 2px solid var(--asmr-border-focus);
     border-radius: 4px;
 }
 .asmr-hotkey-listening {
     animation: pulse-border 1s ease-in-out infinite;
 }
 @keyframes pulse-border {
-    0%, 100% { outline-color: rgba(255, 255, 255, 0.3); }
-    50% { outline-color: rgba(255, 255, 255, 0.8); }
+    0%, 100% { outline-color: var(--asmr-border-color); }
+    50% { outline-color: var(--asmr-border-focus); }
 }
 .asmr-hotkey-reset {
     background: none;
     border: none;
-    color: rgba(255, 255, 255, 0.5);
+    color: var(--asmr-text-tertiary);
     cursor: pointer;
     padding: 2px;
     line-height: 1;
@@ -147,6 +147,6 @@ function resetToDefault() {
     align-items: center;
 }
 .asmr-hotkey-reset:hover {
-    color: rgba(255, 255, 255, 0.9);
+    color: var(--asmr-text-primary);
 }
 </style>

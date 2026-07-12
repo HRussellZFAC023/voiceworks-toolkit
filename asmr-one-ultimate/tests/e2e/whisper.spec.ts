@@ -10,12 +10,14 @@ test.describe('Whisper Button Presence', () => {
   test('Whisper button exists on work page', async ({ injectedPage, isScriptLoaded }) => {
     await helpers.gotoWork(injectedPage, TEST_WORKS.STANDARD);
     await isScriptLoaded();
-    await injectedPage.waitForTimeout(2000);
+    await helpers.playFirstTrack(injectedPage);
 
-    const btn = helpers.getWhisperButton(injectedPage);
-    const count = await btn.count();
+    const btn = helpers.getWhisperButton(injectedPage).first();
+    await expect(btn).toBeAttached({ timeout: 10000 });
+    await expect(btn).toHaveAttribute('aria-label', /.+/);
+    await expect(btn.locator('.material-icons, .q-icon')).toContainText('record_voice_over');
 
-    console.log(`Whisper button count: ${count}`);
+    expect(await helpers.getWhisperButton(injectedPage).count()).toBe(1);
   });
 
   test('Whisper button has correct icon', async ({ injectedPage, isScriptLoaded }) => {
@@ -272,7 +274,7 @@ test.describe('Whisper Settings', () => {
     await expect(section).toBeVisible({ timeout: 15000 });
   });
 
-  test('Whisper model input exists', async ({ injectedPage, isScriptLoaded }) => {
+  test('Whisper model download control exists', async ({ injectedPage, isScriptLoaded }) => {
     await helpers.gotoSettings(injectedPage);
     await isScriptLoaded();
     await injectedPage.waitForTimeout(3000);
@@ -280,22 +282,18 @@ test.describe('Whisper Settings', () => {
     const section = injectedPage.locator('#asmr-whisper-settings-section');
     await expect(section).toBeVisible({ timeout: 15000 });
 
-    // whisperModel uses a combobox input with data-key attribute
-    const input = section.locator('.asmr-combobox-input[data-key="whisperModel"]');
-    await expect(input).toBeVisible({ timeout: 15000 });
-
-    const value = await input.inputValue();
-    console.log(`Whisper model value: ${value}`);
-    expect(value).toBeTruthy();
+    const download = section.getByRole('button', { name: /download whisper/i });
+    await expect(download).toBeVisible({ timeout: 15000 });
+    await expect(section.locator('.asmr-settings-hint-text')).not.toHaveText('');
   });
 
-  test('Whisper quantized toggle exists', async ({ injectedPage, isScriptLoaded }) => {
+  test('Force Whisper WASM toggle exists', async ({ injectedPage, isScriptLoaded }) => {
     await helpers.gotoSettings(injectedPage);
     await isScriptLoaded();
     await injectedPage.waitForTimeout(3000);
 
     // Toggle uses data-key attribute on the .asmr-toggle wrapper
-    const toggle = injectedPage.locator('#asmr-whisper-settings-section .asmr-toggle[data-key="whisperQuantized"]');
+    const toggle = injectedPage.locator('#asmr-whisper-settings-section .asmr-toggle[data-key="forceWhisperWasm"]');
     await expect(toggle).toBeVisible({ timeout: 15000 });
   });
 });

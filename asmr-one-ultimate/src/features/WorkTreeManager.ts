@@ -41,6 +41,7 @@ export class WorkTreeManager {
     private domDiveAt = 0;
     private lastPathKey = '';
     private treeObserver: MutationObserver | null = null;
+    private treeObserverRetry: ReturnType<typeof setTimeout> | null = null;
     private treeObserverDebounce: ReturnType<typeof setTimeout> | null = null;
     private manualOverrideUntil = 0;
     private autoDiveInProgress = false;
@@ -51,6 +52,13 @@ export class WorkTreeManager {
     private manualNavCleanups: Array<() => void> = [];
     private treeVmHooked = false;
     private syncWatcherCleanup: (() => void) | null = null;
+    private hookedTreeVm: WorkTreeComponent | null = null;
+    private treeHookHandlers: {
+        updated: () => void;
+        mounted: () => void;
+        beforeDestroy: () => void;
+    } | null = null;
+    private treeHookGeneration = 0;
     /** Dedup key for worktree:path-change emission from enhanceWorkTree */
     private lastEnhancedPathKey = '';
     /** True while our own code is modifying the work-tree DOM (suppresses treeObserver) */
@@ -93,6 +101,10 @@ export class WorkTreeManager {
         this.flatView.disable();
         this.treeObserver?.disconnect();
         this.treeObserver = null;
+        if (this.treeObserverRetry !== null) {
+            clearTimeout(this.treeObserverRetry);
+            this.treeObserverRetry = null;
+        }
         if (this.treeObserverDebounce) {
             clearTimeout(this.treeObserverDebounce);
             this.treeObserverDebounce = null;
@@ -103,9 +115,8 @@ export class WorkTreeManager {
         this.hostPathWatcherCleanup = null;
         for (const cleanup of this.manualNavCleanups) cleanup();
         this.manualNavCleanups = [];
-        this.syncWatcherCleanup?.();
-        this.syncWatcherCleanup = null;
-        this.treeVmHooked = false;
+        this.uninstallTreeHooks();
+        this.folderDiver.reset();
         this.bridge.invalidateWorkTreeCache();
         this.resetNavigationState();
         this.diveToken++;
@@ -172,6 +183,9 @@ export class WorkTreeManager {
 
     private handleWorkRoute(workId: string): void {
         if (this.currentWorkId === workId) return;
+        // Invalidate both in-flight dives and deferred Vue path fallbacks before
+        // any component from the new work can become visible.
+        this.folderDiver.reset();
         this.currentWorkId = workId;
         this.diveToken++;
         this.lastPathKey = '';
@@ -424,15 +438,23 @@ export class WorkTreeManager {
      * - Clears treeVmHooked so hooks are reinstalled on new VM instance
      */
     private installTreeHooks(treeVm: WorkTreeComponent): void {
-        if (this.treeVmHooked) return;
+        if (!this.enabled) return;
+        if (this.treeVmHooked && this.hookedTreeVm === treeVm) return;
         if (!treeVm?.$watch || !treeVm?.$on) return;
+        this.uninstallTreeHooks();
+        const generation = this.treeHookGeneration;
         this.treeVmHooked = true;
+        this.hookedTreeVm = treeVm;
+        const isCurrent = () => this.enabled
+            && this.treeHookGeneration === generation
+            && this.hookedTreeVm === treeVm;
 
         // Sync watcher: nuke vnode + force update BEFORE Vue's render watcher.
         // Vue sees prevVnode=null → full mount (fresh DOM, no stale refs).
         // $forceUpdate() ensures render is scheduled even during Vue's scheduler flush
         // (matches KikoeruBridge.forceWorkTreeRerender() which also calls both).
         const unwatch = treeVm.$watch('path', () => {
+            if (!isCurrent()) return;
             Logger.debug('[WorkTreeManager] Sync path watcher: nuking vnode for fresh render');
             treeVm._vnode = null;
             treeVm.$forceUpdate?.();
@@ -454,25 +476,45 @@ export class WorkTreeManager {
         this.syncWatcherCleanup = unwatch || null;
 
         // After every render: single coordinated enhancement pass.
-        treeVm.$on?.('hook:updated', () => {
-            this.enhanceWorkTree(treeVm);
-        });
+        const updated = () => {
+            if (isCurrent()) this.enhanceWorkTree(treeVm);
+        };
 
         // Also on initial mount (hook:updated only fires on re-renders).
-        treeVm.$on?.('hook:mounted', () => {
-            this.enhanceWorkTree(treeVm);
-        });
+        const mounted = () => {
+            if (isCurrent()) this.enhanceWorkTree(treeVm);
+        };
 
         // Detect component destruction → re-install hooks on recreation.
-        treeVm.$on?.('hook:beforeDestroy', () => {
+        const beforeDestroy = () => {
+            if (!isCurrent()) return;
             Logger.debug('[WorkTreeManager] WorkTree VM destroyed, clearing hooks');
-            this.treeVmHooked = false;
-            this.syncWatcherCleanup = null;
+            this.uninstallTreeHooks();
             this.lastEnhancedPathKey = '';
             this.bridge.invalidateWorkTreeCache();
-        });
+        };
+        this.treeHookHandlers = { updated, mounted, beforeDestroy };
+        treeVm.$on('hook:updated', updated);
+        treeVm.$on('hook:mounted', mounted);
+        treeVm.$on('hook:beforeDestroy', beforeDestroy);
 
         Logger.debug('[WorkTreeManager] Installed sync watcher + lifecycle hooks on WorkTree');
+    }
+
+    private uninstallTreeHooks(): void {
+        this.treeHookGeneration++;
+        this.syncWatcherCleanup?.();
+        this.syncWatcherCleanup = null;
+        const treeVm = this.hookedTreeVm;
+        const handlers = this.treeHookHandlers;
+        if (treeVm?.$off && handlers) {
+            treeVm.$off('hook:updated', handlers.updated);
+            treeVm.$off('hook:mounted', handlers.mounted);
+            treeVm.$off('hook:beforeDestroy', handlers.beforeDestroy);
+        }
+        this.treeHookHandlers = null;
+        this.hookedTreeVm = null;
+        this.treeVmHooked = false;
     }
 
     /**
@@ -487,6 +529,7 @@ export class WorkTreeManager {
      * so TranslatedTags/FuriganaRenderer reset state BEFORE Vue renders fresh DOM.
      */
     private enhanceWorkTree(treeVm: WorkTreeComponent): void {
+        if (!this.enabled) return;
         const workTree = document.getElementById('work-tree');
         if (!workTree) return;
 
@@ -581,14 +624,25 @@ export class WorkTreeManager {
      * the callback to batch rapid mutations into a single processing pass.
      */
     private observeWorkTreeDom(): void {
+        if (!this.enabled) return;
         if (this.treeObserver) return;
         const root = document.getElementById('work-tree');
         if (!root) {
             // #work-tree not in DOM yet — retry once after a short delay
-            setTimeout(() => this.observeWorkTreeDom(), 200);
+            if (this.treeObserverRetry === null) {
+                this.treeObserverRetry = setTimeout(() => {
+                    this.treeObserverRetry = null;
+                    this.observeWorkTreeDom();
+                }, 200);
+            }
             return;
         }
+        if (this.treeObserverRetry !== null) {
+            clearTimeout(this.treeObserverRetry);
+            this.treeObserverRetry = null;
+        }
         this.treeObserver = new MutationObserver(() => {
+            if (!this.enabled) return;
             // Skip mutations caused by our own DOM modifications
             if (this.modifyingDom) return;
 
@@ -604,6 +658,7 @@ export class WorkTreeManager {
 
     /** Debounced handler for treeObserver mutations. */
     private processTreeMutation(): void {
+        if (!this.enabled) return;
         // Skip re-triggering while an auto-dive is in progress — our own DOM clicks
         // cause mutations that would otherwise start a competing maybeAutoDive,
         // incrementing diveToken/diveGeneration and aborting the current click sequence.

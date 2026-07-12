@@ -54,34 +54,8 @@ export class SettingsController extends FeatureController {
         const lists = container.querySelectorAll(':scope > .q-list');
         if (lists.length === 0) return null;
 
-        // Also fix existing host settings to match our theme
-        this.fixExistingSettings();
-
         // Insert after the last host settings list
         return lists[lists.length - 1] as HTMLElement;
-    }
-
-    /**
-     * Fix existing host settings sections to use our theme variables
-     * instead of hardcoded dark/light colors.
-     */
-    private fixExistingSettings(): void {
-        const lists = document.querySelectorAll('.q-list');
-        lists.forEach(el => {
-            if (el.classList.contains('bg-black')) {
-                el.classList.remove('bg-black');
-                el.classList.add('bg-asmr-secondary');
-            }
-            el.classList.remove('q-list--dark');
-            el.classList.remove('text-white');
-            el.classList.add('text-asmr-primary');
-            el.classList.add('asmr-settings-section');
-            const items = el.querySelectorAll('.q-item--dark, .q-field--dark, .q-item, .q-field');
-            items.forEach(item => {
-                item.classList.remove('q-item--dark');
-                item.classList.remove('q-field--dark');
-            });
-        });
     }
 }
 

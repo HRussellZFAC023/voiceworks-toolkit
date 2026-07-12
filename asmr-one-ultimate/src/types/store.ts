@@ -4,6 +4,8 @@
 
 import type { PlayerTrack, PlayMode, PlayModeObject, WorkDetail, WorkSummary } from './api';
 
+export type TranslationSourceHint = 'ja' | 'zh' | 'en' | 'auto';
+
 // ============================================================================
 // Kikoeru Store Types (Host Application State)
 // ============================================================================
@@ -70,6 +72,7 @@ export interface KikoeruStore {
     watch?: <T>(getter: (state: KikoeruStoreState) => T, callback: (value: T, oldValue: T) => void, options?: { immediate?: boolean }) => () => void;
     subscribe?: (fn: (mutation: { type: string; payload?: unknown }, state: KikoeruStoreState) => void) => () => void;
     _actions?: Record<string, unknown>;
+    _mutations?: Record<string, unknown>;
 }
 
 // ============================================================================
@@ -123,6 +126,7 @@ export interface KikoeruApp {
         options?: { immediate?: boolean; deep?: boolean; sync?: boolean }
     ) => () => void;
     $on?: (event: string, callback: (...args: unknown[]) => void) => void;
+    $off?: (event: string, callback?: (...args: unknown[]) => void) => void;
     $children?: KikoeruApp[];
     $options?: Record<string, unknown>;
     $data?: Record<string, unknown>;
@@ -193,6 +197,7 @@ export interface PluginConfig {
 
     // AI Features
     whisperModel: string;
+    whisperLanguage: string;
     whisperTask: string;
     whisperQuantized: boolean;
     whisperOverrideSubs: boolean;
@@ -213,6 +218,7 @@ export interface PluginConfig {
     vectorRateLimitCooldownUntil: number;
 
     // Cache
+    autoCacheAudio: boolean;
     cacheLimitGB: number;
 
     // Transcript Sync
@@ -223,6 +229,10 @@ export interface PluginConfig {
 
     // Translation
     translateCnToJp: boolean;
+    translationApiEndpoint: string;
+    translationApiKey: string;
+    translationApiModel: string;
+    googleDriveClientId: string;
 
     // Folder Selection
     sePref: boolean;
@@ -406,6 +416,7 @@ export interface AppEvents {
         text: string;
         segments: Array<{ start: number; end: number; text: string; words?: Array<{ start: number; end: number; text: string }> }>;
         final: boolean;
+        sourceLanguageHint?: TranslationSourceHint;
         chunkIndex?: number;
         fromCache?: boolean;
         live?: boolean;
@@ -422,7 +433,11 @@ export interface AppEvents {
     'playlist:active': { isActive: boolean; workIds?: string[]; playlistId?: string };
     'playlist:navigate': { direction: 'next' | 'previous'; workId: string; index: number };
     'playlist:progress': { current: number; total: number; workId: string };
-    'title:update': { title: string };
+    'title:update': {
+        title: string;
+        sourceLanguageHint?: TranslationSourceHint;
+        translated?: boolean;
+    };
     'player:rate-change': { rate: number };
     'player:nav-prev': {};
     'player:nav-next': {};

@@ -68,9 +68,9 @@ test.describe('Header Elements', () => {
     const btn = helpers.getSemanticSearchButton(injectedPage);
     const icon = btn.locator('.q-icon, .material-icons');
 
-    // Should have psychology icon
+    // Vector search uses the Material `saved_search` glyph.
     const iconText = await icon.textContent();
-    expect(iconText).toContain('psychology');
+    expect(iconText).toContain('saved_search');
   });
 
   test('Support button is visible', async ({ injectedPage, isScriptLoaded }) => {
@@ -84,18 +84,32 @@ test.describe('Header Elements', () => {
 });
 
 test.describe('Player Bar Elements', () => {
-  test('player bar exists on work page', async ({ injectedPage, isScriptLoaded }) => {
+  test('starting a track initializes the player and requests playback', async ({ injectedPage, isScriptLoaded }) => {
     await helpers.gotoWork(injectedPage, TEST_WORKS.STANDARD);
     await isScriptLoaded();
+    await helpers.playFirstTrack(injectedPage);
 
-    const playBtn = injectedPage.locator('#work-tree .q-btn--round, .work-tree .q-btn--round').first();
-    if (await playBtn.count() > 0) {
-      await playBtn.click();
-      await injectedPage.waitForTimeout(1000);
-    }
+    const playback = await injectedPage.evaluate(() => {
+      const bridge = (window as any).__ASMR_KIKOERU_BRIDGE__;
+      const player = bridge?.store?.state?.AudioPlayer
+        || bridge?._app?.$store?.state?.AudioPlayer;
+      const queue = player?.queue || player?.playlist || [];
+      const current = player?.currentPlayingFile
+        || player?.currentTrack
+        || queue[player?.queueIndex ?? 0];
+      return {
+        currentTitle: current?.title || '',
+        queueLength: Array.isArray(queue) ? queue.length : 0,
+        playing: player?.playing,
+        controlSignal: player?.playingControlSignal || '',
+      };
+    });
 
-    const playerBar = helpers.getPlayerBar(injectedPage);
-    await expect(playerBar).toHaveCount(1);
+    expect(playback.currentTitle).toBeTruthy();
+    expect(playback.queueLength).toBeGreaterThan(0);
+    expect(playback.playing || playback.controlSignal === 'wantPlay').toBe(true);
+    await expect(injectedPage.locator('.player-bar-container, .player-bar, .q-footer').first())
+      .toBeAttached({ timeout: 10000 });
   });
 
   test('Whisper button appears in player controls', async ({ injectedPage, isScriptLoaded }) => {
@@ -238,35 +252,18 @@ test.describe('Responsive Design', () => {
     await expect(semanticBtn).toBeVisible();
   });
 
-  test('player controls fit on small screen', async ({ injectedPage, isScriptLoaded }) => {
+  test('playback UI does not overflow a small screen', async ({ injectedPage, isScriptLoaded }) => {
     await injectedPage.setViewportSize({ width: 400, height: 800 });
     await helpers.gotoWork(injectedPage, TEST_WORKS.STANDARD);
     await isScriptLoaded();
-    await injectedPage.waitForTimeout(1500);
+    await helpers.playFirstTrack(injectedPage);
 
-    // Try to start playback to make player bar appear
-    const playBtn = injectedPage.locator('#work-tree .q-btn--round, .work-tree .q-btn--round').first();
-    if (await playBtn.count() > 0) {
-      await playBtn.click({ force: true }).catch(() => {});
-      await injectedPage.waitForTimeout(1000);
-    }
-
-    // Player bar may not appear in headless without actual audio
-    const playerBar = helpers.getPlayerBar(injectedPage);
-    const playerBarVisible = await playerBar.isVisible({ timeout: 3000 }).catch(() => false);
-
-    if (playerBarVisible) {
-      // Check player bar doesn't overflow
-      const isOverflowing = await injectedPage.evaluate(() => {
-        const bar = document.querySelector('.player-bar, .q-footer');
-        if (!bar) return false;
-        return bar.scrollWidth > bar.clientWidth;
-      });
-      console.log(`Player bar overflowing: ${isOverflowing}`);
-    } else {
-      // Player bar not visible without actual audio playback in headless - still valid
-      console.log('Player bar not visible (no audio playing in headless mode)');
-    }
+    await expect(injectedPage.locator('#asmr-learner-subs-root')).toBeAttached({ timeout: 10000 });
+    const horizontalOverflow = await injectedPage.evaluate(() => {
+      const root = document.documentElement;
+      return root.scrollWidth - root.clientWidth;
+    });
+    expect(horizontalOverflow).toBeLessThanOrEqual(1);
 
     // Core header elements should still be accessible on small screen
     const semanticBtn = helpers.getSemanticSearchButton(injectedPage);

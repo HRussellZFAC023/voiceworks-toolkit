@@ -52,11 +52,11 @@ const MAX_PATTERN_LEN = 6;
 
 /** Bracketed non-speech annotations (e.g. [laughter], (music)). */
 const HALLUCINATION_RE =
-    /^\s*[\[(](laughter|laughing|crying|music|applause|cheering|singing|sighing|coughing|clapping|crowd noise|background noise|inaudible|silence|blank audio|no speech|ため息|笑い|泣き|拍手|音楽)[\])]\s*$/i;
+    /^\s*[\[(](laughter|laughing|crying|music|applause|cheering|singing|sighing|coughing|clapping|crowd noise|background noise|inaudible|silence|blank audio|no speech|ため息|笑い|泣き|拍手|音楽|音乐|音樂|笑声|笑聲|哭声|哭聲|掌声|掌聲|叹气|嘆氣|静音|靜音)[\])]\s*$/i;
 
 /** Common YouTube/subtitle hallucinations from Whisper's training data. */
 const SUBTITLE_HALLUCINATION_RE =
-    /^\s*(thank you(\s+for\s+watching)?|thanks for watching|please subscribe|like and subscribe|see you next time|ご視聴ありがとうございます|チャンネル登録)\s*[.!]*\s*$/i;
+    /^\s*(thank you(\s+for\s+watching)?|thanks for watching|please subscribe|like and subscribe|see you next time|ご視聴ありがとうございます|チャンネル登録|谢谢观看|謝謝觀看|请订阅|請訂閱|下次见|下次見)\s*[.!。！]*\s*$/i;
 
 /** Bracket/paren openers for `restoreMissingBrackets`. */
 const OPEN_BRACKET_RE = /^([\[（「『【〈《〔(]+)/;

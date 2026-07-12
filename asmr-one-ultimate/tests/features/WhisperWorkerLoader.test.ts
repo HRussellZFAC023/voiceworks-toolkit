@@ -88,8 +88,32 @@ describe('WhisperWorkerLoader', () => {
         const code = __getWhisperWorkerCodeForTests();
 
         expect(code).toContain('const INFERENCE_TIMEOUT_MS = 45_000;');
-        expect(code).toContain('WebGPU inference timed out after');
+        expect(code).toContain("backendName + ' inference timed out after '");
         expect(code).toContain('chunkS * 5 * 1000');
+        expect(code).toContain("Math.min(180_000, Math.max(90_000, chunkS * 4 * 1000))");
+    });
+
+    it('does not retry on a pipeline whose uncancellable inference timed out', () => {
+        const code = __getWhisperWorkerCodeForTests();
+        const timeoutGuard = code.indexOf("if (/inference timed out/i.test(initialMsg))");
+        const wordRetry = code.indexOf('const canRetryWithoutWords');
+
+        expect(timeoutGuard).toBeGreaterThan(0);
+        expect(wordRetry).toBeGreaterThan(timeoutGuard);
+        expect(code.slice(timeoutGuard, wordRetry)).toContain("postChunkError(chunkId, initialMsg, currentBackend !== 'wasm')");
+        expect(code.slice(timeoutGuard, wordRetry)).toContain('return null');
+    });
+
+    it('falls back to a bounded tiny multilingual model when model loading fails', () => {
+        const code = __getWhisperWorkerCodeForTests();
+        expect(code).toContain("const FALLBACK_MODEL = 'onnx-community/whisper-tiny'");
+        expect(code).toContain("status: 'fallback'");
+        expect(code).toContain('loadPipelineForModel({ ...settings, model: FALLBACK_MODEL }');
+    });
+
+    it('produces syntactically valid worker JavaScript', () => {
+        const code = __getWhisperWorkerCodeForTests();
+        expect(() => new Function(code)).not.toThrow();
     });
 
     it('accepts gpuVendorHint from host for Firefox hidden adapter.info', () => {

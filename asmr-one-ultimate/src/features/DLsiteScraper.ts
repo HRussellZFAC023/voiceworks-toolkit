@@ -11,6 +11,7 @@ import type { DLsiteMetadata } from '../types/dlsite';
 export class DLsiteScraper {
     private static instance: DLsiteScraper;
     private cacheTtlMs = CACHE_TTL.SEVEN_DAYS_MS;
+    private static readonly DETAILS_SCHEMA_VERSION = 2;
 
     public static getInstance(): DLsiteScraper {
         if (!this.instance) this.instance = new DLsiteScraper();
@@ -22,7 +23,7 @@ export class DLsiteScraper {
         const key = CacheKeys.dlsite(normalized);
         const cached = SharedCache.get<DLsiteMetadata>(key);
         if (cached) {
-            return this.maybeUpgradeSampleImages(cached, normalized, key);
+            return this.maybeUpgradeMetadata(cached, normalized, key);
         }
         return SharedCache.getOrFetch(key, this.cacheTtlMs, async () => {
             return this.scrapeFresh(normalized);
@@ -44,7 +45,7 @@ export class DLsiteScraper {
 
         // Cache hit — return immediately, no progressive phases needed
         const cached = SharedCache.get<DLsiteMetadata>(key);
-        if (cached) return this.maybeUpgradeSampleImages(cached, normalized, key);
+        if (cached) return this.maybeUpgradeMetadata(cached, normalized, key);
 
         // Deduplicate concurrent requests for the same key
         let base: DLsiteMetadata | null = null;
@@ -69,6 +70,7 @@ export class DLsiteScraper {
 
         // Phase 2: Fetch enriched data from product HTML (body + stable sample images)
         if (base) {
+            let detailsEnriched = false;
             try {
                 const [bodyResult, samplesResult] = await Promise.allSettled([
                     DLsiteService.fetchProductPageBody(normalized),
@@ -76,13 +78,16 @@ export class DLsiteScraper {
                 ]);
                 if (bodyResult.status === 'fulfilled' && bodyResult.value) {
                     base.body = bodyResult.value;
+                    detailsEnriched = true;
                 }
                 if (samplesResult.status === 'fulfilled' && samplesResult.value.length > 0) {
                     base.image_samples = this.mergeSampleImageUrls(samplesResult.value, base.image_samples || []);
+                    detailsEnriched = true;
                 }
             } catch (e) {
                 Logger.warn('[DLsiteScraper] Page body fetch failed', e);
             }
+            if (detailsEnriched) base.details_schema_version = DLsiteScraper.DETAILS_SCHEMA_VERSION;
         }
 
         if (!base) {
@@ -112,6 +117,7 @@ export class DLsiteScraper {
 
         // Try to fetch enriched data from product HTML (body + stable sample images)
         if (base) {
+            let detailsEnriched = false;
             try {
                 const [bodyResult, samplesResult] = await Promise.allSettled([
                     DLsiteService.fetchProductPageBody(normalized),
@@ -119,13 +125,16 @@ export class DLsiteScraper {
                 ]);
                 if (bodyResult.status === 'fulfilled' && bodyResult.value) {
                     base.body = bodyResult.value;
+                    detailsEnriched = true;
                 }
                 if (samplesResult.status === 'fulfilled' && samplesResult.value.length > 0) {
                     base.image_samples = this.mergeSampleImageUrls(samplesResult.value, base.image_samples || []);
+                    detailsEnriched = true;
                 }
             } catch (e) {
                 Logger.warn('[DLsiteScraper] Page body fetch failed', e);
             }
+            if (detailsEnriched) base.details_schema_version = DLsiteScraper.DETAILS_SCHEMA_VERSION;
         }
 
         if (!base) {
@@ -161,13 +170,17 @@ export class DLsiteScraper {
         return hasParts || hasLegacy;
     }
 
-    private async maybeUpgradeSampleImages(meta: DLsiteMetadata, normalized: string, key: string): Promise<DLsiteMetadata> {
-        if (!this.needsSampleUpgrade(meta)) return meta;
+    private async maybeUpgradeMetadata(meta: DLsiteMetadata, normalized: string, key: string): Promise<DLsiteMetadata> {
+        const needsDetailUpgrade = meta.details_schema_version !== DLsiteScraper.DETAILS_SCHEMA_VERSION;
+        if (!needsDetailUpgrade && !this.needsSampleUpgrade(meta)) return meta;
         try {
             const existing = meta.image_samples || [];
             const hasParts = existing.some(url => this.isPartsSampleUrl(url));
             const hasLegacy = existing.some(url => this.isLegacySampleUrl(url));
 
+            const bodyPromise = needsDetailUpgrade && !meta.body
+                ? DLsiteService.fetchProductPageBody(normalized).catch(() => null)
+                : Promise.resolve<string | null>(null);
             const pageSamplesPromise = hasParts
                 ? Promise.resolve<string[]>([])
                 : DLsiteService.fetchProductPageSampleImages(normalized).catch(() => []);
@@ -177,14 +190,32 @@ export class DLsiteScraper {
                     .then((info) => this.extractApiSampleUrls(info))
                     .catch(() => []);
 
-            const [pageSamples, legacySamples] = await Promise.all([pageSamplesPromise, legacySamplesPromise]);
+            const [body, pageSamples, legacySamples] = await Promise.all([
+                bodyPromise,
+                pageSamplesPromise,
+                legacySamplesPromise,
+            ]);
             const upgradedSamples = this.mergeSampleImageUrls(pageSamples, this.mergeSampleImageUrls(existing, legacySamples));
-            if (upgradedSamples.length === existing.length &&
+            // details_schema_version records a successful HTML enrichment pass,
+            // not merely an `intro` body inherited from the product JSON API.
+            // Keeping the latter unversioned lets a transient HTML/gallery
+            // failure recover on the next cache read.
+            const detailEnriched = !!body || pageSamples.length > 0;
+            const nextDetailsSchema = detailEnriched
+                ? DLsiteScraper.DETAILS_SCHEMA_VERSION
+                : meta.details_schema_version;
+            const hasMetadataChanges = !!body || nextDetailsSchema !== meta.details_schema_version;
+            if (!hasMetadataChanges && upgradedSamples.length === existing.length &&
                 upgradedSamples.every((url, idx) => url === existing[idx])) {
                 return meta;
             }
 
-            const upgraded = { ...meta, image_samples: upgradedSamples };
+            const upgraded = {
+                ...meta,
+                ...(body ? { body } : {}),
+                image_samples: upgradedSamples,
+                ...(nextDetailsSchema ? { details_schema_version: nextDetailsSchema } : {}),
+            };
             SharedCache.set(key, upgraded, this.cacheTtlMs);
             return upgraded;
         } catch (e) {

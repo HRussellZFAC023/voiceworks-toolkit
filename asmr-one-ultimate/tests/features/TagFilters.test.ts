@@ -114,4 +114,22 @@ describe('TagFilters', () => {
         const overlay = document.querySelector('.asmr-filter-overlay') as HTMLElement;
         expect(overlay.textContent).toContain('Ear Cleaning');
     });
+
+    it('renders persisted tag labels as text instead of executable HTML', async () => {
+        sessionStorage.setItem('asmr-ult:tag-filters', JSON.stringify([{
+            id: '53',
+            label: '<img src=x onerror="alert(1)">Ear Cleaning',
+        }]));
+        mockRouter.currentRoute = { path: '/works', query: { tags: '53' } };
+        const app = document.getElementById('q-app');
+        if (app) (app as any).__vue__.$route = mockRouter.currentRoute;
+
+        await bridge.initialize();
+        const tagFilters = new TagFilters();
+        tagFilters.enable();
+
+        const overlay = document.querySelector('.asmr-filter-overlay') as HTMLElement;
+        expect(overlay.querySelector('img')).toBeNull();
+        expect(overlay.textContent).toContain('<img src=x onerror="alert(1)">Ear Cleaning');
+    });
 });

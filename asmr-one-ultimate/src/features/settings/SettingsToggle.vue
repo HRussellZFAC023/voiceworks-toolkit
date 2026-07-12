@@ -22,7 +22,7 @@ function toggle() {
 </script>
 
 <template>
-    <div role="listitem" class="q-py-sm q-item q-item-type row no-wrap q-item--dark">
+    <div role="listitem" class="q-py-sm q-item q-item-type row no-wrap asmr-settings-item">
         <div class="q-item__section column q-item__section--avatar q-item__section--side justify-center">
             <i class="q-icon notranslate material-icons asmr-settings-icon" style="font-size: 28px;">{{ icon }}</i>
         </div>
@@ -38,7 +38,7 @@ function toggle() {
                 role="switch"
                 :aria-checked="String(!!value)"
                 :aria-label="label"
-                class="q-toggle cursor-pointer no-outline row inline no-wrap items-center q-toggle--dark q-toggle--dense asmr-toggle"
+                class="q-toggle cursor-pointer no-outline row inline no-wrap items-center q-toggle--dense asmr-toggle"
                 :data-key="configKey"
                 :data-asmr-toggle="configKey"
                 @click="toggle"

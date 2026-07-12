@@ -239,29 +239,37 @@ defineExpose({ syncFullscreenClass, toggleFullscreen, exit, isFullscreen });
     top: 8px !important;
     right: 8px !important;
     z-index: 1000000 !important;
-    width: 26px !important;
-    height: 26px !important;
-    background: rgba(255, 255, 255, 0.05) !important;
-    backdrop-filter: blur(4px) !important;
-    border: 1px solid rgba(255, 255, 255, 0.08) !important;
+    width: 44px !important;
+    height: 44px !important;
+    background: transparent !important;
+    backdrop-filter: none !important;
+    border: 1px solid transparent !important;
     border-radius: 50% !important;
     display: flex !important;
     align-items: center !important;
     justify-content: center !important;
-    color: #fff !important;
-    opacity: 0.5 !important;
+    color: #111827 !important;
+    opacity: 0.28 !important;
     cursor: pointer !important;
     box-shadow: none !important;
-    transition: all 0.3s ease !important;
+    transition: background-color 0.18s ease, border-color 0.18s ease, opacity 0.18s ease, transform 0.18s ease !important;
 }
 
 .asmr-fullscreen-btn:hover {
-    background: rgba(255, 255, 255, 0.15) !important;
+    background: rgba(255, 255, 255, 0.78) !important;
+    border-color: rgba(17, 24, 39, 0.45) !important;
     opacity: 1 !important;
     transform: scale(1.05) !important;
 }
 
+.asmr-fullscreen-btn:focus-visible {
+    background: rgba(255, 255, 255, 0.78) !important;
+    opacity: 1 !important;
+    outline: 3px solid #1976d2 !important;
+    outline-offset: 2px !important;
+}
+
 .asmr-fullscreen-btn :deep(.material-icons) {
-    font-size: 16px !important;
+    font-size: 22px !important;
 }
 </style>

@@ -44,6 +44,15 @@ function deduplicateOverlappingSegments(sorted: WhisperSegment[]): WhisperSegmen
     return result;
 }
 
+export function buildPlainTextFromSegments(segments: WhisperSegment[]): string {
+    if (!segments?.length) return '';
+    const sorted = [...segments].sort((a, b) => a.start - b.start);
+    return deduplicateOverlappingSegments(sorted)
+        .map((segment) => segment.text.trim())
+        .filter(Boolean)
+        .join('\n');
+}
+
 export function buildLrcFromSegments(segments: WhisperSegment[]): string {
     if (!segments?.length) return '';
     const sorted = [...segments].sort((a, b) => a.start - b.start);

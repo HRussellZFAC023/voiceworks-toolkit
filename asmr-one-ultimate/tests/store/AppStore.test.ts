@@ -61,6 +61,45 @@ describe('AppStore', () => {
             expect(AppStore.getConfig('segmentMode')).toBe(true);
         });
 
+        it('keeps full-track background audio caching opt-in', () => {
+            expect(AppStore.getConfig('autoCacheAudio')).toBe(false);
+            expect(AppStore.getConfigDefault('autoCacheAudio')).toBe(false);
+        });
+
+        it('enables Chinese-to-Japanese translation on a clean first run', () => {
+            expect(AppStore.getConfig('translateCnToJp')).toBe(true);
+            expect(AppStore.getConfigDefault('translateCnToJp')).toBe(true);
+        });
+
+        it('respects an existing explicit Chinese-to-Japanese opt-out', () => {
+            mockStorage.translateCnToJp = false;
+            expect(AppStore.getConfig('translateCnToJp')).toBe(false);
+        });
+
+        it('gives a fresh Chinese browser Chinese secondary subtitles and Whisper autodetect', async () => {
+            const originalLanguage = navigator.language;
+            try {
+                Object.defineProperty(navigator, 'language', { configurable: true, value: 'zh-CN' });
+                vi.resetModules();
+                const g = (typeof global !== 'undefined' ? global : window) as any;
+                delete g.__ASMR_APP_STORE__;
+                const freshModule = await import('../../src/store/AppStore');
+
+                expect(freshModule.AppStore.getConfig('subtitleLang')).toBe('zh-CN');
+                expect(freshModule.AppStore.getConfig('translateCnToJp')).toBe(true);
+                expect(freshModule.AppStore.getConfig('whisperLanguage')).toBe('auto');
+                expect(freshModule.AppStore.getConfig('whisperModel')).toBe('onnx-community/whisper-small_timestamped');
+            } finally {
+                Object.defineProperty(navigator, 'language', { configurable: true, value: originalLanguage });
+            }
+        });
+
+        it('ships the maintained public Google Drive OAuth client', () => {
+            expect(AppStore.getConfig('googleDriveClientId')).toMatch(
+                /^166564421003-[a-z0-9]+\.apps\.googleusercontent\.com$/,
+            );
+        });
+
         it('should set and get config value', () => {
             AppStore.setConfig('shuffle', true);
             expect(AppStore.getConfig('shuffle')).toBe(true);

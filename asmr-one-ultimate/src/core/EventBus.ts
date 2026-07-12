@@ -10,7 +10,7 @@
  */
 
 import type { AppEventName, AppEventPayload } from '../types';
-import { Logger } from './Utils';
+import { Logger } from './Logger';
 
 declare const unsafeWindow: Window & typeof globalThis;
 
@@ -188,5 +188,4 @@ function getEventBus(): EventBusImpl {
 }
 
 export const EventBus = getEventBus();
-
 

@@ -10,28 +10,24 @@ test.describe('Learner Mode UI Presence', () => {
   test('learner containers exist on work page', async ({ injectedPage, isScriptLoaded }) => {
     await helpers.gotoWork(injectedPage, TEST_WORKS.WITH_SUBTITLES);
     await isScriptLoaded();
-    await injectedPage.waitForTimeout(2000);
+    await helpers.playFirstTrack(injectedPage);
 
     // Check for expanded or collapsed subtitle containers
     const expanded = injectedPage.locator('.learner-subs-expanded');
     const collapsed = injectedPage.locator('.learner-subs-collapsed');
 
-    const expandedCount = await expanded.count();
-    const collapsedCount = await collapsed.count();
-
-    console.log(`Expanded containers: ${expandedCount}`);
-    console.log(`Collapsed containers: ${collapsedCount}`);
+    await expect(expanded).toHaveCount(1, { timeout: 10000 });
+    await expect(collapsed).toHaveCount(1, { timeout: 10000 });
   });
 
   test('learner controls are injected', async ({ injectedPage, isScriptLoaded }) => {
     await helpers.gotoWork(injectedPage, TEST_WORKS.WITH_SUBTITLES);
     await isScriptLoaded();
-    await injectedPage.waitForTimeout(2000);
+    await helpers.playFirstTrack(injectedPage);
 
     const controls = helpers.getLearnerControls(injectedPage);
-    const count = await controls.count();
-
-    console.log(`Learner control containers: ${count}`);
+    await expect(controls.first()).toBeAttached({ timeout: 10000 });
+    expect(await controls.count()).toBeGreaterThanOrEqual(1);
   });
 });
 

@@ -2,9 +2,11 @@ import { Logger, Config, I18n } from '../core/Utils';
 import { EventBus } from '../core/EventBus';
 import { SharedCache, CacheKeys } from '../core/Cache';
 import { getCleanText } from '../core/DomUtils';
+import { KikoeruBridge } from '../infrastructure/KikoeruBridge';
 import type { WhisperSegment } from '../types';
 import {
     buildLrcFromSegments,
+    buildPlainTextFromSegments,
     buildTranscriptFileName,
     buildVttFromSegments,
 } from './transcriptFileUtils';
@@ -37,8 +39,10 @@ interface CachedTranscript {
 const BADGE_ATTR = 'data-asmr-transcript';
 
 export class TranscriptFileInjector {
+    private bridge = KikoeruBridge.getInstance();
     private cleanups: (() => void)[] = [];
     private refreshTimer: number | null = null;
+    private flatAttachTimer: number | null = null;
     private flatObserver: MutationObserver | null = null;
     private flatDebounce: number | null = null;
     private enabled = false;
@@ -52,8 +56,12 @@ export class TranscriptFileInjector {
         }));
 
         this.cleanups.push(EventBus.on('flatview:toggle', (data: { active: boolean }) => {
+            this.clearFlatAttachTimer();
             if (data.active) {
-                setTimeout(() => this.attachFlatPanel(), 200);
+                this.flatAttachTimer = window.setTimeout(() => {
+                    this.flatAttachTimer = null;
+                    this.attachFlatPanel();
+                }, 200);
             } else {
                 this.detachFlatPanel();
             }
@@ -79,11 +87,13 @@ export class TranscriptFileInjector {
             clearTimeout(this.refreshTimer);
             this.refreshTimer = null;
         }
+        this.clearFlatAttachTimer();
         this.detachFlatPanel();
         document.querySelectorAll(`[${BADGE_ATTR}]`).forEach(el => el.remove());
     }
 
     private scheduleRefresh(): void {
+        if (!this.enabled) return;
         if (this.refreshTimer !== null) clearTimeout(this.refreshTimer);
         this.refreshTimer = window.setTimeout(() => {
             this.refreshTimer = null;
@@ -92,6 +102,7 @@ export class TranscriptFileInjector {
     }
 
     private refresh(): void {
+        if (!this.enabled) return;
         const workTree = document.getElementById('work-tree');
         if (workTree) this.injectBadges(workTree);
 
@@ -100,6 +111,7 @@ export class TranscriptFileInjector {
     }
 
     private attachFlatPanel(): void {
+        if (!this.enabled) return;
         const body = document.querySelector('.asmr-flat-panel__body');
         if (!body) return;
 
@@ -107,11 +119,12 @@ export class TranscriptFileInjector {
 
         this.flatObserver?.disconnect();
         this.flatObserver = new MutationObserver(() => {
+            if (!this.enabled) return;
             // Debounce: batch rapid Vue re-renders into one injection pass
             if (this.flatDebounce !== null) return;
             this.flatDebounce = window.setTimeout(() => {
                 this.flatDebounce = null;
-                this.injectBadges(body);
+                if (this.enabled) this.injectBadges(body);
             }, 150);
         });
         this.flatObserver.observe(body, { childList: true, subtree: true });
@@ -126,30 +139,59 @@ export class TranscriptFileInjector {
         }
     }
 
+    private clearFlatAttachTimer(): void {
+        if (this.flatAttachTimer !== null) {
+            clearTimeout(this.flatAttachTimer);
+            this.flatAttachTimer = null;
+        }
+    }
+
     /** Build lookup maps from the whisper index: by normalized title and by trackKey (hash). */
     private buildLookupMaps(): { byTitle: Map<string, TranscriptIndexEntry>; byHash: Map<string, TranscriptIndexEntry> } {
         const index = SharedCache.get<Record<string, TranscriptIndexEntry[]>>(CacheKeys.whisperIndex()) || {};
         const byTitle = new Map<string, TranscriptIndexEntry>();
         const byHash = new Map<string, TranscriptIndexEntry>();
+        const currentWorkId = this.bridge.currentWorkId?.trim().toLowerCase() || '';
+        const titleCandidates = new Map<string, TranscriptIndexEntry[]>();
 
         for (const [trackKey, list] of Object.entries(index)) {
             for (const entry of list) {
-                // By title
-                const title = (entry.trackTitle || '').trim().toLowerCase();
-                if (title) {
-                    const existing = byTitle.get(title);
-                    if (!existing || entry.updatedAt > existing.updatedAt) {
-                        byTitle.set(title, entry);
-                    }
-                }
-                // By hash (trackKey)
+                // Exact hashes are safe across works and always take precedence.
                 if (trackKey) {
                     const existing = byHash.get(trackKey);
                     if (!existing || entry.updatedAt > existing.updatedAt) {
                         byHash.set(trackKey, entry);
                     }
                 }
+
+                // Titles are not globally unique. Retain candidates here, then
+                // admit only a current-work match or an unambiguous legacy row.
+                const title = (entry.trackTitle || '').trim().toLowerCase();
+                if (title) {
+                    const candidates = titleCandidates.get(title) || [];
+                    candidates.push(entry);
+                    titleCandidates.set(title, candidates);
+                }
             }
+        }
+
+        for (const [title, candidates] of titleCandidates) {
+            const currentWorkMatches = currentWorkId
+                ? candidates.filter(entry => entry.workId?.trim().toLowerCase() === currentWorkId)
+                : [];
+            const eligible = currentWorkMatches.length > 0
+                ? currentWorkMatches
+                : candidates.filter(entry => !entry.workId);
+            const distinctTrackKeys = new Set(eligible.map(entry => entry.trackKey).filter(Boolean));
+
+            // A filename fallback is safe only when it identifies one track,
+            // even inside the same work (different folders may repeat names).
+            if (distinctTrackKeys.size !== 1) continue;
+            const newest = eligible.reduce<TranscriptIndexEntry | undefined>(
+                (latest, entry) => !latest || entry.updatedAt > latest.updatedAt ? entry : latest,
+                undefined,
+            );
+            if (newest) byTitle.set(title, newest);
         }
         return { byTitle, byHash };
     }
@@ -170,9 +212,9 @@ export class TranscriptFileInjector {
                 : '';
             const title = rawTitle.trim().toLowerCase();
 
-            // Try title match first, then hash match (flat view items have data-asmr-flat-hash)
+            // Exact row hashes beat filename fallbacks (filenames commonly repeat across works).
             const hash = li.dataset.asmrFlatHash || li.dataset.asmrHash || '';
-            const entry = (title ? byTitle.get(title) : undefined) || (hash ? byHash.get(hash) : undefined);
+            const entry = (hash ? byHash.get(hash) : undefined) || (title ? byTitle.get(title) : undefined);
             if (!entry) {
                 li.querySelector(`[${BADGE_ATTR}]`)?.remove();
                 continue;
@@ -230,6 +272,15 @@ export class TranscriptFileInjector {
                 if (content) this.download(buildTranscriptFileName(entry.trackTitle, entry.model, cached.language, 'lrc'), content);
             }));
         }
+
+        // Keep the untranslated source text available for editing or use with
+        // an external translation workflow.
+        wrap.appendChild(this.createButton(I18n.t('whisperTranscriptDownloadTxt'), () => {
+            const fresh = SharedCache.get<CachedTranscript>(entry.cacheKey);
+            const segs = fresh?.segments || cached.segments;
+            const text = buildPlainTextFromSegments(segs) || fresh?.text || cached.text;
+            if (text) this.download(buildTranscriptFileName(entry.trackTitle, entry.model, cached.language, 'txt'), text);
+        }, true));
 
         // VTT download
         wrap.appendChild(this.createButton(I18n.t('vttDownload'), () => {

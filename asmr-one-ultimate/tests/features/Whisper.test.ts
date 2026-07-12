@@ -1,11 +1,15 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { Whisper } from '../../src/features/Whisper';
+import { Whisper, resolveWhisperLanguage } from '../../src/features/Whisper';
 import { DeviceCapabilities } from '../../src/core/DeviceCapabilities';
-import { GpuScheduler } from '../../src/core/GpuScheduler';
+import { GpuScheduler, Priority } from '../../src/core/GpuScheduler';
 import { Config } from '../../src/core/Utils';
+import { EventBus } from '../../src/core/EventBus';
+import { TranslationService } from '../../src/services/TranslationService';
+import { MLCrashGuard } from '../../src/core/MLCrashGuard';
 
-const { gmSpy } = vi.hoisted(() => ({
+const { gmSpy, trustedCorsSpy } = vi.hoisted(() => ({
     gmSpy: vi.fn(),
+    trustedCorsSpy: vi.fn(() => false),
 }));
 
 vi.mock('../../src/infrastructure/HttpClient', async () => {
@@ -18,6 +22,8 @@ vi.mock('../../src/infrastructure/HttpClient', async () => {
 
 vi.mock('../../src/infrastructure/AudioCache', () => ({
     AudioCache: class {
+        static objectUrls = new Map<string, string>();
+        static hasTrustedCorsPlayback = trustedCorsSpy;
         getBlob() {
             return null;
         }
@@ -33,6 +39,834 @@ describe('Whisper', () => {
         (Whisper as any).webgpuRetryNotBefore = 0;
         (Whisper as any).gpuRecoveryAttempts = 0;
         (Whisper as any).crashRecoveries = 0;
+        trustedCorsSpy.mockReset();
+        trustedCorsSpy.mockReturnValue(false);
+    });
+
+    describe('spoken-language policy', () => {
+        it('is Japanese-first for auto, using catalogue language only for original works', () => {
+            expect(resolveWhisperLanguage('auto')).toBe('japanese');
+            expect(resolveWhisperLanguage('auto', {
+                translation_info: { lang: 'CHI_HANS', is_original: false },
+            })).toBe('japanese');
+            expect(resolveWhisperLanguage('auto', {
+                translation_info: { lang: 'ENG', is_original: false },
+            })).toBe('japanese');
+            expect(resolveWhisperLanguage('auto', {
+                translation_info: { lang: 'CHI_HANS', is_original: true },
+            })).toBe('chinese');
+            expect(resolveWhisperLanguage('auto', {
+                translation_info: { lang: 'ENG', is_original: true },
+            })).toBe('english');
+            expect(resolveWhisperLanguage('detect')).toBe('');
+            expect(resolveWhisperLanguage('en')).toBe('english');
+        });
+
+        it('keeps RJ01503719-shaped translated editions on Japanese audio', () => {
+            expect(resolveWhisperLanguage('auto', {
+                id: 1503719,
+                source_id: 'RJ01503719',
+                original_workno: 'RJ01501861',
+                translation_info: { lang: 'CHI_HANS', is_original: false },
+            })).toBe('japanese');
+        });
+    });
+
+    describe('feature lifecycle', () => {
+        it('rejects non-HTTP audio URLs before invoking a download transport', async () => {
+            const whisper = new Whisper();
+            await expect((whisper as any).fetchAndDecodeAudio('javascript:alert(1)'))
+                .rejects.toThrow('Unsupported audio URL protocol');
+            expect(gmSpy).not.toHaveBeenCalled();
+        });
+
+        it('uses the RJ01503719 source ladder: low quality, stream, then download', () => {
+            const whisper = new Whisper();
+
+            expect((whisper as any).resolveTrackUrl({
+                type: 'audio',
+                hash: 'track-a',
+                title: 'Track A',
+                streamLowQualityUrl: 'https://raw.kiko-play-niptan.one/low/track-a.m4a',
+                mediaStreamUrl: 'https://example.com/camel-stream',
+                media_stream_url: 'https://example.com/snake-stream',
+                mediaDownloadUrl: 'https://example.com/large-download.zip',
+            })).toBe('https://raw.kiko-play-niptan.one/low/track-a.m4a');
+
+            expect((whisper as any).resolveTrackUrl({
+                type: 'audio',
+                hash: 'track-b',
+                title: 'Track B',
+                stream_low_quality_url: 'https://raw.kiko-play-niptan.one/low/track-b.m4a',
+                mediaStreamUrl: '',
+                media_stream_url: 'https://example.com/snake-stream',
+                stream_url: 'https://example.com/alternate-stream',
+                mediaDownloadUrl: 'https://example.com/large-download.zip',
+            })).toBe('https://raw.kiko-play-niptan.one/low/track-b.m4a');
+
+            expect((whisper as any).resolveTrackUrl({
+                type: 'audio',
+                hash: 'track-c',
+                title: 'Track C',
+                mediaStreamUrl: 'https://example.com/full-stream',
+                mediaDownloadUrl: 'https://example.com/full-download',
+            })).toBe('https://example.com/full-stream');
+
+            expect((whisper as any).resolveTrackUrl({
+                type: 'audio',
+                hash: 'track-d',
+                title: 'Track D',
+                mediaStreamUrl: '',
+                mediaDownloadUrl: 'https://example.com/full-download',
+            })).toBe('https://example.com/full-download');
+
+            expect((whisper as any).resolveFallbackAudioSource({
+                type: 'audio',
+                hash: 'rj01503719-track',
+                title: 'RJ01503719 Track',
+                streamLowQualityUrl: 'https://raw.kiko-play-niptan.one/low/track.m4a',
+                mediaStreamUrl: 'https://raw.kiko-play-niptan.one/full/track.flac',
+                mediaDownloadUrl: 'https://api.asmr.one/api/media/download/track',
+                size: 39_762_038,
+            }, 'fallback')).toEqual({
+                url: 'https://raw.kiko-play-niptan.one/low/track.m4a',
+                knownSizeBytes: null,
+                allowUnknownSize: true,
+                preferBoundedStreaming: true,
+            });
+
+            expect((whisper as any).resolveFallbackAudioSource({
+                type: 'audio',
+                hash: 'small-full-track',
+                title: 'Small Full Track',
+                mediaStreamUrl: 'https://example.com/full-stream',
+                size: 30_186_038,
+            }, 'fallback')).toEqual({
+                url: 'https://example.com/full-stream',
+                knownSizeBytes: 30_186_038,
+                allowUnknownSize: false,
+                preferBoundedStreaming: false,
+            });
+        });
+
+        it('does not start an unbounded fallback download for unknown or large files', async () => {
+            const whisper = new Whisper();
+            const axiosGet = vi.fn();
+            vi.spyOn((whisper as any).bridge, 'axios', 'get').mockReturnValue({ get: axiosGet });
+            gmSpy.mockClear();
+            const fetchSpy = vi.mocked(fetch);
+            fetchSpy.mockClear();
+
+            await expect((whisper as any).fetchAndDecodeAudio(
+                'https://example.com/unknown.mp3',
+                undefined,
+                null,
+            )).rejects.toThrow(/32|known size|whisperLiveCaptureFallbackLimit/i);
+            await expect((whisper as any).fetchAndDecodeAudio(
+                'https://example.com/large.mp3',
+                undefined,
+                64 * 1024 * 1024,
+            )).rejects.toThrow(/32|known size|whisperLiveCaptureFallbackLimit/i);
+
+            expect(axiosGet).not.toHaveBeenCalled();
+            expect(gmSpy).not.toHaveBeenCalled();
+            expect(fetchSpy).not.toHaveBeenCalled();
+        });
+
+        it('streams an unknown-size low-quality source through the same 32 MiB cap', async () => {
+            const whisper = new Whisper();
+            const decode = vi.spyOn(whisper as any, 'decodeToPcm')
+                .mockResolvedValue(new Float32Array([0.25]));
+            const response = {
+                ok: true,
+                headers: new Headers(),
+                body: new ReadableStream<Uint8Array>({
+                    start(controller) {
+                        controller.enqueue(new Uint8Array([1, 2, 3, 4]));
+                        controller.close();
+                    },
+                }),
+                blob: vi.fn(),
+            } as unknown as Response;
+            vi.mocked(fetch).mockResolvedValueOnce(response);
+
+            const pcm = await (whisper as any).fetchAndDecodeAudio(
+                'https://raw.kiko-play-niptan.one/low/track.m4a',
+                undefined,
+                null,
+                true,
+                true,
+            );
+
+            expect(pcm).toEqual(new Float32Array([0.25]));
+            expect(fetch).toHaveBeenCalledTimes(1);
+            expect(decode).toHaveBeenCalledWith(expect.any(ArrayBuffer), undefined);
+        });
+
+        it('rejects an oversized low-quality response before reading or decoding it', async () => {
+            const whisper = new Whisper();
+            const decode = vi.spyOn(whisper as any, 'decodeToPcm');
+            const response = {
+                ok: true,
+                headers: new Headers({ 'content-length': String(33 * 1024 * 1024) }),
+                body: new ReadableStream<Uint8Array>(),
+                blob: vi.fn(),
+            } as unknown as Response;
+            vi.mocked(fetch).mockResolvedValueOnce(response);
+
+            await expect((whisper as any).fetchAndDecodeAudio(
+                'https://raw.kiko-play-niptan.one/low/oversized.m4a',
+                undefined,
+                null,
+                true,
+                true,
+            )).rejects.toThrow(/32|whisperLiveCaptureFallbackLimit/i);
+            expect(decode).not.toHaveBeenCalled();
+        });
+
+        it('will not allocate an unknown-size low-quality response without a streaming body', async () => {
+            const whisper = new Whisper();
+            const decode = vi.spyOn(whisper as any, 'decodeToPcm');
+            const blob = vi.fn();
+            vi.mocked(fetch).mockResolvedValueOnce({
+                ok: true,
+                headers: new Headers(),
+                body: null,
+                blob,
+            } as unknown as Response);
+
+            await expect((whisper as any).fetchAndDecodeAudio(
+                'https://raw.kiko-play-niptan.one/low/no-stream-body.m4a',
+                undefined,
+                null,
+                true,
+                true,
+            )).rejects.toThrow(/32|known size|whisperLiveCaptureFallbackLimit/i);
+            expect(blob).not.toHaveBeenCalled();
+            expect(decode).not.toHaveBeenCalled();
+        });
+
+        it('allows the hard-cap boundary but rejects a full source one byte over it', () => {
+            const whisper = new Whisper();
+            expect(() => (whisper as any).assertFallbackAudioSize(32 * 1024 * 1024)).not.toThrow();
+            expect(() => (whisper as any).assertFallbackAudioSize(32 * 1024 * 1024 + 1))
+                .toThrow(/32|whisperLiveCaptureFallbackLimit/i);
+        });
+
+        it('starts from live capture without fetching the track again', async () => {
+            const whisper = new Whisper();
+            const audio = document.createElement('audio');
+            audio.src = `${window.location.origin}/api/media/stream/track-a`;
+            document.body.appendChild(audio);
+            vi.spyOn((whisper as any).bridge, 'currentTrack', 'get').mockReturnValue({
+                type: 'audio',
+                hash: 'track-a',
+                title: 'Track A',
+                mediaStreamUrl: audio.src,
+                mediaDownloadUrl: `${window.location.origin}/api/media/download/track-a`,
+                size: 500 * 1024 * 1024,
+            });
+            vi.spyOn((whisper as any).bridge, 'currentWorkId', 'get').mockReturnValue('RJ000001');
+            vi.spyOn(whisper as any, 'getWhisperSettings').mockReturnValue({
+                model: 'onnx-community/whisper-tiny',
+                subtask: 'transcribe',
+                language: 'ja',
+                multilingual: true,
+                chunkLengthS: 29,
+                strideLengthS: 5,
+                cacheTranscripts: false,
+                autoWarmup: false,
+                silenceThreshold: 0,
+                maxPendingChunks: 1,
+                pollIntervalMs: 500,
+                workerUpdateIntervalMs: 350,
+                idleUnloadMs: 120_000,
+                forceWasm: true,
+                preferLowPowerAdapter: true,
+                minWebgpuBufferBytes: 256 * 1024 * 1024,
+            });
+            vi.spyOn(whisper as any, 'initWorker').mockImplementation(() => {});
+            vi.spyOn(whisper as any, 'startProcessingLoop').mockImplementation(() => {});
+            vi.spyOn(whisper as any, 'scheduleIdleUnload').mockImplementation(() => {});
+            vi.spyOn(whisper as any, 'persistCache').mockImplementation(() => {});
+            vi.spyOn(whisper as any, 'startLiveAudioCapture').mockReturnValue(true);
+            const fetchAudio = vi.spyOn(whisper as any, 'fetchAndDecodeAudio');
+            (whisper as any).enabled = true;
+
+            await (whisper as any).startTranscription();
+
+            expect((whisper as any).startLiveAudioCapture).toHaveBeenCalled();
+            expect(fetchAudio).not.toHaveBeenCalled();
+            expect((whisper as any).transcribing).toBe(true);
+            (whisper as any).stopTranscription('test');
+        });
+
+        it('uses bounded low-quality fallback without touching the oversized full source', async () => {
+            const whisper = new Whisper();
+            const audio = document.createElement('audio');
+            document.body.appendChild(audio);
+            const lowUrl = 'https://raw.kiko-play-niptan.one/low/RJ01503719-track.m4a';
+            const fullStreamUrl = 'https://raw.kiko-play-niptan.one/full/RJ01503719-track.flac';
+            const fullDownloadUrl = 'https://api.asmr.one/api/media/download/RJ01503719-track';
+            vi.spyOn((whisper as any).bridge, 'currentTrack', 'get').mockReturnValue({
+                type: 'audio',
+                hash: 'rj01503719-track',
+                title: 'RJ01503719 Track',
+                streamLowQualityUrl: lowUrl,
+                mediaStreamUrl: fullStreamUrl,
+                mediaDownloadUrl: fullDownloadUrl,
+                size: 39_762_038,
+            });
+            vi.spyOn((whisper as any).bridge, 'currentWorkId', 'get').mockReturnValue('RJ01503719');
+            vi.spyOn(whisper as any, 'getWhisperSettings').mockReturnValue({
+                model: 'onnx-community/whisper-tiny',
+                subtask: 'transcribe',
+                language: 'ja',
+                multilingual: true,
+                chunkLengthS: 29,
+                strideLengthS: 5,
+                cacheTranscripts: false,
+                autoWarmup: false,
+                silenceThreshold: 0,
+                maxPendingChunks: 1,
+                pollIntervalMs: 500,
+                workerUpdateIntervalMs: 350,
+                idleUnloadMs: 120_000,
+                forceWasm: true,
+                preferLowPowerAdapter: true,
+                minWebgpuBufferBytes: 256 * 1024 * 1024,
+            });
+            vi.spyOn(whisper as any, 'initWorker').mockImplementation(() => {});
+            vi.spyOn(whisper as any, 'startProcessingLoop').mockImplementation(() => {});
+            vi.spyOn(whisper as any, 'scheduleIdleUnload').mockImplementation(() => {});
+            vi.spyOn(whisper as any, 'persistCache').mockImplementation(() => {});
+            vi.spyOn(whisper as any, 'startLiveAudioCapture').mockReturnValue(false);
+            const fetchAudio = vi.spyOn(whisper as any, 'fetchAndDecodeAudio')
+                .mockResolvedValue(new Float32Array(6 * 16_000));
+            (whisper as any).enabled = true;
+
+            await (whisper as any).startTranscription();
+
+            expect(fetchAudio).toHaveBeenCalledWith(
+                lowUrl,
+                expect.any(AbortSignal),
+                null,
+                true,
+                true,
+            );
+            expect(fetchAudio).not.toHaveBeenCalledWith(
+                expect.stringMatching(/full|download/),
+                expect.anything(),
+                expect.anything(),
+                expect.anything(),
+                expect.anything(),
+            );
+            (whisper as any).stopTranscription('test');
+        });
+
+        it('binds listeners once, disposes them, and rebinds once', () => {
+            const whisper = new Whisper();
+            const unwatch = vi.fn();
+            const watch = vi.fn().mockReturnValue(unwatch);
+            vi.spyOn((whisper as any).bridge, 'store', 'get').mockReturnValue({
+                state: {},
+                watch,
+            });
+            vi.spyOn(Config, 'get').mockImplementation((key) => key === 'whisperAutoWarmup' ? false : false);
+
+            const baseline = EventBus.listenerCount('whisper:toggle');
+
+            whisper.enable();
+            whisper.enable();
+            expect(EventBus.listenerCount('whisper:toggle')).toBe(baseline + 1);
+            expect(watch).toHaveBeenCalledTimes(1);
+
+            whisper.disable();
+            whisper.disable();
+            expect(EventBus.listenerCount('whisper:toggle')).toBe(baseline);
+            expect(unwatch).toHaveBeenCalledTimes(1);
+
+            whisper.enable();
+            expect(EventBus.listenerCount('whisper:toggle')).toBe(baseline + 1);
+            expect(watch).toHaveBeenCalledTimes(2);
+            whisper.disable();
+        });
+
+        it('cancels active runtime work and unloads the worker on disable', () => {
+            vi.useFakeTimers();
+            try {
+                const whisper = new Whisper();
+                const unwatch = vi.fn();
+                vi.spyOn((whisper as any).bridge, 'store', 'get').mockReturnValue({
+                    state: {},
+                    watch: vi.fn().mockReturnValue(unwatch),
+                });
+                vi.spyOn(Config, 'get').mockReturnValue(false);
+
+                whisper.enable();
+                const abort = vi.fn();
+                const terminate = vi.fn();
+                (whisper as any).fetchAbortController = { abort };
+                (whisper as any).worker = { postMessage: vi.fn(), terminate };
+                (whisper as any).transcribing = true;
+                (whisper as any).autoTranscribeWorkId = 'RJ000001';
+                (whisper as any).processingLoopId = window.setInterval(() => {}, 1000);
+
+                whisper.disable();
+                vi.advanceTimersByTime(500);
+
+                expect(abort).toHaveBeenCalledTimes(1);
+                expect(terminate).toHaveBeenCalledTimes(1);
+                expect(unwatch).toHaveBeenCalledTimes(1);
+                expect((whisper as any).enabled).toBe(false);
+                expect((whisper as any).transcribing).toBe(false);
+                expect((whisper as any).autoTranscribeWorkId).toBeNull();
+                expect((whisper as any).processingLoopId).toBeNull();
+                expect((whisper as any).worker).toBeNull();
+            } finally {
+                vi.useRealTimers();
+            }
+        });
+
+        it('mounts status as a no-flow cover overlay before first load and removes it on disable', () => {
+            const player = document.createElement('div');
+            player.className = 'audio-player';
+            const albumArt = document.createElement('div');
+            albumArt.className = 'albumart';
+            player.appendChild(albumArt);
+            document.body.appendChild(player);
+
+            const whisper = new Whisper();
+            vi.spyOn((whisper as any).bridge, 'store', 'get').mockReturnValue({
+                state: {},
+                watch: vi.fn().mockReturnValue(vi.fn()),
+            });
+            vi.spyOn(Config, 'get').mockReturnValue(false);
+
+            whisper.enable();
+            const status = document.querySelector('.whisper-status') as HTMLElement;
+            expect(status).not.toBeNull();
+            expect(status.parentElement).toBe(albumArt);
+            expect(status.classList.contains('whisper-status--overlay')).toBe(true);
+            expect(status.innerHTML).toBe('');
+            expect(status.style.visibility).toBe('hidden');
+
+            (whisper as any).showStatus('<span>Loading</span>');
+
+            (whisper as any).clearStatus();
+            expect(status.style.display).toBe('none');
+            expect(status.style.visibility).toBe('hidden');
+
+            whisper.disable();
+            expect(status.isConnected).toBe(false);
+        });
+    });
+
+    describe('transcription restart races', () => {
+        const settings = {
+            model: 'onnx-community/whisper-small_timestamped',
+            subtask: 'transcribe',
+            language: 'ja',
+            multilingual: true,
+            chunkLengthS: 29,
+            strideLengthS: 5,
+            cacheTranscripts: false,
+            autoWarmup: false,
+            silenceThreshold: 0,
+            maxPendingChunks: 6,
+            pollIntervalMs: 250,
+            workerUpdateIntervalMs: 200,
+            idleUnloadMs: 600_000,
+            forceWasm: false,
+            preferLowPowerAdapter: false,
+            minWebgpuBufferBytes: 256 * 1024 * 1024,
+        };
+
+        function deferred<T>() {
+            let resolve!: (value: T) => void;
+            let reject!: (error: unknown) => void;
+            const promise = new Promise<T>((res, rej) => {
+                resolve = res;
+                reject = rej;
+            });
+            return { promise, resolve, reject };
+        }
+
+        function setupRestartRace() {
+            const whisper = new Whisper();
+            const audio = document.createElement('audio');
+            document.body.appendChild(audio);
+            let trackUrl = 'https://example.com/a.mp3';
+            vi.spyOn((whisper as any).bridge, 'currentTrack', 'get').mockImplementation(() => ({
+                type: 'audio',
+                hash: trackUrl,
+                title: trackUrl.endsWith('a.mp3') ? 'A' : 'B',
+                mediaStreamUrl: trackUrl,
+            }));
+            vi.spyOn((whisper as any).bridge, 'currentWorkId', 'get').mockReturnValue('RJ000001');
+            vi.spyOn(whisper as any, 'getWhisperSettings').mockReturnValue(settings);
+            vi.spyOn(whisper as any, 'initWorker').mockImplementation(() => {});
+            vi.spyOn(whisper as any, 'startProcessingLoop').mockImplementation(() => {});
+            vi.spyOn(whisper as any, 'scheduleIdleUnload').mockImplementation(() => {});
+            vi.spyOn(whisper as any, 'persistCache').mockImplementation(() => {});
+            (whisper as any).enabled = true;
+
+            const first = deferred<Float32Array>();
+            const second = deferred<Float32Array>();
+            vi.spyOn(whisper as any, 'fetchAndDecodeAudio')
+                .mockReturnValueOnce(first.promise)
+                .mockReturnValueOnce(second.promise);
+
+            return {
+                whisper,
+                first,
+                second,
+                useTrackB: () => { trackUrl = 'https://example.com/b.mp3'; },
+            };
+        }
+
+        async function startReplacement(setup: ReturnType<typeof setupRestartRace>) {
+            const firstRun = (setup.whisper as any).startTranscription();
+            (setup.whisper as any).stopTranscription('track-change');
+            (setup.whisper as any).resetState('track-change');
+            setup.useTrackB();
+            const secondRun = (setup.whisper as any).startTranscription();
+            const secondBuffer = new Float32Array(32_000);
+            setup.second.resolve(secondBuffer);
+            await secondRun;
+            return { firstRun, secondBuffer };
+        }
+
+        it('does not let an uncancellable old download overwrite the replacement PCM', async () => {
+            const setup = setupRestartRace();
+            const { firstRun, secondBuffer } = await startReplacement(setup);
+
+            setup.first.resolve(new Float32Array(16_000));
+            await firstRun;
+
+            expect((setup.whisper as any).transcribing).toBe(true);
+            expect((setup.whisper as any).pcmBuffer).toBe(secondBuffer);
+            expect((setup.whisper as any).pcmSourceUrl).toBe('https://example.com/b.mp3');
+        });
+
+        it('does not let an old AbortError stop the replacement transcription', async () => {
+            const setup = setupRestartRace();
+            const { firstRun, secondBuffer } = await startReplacement(setup);
+
+            setup.first.reject(new DOMException('old request aborted', 'AbortError'));
+            await firstRun;
+
+            expect((setup.whisper as any).transcribing).toBe(true);
+            expect((setup.whisper as any).pcmBuffer).toBe(secondBuffer);
+            expect((setup.whisper as any).pcmSourceUrl).toBe('https://example.com/b.mp3');
+        });
+    });
+
+    describe('worker replacement races', () => {
+        it('settles a controlled init reset so crash sentinels do not accumulate', () => {
+            const whisper = new Whisper();
+            const initComplete = vi.spyOn(MLCrashGuard, 'initComplete').mockImplementation(() => {});
+            (whisper as any).workerInitPending = {
+                worker: { postMessage: vi.fn(), terminate: vi.fn() },
+                generation: 1,
+            };
+
+            (whisper as any).resetWorker('model-load-timeout-smaller-model');
+
+            expect(initComplete).toHaveBeenCalledWith('whisper');
+            expect((whisper as any).workerInitPending).toBeNull();
+        });
+
+        it('ignores queued ready/error callbacks from a detached worker', () => {
+            vi.useFakeTimers();
+            const workers: Array<{
+                onmessage: ((event: MessageEvent) => void) | null;
+                onerror: ((event: ErrorEvent) => void) | null;
+                postMessage: ReturnType<typeof vi.fn>;
+                terminate: ReturnType<typeof vi.fn>;
+            }> = [];
+            class MockWorker {
+                onmessage: ((event: MessageEvent) => void) | null = null;
+                onerror: ((event: ErrorEvent) => void) | null = null;
+                postMessage = vi.fn();
+                terminate = vi.fn();
+                constructor() { workers.push(this); }
+            }
+
+            const NativeURL = URL;
+            class MockURL extends NativeURL {}
+            Object.assign(MockURL, {
+                createObjectURL: vi.fn(() => 'blob:whisper-test'),
+                revokeObjectURL: vi.fn(),
+            });
+            vi.stubGlobal('URL', MockURL);
+            vi.stubGlobal('Worker', MockWorker);
+            try {
+                const whisper = new Whisper();
+                (whisper as any).ensureWorker();
+                const oldWorker = workers[0];
+                const queuedMessage = oldWorker.onmessage!;
+                const queuedError = oldWorker.onerror!;
+
+                (whisper as any).resetWorker('replacement-test');
+                (whisper as any).ensureWorker();
+                (whisper as any).modelReady = false;
+                (whisper as any).transcribing = true;
+                const stopSpy = vi.spyOn(whisper as any, 'stopTranscription');
+
+                queuedMessage({ data: { status: 'ready' } } as MessageEvent);
+                queuedError({ message: 'createBuffer failed' } as ErrorEvent);
+
+                expect((whisper as any).modelReady).toBe(false);
+                expect(stopSpy).not.toHaveBeenCalled();
+                expect((whisper as any).worker).toBe(workers[1]);
+            } finally {
+                vi.runOnlyPendingTimers();
+                vi.unstubAllGlobals();
+                vi.useRealTimers();
+            }
+        });
+
+        it('deduplicates warmup and transcription init on the same worker', async () => {
+            const whisper = new Whisper();
+            const worker = {
+                postMessage: vi.fn(),
+                terminate: vi.fn(),
+                onmessage: null,
+                onerror: null,
+            };
+            const release = vi.fn();
+            let resolveLease!: (release: () => void) => void;
+            const lease = new Promise<() => void>(resolve => { resolveLease = resolve; });
+            const acquireSpy = vi.spyOn(GpuScheduler, 'acquireLoadLease').mockReturnValue(lease);
+            const settings = {
+                model: 'onnx-community/whisper-small_timestamped',
+                subtask: 'transcribe',
+                language: 'ja',
+                multilingual: true,
+                chunkLengthS: 29,
+                strideLengthS: 5,
+                cacheTranscripts: true,
+                autoWarmup: true,
+                silenceThreshold: 0,
+                maxPendingChunks: 6,
+                pollIntervalMs: 250,
+                workerUpdateIntervalMs: 200,
+                idleUnloadMs: 600_000,
+                forceWasm: false,
+                preferLowPowerAdapter: false,
+                minWebgpuBufferBytes: 256 * 1024 * 1024,
+            };
+            (whisper as any).enabled = true;
+            (whisper as any).worker = worker;
+            vi.spyOn(whisper as any, 'ensureWorker').mockImplementation(() => {});
+            vi.spyOn(whisper as any, 'getWhisperSettings').mockReturnValue(settings);
+
+            (whisper as any).initWorker(settings);
+            (whisper as any).initWorker(settings);
+            expect(acquireSpy).toHaveBeenCalledTimes(1);
+
+            resolveLease(release);
+            await vi.waitFor(() => expect(worker.postMessage).toHaveBeenCalledTimes(1));
+            expect(worker.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'init' }));
+
+            (whisper as any).handleWorkerMessage({ data: { status: 'ready' } });
+            (whisper as any).initWorker(settings);
+            expect(acquireSpy).toHaveBeenCalledTimes(1);
+            expect(release).toHaveBeenCalledTimes(1);
+        });
+    });
+
+    describe('audio decode watchdog', () => {
+        it('rejects a browser decode that hangs instead of staying at 55% forever', async () => {
+            vi.useFakeTimers();
+            class HangingOfflineAudioContext {
+                decodeAudioData(): Promise<AudioBuffer> {
+                    return new Promise(() => {});
+                }
+            }
+            vi.stubGlobal('OfflineAudioContext', HangingOfflineAudioContext);
+            try {
+                const whisper = new Whisper();
+                const decode = (whisper as any).decodeToPcm(new ArrayBuffer(1024));
+                const rejection = expect(decode).rejects.toThrow(/timed out|whisperDecodeTimeout/i);
+
+                await vi.advanceTimersByTimeAsync(90_001);
+                await rejection;
+            } finally {
+                vi.unstubAllGlobals();
+                vi.useRealTimers();
+            }
+        });
+
+        it('scales decode timeouts for large files but caps them', () => {
+            const whisper = new Whisper();
+            expect((whisper as any).getAudioDecodeTimeoutMs(1024)).toBe(90_000);
+            expect((whisper as any).getAudioDecodeTimeoutMs(500 * 1024 * 1024)).toBe(600_000);
+        });
+    });
+
+    describe('bounded live PCM scheduling', () => {
+        const liveSettings = {
+            chunkLengthS: 29,
+            strideLengthS: 5,
+            silenceThreshold: 0,
+            maxPendingChunks: 6,
+        };
+
+        function setupLiveBuffer(startTime: number, validSeconds: number) {
+            const whisper = new Whisper();
+            const audio = document.createElement('audio');
+            audio.currentTime = startTime + validSeconds;
+            vi.spyOn((whisper as any).bridge, 'currentTrack', 'get').mockReturnValue(undefined);
+            vi.spyOn(whisper as any, 'getWhisperSettings').mockReturnValue(liveSettings);
+            const send = vi.spyOn(whisper as any, 'sendChunk').mockImplementation(() => {});
+
+            const capacity = 12 * 16_000;
+            const validLength = validSeconds * 16_000;
+            const buffer = new Float32Array(capacity);
+            buffer.fill(0.5, 0, validLength);
+            (whisper as any).audio = audio;
+            (whisper as any).transcribing = true;
+            (whisper as any).modelReady = true;
+            (whisper as any).liveCaptureActive = true;
+            (whisper as any).liveCaptureEnded = false;
+            (whisper as any).pcmBuffer = buffer;
+            (whisper as any).pcmBufferStartTime = startTime;
+            (whisper as any).pcmSampleLength = validLength;
+            (whisper as any).pcmDuration = startTime + validSeconds;
+            (whisper as any).transcribedUpTo = startTime;
+            return { whisper, audio, send };
+        }
+
+        it('will not create a new Web Audio source for cross-origin media even with a CORS attribute', () => {
+            vi.spyOn(DeviceCapabilities, 'profile', 'get').mockReturnValue({ isMobile: false } as any);
+            vi.stubGlobal('AudioContext', class {});
+            try {
+                const whisper = new Whisper();
+                const audio = document.createElement('audio');
+                audio.crossOrigin = 'anonymous';
+                audio.src = 'https://media.example.net/track.mp3';
+
+                expect((whisper as any).canUseLiveAudioCapture(audio)).toBe(false);
+            } finally {
+                vi.unstubAllGlobals();
+            }
+        });
+
+        it('accepts cross-origin media only when the pre-load trusted-CORS proof matches', () => {
+            vi.spyOn(DeviceCapabilities, 'profile', 'get').mockReturnValue({ isMobile: false } as any);
+            vi.stubGlobal('AudioContext', class {});
+            try {
+                const whisper = new Whisper();
+                const audio = document.createElement('audio');
+                audio.crossOrigin = 'anonymous';
+                audio.src = 'https://raw.kiko-play-niptan.one/audio/track.mp3';
+
+                trustedCorsSpy.mockReturnValue(true);
+                expect((whisper as any).canUseLiveAudioCapture(audio)).toBe(true);
+                expect(trustedCorsSpy).toHaveBeenCalledWith(audio);
+            } finally {
+                vi.unstubAllGlobals();
+            }
+        });
+
+        it('indexes a nonzero live window from its start and ignores spare capacity', () => {
+            const { whisper, send } = setupLiveBuffer(100, 6);
+
+            (whisper as any).maybeProcessNextChunk();
+
+            expect(send).toHaveBeenCalledTimes(1);
+            const chunk = send.mock.calls[0][0] as Float32Array;
+            expect(send.mock.calls[0][1]).toBe(100);
+            expect(chunk.length).toBe(6 * 16_000);
+            expect(chunk[0]).toBe(0.5);
+            expect(chunk[chunk.length - 1]).toBe(0.5);
+        });
+
+        it('waits on a paused partial chunk, then pads it only after the track ends', () => {
+            const { whisper, send } = setupLiveBuffer(100, 2);
+
+            (whisper as any).handlePause();
+            expect(send).not.toHaveBeenCalled();
+            expect((whisper as any).finalizeOnIdle).toBe(false);
+
+            (whisper as any).handleEnded();
+            expect((whisper as any).liveCaptureEnded).toBe(true);
+            expect(send).toHaveBeenCalledTimes(1);
+            const chunk = send.mock.calls[0][0] as Float32Array;
+            expect(chunk.length).toBe(6 * 16_000);
+            expect(chunk[2 * 16_000 - 1]).toBe(0.5);
+            expect(chunk[2 * 16_000]).toBe(0);
+        });
+
+        it('advances past a silent final partial chunk instead of looping forever', () => {
+            const { whisper, send } = setupLiveBuffer(100, 2);
+            vi.spyOn(whisper as any, 'getWhisperSettings').mockReturnValue({
+                ...liveSettings,
+                silenceThreshold: 1,
+            });
+
+            (whisper as any).handleEnded();
+
+            expect(send).not.toHaveBeenCalled();
+            expect((whisper as any).transcribedUpTo).toBe(102);
+        });
+
+        it('disconnects the live tap exactly once when transcription stops', () => {
+            const whisper = new Whisper();
+            const disconnect = vi.fn();
+            vi.spyOn(whisper as any, 'scheduleIdleUnload').mockImplementation(() => {});
+            vi.spyOn(whisper as any, 'persistCache').mockImplementation(() => {});
+            (whisper as any).transcribing = true;
+            (whisper as any).liveCaptureActive = true;
+            (whisper as any).liveCaptureCleanup = disconnect;
+
+            (whisper as any).stopTranscription('test');
+            (whisper as any).stopLiveAudioCapture();
+
+            expect(disconnect).toHaveBeenCalledTimes(1);
+            expect((whisper as any).liveCaptureActive).toBe(false);
+        });
+
+        it('ignores PCM callbacks from a stale track generation or audio element', () => {
+            const whisper = new Whisper();
+            const audio = document.createElement('audio');
+            const replacementAudio = document.createElement('audio');
+            Object.defineProperty(audio, 'paused', { configurable: true, value: false });
+            Object.defineProperty(replacementAudio, 'paused', { configurable: true, value: false });
+            (whisper as any).audio = audio;
+            (whisper as any).transcribing = true;
+            (whisper as any).transcriptionGeneration = 2;
+            (whisper as any).liveCaptureActive = true;
+            const append = vi.spyOn(whisper as any, 'appendLivePcm').mockImplementation(() => {});
+            const samples = new Float32Array(1600);
+
+            (whisper as any).handleLivePcm(samples, audio, 1);
+            (whisper as any).handleLivePcm(samples, replacementAudio, 2);
+            expect(append).not.toHaveBeenCalled();
+
+            (whisper as any).handleLivePcm(samples, audio, 2);
+            expect(append).toHaveBeenCalledTimes(1);
+        });
+
+        it('keeps the live PCM window bounded and trims it in batches', () => {
+            const whisper = new Whisper();
+            const maxSamples = 180 * 16_000;
+            (whisper as any).liveCaptureActive = true;
+            (whisper as any).pcmBuffer = new Float32Array(maxSamples);
+            (whisper as any).pcmSampleLength = maxSamples;
+            (whisper as any).pcmBufferStartTime = 0;
+            (whisper as any).transcribedUpTo = 0;
+
+            (whisper as any).appendLivePcm(new Float32Array(16_000));
+
+            expect((whisper as any).pcmBuffer.length).toBe(maxSamples);
+            expect((whisper as any).pcmSampleLength).toBe(151 * 16_000);
+            expect((whisper as any).pcmBufferStartTime).toBe(30);
+            expect((whisper as any).pcmDuration).toBe(181);
+            expect((whisper as any).transcribedUpTo).toBe(30);
+        });
     });
 
     describe('getWhisperSettings', () => {
@@ -73,6 +907,91 @@ describe('Whisper', () => {
             expect(settings.idleUnloadMs).toBe(10 * 60 * 1000);
         });
 
+        it('starts the exact M1 Firefox compatibility profile on WebGPU tiny', () => {
+            vi.spyOn(Config, 'get').mockImplementation((key) => {
+                const map: Record<string, string | number | boolean> = {
+                    whisperModel: 'onnx-community/whisper-small_timestamped',
+                    whisperLanguage: 'auto',
+                    whisperTask: 'transcribe',
+                    whisperAutoWarmup: true,
+                    whisperCacheTranscripts: true,
+                    forceWhisperWasm: false,
+                };
+                return map[key as string] ?? false;
+            });
+            vi.spyOn(DeviceCapabilities, 'profile', 'get').mockReturnValue({
+                tier: 'full',
+                hasGpu: true,
+                memory: -1,
+                cores: 10,
+                isTouch: false,
+                isMobile: false,
+                screenWidth: 1728,
+                gpuVendor: 'mozilla apple m1, or similar',
+                reason: 'full, GPU, 10 cores, 1728px',
+            });
+            vi.spyOn(DeviceCapabilities, 'shouldWarmup', 'get').mockReturnValue(true);
+            vi.spyOn(DeviceCapabilities, 'budget', 'get').mockReturnValue({
+                whisperIdleMs: 10 * 60 * 1000,
+            } as any);
+            vi.spyOn(GpuScheduler, 'getMemoryPressure').mockReturnValue('low');
+
+            const settings = (new Whisper() as any).getWhisperSettings();
+
+            expect(settings.model).toBe('onnx-community/whisper-tiny');
+            expect(settings.forceWasm).toBe(false);
+            expect(settings.preferLowPowerAdapter).toBe(false);
+            expect(settings.maxPendingChunks).toBe(6);
+            expect(settings.autoWarmup).toBe(true);
+        });
+
+        it('keeps the configured model on newer or known-memory Apple Silicon', () => {
+            vi.spyOn(Config, 'get').mockImplementation((key) => {
+                const map: Record<string, string | number | boolean> = {
+                    whisperModel: 'onnx-community/whisper-small_timestamped',
+                    whisperLanguage: 'auto',
+                    whisperTask: 'transcribe',
+                    whisperAutoWarmup: false,
+                    whisperCacheTranscripts: true,
+                    forceWhisperWasm: false,
+                };
+                return map[key as string] ?? false;
+            });
+            const profileSpy = vi.spyOn(DeviceCapabilities, 'profile', 'get').mockReturnValue({
+                tier: 'full',
+                hasGpu: true,
+                memory: -1,
+                cores: 12,
+                isTouch: false,
+                isMobile: false,
+                screenWidth: 1800,
+                gpuVendor: 'mozilla apple m3 gpu',
+                reason: 'full, GPU, 12 cores, 1800px',
+            });
+            vi.spyOn(DeviceCapabilities, 'shouldWarmup', 'get').mockReturnValue(true);
+            vi.spyOn(DeviceCapabilities, 'budget', 'get').mockReturnValue({
+                whisperIdleMs: 10 * 60 * 1000,
+            } as any);
+            vi.spyOn(GpuScheduler, 'getMemoryPressure').mockReturnValue('low');
+
+            expect((new Whisper() as any).getWhisperSettings().model)
+                .toBe('onnx-community/whisper-small_timestamped');
+
+            profileSpy.mockReturnValue({
+                tier: 'full',
+                hasGpu: true,
+                memory: 8,
+                cores: 10,
+                isTouch: false,
+                isMobile: false,
+                screenWidth: 1728,
+                gpuVendor: 'mozilla apple m1, or similar',
+                reason: 'full, GPU, 8GB, 10 cores, 1728px',
+            });
+            expect((new Whisper() as any).getWhisperSettings().model)
+                .toBe('onnx-community/whisper-small_timestamped');
+        });
+
         it('reduces pressure on limited-tier desktop machines without forcing low-power adapters', () => {
             vi.spyOn(Config, 'get').mockImplementation((key) => {
                 const map: Record<string, string | number | boolean> = {
@@ -110,6 +1029,42 @@ describe('Whisper', () => {
             expect(settings.autoWarmup).toBe(false);
             expect(settings.idleUnloadMs).toBe(5 * 60 * 1000);
             expect(settings.minWebgpuBufferBytes).toBe(384 * 1024 * 1024);
+        });
+
+        it('starts no-WebGPU desktop and Apple Silicon compatibility profiles on tiny/WASM-safe model', () => {
+            vi.spyOn(Config, 'get').mockImplementation((key) => {
+                const map: Record<string, string | number | boolean> = {
+                    whisperModel: 'onnx-community/whisper-small_timestamped',
+                    whisperLanguage: 'auto',
+                    whisperTask: 'transcribe',
+                    whisperAutoWarmup: true,
+                    whisperCacheTranscripts: true,
+                    forceWhisperWasm: false,
+                };
+                return map[key as string] ?? false;
+            });
+            vi.spyOn(DeviceCapabilities, 'profile', 'get').mockReturnValue({
+                tier: 'limited',
+                hasGpu: false,
+                memory: -1,
+                cores: 8,
+                isTouch: false,
+                isMobile: false,
+                screenWidth: 1440,
+                gpuVendor: '',
+                reason: 'limited, no-GPU, 8 cores, 1440px',
+            });
+            vi.spyOn(DeviceCapabilities, 'shouldWarmup', 'get').mockReturnValue(false);
+            vi.spyOn(DeviceCapabilities, 'budget', 'get').mockReturnValue({
+                whisperIdleMs: 5 * 60 * 1000,
+            } as any);
+            vi.spyOn(GpuScheduler, 'getMemoryPressure').mockReturnValue('low');
+
+            const settings = (new Whisper() as any).getWhisperSettings();
+
+            expect(settings.model).toBe('onnx-community/whisper-tiny');
+            expect(settings.maxPendingChunks).toBe(4);
+            expect(settings.autoWarmup).toBe(false);
         });
 
         it('prefers low-power adapters on Intel-mac limited profiles', () => {
@@ -383,6 +1338,26 @@ describe('Whisper', () => {
             expect(resetWorkerSpy).toHaveBeenCalledWith('error');
         });
 
+        it('routes an explicitly signalled WebGPU timeout to tiny/WASM recovery', () => {
+            const whisper = new Whisper();
+            const markWebgpuFailedSpy = vi.spyOn(whisper as any, 'markWebgpuFailed').mockImplementation(() => {});
+            vi.spyOn(whisper as any, 'resetWorker').mockImplementation(() => {});
+            vi.spyOn(whisper as any, 'clearModelLoadTimer').mockImplementation(() => {});
+            (whisper as any).workerBackend = 'webgpu';
+            (whisper as any).transcribing = false;
+
+            (whisper as any).handleWorkerMessage({
+                data: {
+                    status: 'error',
+                    data: { message: 'WebGPU inference timed out after 45s', gpuFallback: true },
+                    chunkId: 9,
+                },
+            } as any);
+
+            expect(markWebgpuFailedSpy).toHaveBeenCalledWith('webgpu-inference-timeout');
+            expect((whisper as any).modelOverride).toBe('onnx-community/whisper-tiny');
+        });
+
         it('marks WebGPU failed for non-timeout GPU errors from worker fallback', () => {
             const whisper = new Whisper();
             const markWebgpuFailedSpy = vi.spyOn(whisper as any, 'markWebgpuFailed').mockImplementation(() => {});
@@ -409,6 +1384,20 @@ describe('Whisper', () => {
     });
 
     describe('parseSegments', () => {
+        it('does not apply Japanese glossary rewrites to explicit Chinese transcription', () => {
+            vi.spyOn(Config, 'get').mockImplementation((key) => {
+                if (key === 'whisperLanguage') return 'zh-CN';
+                if (key === 'whisperModel') return 'onnx-community/whisper-small_timestamped';
+                if (key === 'whisperTask') return 'transcribe';
+                return false;
+            });
+            const whisper = new Whisper();
+            const segments = (whisper as any).parseSegments([
+                { text: '写生课程和重生故事', timestamp: [0, 3] },
+            ]);
+            expect(segments[0].text).toBe('写生课程和重生故事');
+        });
+
         it('parses chunks with timestamps into segments', () => {
             const whisper = new Whisper();
             const chunks = [
@@ -474,6 +1463,39 @@ describe('Whisper', () => {
 
                 vi.advanceTimersByTime(101);
                 expect(processSpy).toHaveBeenCalled();
+            } finally {
+                vi.useRealTimers();
+            }
+        });
+
+        it('drops discontinuous live PCM and flushes queued work after a seek', () => {
+            vi.useFakeTimers();
+            try {
+                const whisper = new Whisper();
+                const audio = document.createElement('audio');
+                audio.currentTime = 42;
+                const worker = { postMessage: vi.fn() };
+                (whisper as any).audio = audio;
+                (whisper as any).worker = worker;
+                (whisper as any).transcribing = true;
+                (whisper as any).liveCaptureActive = true;
+                (whisper as any).pcmBuffer = new Float32Array(12 * 16_000);
+                (whisper as any).pcmBufferStartTime = 100;
+                (whisper as any).pcmSampleLength = 6 * 16_000;
+                (whisper as any).pcmDuration = 106;
+                (whisper as any).transcribedUpTo = 106;
+                vi.spyOn(window, 'requestAnimationFrame').mockImplementation(() => 1);
+                vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => {});
+                vi.spyOn(whisper as any, 'maybeProcessNextChunk').mockImplementation(() => {});
+
+                (whisper as any).handleSeek();
+                vi.advanceTimersByTime(101);
+
+                expect(worker.postMessage).toHaveBeenCalledWith({ type: 'flush-queue' });
+                expect((whisper as any).pcmBufferStartTime).toBe(42);
+                expect((whisper as any).pcmSampleLength).toBe(0);
+                expect((whisper as any).pcmDuration).toBe(42);
+                expect((whisper as any).transcribedUpTo).toBe(42);
             } finally {
                 vi.useRealTimers();
             }
@@ -550,7 +1572,7 @@ describe('Whisper', () => {
             (whisper as any).recoverFromStalledChunks(settings, 1, 150_000);
 
             expect(resetSpy).toHaveBeenCalledWith('chunk-stall-timeout');
-            expect(initSpy).toHaveBeenCalledWith(settings);
+            expect(initSpy).toHaveBeenCalledWith((whisper as any).getWhisperSettings());
             expect(progressSpy).toHaveBeenCalled();
             expect((whisper as any).pendingChunks).toBe(0);
             expect((whisper as any).chunkSendTimes.size).toBe(0);
@@ -634,6 +1656,139 @@ describe('Whisper', () => {
 
             expect(sendSpy).toHaveBeenCalledTimes(1);
             expect(sendSpy.mock.calls[0]?.[4]).toBe(6);
+        });
+    });
+
+    describe('translation ahead retry cursor', () => {
+        it('retries a failed CN-to-JA-only lane before advancing the segment marker', async () => {
+            vi.spyOn(Config, 'get').mockImplementation((key) => {
+                if (key === 'subtitleLang') return 'zh-CN';
+                if (key === 'translateMode' || key === 'translateCnToJp') return true;
+                return false;
+            });
+            const whisper = new Whisper();
+            vi.spyOn(whisper as any, 'getWhisperSettings').mockReturnValue({ language: '' });
+            (whisper as any).segments = [
+                { start: 1, end: 3, text: '你好，欢迎回来' },
+            ];
+            (whisper as any).currentCacheKey = 'cache-a';
+            (whisper as any).currentCacheIdentity = 'track-a';
+
+            const translateBatch = vi.spyOn(TranslationService, 'translateBatch')
+                .mockResolvedValueOnce(['你好，欢迎回来'])
+                .mockResolvedValueOnce(['こんにちは、お帰りなさい']);
+
+            await (whisper as any).translateAhead();
+            expect((whisper as any).lastTranslatedSegmentCount).toBe(0);
+            expect((whisper as any).translateAheadUpTo).toBe(0);
+
+            await (whisper as any).translateAhead();
+            expect((whisper as any).lastTranslatedSegmentCount).toBe(1);
+            expect((whisper as any).translateAheadUpTo).toBe(3);
+            expect(translateBatch).toHaveBeenCalledTimes(2);
+            expect(translateBatch).toHaveBeenLastCalledWith(
+                ['你好，欢迎回来'],
+                'ja',
+                expect.objectContaining({
+                    priority: Priority.HIGH,
+                    cancellable: true,
+                    sourceLanguageHint: 'zh',
+                }),
+            );
+        });
+
+        it('does not misroute explicit Japanese Han-only text through CN-to-JA', async () => {
+            vi.spyOn(Config, 'get').mockImplementation((key) => {
+                if (key === 'subtitleLang') return 'zh-CN';
+                if (key === 'translateMode') return true;
+                return false;
+            });
+            const whisper = new Whisper();
+            vi.spyOn(whisper as any, 'getWhisperSettings').mockReturnValue({ language: 'japanese' });
+            (whisper as any).segments = [{ start: 0, end: 2, text: '限界集落' }];
+            (whisper as any).currentCacheKey = 'cache-ja';
+            (whisper as any).currentCacheIdentity = 'track-ja';
+            const translateBatch = vi.spyOn(TranslationService, 'translateBatch')
+                .mockResolvedValue(['边缘村落']);
+
+            await (whisper as any).translateAhead();
+
+            expect(translateBatch).toHaveBeenCalledTimes(1);
+            expect(translateBatch).toHaveBeenCalledWith(
+                ['限界集落'],
+                'zh-cn',
+                expect.objectContaining({
+                    priority: Priority.HIGH,
+                    sourceLanguageHint: 'ja',
+                    preserveRequestedTarget: true,
+                }),
+            );
+            expect((whisper as any).lastTranslatedSegmentCount).toBe(1);
+        });
+
+        it('keeps Chinese Whisper secondary translation in English while separately warming Japanese', async () => {
+            vi.spyOn(Config, 'get').mockImplementation((key) => {
+                if (key === 'subtitleLang') return 'en';
+                if (key === 'translateMode' || key === 'translateCnToJp') return true;
+                return false;
+            });
+            const whisper = new Whisper();
+            vi.spyOn(whisper as any, 'getWhisperSettings').mockReturnValue({ language: 'chinese' });
+            (whisper as any).segments = [{ start: 0, end: 2, text: '欢迎回来' }];
+            (whisper as any).currentCacheKey = 'cache-zh';
+            (whisper as any).currentCacheIdentity = 'track-zh';
+            const translateBatch = vi.spyOn(TranslationService, 'translateBatch')
+                .mockImplementation(async (_texts, target) => [target === 'ja' ? 'お帰りなさい' : 'Welcome back']);
+
+            await (whisper as any).translateAhead();
+
+            expect(translateBatch).toHaveBeenCalledWith(
+                ['欢迎回来'],
+                'en',
+                expect.objectContaining({
+                    sourceLanguageHint: 'zh',
+                    preserveRequestedTarget: true,
+                }),
+            );
+            expect(translateBatch).toHaveBeenCalledWith(
+                ['欢迎回来'],
+                'ja',
+                expect.objectContaining({ sourceLanguageHint: 'zh' }),
+            );
+        });
+
+        it('stores completed Chinese transcript secondary output under its requested English lane', async () => {
+            vi.spyOn(Config, 'get').mockImplementation((key) => {
+                if (key === 'subtitleLang') return 'en';
+                if (key === 'translateMode' || key === 'translateCnToJp') return true;
+                return false;
+            });
+            const whisper = new Whisper();
+            (whisper as any).currentCacheKey = 'complete-zh';
+            const payload: {
+                text: string;
+                segments: Array<{ start: number; end: number; text: string }>;
+                complete: boolean;
+                translations?: Record<string, { text: string }>;
+            } = {
+                text: '欢迎回来',
+                segments: [{ start: 0, end: 2, text: '欢迎回来' }],
+                complete: true,
+            };
+            const translateBatch = vi.spyOn(TranslationService, 'translateBatch')
+                .mockImplementation(async (_texts, target) => [target === 'ja' ? 'お帰りなさい' : 'Welcome back']);
+
+            await (whisper as any).ensureTranslatedTranscript(payload, { language: 'chinese' });
+
+            expect(translateBatch).toHaveBeenCalledWith(
+                ['欢迎回来'],
+                'en',
+                expect.objectContaining({
+                    sourceLanguageHint: 'zh',
+                    preserveRequestedTarget: true,
+                }),
+            );
+            expect(payload.translations?.en.text).toBe('Welcome back');
         });
     });
 

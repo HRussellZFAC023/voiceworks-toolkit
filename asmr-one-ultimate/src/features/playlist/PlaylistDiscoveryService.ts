@@ -323,21 +323,22 @@ export class PlaylistDiscoveryService {
      */
     async *fetchMetadataBatch(
         ids: string[],
-        batchSize = 4,
-        delayMs = 300,
+        batchSize = 2,
+        delayMs = 500,
     ): AsyncGenerator<CachedPlaylistMetadata> {
-        for (let i = 0; i < ids.length; i += batchSize) {
-            const batch = ids.slice(i, i + batchSize);
+        const safeBatchSize = Math.max(1, Math.floor(batchSize));
+        const safeDelayMs = Math.max(0, delayMs);
+        for (let i = 0; i < ids.length; i += safeBatchSize) {
             const results = await Promise.allSettled(
-                batch.map(id => this.fetchMetadata(id)),
+                ids.slice(i, i + safeBatchSize).map(id => this.fetchMetadata(id)),
             );
-            for (const r of results) {
-                if (r.status === 'fulfilled' && r.value) {
-                    yield r.value;
+            for (const result of results) {
+                if (result.status === 'fulfilled' && result.value) {
+                    yield result.value;
                 }
             }
-            if (i + batchSize < ids.length) {
-                await new Promise(resolve => setTimeout(resolve, delayMs));
+            if (safeDelayMs > 0 && i + safeBatchSize < ids.length) {
+                await new Promise(resolve => setTimeout(resolve, safeDelayMs));
             }
         }
     }

@@ -1,16 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { AppStore } from '../../src/store/AppStore';
 import { Logger } from '../../src/core/Logger';
 describe('Logger', () => {
-    let getConfigSpy: any;
+    let configState: Record<string, boolean>;
 
     beforeEach(() => {
-        // Spy on AppStore.getConfig to enable logging in tests
-        getConfigSpy = vi.spyOn(AppStore, 'getConfig').mockImplementation((key: any) => {
-            if (key === 'enableLogging') return true as any;
-            if (key === 'debug') return true as any;
-            return false as any;
-        });
+        configState = { enableLogging: true, debug: true };
+        vi.mocked((globalThis as any).GM_getValue).mockImplementation((key: string, fallback: unknown) =>
+            key in configState ? configState[key] : fallback);
 
         // Reset stats between tests
         Logger.resetStats();
@@ -22,7 +18,7 @@ describe('Logger', () => {
     });
 
     afterEach(() => {
-        getConfigSpy.mockRestore();
+        vi.mocked((globalThis as any).GM_getValue).mockReset();
         vi.useRealTimers();
     });
 
@@ -43,7 +39,7 @@ describe('Logger', () => {
         });
 
         it('should not log when enableLogging is false', () => {
-            getConfigSpy.mockReturnValue(false as any);
+            configState.enableLogging = false;
             Logger.log('suppressed');
             expect(console.log).not.toHaveBeenCalled();
         });
@@ -166,11 +162,7 @@ describe('Logger', () => {
         });
 
         it('should not log debug when debug config is false', () => {
-            getConfigSpy.mockImplementation((key: any) => {
-                if (key === 'debug') return false as any;
-                if (key === 'enableLogging') return true as any;
-                return false as any;
-            });
+            configState.debug = false;
             Logger.debug('suppressed debug');
             const stats = Logger.getStats();
             expect(stats['debug:suppressed debug']).toBeUndefined();

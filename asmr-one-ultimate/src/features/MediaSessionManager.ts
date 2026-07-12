@@ -16,12 +16,19 @@ const ARTWORK_DATA_URL_TARGET_LEN = 420_000;
  * (and lock-screen artwork on mobile) can fetch them.
  */
 function toAbsoluteUrl(url: string): string {
-    if (!url) return url;
-    if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('data:')) {
-        return url;
+    const trimmed = url.trim();
+    if (!trimmed) return '';
+    if (/^data:image\/(?:png|jpe?g|webp|gif|avif);base64,/i.test(trimmed)) {
+        return trimmed;
     }
-    // Relative path — resolve against origin
-    return new URL(url, window.location.origin).href;
+    try {
+        const resolved = new URL(trimmed, window.location.origin);
+        return resolved.protocol === 'http:' || resolved.protocol === 'https:'
+            ? resolved.href
+            : '';
+    } catch {
+        return '';
+    }
 }
 
 function guessImageType(url: string): string | undefined {
@@ -63,16 +70,19 @@ export class MediaSessionManager {
     private eventCleanups: Array<() => void> = [];
     private metadataRefreshHandler: (() => void) | null = null;
     private visibilityHandler: (() => void) | null = null;
+    private enabled = false;
 
     constructor() {
         this.bridge = KikoeruBridge.getInstance();
     }
 
     public enable(): void {
+        if (this.enabled) return;
         if (!('mediaSession' in navigator)) {
             Logger.log('[MediaSession] API not supported in this browser');
             return;
         }
+        this.enabled = true;
 
         Logger.log('[MediaSession] Enabling media session controls');
         const store = this.bridge.store;
@@ -413,6 +423,7 @@ export class MediaSessionManager {
 
         const task = this.fetchArtworkDataUrl(coverUrl)
             .then((dataUrl) => {
+                if (!this.enabled) return null;
                 if (!dataUrl) {
                     this.artworkFailed.add(coverUrl);
                     Logger.warn('[MediaSession] Artwork prefetch failed:', coverUrl);
@@ -635,42 +646,66 @@ export class MediaSessionManager {
     // Action handlers (lock-screen / headphone buttons)
     // ------------------------------------------------------------------
 
+    private setActionHandler(
+        action: MediaSessionAction,
+        handler: MediaSessionActionHandler | null,
+    ): void {
+        try {
+            navigator.mediaSession?.setActionHandler(action, handler);
+        } catch {
+            // Browser implementations expose different action subsets. One
+            // unsupported action must not prevent every other control from
+            // being registered or cleaned up.
+            Logger.debug(`[MediaSession] Action unavailable: ${action}`);
+        }
+    }
+
     private setHandlers(): void {
         if (!navigator.mediaSession) return;
-        const ms = navigator.mediaSession;
         const store = this.bridge.store;
 
-        const safeDispatch = (action: string, payload?: unknown) => {
+        const safeDispatch = (action: string, payload?: unknown): boolean => {
+            if (!store.dispatch || !this.bridge.hasAction(action)) return false;
             Logger.debug(`[MediaSession] Action triggered: ${action}`);
-            if (store.dispatch) {
-                store.dispatch(action, payload).catch((err: unknown) =>
+            Promise.resolve(store.dispatch(action, payload)).catch((err: unknown) =>
                     Logger.warn(`[MediaSession] Action ${action} failed:`, err)
                 );
+            return true;
+        };
+
+        const requestTrackChange = (action: string, mutation: string) => {
+            if (safeDispatch(action)) return;
+            if (this.bridge.hasMutation(mutation) || !store._mutations) {
+                this.bridge.commit(mutation);
+                return;
             }
+            Logger.warn(`[MediaSession] Host does not expose ${action} or ${mutation}`);
         };
 
         // Play
-        ms.setActionHandler('play', () => {
-            safeDispatch('AudioPlayer/play');
+        this.setActionHandler('play', () => {
+            Logger.debug('[MediaSession] Action triggered: play');
+            if (!this.bridge.requestPlay()) safeDispatch('AudioPlayer/play');
         });
 
         // Pause
-        ms.setActionHandler('pause', () => {
-            safeDispatch('AudioPlayer/pause');
+        this.setActionHandler('pause', () => {
+            Logger.debug('[MediaSession] Action triggered: pause');
+            if (!this.bridge.requestPause()) safeDispatch('AudioPlayer/pause');
         });
 
         // Previous Track
-        ms.setActionHandler('previoustrack', () => {
-            safeDispatch('AudioPlayer/prev');
+        this.setActionHandler('previoustrack', () => {
+            requestTrackChange('AudioPlayer/prev', 'AudioPlayer/PREVIOUS_TRACK');
         });
 
         // Next Track
-        ms.setActionHandler('nexttrack', () => {
-            safeDispatch('AudioPlayer/next');
+        this.setActionHandler('nexttrack', () => {
+            requestTrackChange('AudioPlayer/next', 'AudioPlayer/NEXT_TRACK');
         });
 
         // Seek Backward (typically 10 seconds)
-        ms.setActionHandler('seekbackward', (details) => {
+        this.setActionHandler('seekbackward', (details) => {
             const skipTime = details.seekOffset || 10;
             const audio = getAudioElement();
             if (audio) {
@@ -680,7 +715,7 @@ export class MediaSessionManager {
         });
 
         // Seek Forward (typically 10 seconds)
-        ms.setActionHandler('seekforward', (details) => {
+        this.setActionHandler('seekforward', (details) => {
             const skipTime = details.seekOffset || 10;
             const audio = getAudioElement();
             if (audio) {
@@ -690,7 +725,7 @@ export class MediaSessionManager {
         });
 
         // Seek To (scrubbing on lock screen)
-        ms.setActionHandler('seekto', (details) => {
+        this.setActionHandler('seekto', (details) => {
             const audio = getAudioElement();
             if (audio && details.seekTime !== undefined) {
                 audio.currentTime = details.seekTime;
@@ -702,6 +737,8 @@ export class MediaSessionManager {
     }
 
     public disable(): void {
+        if (!this.enabled) return;
+        this.enabled = false;
         if (this.unwatch) {
             this.unwatch();
             this.unwatch = null;
@@ -717,15 +754,18 @@ export class MediaSessionManager {
         }
         this.detachPositionSync();
         this.clearArtworkRefreshTimers();
+        this.lastMetadata = null;
+        this.lastTrack = undefined;
+        this.lastWork = undefined;
         if (navigator.mediaSession) {
             navigator.mediaSession.metadata = null;
-            navigator.mediaSession.setActionHandler('play', null);
-            navigator.mediaSession.setActionHandler('pause', null);
-            navigator.mediaSession.setActionHandler('previoustrack', null);
-            navigator.mediaSession.setActionHandler('nexttrack', null);
-            navigator.mediaSession.setActionHandler('seekbackward', null);
-            navigator.mediaSession.setActionHandler('seekforward', null);
-            navigator.mediaSession.setActionHandler('seekto', null);
+            this.setActionHandler('play', null);
+            this.setActionHandler('pause', null);
+            this.setActionHandler('previoustrack', null);
+            this.setActionHandler('nexttrack', null);
+            this.setActionHandler('seekbackward', null);
+            this.setActionHandler('seekforward', null);
+            this.setActionHandler('seekto', null);
         }
     }
 }

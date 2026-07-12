@@ -44,4 +44,17 @@ describe('mediaStreamUrlUtils', () => {
         expect(buildMediaStreamUrl('x', { mediaStreamUrl: '/api/media/stream/x?token=old' }, 'new'))
             .toBe('/api/media/stream/x?token=old');
     });
+
+    it('rejects executable and local-file source protocols', () => {
+        for (const source of [
+            'javascript:alert(1)',
+            ' \n\tjavascript:alert(1)',
+            'java\tscript:alert(1)',
+            'data:text/html,<script>alert(1)</script>',
+            'file:///tmp/audio.wav',
+        ]) {
+            expect(buildMediaStreamUrl('safe-hash', { mediaStreamUrl: source }, 'jwt'))
+                .toBe('/api/media/stream/safe-hash?token=jwt');
+        }
+    });
 });

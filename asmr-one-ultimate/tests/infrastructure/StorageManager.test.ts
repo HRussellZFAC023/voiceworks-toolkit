@@ -10,6 +10,10 @@ vi.mock('../../src/store/AppStore', () => ({
             debug: false,
             radioMode: true,
             cacheLimitGB: 5,
+            translationApiKey: 'translation-secret',
+            jpdbApiToken: 'jpdb-secret',
+            vectorSearchApiKey: 'vector-secret',
+            transcriptSyncApiKey: 'sync-secret',
         })),
     },
 }));
@@ -47,6 +51,10 @@ describe('StorageManager', () => {
 
             expect(data.version).toBe(4);
             expect(data.config).toBeDefined();
+            expect(data.config.translationApiKey).toBeUndefined();
+            expect(data.config.jpdbApiToken).toBeUndefined();
+            expect(data.config.vectorSearchApiKey).toBeUndefined();
+            expect(data.config.transcriptSyncApiKey).toBeUndefined();
             expect(data.cache).toBeDefined();
             // Only asmr-ult: prefixed keys should be exported
             expect(data.cache['asmr-ult:cache1']).toBe('cached-value');

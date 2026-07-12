@@ -28,6 +28,7 @@ tests/e2e/fixtures/*.wav
 tests/e2e/screenshots/
 
 # Scratch / temp files
+scratch/
 *.old.txt
 old_*.txt
 line*.txt

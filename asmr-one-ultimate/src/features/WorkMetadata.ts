@@ -11,6 +11,7 @@ import { MediaViewer } from './MediaViewer';
 import { EventBus } from '../core/EventBus';
 import { AppStore } from '../store/AppStore';
 import { escapeHtml, isChinese } from '../core/DomUtils';
+import { sanitizeAllowedHtml, toSafeHttpUrl } from '../core/SafeHtml';
 import { extractEmbeddedRjCode, extractPrimaryRjCode } from './rjCodeUtils';
 
 export class WorkMetadata {
@@ -176,7 +177,7 @@ export class WorkMetadata {
         try {
             const translated = cnOnlyMode
                 ? await TranslationService.translate(originalTitle, 'ja')
-                : await TranslationService.translate(originalTitle);
+                : await TranslationService.translate(originalTitle, TranslationService.getUiTargetLang());
 
             if (this.currentWorkId !== expectedWorkId || epoch !== this.titleTranslationEpoch) return;
 
@@ -422,7 +423,8 @@ export class WorkMetadata {
                 if (cnOnlyMode && !isChinese(text)) return;
 
                 // Try tag pre-translation first (skip in CN-only mode — we want JP, not EN)
-                if (!cnOnlyMode) {
+                const uiTargetLang = TranslationService.getUiTargetLang();
+                if (!cnOnlyMode && uiTargetLang === 'en') {
                     const tagIdAttr = chip.getAttribute('data-tag-id');
                     const tagId = tagIdAttr ? parseInt(tagIdAttr, 10) : undefined;
                     if (tagId) {
@@ -441,7 +443,7 @@ export class WorkMetadata {
 
             if (labelsTranslate.length === 0) return;
 
-            const targetLang = cnOnlyMode ? 'ja' : 'en';
+            const targetLang = cnOnlyMode ? 'ja' : TranslationService.getUiTargetLang();
             const results = await TranslationService.translateBatch(labelsTranslate.map(l => l.text), targetLang);
             results.forEach((translated, i) => {
                 const item = labelsTranslate[i];
@@ -471,7 +473,7 @@ export class WorkMetadata {
             descSection.appendChild(descEl);
 
             if (this.shouldTranslate) {
-                TranslationService.translate(meta.description).then(translated => {
+                TranslationService.translate(meta.description, TranslationService.getUiTargetLang()).then(translated => {
                     if (translated && translated !== meta.description) {
                         const transEl = document.createElement('div');
                         transEl.className = 'asmr-meta-description-cell asmr-meta-description-cell--translated';
@@ -521,7 +523,9 @@ export class WorkMetadata {
         if (meta.image_samples?.length) {
             const gallery = document.createElement('div');
             gallery.className = 'asmr-meta-gallery';
-            const allUrls = meta.image_samples;
+            const allUrls = meta.image_samples
+                .map(url => toSafeHttpUrl(url))
+                .filter((url): url is string => !!url);
             allUrls.forEach((url, idx) => {
                 const imgWrap = document.createElement('div');
                 imgWrap.className = 'asmr-meta-gallery-item';
@@ -623,7 +627,10 @@ export class WorkMetadata {
 
                 // Batch translate all paragraphs
                 if (transCells.length > 0) {
-                    TranslationService.translateBatch(transCells.map(c => c.text)).then(results => {
+                    TranslationService.translateBatch(
+                        transCells.map(c => c.text),
+                        TranslationService.getUiTargetLang(),
+                    ).then(results => {
                         results.forEach((translated, i) => {
                             const cell = transCells[i];
                             if (translated && translated !== cell.text) {
@@ -762,6 +769,7 @@ export class WorkMetadata {
         s = s.replace(/^={3,}$/gm, '');                     // Stray === underlines
 
         // === 8. Final cleanup ===
+        s = sanitizeAllowedHtml(s, { allowImages: true });
         s = s.replace(/\n{3,}/g, '\n\n');
         s = s.trim();
 

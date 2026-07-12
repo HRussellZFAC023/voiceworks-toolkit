@@ -36,4 +36,72 @@ describe('KikoeruBridge', () => {
         expect(bridge.store).toBe(mockApp.$store);
         vi.useRealTimers();
     });
+
+    it('uses the current host playback mutations before legacy fallbacks', () => {
+        const bridge = KikoeruBridge.getInstance();
+        const commit = vi.fn();
+        const store = {
+            state: { AudioPlayer: { playing: false } },
+            commit,
+            _mutations: {
+                'AudioPlayer/WANT_PLAY': [vi.fn()],
+                'AudioPlayer/WANT_PAUSE': [vi.fn()],
+                'AudioPlayer/TOGGLE_WANT_PLAYING': [vi.fn()],
+            },
+        };
+        (bridge as any)._app = { $store: store, $router: {}, $axios: {} };
+
+        expect(bridge.requestPlay()).toBe(true);
+        expect(bridge.requestPause()).toBe(true);
+        expect(bridge.togglePlayback()).toBe(true);
+        expect(commit.mock.calls).toEqual([
+            ['AudioPlayer/WANT_PLAY', undefined],
+            ['AudioPlayer/WANT_PAUSE', undefined],
+            ['AudioPlayer/TOGGLE_WANT_PLAYING', undefined],
+        ]);
+    });
+
+    it('falls back to SET_PLAYING when mutation metadata is unavailable', () => {
+        const bridge = KikoeruBridge.getInstance();
+        const commit = vi.fn();
+        (bridge as any)._app = {
+            $store: { state: { AudioPlayer: { playing: false } }, commit },
+            $router: {},
+            $axios: {},
+        };
+
+        expect(bridge.requestPlay()).toBe(true);
+        expect(bridge.requestPause()).toBe(true);
+        expect(commit.mock.calls).toEqual([
+            ['AudioPlayer/SET_PLAYING', true],
+            ['AudioPlayer/SET_PLAYING', false],
+        ]);
+    });
+
+    it('prefers legacy play/pause actions on action-only hosts', () => {
+        const bridge = KikoeruBridge.getInstance();
+        const commit = vi.fn();
+        const dispatch = vi.fn(async () => undefined);
+        (bridge as any)._app = {
+            $store: {
+                state: { AudioPlayer: { playing: false } },
+                commit,
+                dispatch,
+                _actions: {
+                    'AudioPlayer/play': [vi.fn()],
+                    'AudioPlayer/pause': [vi.fn()],
+                },
+            },
+            $router: {},
+            $axios: {},
+        };
+
+        expect(bridge.requestPlay()).toBe(true);
+        expect(bridge.requestPause()).toBe(true);
+        expect(dispatch.mock.calls).toEqual([
+            ['AudioPlayer/play', undefined],
+            ['AudioPlayer/pause', undefined],
+        ]);
+        expect(commit).not.toHaveBeenCalled();
+    });
 });

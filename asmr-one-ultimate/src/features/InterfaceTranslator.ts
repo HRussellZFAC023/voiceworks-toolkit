@@ -1,7 +1,8 @@
 import { CentralObserver } from '../core/CentralObserver';
-import { Logger } from '../core/Utils';
+import { I18n, Logger } from '../core/Utils';
 import { TIMING } from '../core/Constants';
 import { AppStore } from '../store/AppStore';
+import { EventBus } from '../core/EventBus';
 
 export class InterfaceTranslator {
     private static instance: InterfaceTranslator | null = null;
@@ -61,10 +62,33 @@ export class InterfaceTranslator {
         '升序': '昇順',
     };
 
+    /** JP → ZH static map for Chinese UI mode. */
+    private readonly jpToZhMap: Record<string, string> = {
+        '最新': '最新',
+        'リリース日': '发布日期',
+        'ユーザー評価': '用户评分',
+        'ダウンロード数': '销量排序',
+        'レビュー数': '评论数',
+        '評価': '评分',
+        'DLsite 評価': 'DLsite 评分',
+        'R18': 'R18',
+        'ランダム': '随机',
+        'RJ コード': 'RJ号排序',
+        '並び替え': '排序方式',
+        '降順': '降序',
+        '昇順': '升序',
+    };
+
     private readonly cnToJpPatterns = [
         { regex: /将于(\d{2}:\d{2})停止播放/g, replace: '$1に再生を停止します' },
         { regex: /🔥 热门作品/g, replace: '🔥 人気作品' },
         { regex: /🌟 推荐作品/g, replace: '🌟 おすすめ作品' },
+    ];
+
+    private readonly jpToZhPatterns = [
+        { regex: /(\d{2}:\d{2})に再生を停止します/g, replace: '将于$1停止播放' },
+        { regex: /🔥 人気作品/g, replace: '🔥 热门作品' },
+        { regex: /🌟 おすすめ作品/g, replace: '🌟 推荐作品' },
     ];
 
     private readonly patterns = [
@@ -98,11 +122,16 @@ export class InterfaceTranslator {
     }
 
     private _enabled = false;
+    private cleanups: Array<() => void> = [];
 
     public enable(): void {
         if (this._enabled) return;
         this._enabled = true;
         CentralObserver.register('InterfaceTranslator', () => this.translate(), TIMING.OBSERVER_REGISTER_DEBOUNCE_MS);
+        this.cleanups.push(EventBus.on('lang:change', () => this.resetAndTranslate()));
+        this.cleanups.push(EventBus.on('config:change', ({ key }) => {
+            if (key === 'translateMode' || key === 'translateCnToJp') this.resetAndTranslate();
+        }));
         this.translate();
         Logger.debug('[InterfaceTranslator] Enabled');
     }
@@ -110,42 +139,76 @@ export class InterfaceTranslator {
     public disable(): void {
         this._enabled = false;
         CentralObserver.unregister('InterfaceTranslator');
+        this.cleanups.forEach((cleanup) => cleanup());
+        this.cleanups = [];
+        this.resetTranslations();
+    }
+
+    private resetAndTranslate(): void {
+        if (!this._enabled) return;
+        this.resetTranslations();
+        this.translate();
+    }
+
+    private resetTranslations(): void {
+        document.querySelectorAll<HTMLElement>('[data-asmritran]').forEach((el) => {
+            const source = el.dataset.asmritranSource;
+            if (source && el.textContent?.trim() === el.dataset.asmritran) el.textContent = source;
+            delete el.dataset.asmritran;
+            delete el.dataset.asmritranSource;
+            this.processedElements.delete(el);
+        });
     }
 
     private translate(): void {
+        if (!this._enabled) return;
+        I18n.syncFromHost?.();
         const translateMode = !!AppStore.getConfig('translateMode');
         const cnToJp = !!AppStore.getConfig('translateCnToJp');
         if (!translateMode && !cnToJp) return;
 
         const cnOnlyMode = !translateMode && cnToJp;
-        const map = cnOnlyMode ? this.cnToJpMap : this.translationMap;
-        const pats = cnOnlyMode ? this.cnToJpPatterns : this.patterns;
+        const uiLang = I18n.lang.toLowerCase().split('-')[0];
+        const map = cnOnlyMode || uiLang === 'ja'
+            ? this.cnToJpMap
+            : uiLang === 'zh'
+                ? this.jpToZhMap
+                : this.translationMap;
+        const pats = cnOnlyMode || uiLang === 'ja'
+            ? this.cnToJpPatterns
+            : uiLang === 'zh'
+                ? this.jpToZhPatterns
+                : this.patterns;
 
         // Narrowed selectors: removed `.q-tooltip *` (unbounded descendant match).
-        // `:not([data-asmritran])` skips already-processed elements at browser engine level.
+        // Revisit processed nodes because Vue frequently reuses them with new text.
         const candidates = document.querySelectorAll(
-            '.q-btn__content span:not([data-asmritran]), ' +
-            '.q-notification__message:not([data-asmritran]), ' +
-            '.q-card__actions .block:not([data-asmritran]), ' +
-            '.q-tooltip:not([data-asmritran]), ' +
-            'h2:not([data-asmritran]), ' +
-            '.text-h5:not([data-asmritran])',
+            '.q-btn__content span, ' +
+            '.q-notification__message, ' +
+            '.q-card__actions .block, ' +
+            '.q-tooltip, ' +
+            'h2, ' +
+            '.text-h5',
         );
 
         candidates.forEach(el => {
             const htmlEl = el as HTMLElement;
 
-            // WeakSet check before textContent read — avoids DOM property access on re-processed elements
-            if (this.processedElements.has(htmlEl)) return;
-
             const text = htmlEl.textContent?.trim();
             if (!text) return;
+            if (this.processedElements.has(htmlEl) && htmlEl.dataset.asmritran === text) return;
+            if (this.processedElements.has(htmlEl)) {
+                this.processedElements.delete(htmlEl);
+                delete htmlEl.dataset.asmritran;
+                delete htmlEl.dataset.asmritranSource;
+            }
 
             // Direct mapping
             if (map[text]) {
                 const translated = map[text];
                 htmlEl.textContent = translated;
                 htmlEl.dataset.asmritran = translated;
+                htmlEl.dataset.asmritranSource = text;
                 this.processedElements.add(htmlEl);
                 return;
             }
@@ -167,6 +230,7 @@ export class InterfaceTranslator {
             if (matched) {
                 htmlEl.textContent = newText;
                 htmlEl.dataset.asmritran = newText;
+                htmlEl.dataset.asmritranSource = text;
                 this.processedElements.add(htmlEl);
             }
         });

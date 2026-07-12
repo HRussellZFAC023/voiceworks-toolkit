@@ -33,6 +33,8 @@ export class StoreBackup {
     private bridge: KikoeruBridge;
     private timerId: number | null = null;
     private isRestoring = false;
+    private enabled = false;
+    private lifecycleGeneration = 0;
 
     constructor() {
         this.bridge = KikoeruBridge.getInstance();
@@ -42,20 +44,27 @@ export class StoreBackup {
      * Enable the backup system
      */
     public async enable(): Promise<void> {
-        if (this.timerId !== null) return; // Already enabled
+        if (this.enabled) return;
+        this.enabled = true;
+        const generation = ++this.lifecycleGeneration;
         Logger.info('[StoreBackup] System enabled');
 
         // Wait for bridge to be ready before starting backup/restore
         await this.bridge.initialize();
+        if (!this.enabled || generation !== this.lifecycleGeneration) return;
 
         // Attempt to restore state
-        await this.restore();
+        await this.restore(generation);
+        if (!this.enabled || generation !== this.lifecycleGeneration) return;
 
         // Start periodic backup
-        this.startTimer();
+        this.startTimer(generation);
     }
 
     public disable(): void {
+        this.enabled = false;
+        this.lifecycleGeneration++;
+        this.isRestoring = false;
         if (this.timerId !== null) {
             clearInterval(this.timerId);
             this.timerId = null;
@@ -65,10 +74,11 @@ export class StoreBackup {
     /**
      * Start periodic backup timer
      */
-    private startTimer(): void {
-        if (this.timerId !== null) return;
+    private startTimer(generation = this.lifecycleGeneration): void {
+        if (!this.enabled || generation !== this.lifecycleGeneration || this.timerId !== null) return;
 
         this.timerId = window.setInterval(() => {
+            if (!this.enabled || generation !== this.lifecycleGeneration) return;
             if (this.isRestoring) return;
             this.save();
         }, BACKUP_INTERVAL_MS);
@@ -78,6 +88,7 @@ export class StoreBackup {
      * Capture and save current state
      */
     private save(): void {
+        if (!this.enabled) return;
         const appState = AppStore.state;
 
         const data: SerializedState = {
@@ -101,7 +112,8 @@ export class StoreBackup {
     /**
      * Restore state from backup
      */
-    private async restore(): Promise<void> {
+    private async restore(generation: number): Promise<void> {
+        if (!this.enabled || generation !== this.lifecycleGeneration) return;
         const saved = GM_getValue(BACKUP_KEY, null);
         if (!saved) return;
 
@@ -110,13 +122,16 @@ export class StoreBackup {
 
             this.isRestoring = true;
             Logger.info('[StoreBackup] Restoring state...', data);
+            if (!this.enabled || generation !== this.lifecycleGeneration) return;
 
             // Restore Site State (Vuex modules only)
             if (data.siteState) {
                 if (data.siteState.Playlist) {
+                    if (!this.enabled || generation !== this.lifecycleGeneration) return;
                     this.bridge.commit('Playlist/SET_STATE', data.siteState.Playlist);
                 }
                 if (data.siteState.Works) {
+                    if (!this.enabled || generation !== this.lifecycleGeneration) return;
                     this.bridge.commit('Works/SET_STATE', data.siteState.Works);
                 }
             }

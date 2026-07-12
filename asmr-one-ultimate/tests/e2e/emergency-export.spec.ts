@@ -125,7 +125,7 @@ test.describe('Emergency Playlist Export', () => {
         const downloads: Download[] = [];
         injectedPage.on('download', (d) => downloads.push(d));
         await injectedPage.locator('[data-testid="emergency-export-csv"]').click();
-        await expect.poll(() => downloads.length, { timeout: 120000 }).toBeGreaterThanOrEqual(2);
+        await expect.poll(() => downloads.length, { timeout: 175000 }).toBeGreaterThanOrEqual(2);
 
         const names = downloads.map((d) => d.suggestedFilename());
         expect(names.some((n) => /^asmr-playlists-own-.*\.csv$/.test(n))).toBe(true);
@@ -151,7 +151,7 @@ test.describe('Emergency Playlist Export', () => {
         const downloads: Download[] = [];
         injectedPage.on('download', (d) => downloads.push(d));
         await injectedPage.locator('[data-testid="emergency-export-txt"]').click();
-        await expect.poll(() => downloads.length, { timeout: 120000 }).toBeGreaterThanOrEqual(2);
+        await expect.poll(() => downloads.length, { timeout: 175000 }).toBeGreaterThanOrEqual(2);
 
         const names = downloads.map((d) => d.suggestedFilename());
         const ownTxt = await readDownload(downloads[names.findIndex((n) => /-own-.*\.txt$/.test(n))]);

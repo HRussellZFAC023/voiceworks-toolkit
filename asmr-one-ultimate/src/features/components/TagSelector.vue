@@ -4,6 +4,7 @@ import type { TagEntry } from '../../types/api';
 import { useI18n } from '../../composables/useI18n';
 
 const props = defineProps<{
+    kind: 'include' | 'exclude';
     label: string;
     filterPlaceholder: string;
     tags: TagEntry[];
@@ -52,7 +53,10 @@ function onSelectChange(event: Event): void {
 }
 
 function onFilterKeydown(event: KeyboardEvent): void {
-    if (event.key === 'Escape') {
+    if (event.key === 'Escape' && filterText.value) {
+        // First Escape clears the active filter; a subsequent Escape may close
+        // the parent dialog through its document-level keyboard handler.
+        event.stopPropagation();
         filterText.value = '';
         (event.target as HTMLElement).blur();
     }
@@ -64,7 +68,7 @@ function onFilterKeydown(event: KeyboardEvent): void {
         <label class="asmr-form-label">{{ label }}</label>
         <input
             type="text"
-            class="asmr-filter-input"
+            :class="['asmr-filter-input', `asmr-${kind}-filter`]"
             :placeholder="filterPlaceholder"
             v-model="filterText"
             @keydown="onFilterKeydown"
@@ -72,7 +76,7 @@ function onFilterKeydown(event: KeyboardEvent): void {
         <select
             multiple
             size="6"
-            class="asmr-include-select"
+            :class="`asmr-${kind}-select`"
             :aria-label="label"
             @change="onSelectChange"
         >
@@ -88,7 +92,7 @@ function onFilterKeydown(event: KeyboardEvent): void {
                 {{ filterText.trim() ? t('advNoResults') : emptyMessage }}
             </option>
         </select>
-        <div class="asmr-chips-container" aria-live="polite">
+        <div :class="['asmr-chips-container', `asmr-chips-${kind}`]" aria-live="polite">
             <div
                 v-for="tag in selected"
                 :key="tag.id"

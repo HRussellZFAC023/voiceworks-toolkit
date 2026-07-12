@@ -6,11 +6,13 @@ import { SharedCache } from '../../core/Cache';
 import { TranslationService } from '../../services/TranslationService';
 import { WorksApi } from '../../api';
 import { buildCoverUrl } from '../../types/api';
-import { Config, Logger, I18n } from '../../core/Utils';
+import { Config, Logger } from '../../core/Utils';
 import { HttpError } from '../../infrastructure/HttpClient';
 import { EmbeddingService } from '../../services/EmbeddingService';
 import { GpuScheduler, Priority } from '../../core/GpuScheduler';
+import { DeviceCapabilities } from '../../core/DeviceCapabilities';
 import { DEFAULT_API_SERVER } from '../../core/Constants';
+import { shouldAutoIndexVectors } from '../vectorSearchPolicy';
 import type { TagEntry, WorkTag, WorkSummary, WorkDetail, WorkOrder } from '../../types/api';
 
 // ============================================================================
@@ -69,6 +71,7 @@ const MAX_PAYLOAD_CHARS = 5000;
 const MIN_SCORE_THRESHOLD = 0.25;
 const SEARCH_TIMEOUT_MS = 90_000;
 const TRANSLATION_TIMEOUT_MS = 5_000;
+const VECTOR_INDEX_TASK_KEY = 'vector-search-index';
 
 // ============================================================================
 // Composables & Reactive State
@@ -118,11 +121,20 @@ let tagIndexReady: Promise<void> | null = null;
 let searchPriority = false;
 let whisperActive = false;
 let searchAbort: AbortController | null = null;
+let componentMounted = false;
+let lifecycleGeneration = 0;
+const backgroundIndexingEnabled = shouldAutoIndexVectors(DeviceCapabilities.profile);
 const tagById = new Map<number, TagEntry>();
 const tagByName = new Map<string, TagEntry[]>();
 
+function isLifecycleCurrent(generation = lifecycleGeneration): boolean {
+    return componentMounted && generation === lifecycleGeneration;
+}
+
 // Title translations cache (for rendered results)
 const titleTranslations = ref<Map<string, string>>(new Map());
+let titleTranslationGeneration = 0;
+let activeTitleTranslationQueueKey = '';
 
 // ============================================================================
 // IndexedDB
@@ -277,6 +289,7 @@ async function getEmbedding(text: string, task: string): Promise<number[] | null
             // Indexing: LOW priority + cancellable so search can clear them from the queue
             priority: isSearch ? Priority.REALTIME : Priority.LOW,
             cancellable: !isSearch,
+            cancellableKey: isSearch ? undefined : VECTOR_INDEX_TASK_KEY,
         });
     } catch (err) {
         Logger.warn('[VectorSearch] getEmbedding failed:', err);
@@ -386,32 +399,39 @@ async function prepareWorkEntry(work: (WorkSummary | WorkDetail) & Record<string
     return { entry, payload };
 }
 
-async function indexWork(work: (WorkSummary | WorkDetail) & Record<string, unknown>): Promise<boolean> {
-    if (!work?.id) return false;
+async function indexWork(
+    work: (WorkSummary | WorkDetail) & Record<string, unknown>,
+    generation = lifecycleGeneration
+): Promise<boolean> {
+    if (!isLifecycleCurrent(generation) || !work?.id) return false;
     // Fully pause indexing while search is active to keep the GPU scheduler queue clear
     if (searchPriority) {
         const pauseStart = Date.now();
-        while (searchPriority && Date.now() - pauseStart < 30_000) {
+        while (isLifecycleCurrent(generation) && searchPriority && Date.now() - pauseStart < 30_000) {
             await new Promise(resolve => setTimeout(resolve, 500));
         }
     }
-    if (whisperActive || EmbeddingService.isSuspended()) return false;
+    if (!isLifecycleCurrent(generation) || whisperActive || EmbeddingService.isSuspended()) return false;
     const id = String(work.id);
     await ensureIndexReady();
+    if (!isLifecycleCurrent(generation)) return false;
     await ensureModelSynced();
+    if (!isLifecycleCurrent(generation)) return false;
     await ensureTagIndex();
+    if (!isLifecycleCurrent(generation)) return false;
     const db = await dbPromise;
+    if (!isLifecycleCurrent(generation)) return false;
     const existing = await db.get('vectors', id);
-    if (existing) return false;
+    if (!isLifecycleCurrent(generation) || existing) return false;
 
     const prepared = await prepareWorkEntry(work);
-    if (!prepared) return false;
+    if (!isLifecycleCurrent(generation) || !prepared) return false;
 
     const vector = await getEmbedding(prepared.payload, EMBEDDING_TASK_DOC);
-    if (vector) {
+    if (isLifecycleCurrent(generation) && vector) {
         const cover = resolveCoverUrl(work, id) || undefined;
         await db.put('vectors', { ...prepared.entry, cover, vector });
-        return true;
+        return isLifecycleCurrent(generation);
     }
     return false;
 }
@@ -419,28 +439,34 @@ async function indexWork(work: (WorkSummary | WorkDetail) & Record<string, unkno
 const MAX_CONSECUTIVE_FAILURES = 5;
 const BACKOFF_BASE_MS = 1000;
 
-async function indexWorks(works: ((WorkSummary | WorkDetail) & Record<string, unknown>)[]): Promise<number> {
-    if (works.length === 0) return 0;
+async function indexWorks(
+    works: ((WorkSummary | WorkDetail) & Record<string, unknown>)[],
+    generation = lifecycleGeneration
+): Promise<number> {
+    if (!isLifecycleCurrent(generation) || works.length === 0) return 0;
     let added = 0;
     let index = 0;
     const workerCount = Math.min(EMBED_CONCURRENCY, works.length);
     const workers = Array.from({ length: workerCount }).map(async () => {
         let consecutiveFails = 0;
-        while (index < works.length) {
+        while (isLifecycleCurrent(generation) && index < works.length) {
             // Stop if embedding service is dead (circuit breaker tripped permanently)
             if (EmbeddingService.isDead()) {
                 Logger.warn('[VectorSearch] Embedding service dead, stopping indexer');
                 break;
             }
+            if (!isLifecycleCurrent(generation)) break;
             const work = works[index++];
             try {
-                if (await indexWork(work)) {
+                if (await indexWork(work, generation)) {
                     added += 1;
                     consecutiveFails = 0;
                 } else {
+                    if (!isLifecycleCurrent(generation)) break;
                     if (whisperActive || EmbeddingService.isSuspended()) {
                         consecutiveFails = 0;
                         await new Promise(resolve => setTimeout(resolve, 1000));
+                        if (!isLifecycleCurrent(generation)) break;
                         continue;
                     }
                     // indexWork returns false if embedding failed or work already indexed
@@ -448,7 +474,9 @@ async function indexWorks(works: ((WorkSummary | WorkDetail) & Record<string, un
                     const id = String(work?.id);
                     if (id) {
                         const db = await dbPromise;
+                        if (!isLifecycleCurrent(generation)) break;
                         const existing = await db.get('vectors', id);
+                        if (!isLifecycleCurrent(generation)) break;
                         if (!existing) {
                             consecutiveFails++;
                         } else {
@@ -457,10 +485,12 @@ async function indexWorks(works: ((WorkSummary | WorkDetail) & Record<string, un
                     }
                 }
             } catch (e) {
+                if (!isLifecycleCurrent(generation)) break;
                 Logger.warn('[VectorSearch] Index work failed', e);
                 if (whisperActive || EmbeddingService.isSuspended()) {
                     consecutiveFails = 0;
                     await new Promise(resolve => setTimeout(resolve, 1000));
+                    if (!isLifecycleCurrent(generation)) break;
                     continue;
                 }
                 consecutiveFails++;
@@ -472,6 +502,7 @@ async function indexWorks(works: ((WorkSummary | WorkDetail) & Record<string, un
             if (consecutiveFails > 0) {
                 const delay = BACKOFF_BASE_MS * Math.pow(2, consecutiveFails - 1);
                 await new Promise(resolve => setTimeout(resolve, Math.min(delay, 16000)));
+                if (!isLifecycleCurrent(generation)) break;
             }
         }
     });
@@ -479,17 +510,23 @@ async function indexWorks(works: ((WorkSummary | WorkDetail) & Record<string, un
     return added;
 }
 
-async function indexCurrentWork(): Promise<void> {
+async function indexCurrentWork(generation = lifecycleGeneration): Promise<void> {
+    if (!isLifecycleCurrent(generation) || !backgroundIndexingEnabled) return;
     if (whisperActive || EmbeddingService.isSuspended()) return;
     const work = bridge.store.state.AudioPlayer?.work as (WorkDetail & Record<string, unknown>) | undefined;
     if (!work?.id) return;
     const id = String(work.id);
 
     await ensureIndexReady();
+    if (!isLifecycleCurrent(generation)) return;
     await ensureModelSynced();
+    if (!isLifecycleCurrent(generation)) return;
     await ensureTagIndex();
+    if (!isLifecycleCurrent(generation)) return;
     const db = await dbPromise;
+    if (!isLifecycleCurrent(generation)) return;
     const existing = await db.get('vectors', id);
+    if (!isLifecycleCurrent(generation)) return;
 
     // Enrich existing entries when richer data (e.g. description) is now available
     const workHasDescription = !!(work.description || work.summary);
@@ -499,13 +536,14 @@ async function indexCurrentWork(): Promise<void> {
     }
 
     const prepared = await prepareWorkEntry(work);
-    if (!prepared) return;
+    if (!isLifecycleCurrent(generation) || !prepared) return;
 
     const vector = await getEmbedding(prepared.payload, EMBEDDING_TASK_DOC);
-    if (!vector) return;
+    if (!isLifecycleCurrent(generation) || !vector) return;
 
     const cover = resolveCoverUrl(work, id) || undefined;
     await db.put('vectors', { ...prepared.entry, cover, vector });
+    if (!isLifecycleCurrent(generation)) return;
     Logger.debug(`[VectorSearch] ${existing ? 'Enriched' : 'Indexed'} work:`, id, prepared.entry.title);
 }
 
@@ -514,14 +552,19 @@ async function indexCurrentWork(): Promise<void> {
 // ============================================================================
 
 async function bulkIndex(opts?: { maxPages?: number; maxWorks?: number; order?: string; sort?: string; startPage?: number }) {
+    const generation = lifecycleGeneration;
+    if (!isLifecycleCurrent(generation)) return;
     if (autoIndexRunning) return;
     if (whisperActive || EmbeddingService.isSuspended()) {
         scheduleNextBatch(15_000);
         return;
     }
     await ensureIndexReady();
+    if (!isLifecycleCurrent(generation)) return;
     await ensureModelSynced();
+    if (!isLifecycleCurrent(generation)) return;
     await ensureTagIndex();
+    if (!isLifecycleCurrent(generation)) return;
     autoIndexRunning = true;
     setStatus(t('magicSearchFetchingLatest'), true);
     try {
@@ -536,6 +579,7 @@ async function bulkIndex(opts?: { maxPages?: number; maxWorks?: number; order?: 
         let exhausted = false;
         let firstWorkId: string | null = null;
         for (let page = startPage; page <= endPage; page++) {
+            if (!isLifecycleCurrent(generation)) return;
             if (whisperActive || EmbeddingService.isSuspended()) {
                 setStatus(t('magicSearchReady'), false);
                 scheduleNextBatch(15_000);
@@ -543,11 +587,13 @@ async function bulkIndex(opts?: { maxPages?: number; maxWorks?: number; order?: 
             }
             if (page > startPage) {
                 await new Promise(resolve => setTimeout(resolve, 2000));
+                if (!isLifecycleCurrent(generation)) return;
             }
             setStatus(format('magicSearchFetchingPage', { page, end: endPage }), true);
             let res;
             try {
                 res = await WorksApi.getWorks({ order: order as WorkOrder, sort: sort as 'asc' | 'desc', page });
+                if (!isLifecycleCurrent(generation)) return;
             } catch (fetchErr) {
                 if (fetchErr instanceof HttpError && fetchErr.status === 429) {
                     Logger.warn('[VectorSearch] Works API rate limited (429). Rescheduling.');
@@ -576,7 +622,8 @@ async function bulkIndex(opts?: { maxPages?: number; maxWorks?: number; order?: 
             const remaining = maxWorks - indexed;
             const pageWorks = works.slice(0, remaining);
             setStatus(format('magicSearchIndexingPage', { page, count: pageWorks.length }), true);
-            indexed += await indexWorks(pageWorks);
+            indexed += await indexWorks(pageWorks, generation);
+            if (!isLifecycleCurrent(generation)) return;
             if (indexed >= maxWorks) break;
         }
         if (exhausted) {
@@ -589,6 +636,7 @@ async function bulkIndex(opts?: { maxPages?: number; maxWorks?: number; order?: 
         Config.set('vectorIndexCursor', bulkIndexCursor);
         if (firstWorkId) Config.set('vectorIndexLatestWorkId', firstWorkId);
         await refreshIndexCount();
+        if (!isLifecycleCurrent(generation)) return;
         const total = indexCount.value;
         if (!autoIndexExhausted) {
             const batchDelay = 60;
@@ -598,15 +646,20 @@ async function bulkIndex(opts?: { maxPages?: number; maxWorks?: number; order?: 
             setStatus(format('magicSearchIndexingPaused', { total }), false);
         }
     } catch (e) {
+        if (!isLifecycleCurrent(generation)) return;
         Logger.error('[VectorSearch] Bulk index failed', e);
         setStatus(t('magicSearchBulkIndexFailed'), false);
     } finally {
-        autoIndexRunning = false;
-        autoIndexRequested = false;
+        if (generation === lifecycleGeneration) {
+            autoIndexRunning = false;
+            autoIndexRequested = false;
+        }
     }
 }
 
 async function scheduleAutoIndex(): Promise<void> {
+    const generation = lifecycleGeneration;
+    if (!isLifecycleCurrent(generation)) return;
     if (autoIndexRequested || autoIndexRunning) return;
     if (whisperActive || EmbeddingService.isSuspended()) {
         scheduleNextBatch(15_000);
@@ -614,28 +667,35 @@ async function scheduleAutoIndex(): Promise<void> {
     }
     autoIndexRequested = true;
     await bulkIndex({ maxPages: 6, maxWorks: 250, order: 'release', sort: 'desc' });
+    if (!isLifecycleCurrent(generation)) return;
 }
 
 function scheduleNextBatch(delayMs = 60 * 1000): void {
-    if (autoBatchTimer) return;
+    if (!componentMounted || autoBatchTimer) return;
+    const generation = lifecycleGeneration;
     autoBatchTimer = window.setTimeout(async () => {
         autoBatchTimer = null;
+        if (!isLifecycleCurrent(generation)) return;
         if (autoIndexRunning || autoIndexExhausted) return;
         await scheduleAutoIndex();
     }, delayMs);
 }
 
 function startIndexWatcher(): void {
-    if (autoWatchTimer) return;
+    if (!componentMounted || autoWatchTimer) return;
+    const generation = lifecycleGeneration;
     autoWatchTimer = window.setInterval(() => {
-        void checkForNewWorks();
+        if (isLifecycleCurrent(generation)) void checkForNewWorks();
     }, 10 * 60 * 1000);
 }
 
 async function checkForNewWorks(): Promise<void> {
+    const generation = lifecycleGeneration;
+    if (!isLifecycleCurrent(generation)) return;
     if (autoIndexRunning) return;
     if (whisperActive || EmbeddingService.isSuspended()) return;
     const res = await WorksApi.getWorks({ order: 'release', sort: 'desc', page: 1 });
+    if (!isLifecycleCurrent(generation)) return;
     const works = res.works || [];
     if (!works.length || !works[0]?.id) return;
     const latest = String(works[0].id);
@@ -648,8 +708,11 @@ async function checkForNewWorks(): Promise<void> {
 }
 
 async function ensureAutoIndexOnOpen(): Promise<void> {
+    const generation = lifecycleGeneration;
+    if (!isLifecycleCurrent(generation)) return;
     if (whisperActive || EmbeddingService.isSuspended()) return;
     const count = await countIndex();
+    if (!isLifecycleCurrent(generation)) return;
     if (count > 0) return;
     await scheduleAutoIndex();
 }
@@ -931,9 +994,19 @@ async function doSearch(): Promise<void> {
 // ============================================================================
 
 async function translateResultTitle(title: string, id: string): Promise<void> {
-    if (!title || I18n.lang !== 'en') return;
+    if (!title) return;
     if (!containsJapanese(title)) return;
-    const translated = await TranslationService.translate(title, 'en');
+    const generation = titleTranslationGeneration;
+    const targetLang = TranslationService.getUiTargetLang();
+    const queueKey = `vector-title:${targetLang}`;
+    activeTitleTranslationQueueKey = queueKey;
+    const translated = await TranslationService.translate(title, targetLang, {
+        priority: Priority.NORMAL,
+        cancellable: true,
+        cancellableKey: queueKey,
+        sourceLanguageHint: 'auto',
+    });
+    if (generation !== titleTranslationGeneration) return;
     if (!translated || translated.trim() === title.trim()) return;
     titleTranslations.value.set(id, translated);
     // Trigger reactivity
@@ -1036,14 +1109,21 @@ void ensureIndexReady();
 let routeUnwatch: (() => void) | undefined;
 
 onMounted(() => {
-    routeUnwatch = bridge.$watch?.('$route', () => indexCurrentWork());
-    void indexCurrentWork();
+    componentMounted = true;
+    const generation = ++lifecycleGeneration;
+    if (backgroundIndexingEnabled) {
+        routeUnwatch = bridge.$watch?.('$route', () => void indexCurrentWork(generation));
+        void indexCurrentWork(generation);
+    }
 
     // Schedule background indexing
-    if (!autoSeedTimer) {
+    if (backgroundIndexingEnabled && !autoSeedTimer) {
         autoSeedTimer = window.setTimeout(async () => {
+            autoSeedTimer = null;
+            if (!isLifecycleCurrent(generation)) return;
             Logger.log('[VectorSearch] Auto-indexing in background...');
             await scheduleAutoIndex();
+            if (!isLifecycleCurrent(generation)) return;
             startIndexWatcher();
         }, 3000);
     }
@@ -1056,7 +1136,16 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
+    componentMounted = false;
+    lifecycleGeneration++;
+    autoIndexRequested = false;
+    autoIndexRunning = false;
+    titleTranslationGeneration++;
+    TranslationService.cancelPending({ cancellableKey: activeTitleTranslationQueueKey });
+    GpuScheduler.clearCancellable('embedding', VECTOR_INDEX_TASK_KEY);
     routeUnwatch?.();
+    routeUnwatch = undefined;
+    cancelSearch();
     document.removeEventListener('keydown', onKeydown);
     if (autoSeedTimer) { window.clearTimeout(autoSeedTimer); autoSeedTimer = null; }
     if (autoWatchTimer) { window.clearInterval(autoWatchTimer); autoWatchTimer = null; }
@@ -1065,10 +1154,16 @@ onUnmounted(() => {
 
 // Listen for language changes
 on('lang:change', () => {
+    if (!componentMounted) return;
+    titleTranslationGeneration++;
+    TranslationService.cancelPending({ cancellableKey: activeTitleTranslationQueueKey });
+    titleTranslations.value = new Map();
     void refreshIndexCount();
+    void nextTick().then(() => translateVisibleTitles());
 });
 
 on('whisper:transcribing', ({ active }) => {
+    if (!componentMounted) return;
     whisperActive = !!active;
     if (active) {
         Logger.debug('[VectorSearch] Whisper active: pausing embedding index tasks');
@@ -1079,7 +1174,7 @@ on('whisper:transcribing', ({ active }) => {
         }
         return;
     }
-    if (!autoBatchTimer && !autoIndexRunning && !autoIndexExhausted) {
+    if (backgroundIndexingEnabled && !autoBatchTimer && !autoIndexRunning && !autoIndexExhausted) {
         scheduleNextBatch(2_000);
     }
 });

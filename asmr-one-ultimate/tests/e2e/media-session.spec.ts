@@ -27,7 +27,7 @@ test.describe('Media Session Metadata', () => {
         await helpers.gotoWork(injectedPage, TEST_WORKS.STANDARD);
         await isScriptLoaded();
 
-        const playButtons = injectedPage.locator('#work-tree .q-item .q-btn--round, .work-tree .q-item .q-btn--round');
+        const playButtons = helpers.getPlayableTrackButtons(injectedPage);
         await expect(playButtons.first()).toBeVisible({ timeout: 20000 });
         await playButtons.first().click();
 
@@ -38,6 +38,7 @@ test.describe('Media Session Metadata', () => {
             if (meta.title === 'No Track') return 'fallback-title';
             if (!meta.artist) return 'empty-artist';
             if (meta.artist === 'ASMR.one') return 'fallback-artist';
+            if (meta.artworkCount === 0) return 'missing-artwork';
             return 'ok';
         }, { timeout: 30000 }).toBe('ok');
 
@@ -51,7 +52,7 @@ test.describe('Media Session Metadata', () => {
         await helpers.gotoWork(injectedPage, TEST_WORKS.STANDARD);
         await isScriptLoaded();
 
-        const playButtons = injectedPage.locator('#work-tree .q-item .q-btn--round, .work-tree .q-item .q-btn--round');
+        const playButtons = helpers.getPlayableTrackButtons(injectedPage);
         await expect(playButtons.first()).toBeVisible({ timeout: 20000 });
 
         const count = await playButtons.count();
@@ -66,5 +67,31 @@ test.describe('Media Session Metadata', () => {
             const meta = await readMediaSession(injectedPage);
             return meta?.title || '';
         }, { timeout: 30000 }).not.toBe(firstTitle);
+    });
+
+    test('restores current metadata after the feature is disabled and re-enabled', async ({ injectedPage, isScriptLoaded }) => {
+        await helpers.gotoWork(injectedPage, TEST_WORKS.STANDARD);
+        await isScriptLoaded();
+
+        const playButton = helpers.getPlayableTrackButtons(injectedPage).first();
+        await expect(playButton).toBeVisible({ timeout: 20000 });
+        await playButton.click();
+
+        await expect.poll(async () => (await readMediaSession(injectedPage))?.title || '', {
+            timeout: 30000,
+        }).not.toBe('');
+        const title = (await readMediaSession(injectedPage))?.title || '';
+
+        await injectedPage.evaluate(() => {
+            (window as any).__ASMR_APP_STORE__?.setConfig('enableMediaSession', false);
+        });
+        await expect.poll(() => readMediaSession(injectedPage)).toBeNull();
+
+        await injectedPage.evaluate(() => {
+            (window as any).__ASMR_APP_STORE__?.setConfig('enableMediaSession', true);
+        });
+        await expect.poll(async () => (await readMediaSession(injectedPage))?.title || '', {
+            timeout: 15000,
+        }).toBe(title);
     });
 });

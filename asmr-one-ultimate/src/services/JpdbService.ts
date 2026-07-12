@@ -7,6 +7,7 @@
 
 import { AppStore } from '../store/AppStore';
 import { Logger } from '../core/Logger';
+import { gmRequest, HttpError } from '../infrastructure/HttpClient';
 import type {
     JPDBCard,
     JPDBCardState,
@@ -139,37 +140,49 @@ class JpdbServiceImpl {
             throw new Error('Rate limited — try again later');
         }
 
-        const response = await fetch(`${API_BASE}/${endpoint}`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${token}`,
-                'Accept': 'application/json',
-            },
-            body: body ? JSON.stringify(body) : undefined,
-        });
-
-        if (response.status === 429) {
-            // Backoff 30s on rate limit
-            this.retryAfter = Date.now() + 30_000;
-            Logger.warn('[JPDB] Rate limited, backing off 30s');
-            throw new Error('Rate limited');
+        let response;
+        try {
+            // JPDB's API contract is the same one Yomu uses. Use the userscript
+            // transport so the key works from every asmr.one mirror regardless
+            // of the page origin's CORS policy.
+            response = await gmRequest({
+                method: 'POST',
+                url: `${API_BASE}/${endpoint}`,
+                headers: {
+                    'Content-Type': 'application/json',
+                    Authorization: `Bearer ${token}`,
+                    Accept: 'application/json',
+                },
+                data: body ? JSON.stringify(body) : undefined,
+                responseType: 'json',
+                timeout: 30_000,
+            });
+        } catch (error) {
+            if (error instanceof HttpError && error.status === 429) {
+                this.retryAfter = Date.now() + 30_000;
+                Logger.warn('[JPDB] Rate limited, backing off 30s');
+                throw new Error('Rate limited');
+            }
+            if (error instanceof HttpError && error.status === 403) {
+                throw new Error('Invalid API key');
+            }
+            if (error instanceof HttpError && error.responseText) {
+                let detail = '';
+                try {
+                    const payload = JSON.parse(error.responseText) as JPDBErrorResponse;
+                    detail = typeof payload?.error_message === 'string' ? payload.error_message : '';
+                } catch { /* malformed error body; fall back to the HTTP status */ }
+                if (detail) throw new Error(detail);
+            }
+            throw error;
         }
 
-        if (response.status === 403) {
-            throw new Error('Invalid API key');
-        }
+        const text = response.responseText || '';
+        if (!text && response.response == null) return undefined as T;
 
-        if (!response.ok) {
-            const text = await response.text().catch(() => '');
-            throw new Error(`JPDB API error ${response.status}: ${text}`);
-        }
-
-        // Some endpoints return empty body (204-like)
-        const text = await response.text();
-        if (!text) return undefined as T;
-
-        const json = JSON.parse(text) as T | JPDBErrorResponse;
+        const json = (response.response && typeof response.response === 'object'
+            ? response.response
+            : JSON.parse(text)) as T | JPDBErrorResponse;
         if (json && typeof json === 'object' && 'error_message' in json) {
             throw new Error((json as JPDBErrorResponse).error_message);
         }

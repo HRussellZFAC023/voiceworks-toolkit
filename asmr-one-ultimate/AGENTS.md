@@ -99,7 +99,10 @@ Recently refactored:
 - Media viewer WorkTree patch lifecycle is now centralized in `src/features/media/mediaViewerWorkTreePatchUtils.ts`; `MediaViewerController` now restores patched `onClickItem` handlers and disposes folder-path watchers on disable/route cleanup to prevent stale hooks after feature toggles.
 - Work-tree copy injection now performs upsert behavior (update/remove/rebind existing buttons), cleans up injected copy buttons on disable, and uses shared DOM helpers in `src/features/workTreeCopyUtils.ts`, preventing stale copy metadata on reused rows and stale controls when the feature is toggled off.
 - Media viewer candidate-type resolution now uses title-first + explicit-type fallback in `src/features/media/mediaViewerDomUtils.ts`, fixing over-inclusive DOM-scan matching and preserving delegated-click behavior for typed media items without standard extensions.
-- Infinite-scroll route/query API URL construction is now centralized in `src/features/infiniteScrollApiUtils.ts` and reused by both `src/features/components/InfiniteScrollGrid.vue` and `src/features/InfiniteScrollManager.ts`, fixing dropped `'0'` filter values and array-query normalization inconsistencies.
+- Infinite-scroll route/query API URL construction is now centralized in `src/features/infiniteScrollApiUtils.ts` and reused by `src/features/components/InfiniteScrollGrid.vue` and `src/features/InfiniteScrollController.ts`, fixing dropped `'0'` filter values and array-query normalization inconsistencies.
+- Host queue replacement for Flat View and Media Viewer is centralized in `src/features/audioPlayerQueueUtils.ts`; it advances the track/index before replacing a queue and refreshes legacy compatibility state to avoid synchronous stale-index watcher crashes.
+- Whisper fetches and workers are identity/generation guarded, and same-worker model initialization is deduplicated across warmup and transcription start so stale async completions cannot stop or dispose a replacement run.
+- `src/core/RegionGateRecovery.ts` runs before bridge initialization on the exact English-language gate response, validates/fetches same-host bootstrap and Webpack lazy-route assets with Chinese-first privileged requests, and restores the SPA without changing the browser language or page origin.
 
 Not refactored yet (legacy imperative DOM-heavy paths still present):
 

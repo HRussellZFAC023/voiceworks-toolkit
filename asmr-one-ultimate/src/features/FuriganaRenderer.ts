@@ -65,14 +65,18 @@ export class FuriganaRenderer {
     private pendingElements = new Set<Element>();
     private processingBatch = false;
     private pathChangeCleanup: (() => void) | null = null;
+    private lifecycleGeneration = 0;
+    private processFrame: number | null = null;
 
     enable(): void {
         if (this._enabled) return;
         this._enabled = true;
+        const generation = ++this.lifecycleGeneration;
 
         // Set up IntersectionObserver for viewport-aware processing
         this.observer = new IntersectionObserver(
             entries => {
+                if (!this._enabled || generation !== this.lifecycleGeneration) return;
                 for (const entry of entries) {
                     if (entry.isIntersecting) {
                         this.pendingElements.add(entry.target);
@@ -91,6 +95,7 @@ export class FuriganaRenderer {
         // FuriganaRenderer's innerHTML replacement detaches Vue's tracked text nodes;
         // restoring original text allows Vue to patch correctly even if _vnode=null fails.
         this.pathChangeCleanup = EventBus.on('worktree:path-change', () => {
+            if (!this._enabled || generation !== this.lifecycleGeneration) return;
             const workTree = document.getElementById('work-tree');
             if (workTree) {
                 const annotated = workTree.querySelectorAll('[data-jpdb]');
@@ -116,6 +121,12 @@ export class FuriganaRenderer {
 
     disable(): void {
         this._enabled = false;
+        this.lifecycleGeneration++;
+        if (this.processFrame !== null) {
+            cancelAnimationFrame(this.processFrame);
+            this.processFrame = null;
+        }
+        this.processingBatch = false;
         CentralObserver.unregister('FuriganaRenderer');
 
         this.pathChangeCleanup?.();
@@ -197,7 +208,8 @@ export class FuriganaRenderer {
      * Process elements that are currently visible in the viewport.
      */
     private async processVisible(): Promise<void> {
-        if (this.processingBatch || this.pendingElements.size === 0) return;
+        if (!this._enabled || this.processingBatch || this.pendingElements.size === 0) return;
+        const generation = this.lifecycleGeneration;
         this.processingBatch = true;
 
         try {
@@ -234,6 +246,7 @@ export class FuriganaRenderer {
 
             // Parse all texts in one API call
             const result = await JpdbService.parse(texts);
+            if (!this._enabled || generation !== this.lifecycleGeneration) return;
 
             // Apply annotations
             CentralObserver.withModification(() => {
@@ -241,6 +254,8 @@ export class FuriganaRenderer {
                     const el = elements[i];
                     const tokens = result.tokens[i];
                     if (!tokens || tokens.length === 0) continue;
+                    if (!el.isConnected || this.getAnnotatableText(el) !== texts[i]) continue;
+                    if (!this._enabled || generation !== this.lifecycleGeneration) return;
 
                     this.applyTokensToElement(el, tokens, texts[i]);
                     this.processedElements.add(el);
@@ -249,11 +264,17 @@ export class FuriganaRenderer {
         } catch (err) {
             Logger.error('[FuriganaRenderer] Error processing batch:', err);
         } finally {
+            if (generation !== this.lifecycleGeneration) return;
             this.processingBatch = false;
 
             // Process next batch if pending
-            if (this.pendingElements.size > 0) {
-                requestAnimationFrame(() => this.processVisible());
+            if (this._enabled && this.pendingElements.size > 0) {
+                this.processFrame = requestAnimationFrame(() => {
+                    this.processFrame = null;
+                    if (this._enabled && generation === this.lifecycleGeneration) {
+                        void this.processVisible();
+                    }
+                });
             }
         }
     }
@@ -266,6 +287,7 @@ export class FuriganaRenderer {
      * Apply JPDB tokens with furigana to an element.
      */
     private applyTokensToElement(el: HTMLElement, tokens: JPDBToken[], originalText: string): void {
+        if (!this._enabled || !el.isConnected || this.getAnnotatableText(el) !== originalText) return;
         const showPitch = AppStore.getConfig('jpdbShowPitchAccent');
         const fragment = document.createDocumentFragment();
         const chars = Array.from(originalText);

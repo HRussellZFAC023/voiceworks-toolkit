@@ -4,16 +4,21 @@ import type { KikoeruStoreState, AudioPlayerState, PlayerTrack, PlayMode, PlayMo
 
 export class ShuffleFeature {
     private bridge: KikoeruBridge;
-    private _unwatch: (() => void) | null = null; // stored for future cleanup
+    private _unwatch: (() => void) | null = null;
+    private enabled = false;
+    private toggleHandler: (() => Promise<void>) | null = null;
 
     constructor() {
         this.bridge = KikoeruBridge.getInstance();
     }
 
     public enable(): void {
+        if (this.enabled) return;
+        this.enabled = true;
         const w = window as Window & { ASMRUlt?: Record<string, unknown> };
         const api = w.ASMRUlt || (w.ASMRUlt = {});
-        api.toggleShuffle = () => this.toggle();
+        this.toggleHandler = () => this.enabled ? this.toggle() : Promise.resolve();
+        api.toggleShuffle = this.toggleHandler;
 
         const store = this.bridge.store;
         if (store.watch) {
@@ -29,12 +34,26 @@ export class ShuffleFeature {
         Logger.log('[ShuffleFeature] Enabled.');
     }
 
-    public toggle(): void {
+    public disable(): void {
+        if (!this.enabled) return;
+        this.enabled = false;
+        this._unwatch?.();
+        this._unwatch = null;
+        const api = (window as Window & { ASMRUlt?: Record<string, unknown> }).ASMRUlt;
+        if (api && api.toggleShuffle === this.toggleHandler) delete api.toggleShuffle;
+        this.toggleHandler = null;
+    }
+
+    public async toggle(): Promise<void> {
         const store = this.bridge.store;
         const currentMode = this.getMode(store.state.AudioPlayer?.playMode);
         const nextMode = currentMode === 'shuffle' ? 'order' : 'shuffle';
 
-        this.setMode(nextMode);
+        const applied = await this.setMode(nextMode);
+        if (!applied) {
+            Logger.warn('[ShuffleFeature] Host does not expose a supported play-mode contract.');
+            return;
+        }
         Logger.debug('[ShuffleFeature] Native shuffle toggled to:', nextMode);
 
         if (nextMode === 'shuffle') {
@@ -50,22 +69,31 @@ export class ShuffleFeature {
         return 'order';
     }
 
-    private setMode(mode: 'shuffle' | 'order'): void {
+    private async setMode(mode: 'shuffle' | 'order'): Promise<boolean> {
         const store = this.bridge.store;
         const commit = store.commit?.bind(store);
         const dispatch = store.dispatch?.bind(store);
+        const contract = 'AudioPlayer/CHANGE_PLAY_MODE';
+        const canCommit = !!commit && (store._mutations?.[contract] !== undefined || !store._mutations);
+        const canDispatch = !!dispatch && store._actions?.[contract] !== undefined;
 
-        const rotateMode = () => {
-            if (commit) commit('AudioPlayer/CHANGE_PLAY_MODE');
-            else if (dispatch) dispatch('AudioPlayer/CHANGE_PLAY_MODE');
-        };
+        if (!canCommit && !canDispatch) return false;
 
-        if (!rotateMode) return;
         for (let i = 0; i < 4; i++) {
             const current = this.getMode(store.state.AudioPlayer?.playMode);
-            if (current === mode) return;
-            rotateMode();
+            if (current === mode) return true;
+            try {
+                if (canCommit) {
+                    commit!(contract);
+                } else {
+                    await dispatch!(contract);
+                }
+            } catch (error) {
+                Logger.warn('[ShuffleFeature] Failed to change native play mode:', error);
+                return false;
+            }
         }
+        return this.getMode(store.state.AudioPlayer?.playMode) === mode;
     }
 
     private applyHardShuffle(): void {

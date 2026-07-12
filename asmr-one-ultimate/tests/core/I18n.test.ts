@@ -221,6 +221,50 @@ describe('I18n', () => {
 
             document.body.removeChild(qApp);
         });
+
+        it('seeds a Chinese browser on first run, then follows a later host locale change', () => {
+            const originalLanguage = Object.getOwnPropertyDescriptor(navigator, 'language');
+            Object.defineProperty(navigator, 'language', { configurable: true, value: 'zh-CN' });
+            const qApp = document.createElement('div');
+            qApp.id = 'q-app';
+            const vue = { $i18n: { locale: 'ja' } };
+            (qApp as any).__vue__ = vue;
+            document.body.appendChild(qApp);
+
+            try {
+                I18n.resetAutoDetection();
+                I18n.syncFromHost();
+                expect(I18n.lang).toBe('zh');
+
+                // Repeated observation of the initial host fallback must not erase
+                // the first-install browser seed.
+                I18n.syncFromHost();
+                expect(I18n.lang).toBe('zh');
+
+                // A real host selection changes the observed Vue locale and wins.
+                vue.$i18n.locale = 'en';
+                I18n.syncFromHost();
+                expect(I18n.lang).toBe('en');
+            } finally {
+                qApp.remove();
+                if (originalLanguage) Object.defineProperty(navigator, 'language', originalLanguage);
+                I18n.resetAutoDetection();
+            }
+        });
+
+        it('keeps a persisted host choice authoritative over browser seeding', () => {
+            const originalLanguage = Object.getOwnPropertyDescriptor(navigator, 'language');
+            Object.defineProperty(navigator, 'language', { configurable: true, value: 'zh-CN' });
+            try {
+                localStorage.setItem('locale', 'en');
+                I18n.resetAutoDetection();
+                I18n.syncFromHost();
+                expect(I18n.lang).toBe('en');
+            } finally {
+                if (originalLanguage) Object.defineProperty(navigator, 'language', originalLanguage);
+                I18n.resetAutoDetection();
+            }
+        });
     });
 
     // =========================================================================

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
     buildLrcFromSegments,
+    buildPlainTextFromSegments,
     buildTranscriptFileName,
     buildVttFromSegments,
     formatLrcTimestamp,
@@ -21,6 +22,14 @@ describe('transcriptFileUtils', () => {
         ]);
         expect(lrc).toContain('[00:00.00]hello');
         expect(lrc).toContain('[00:01.50]world');
+    });
+
+    it('builds raw text in timeline order and removes overlapping duplicate segments', () => {
+        expect(buildPlainTextFromSegments([
+            { start: 2, end: 3, text: ' 二行目 ' } as any,
+            { start: 0, end: 2, text: '一行目' } as any,
+            { start: 0.1, end: 1.8, text: '短い重複' } as any,
+        ])).toBe('一行目\n二行目');
     });
 
     it('formats VTT timestamps', () => {
@@ -57,4 +66,3 @@ describe('transcriptFileUtils', () => {
             .toBe('transcript.ja.whisper.vtt');
     });
 });
-

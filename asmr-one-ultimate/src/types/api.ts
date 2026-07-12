@@ -466,6 +466,8 @@ export interface PlayerTrack {
     mediaDownloadUrl?: string;
     /** Low quality streaming URL (for bandwidth saving) */
     streamLowQualityUrl?: string;
+    /** Low quality streaming URL (snake_case host variant) */
+    stream_low_quality_url?: string;
     /** Duration in seconds */
     duration?: number;
     /** File size in bytes */

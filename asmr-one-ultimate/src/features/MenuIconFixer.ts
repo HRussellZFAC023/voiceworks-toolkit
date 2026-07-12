@@ -1,6 +1,7 @@
 
 export class MenuIconFixer {
     private observer: MutationObserver | null = null;
+    private enabled = false;
     // Map existing text labels (English) to Material Icon names
     // We can expand this for JP if needed, but English matching is usually safer as key
     private iconMap: Record<string, string> = {
@@ -18,9 +19,11 @@ export class MenuIconFixer {
     };
 
     public enable(): void {
-        if (this.observer) return;
+        if (this.enabled) return;
+        this.enabled = true;
 
         this.observer = new MutationObserver((mutations) => {
+            if (!this.enabled) return;
             for (const mutation of mutations) {
                 // Check for added nodes
                 mutation.addedNodes.forEach((node) => {
@@ -45,6 +48,7 @@ export class MenuIconFixer {
     }
 
     private fixIcons(root: HTMLElement): void {
+        if (!this.enabled) return;
         // Find all menu items
         const items = root.querySelectorAll('.q-menu .q-item');
         items.forEach((item) => {
@@ -58,11 +62,17 @@ export class MenuIconFixer {
                 if (iconName) {
                     if (iconNode) {
                         // Replace the existing icon text content
+                        const icon = iconNode as HTMLElement;
+                        if (icon.dataset.asmrIconOriginal === undefined) {
+                            icon.dataset.asmrIconOriginal = icon.textContent || '';
+                        }
+                        icon.dataset.asmrIconPatched = 'true';
                         iconNode.textContent = iconName;
                     } else {
                         // Inject missing icon section
                         const section = document.createElement('div');
                         section.className = 'q-item__section column q-item__section--avatar';
+                        section.dataset.asmrIconInjected = 'true';
 
                         const icon = document.createElement('i');
                         icon.className = 'q-icon material-icons';
@@ -81,7 +91,18 @@ export class MenuIconFixer {
     }
 
     public disable(): void {
+        this.enabled = false;
         this.observer?.disconnect();
         this.observer = null;
+        document.querySelectorAll<HTMLElement>('[data-asmr-icon-injected="true"]')
+            .forEach((section) => section.remove());
+        document.querySelectorAll<HTMLElement>('[data-asmr-icon-original]')
+            .forEach((icon) => {
+                icon.textContent = icon.dataset.asmrIconOriginal || '';
+                delete icon.dataset.asmrIconOriginal;
+                delete icon.dataset.asmrIconPatched;
+            });
+        document.querySelectorAll<HTMLElement>('[data-asmr-icon-patched="true"]')
+            .forEach((item) => delete item.dataset.asmrIconPatched);
     }
 }

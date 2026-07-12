@@ -18,6 +18,9 @@ export const DEFAULT_API_SERVER = 'https://api.asmr-200.com';
  */
 export const DEFAULT_API_PROXY = 'https://asmr-api-proxy.henry-robert-christopher-russell.workers.dev';
 
+/** Maintained Japan-placed read-only relay for DLsite metadata and images. */
+export const DEFAULT_DLSITE_PROXY = 'https://wild-sun-1a84.henry-85d.workers.dev';
+
 // =============================================================================
 // Timing
 // =============================================================================

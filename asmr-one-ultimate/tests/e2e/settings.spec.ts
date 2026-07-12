@@ -26,12 +26,12 @@ test.describe('Settings Page Injection', () => {
     await expect(section).toBeVisible();
   });
 
-  test('Magic Search Settings section is injected', async ({ injectedPage, isScriptLoaded }) => {
+  test('Translation Settings section is injected', async ({ injectedPage, isScriptLoaded }) => {
     await helpers.gotoSettings(injectedPage);
     await isScriptLoaded();
     await injectedPage.waitForTimeout(1500);
 
-    const section = injectedPage.locator('#asmr-magic-settings-section');
+    const section = injectedPage.locator('#asmr-translation-settings-section');
     await expect(section).toBeVisible();
   });
 
@@ -62,9 +62,10 @@ test.describe('Settings Page Injection', () => {
 
     expect(sections.radio).toBe(true);
     expect(sections.playlist).toBe(true);
-    expect(sections.magic).toBe(true);
+    expect(sections.translation).toBe(true);
     expect(sections.whisper).toBe(true);
     expect(sections.storage).toBe(true);
+    expect(sections.emergency).toBe(true);
   });
 });
 
@@ -107,20 +108,28 @@ test.describe('Settings Toggles', () => {
     await expect(injectedPage.locator('.asmr-toggle[data-key="autoProgress"]')).toBeVisible();
   });
 
-  test('Flatten Track List toggle exists', async ({ injectedPage, isScriptLoaded }) => {
+  test('Track pool all-folders toggle exists', async ({ injectedPage, isScriptLoaded }) => {
     await helpers.gotoSettings(injectedPage);
     await isScriptLoaded();
     await injectedPage.waitForTimeout(1500);
 
-    await expect(injectedPage.locator('.asmr-toggle[data-key="radioUseFlatTracks"]')).toBeVisible();
+    await expect(injectedPage.locator('.asmr-toggle[data-key="playlistUseFlatTracks"]')).toBeVisible();
   });
 
-  test('Whisper Quantized toggle exists', async ({ injectedPage, isScriptLoaded }) => {
+  test('Force Whisper WASM toggle exists', async ({ injectedPage, isScriptLoaded }) => {
     await helpers.gotoSettings(injectedPage);
     await isScriptLoaded();
     await injectedPage.waitForTimeout(1500);
 
-    await expect(injectedPage.locator('.asmr-toggle[data-key="whisperQuantized"]')).toBeVisible();
+    await expect(injectedPage.locator('.asmr-toggle[data-key="forceWhisperWasm"]')).toBeVisible();
+  });
+
+  test('player fullscreen and gallery feature toggles are visible', async ({ injectedPage, isScriptLoaded }) => {
+    await helpers.gotoSettings(injectedPage);
+    await isScriptLoaded();
+
+    await expect(injectedPage.locator('.asmr-toggle[data-key="enablePlayerFullscreen"]')).toBeVisible();
+    await expect(injectedPage.locator('.asmr-toggle[data-key="enablePlayerGallery"]')).toBeVisible();
   });
 });
 
@@ -170,24 +179,39 @@ test.describe('Settings Toggle Functionality', () => {
 });
 
 test.describe('Settings Input Fields', () => {
-  test('API key input exists in Magic Search section', async ({ injectedPage, isScriptLoaded }) => {
+  test('custom translation endpoint, model, and secret inputs are typed correctly', async ({ injectedPage, isScriptLoaded }) => {
+    await helpers.gotoSettings(injectedPage);
+    await isScriptLoaded();
+
+    const section = injectedPage.locator('#asmr-translation-settings-section');
+    await expect(section.locator('input[data-key="translationApiEndpoint"]')).toHaveAttribute('type', 'url');
+    await expect(section.locator('input[data-key="translationApiModel"]')).toHaveAttribute('type', 'text');
+    await expect(section.locator('input[data-key="translationApiKey"]')).toHaveAttribute('type', 'password');
+  });
+
+  test('Google Drive client ID input exists in Emergency Backup section', async ({ injectedPage, isScriptLoaded }) => {
     await helpers.gotoSettings(injectedPage);
     await isScriptLoaded();
     await injectedPage.waitForTimeout(1500);
 
-    const section = injectedPage.locator('#asmr-magic-settings-section');
-    const input = section.locator('input[data-key="vectorSearchApiKey"]');
+    const section = injectedPage.locator('#asmr-emergency-export-section');
+    const input = section.locator('input[data-key="googleDriveClientId"]');
 
     await expect(input).toBeVisible();
+    await expect(input).toHaveValue(/^166564421003-[a-z0-9]+\.apps\.googleusercontent\.com$/);
+    await expect.poll(() => injectedPage.evaluate(() => Boolean(
+      (window as typeof window & { google?: { accounts?: { oauth2?: unknown } } })
+        .google?.accounts?.oauth2,
+    ))).toBe(true);
   });
 
-  test('Whisper model input exists', async ({ injectedPage, isScriptLoaded }) => {
+  test('Whisper runtime controls exist', async ({ injectedPage, isScriptLoaded }) => {
     await helpers.gotoSettings(injectedPage);
     await isScriptLoaded();
     await injectedPage.waitForTimeout(1500);
 
     const section = injectedPage.locator('#asmr-whisper-settings-section');
-    const input = section.locator('input[data-key="whisperModel"]');
+    const input = section.locator('.asmr-toggle[data-key="forceWhisperWasm"]');
 
     await expect(input).toBeVisible();
   });
@@ -211,7 +235,7 @@ test.describe('Storage & Data', () => {
     await isScriptLoaded();
     await injectedPage.waitForTimeout(1500);
 
-    const backupBtn = injectedPage.locator('.asmr-backup-btn');
+    const backupBtn = injectedPage.getByTestId('settings-backup');
     await expect(backupBtn).toBeVisible();
   });
 
@@ -251,11 +275,11 @@ test.describe('Settings Page Stability', () => {
     // Count sections
     const radioSections = await injectedPage.locator('#asmr-radio-settings-section').count();
     const playlistSections = await injectedPage.locator('#asmr-playlist-settings-section').count();
-    const magicSections = await injectedPage.locator('#asmr-magic-settings-section').count();
+    const translationSections = await injectedPage.locator('#asmr-translation-settings-section').count();
 
     expect(radioSections).toBe(1);
     expect(playlistSections).toBe(1);
-    expect(magicSections).toBe(1);
+    expect(translationSections).toBe(1);
   });
 
   test('toggle states sync correctly on re-entry', async ({ injectedPage, isScriptLoaded }) => {
@@ -283,20 +307,44 @@ test.describe('Settings Page Stability', () => {
 });
 
 test.describe('Settings Theme Support', () => {
-  test('settings sections respect current theme', async ({ injectedPage, isScriptLoaded }) => {
+  test('settings sections switch every owned surface between light and dark atomically', async ({ injectedPage, isScriptLoaded }) => {
     await helpers.gotoSettings(injectedPage);
     await isScriptLoaded();
     await injectedPage.waitForTimeout(1500);
 
-    const isDark = await helpers.isDarkMode(injectedPage);
-    console.log(`Theme is dark: ${isDark}`);
+    const forbidden = '.q-list--dark, .q-item--dark, .q-field--dark, .q-toggle--dark, .bg-black';
+    await expect(injectedPage.locator('#asmr-settings-panel-root').locator(forbidden)).toHaveCount(0);
 
-    // Check that sections use theme-appropriate classes
-    const section = injectedPage.locator('#asmr-radio-settings-section');
-    const classes = await section.getAttribute('class');
+    const surfaces = await injectedPage.evaluate(() => {
+      const body = document.body;
+      const html = document.documentElement;
+      const app = document.getElementById('q-app');
+      body.classList.remove('body--dark', 'q-dark');
+      html.classList.remove('dark', 'q-dark');
+      app?.classList.remove('q-dark');
 
-    if (isDark) {
-      expect(classes).toContain('q-list--dark');
-    }
+      const section = document.getElementById('asmr-radio-settings-section') as HTMLElement;
+      const input = document.querySelector<HTMLElement>('.asmr-hotkey-input');
+      const separator = section.querySelector<HTMLElement>('.asmr-settings-separator');
+      const action = document.querySelector<HTMLElement>('[data-testid="settings-backup"]');
+      const read = () => ({
+        sectionBg: getComputedStyle(section).backgroundColor,
+        sectionText: getComputedStyle(section).color,
+        inputBg: input ? getComputedStyle(input).backgroundColor : '',
+        separatorBg: separator ? getComputedStyle(separator).backgroundColor : '',
+        actionBg: action ? getComputedStyle(action).backgroundColor : '',
+      });
+
+      const light = read();
+      body.classList.add('body--dark');
+      const dark = read();
+      return { light, dark };
+    });
+
+    expect(surfaces.light.sectionBg).not.toBe(surfaces.dark.sectionBg);
+    expect(surfaces.light.sectionText).not.toBe(surfaces.dark.sectionText);
+    expect(surfaces.light.inputBg).not.toBe(surfaces.dark.inputBg);
+    expect(surfaces.light.separatorBg).not.toBe(surfaces.dark.separatorBg);
+    expect(surfaces.light.actionBg).not.toBe(surfaces.dark.actionBg);
   });
 });

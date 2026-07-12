@@ -44,6 +44,7 @@ export class FolderDiver {
     private diveGeneration = 0;
     private formatPriority: string[] = [];
     private deferredApplyToken = 0;
+    private deferredApplyTimer: ReturnType<typeof setTimeout> | null = null;
 
     private constructor() {
         this.bridge = KikoeruBridge.getInstance();
@@ -70,6 +71,10 @@ export class FolderDiver {
     }
 
     syncPath(path: string[]): void {
+        // A host/route path update supersedes any deferred fallback from an older
+        // navigation attempt. Without this, the retry can overwrite a later
+        // manual selection after the WorkTree component is recreated.
+        this.cancelDeferredVueApply();
         this.currentPath = [...path];
     }
 
@@ -78,6 +83,7 @@ export class FolderDiver {
     }
 
     reset(): void {
+        this.cancelDeferredVueApply();
         this.currentPath = [];
         this.diveGeneration++;
     }
@@ -171,6 +177,7 @@ export class FolderDiver {
      * Navigate to a specific folder by name
      */
     async navigateToFolder(folderName: string): Promise<void> {
+        this.cancelDeferredVueApply();
         this.currentPath.push(folderName);
         await this.applyPathToWorkTree(this.currentPath);
         Logger.debug(`[FolderDiver] Navigated to: ${folderName}`);
@@ -181,6 +188,7 @@ export class FolderDiver {
      */
     async navigateUp(): Promise<boolean> {
         if (this.currentPath.length === 0) return false;
+        this.cancelDeferredVueApply();
         this.currentPath.pop();
         await this.applyPathToWorkTree(this.currentPath);
         Logger.debug('[FolderDiver] Navigated up');
@@ -191,6 +199,7 @@ export class FolderDiver {
      * Navigate to root
      */
     async navigateToRoot(): Promise<void> {
+        this.cancelDeferredVueApply();
         this.currentPath = [];
         await this.navigateToRootViaDOM();
         Logger.debug('[FolderDiver] Navigated to root');
@@ -416,6 +425,8 @@ export class FolderDiver {
     }
 
     private applyPathToVm(treeVm: WorkTreeComponent, pathSegments: string[]): void {
+        // A successful immediate apply supersedes any older deferred target.
+        this.cancelDeferredVueApply();
         if (typeof treeVm.$set === 'function') {
             treeVm.$set(treeVm, 'path', [...pathSegments]);
         } else {
@@ -428,8 +439,15 @@ export class FolderDiver {
     }
 
     private scheduleDeferredVueApply(pathSegments: string[]): void {
-        const token = ++this.deferredApplyToken;
+        this.cancelDeferredVueApply();
+        const token = this.deferredApplyToken;
         const target = pathSegments.join('\x00');
+        const scheduleAttempt = (remaining: number) => {
+            this.deferredApplyTimer = setTimeout(() => {
+                this.deferredApplyTimer = null;
+                attempt(remaining);
+            }, 100);
+        };
         const attempt = (remaining: number) => {
             if (token !== this.deferredApplyToken) return;
             const treeVm = this.bridge.findWorkTreeComponent() as WorkTreeComponent;
@@ -442,9 +460,17 @@ export class FolderDiver {
                 return;
             }
             if (remaining <= 0) return;
-            window.setTimeout(() => attempt(remaining - 1), 100);
+            scheduleAttempt(remaining - 1);
         };
-        window.setTimeout(() => attempt(12), 100);
+        scheduleAttempt(12);
+    }
+
+    private cancelDeferredVueApply(): void {
+        this.deferredApplyToken++;
+        if (this.deferredApplyTimer !== null) {
+            clearTimeout(this.deferredApplyTimer);
+            this.deferredApplyTimer = null;
+        }
     }
 
     /**

@@ -43,6 +43,7 @@ export class ListSearchEnhancer {
     private routeGuardCleanup?: () => void;
     private itemsUnwatch?: () => void;
     private configCleanup?: () => void;
+    private langCleanup?: () => void;
     private currentListVm: ListVm | null = null;
     private augmentationToken = 0;
 
@@ -84,9 +85,15 @@ export class ListSearchEnhancer {
                 if (value) {
                     this.tryAugment();
                 } else {
+                    this.augmentationToken++;
                     this.restoreOriginalNames();
                 }
             }
+        });
+        this.langCleanup = EventBus.on('lang:change', () => {
+            this.augmentationToken++;
+            this.restoreOriginalNames();
+            this.tryAugment();
         });
 
         Logger.debug('[ListSearchEnhancer] Enabled');
@@ -108,6 +115,8 @@ export class ListSearchEnhancer {
 
         this.configCleanup?.();
         this.configCleanup = undefined;
+        this.langCleanup?.();
+        this.langCleanup = undefined;
 
         this.restoreOriginalNames();
         this.currentListVm = null;
@@ -125,6 +134,7 @@ export class ListSearchEnhancer {
     }
 
     private onRouteChange(): void {
+        this.augmentationToken++;
         const path = this.bridge.route?.path;
 
         // Leaving a list page — restore originals
@@ -173,34 +183,47 @@ export class ListSearchEnhancer {
         if (!this.isEnabled) return;
         if (!this.isListPage(this.bridge.route?.path)) return;
         if (!Config.get('translateMode')) return;
+        const routeToken = this.augmentationToken;
 
         const vm = await this.findListComponentWithRetry();
-        if (!vm || !this.isEnabled) return;
+        if (!vm || !this.isEnabled || routeToken !== this.augmentationToken) return;
 
         // Clean up previous watcher
         this.itemsUnwatch?.();
 
         this.currentListVm = vm;
+        const augmentToken = ++this.augmentationToken;
 
         // Augment current items immediately
-        await this.augmentItems(vm);
+        await this.augmentItems(vm, augmentToken);
+
+        // Translation can settle after disable, route/language changes, or a
+        // replacement list component. Never install a watcher for stale state.
+        if (!this.isEnabled
+            || augmentToken !== this.augmentationToken
+            || this.currentListVm !== vm
+            || !this.isListPage(this.bridge.route?.path)
+            || !Config.get('translateMode')) return;
 
         // Watch for items replacement (e.g. navigating /tags → /circles reuses component)
         this.itemsUnwatch = vm.$watch('items', () => {
-            this.augmentItems(vm);
+            if (!this.isEnabled || this.currentListVm !== vm) return;
+            const token = ++this.augmentationToken;
+            void this.augmentItems(vm, token);
         }, { deep: false });
     }
 
-    private async augmentItems(vm: ListVm): Promise<void> {
+    private async augmentItems(vm: ListVm, token: number): Promise<void> {
+        if (token !== this.augmentationToken || !this.isEnabled || this.currentListVm !== vm) return;
         if (!vm.items || vm.items.length === 0) return;
         if (!Config.get('translateMode')) return;
 
         const restrict = vm.restrict;
 
-        if (restrict === 'tags') {
+        if (restrict === 'tags' && TranslationService.getUiTargetLang() === 'en') {
             this.augmentTagItems(vm);
         } else {
-            await this.augmentTranslatedItems(vm);
+            await this.augmentTranslatedItems(vm, token);
         }
     }
 
@@ -238,9 +261,7 @@ export class ListSearchEnhancer {
     // Circles / VAs: progressive async batch translation
     // -----------------------------------------------------------------------
 
-    private async augmentTranslatedItems(vm: ListVm): Promise<void> {
-        const token = ++this.augmentationToken;
-
+    private async augmentTranslatedItems(vm: ListVm, token: number): Promise<void> {
         const toTranslate = vm.items
             .filter(item => !item._origName && this.looksJapanese(item.name));
 
@@ -257,7 +278,10 @@ export class ListSearchEnhancer {
             const texts = batch.map(item => item.name);
 
             try {
-                const results = await TranslationService.translateBatch(texts, 'en');
+                const results = await TranslationService.translateBatch(
+                    texts,
+                    TranslationService.getUiTargetLang(),
+                );
 
                 // Re-check after async
                 if (token !== this.augmentationToken || !this.isEnabled) return;
@@ -313,12 +337,12 @@ export class ListSearchEnhancer {
     }
 
     /**
-     * Strip English translations added by formatPair() from advanced search keywords.
+     * Strip translations added by formatPair() from advanced search keywords.
      * e.g. `$circle:テグラユウキ (Tegra Yuki)$` → `$circle:テグラユウキ$`
      */
     private stripTranslationsFromKeyword(keyword: string): string {
         return keyword.replace(
-            /(\$(?:circle|va|tag):.*?)\s+\([A-Za-z][-A-Za-z\s.,!?;:'"…()]*\)(\$)/g,
+            /(\$(?:circle|va|tag):.*?)\s+\([^$()]+\)(\$)/g,
             '$1$2',
         );
     }

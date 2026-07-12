@@ -1,8 +1,16 @@
-import { AppStore } from '../store/AppStore';
+import { GM_getValue } from '$';
 
 const LOG_PREFIX = '[ASMR Ultimate]';
 const LOG_STYLE = 'background: #7c4dff; color: white; border-radius: 3px; padding: 2px 4px; font-weight: bold;';
 const DEBUG_STYLE = 'color: #aaa;';
+
+function isLogConfigEnabled(key: 'debug' | 'enableLogging'): boolean {
+    try {
+        return GM_getValue<boolean>(key, false) === true;
+    } catch {
+        return false;
+    }
+}
 
 interface CallStats {
     count: number;
@@ -45,7 +53,7 @@ class LoggerImpl {
     }
 
     debug(message: string, ...args: unknown[]): void {
-        if (!AppStore.getConfig('debug')) return;
+        if (!isLogConfigEnabled('debug')) return;
         this.logAt('debug', console.debug, message, args, `[DEBUG] `, false, DEBUG_STYLE);
     }
 
@@ -53,7 +61,7 @@ class LoggerImpl {
      * Trace log with stack trace - useful for tracking call origins
      */
     trace(message: string, ...args: unknown[]): void {
-        if (!AppStore.getConfig('enableLogging')) return;
+        if (!isLogConfigEnabled('enableLogging')) return;
         const stack = new Error().stack?.split('\n').slice(2).join('\n');
         console.log(`%c${LOG_PREFIX}%c [TRACE] ${message}`, LOG_STYLE, 'color: #888;', ...args);
         this.dirObjects(args);
@@ -66,7 +74,7 @@ class LoggerImpl {
      * Useful for complex nested objects that console.log collapses.
      */
     dir(label: string, obj: unknown): void {
-        if (!AppStore.getConfig('enableLogging')) return;
+        if (!isLogConfigEnabled('enableLogging')) return;
         console.log(`%c${LOG_PREFIX}%c ${label} ▼`, LOG_STYLE, 'font-weight: bold;');
         console.dir(obj);
         this.bufferLog('dir', label, [obj]);
@@ -76,7 +84,7 @@ class LoggerImpl {
      * Log tabular data (arrays of objects) in a readable table format.
      */
     table(label: string, data: unknown[] | Record<string, unknown>): void {
-        if (!AppStore.getConfig('enableLogging')) return;
+        if (!isLogConfigEnabled('enableLogging')) return;
         console.log(`%c${LOG_PREFIX}%c ${label} ▼`, LOG_STYLE, 'font-weight: bold;');
         console.table(data);
         this.bufferLog('table', label, [data]);
@@ -86,27 +94,27 @@ class LoggerImpl {
      * Performance timing
      */
     time(label: string): void {
-        if (!AppStore.getConfig('enableLogging')) return;
+        if (!isLogConfigEnabled('enableLogging')) return;
         console.time(`${LOG_PREFIX} ${label}`);
     }
 
     timeEnd(label: string): void {
-        if (!AppStore.getConfig('enableLogging')) return;
+        if (!isLogConfigEnabled('enableLogging')) return;
         console.timeEnd(`${LOG_PREFIX} ${label}`);
     }
 
     group(label: string): void {
-        if (!AppStore.getConfig('enableLogging')) return;
+        if (!isLogConfigEnabled('enableLogging')) return;
         console.group(`%c${LOG_PREFIX}%c ${label}`, LOG_STYLE, '');
     }
 
     groupCollapsed(label: string): void {
-        if (!AppStore.getConfig('enableLogging')) return;
+        if (!isLogConfigEnabled('enableLogging')) return;
         console.groupCollapsed(`%c${LOG_PREFIX}%c ${label}`, LOG_STYLE, '');
     }
 
     groupEnd(): void {
-        if (!AppStore.getConfig('enableLogging')) return;
+        if (!isLogConfigEnabled('enableLogging')) return;
         console.groupEnd();
     }
 
@@ -122,7 +130,7 @@ class LoggerImpl {
         includeStack = false,
         resetStyle = '',
     ): void {
-        if (!AppStore.getConfig('enableLogging')) return;
+        if (!isLogConfigEnabled('enableLogging')) return;
         this.trackCall(level, message);
         consoleFn(`%c${LOG_PREFIX}%c ${prefix}${message}`, LOG_STYLE, resetStyle, ...args);
         this.dirObjects(args);

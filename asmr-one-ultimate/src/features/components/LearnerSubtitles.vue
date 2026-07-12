@@ -21,14 +21,24 @@ import { AppStore } from '../../store/AppStore';
 import { AudioCache } from '../../infrastructure/AudioCache';
 import { getAudioElement, getPlayerBar, isChinese, isTranslatable } from '../../core/DomUtils';
 import { Logger, Config } from '../../core/Utils';
-import type { WhisperUpdatePayload, JPDBToken, AudioPlayerState, KikoeruStoreState, KikoeruApp, VueRoute, PlayerTrack, AvailableLyric } from '../../types';
+import { Priority } from '../../core/GpuScheduler';
+import type { WhisperUpdatePayload, JPDBToken, AudioPlayerState, KikoeruStoreState, KikoeruApp, VueRoute, PlayerTrack, AvailableLyric, TranslationSourceHint } from '../../types';
 import { buildSegments, sliceSegments, type FuriganaSegment } from '../../lib/jpdb-segments';
 import { splitSubtitleSegments } from '../subtitleSegmentSplitter';
+import {
+    isCurrentWhisperTextRequest,
+    type WhisperTextRequestContext,
+} from '../learnerWhisperRequestUtils';
 import { findLyricsSource as findLyricsSourceUtil, normalizeLyricLines, parseLrcContent, parseSubtitleContent } from '../learnerLyricsUtils';
 import {
     buildKaraokeCharMap, computeWordKaraokeIndices, computeTimeFallbackKaraokeIndices,
     type KaraokeCharMap, type KaraokeWord,
 } from '../karaokeUtils';
+import {
+    LearnerTaskScheduler,
+    allTranslationLanesSucceeded,
+    type TranslationLaneResult,
+} from '../learnerTaskScheduler';
 import SubtitleContent from './SubtitleContent.vue';
 
 // ---------------------------------------------------------------------------
@@ -95,6 +105,8 @@ let whisperActive = false;
 let whisperFromCache = false;
 let whisperLive = false;
 let whisperLeadSec = 0;
+let whisperSourceLanguageHint: TranslationSourceHint = 'auto';
+let whisperTextGeneration = 0;
 let lastWhisperDisplayText = '';
 let whisperTickerId: number | null = null;
 let whisperTickerInterval = 80;
@@ -104,6 +116,7 @@ const subtitleLeadSec = 1.2;
 const subtitleAppendWindowSec = 1.5;
 const subtitleAppendMaxChars = 140;
 const WORD_REVEAL_DELAY_SEC = 0.002;
+const LEARNER_SECONDARY_TARGET = { preserveRequestedTarget: true } as const;
 
 /** Adjust lead time for playback rate: at 2x, need 2x audio-seconds of lead for same real-world reaction time */
 function effectiveLead(baseLead: number): number {
@@ -121,6 +134,10 @@ let lrcFetchPromise: Promise<void> | null = null;
 const lrcFetchAttemptedHashes = new Set<string>();
 let lastNoLyricsLogHash: string | null = null;
 let lastPreTranslatedKey: string | null = null;
+let pretranslateInFlightKey: string | null = null;
+const pretranslationTasks = new LearnerTaskScheduler();
+const trackTasks = new LearnerTaskScheduler();
+const lifecycleTasks = new LearnerTaskScheduler();
 let realtimeQueueKey = '';
 let realtimeJaQueueKey = '';
 let lookaheadQueueKey = '';
@@ -156,12 +173,14 @@ const originalParents = new Map<HTMLElement, { parent: HTMLElement; nextSibling:
 
 // Overflow menu DOM ref (created imperatively and appended to body for z-index)
 let overflowMenuEl: HTMLElement | null = null;
+let overflowTransientCleanup: (() => void) | null = null;
 
 // Player observer (for injection race condition)
 let playerObserver: MutationObserver | null = null;
 
 // Store watchers cleanup
 const storeWatcherCleanups: (() => void)[] = [];
+let routeUnwatch: (() => void) | null = null;
 
 // Microtask-debounced updateLyrics to coalesce multiple store watchers firing in the same tick
 let lyricsUpdateScheduled = false;
@@ -244,6 +263,7 @@ function resetDedupState(options: { includeWhisperDisplay?: boolean; bumpTransla
     lastText = '';
     lastDisplayedText = '';
     lastSecondaryShown = '';
+    lastLookaheadText = '';
     if (options.includeWhisperDisplay) {
         lastWhisperDisplayText = '';
     }
@@ -342,7 +362,9 @@ function cancelQueue(cancellableKey: string): void {
 }
 
 function updateQueueKey(currentKey: string, nextKey: string): string {
-    if (currentKey && currentKey !== nextKey) cancelQueue(currentKey);
+    // A key identifies a UI lane, not one immutable request. Cancel queued
+    // work from the previous line even when track/target (and thus key) match.
+    if (currentKey) cancelQueue(currentKey);
     return nextKey;
 }
 
@@ -364,11 +386,57 @@ function resetRealtimeQueues(): void {
 
 /** Cancel ALL translation queues (for track changes / navigation / cleanup). */
 function resetLearnerTranslationQueues(): void {
+    pretranslationTasks.cancelAll();
+    pretranslateInFlightKey = null;
+    lastPreTranslatedKey = null;
     resetRealtimeQueues();
     cancelQueue(pretranslateQueueKey);
     cancelQueue(pretranslateJaQueueKey);
     pretranslateQueueKey = '';
     pretranslateJaQueueKey = '';
+}
+
+function resetTrackTasks(): void {
+    trackTasks.cancelAll();
+    // The transport may not be abortable, but its generation/key guard will
+    // prevent it from mutating the replacement track.
+    lrcFetchPromise = null;
+}
+
+function schedulePreTranslation(
+    lyrics: Array<{ time: number; text: string }>,
+    delayMs: number,
+    sourceLanguageHint: TranslationSourceHint = 'auto',
+): void {
+    const expectedTrackKey = getTrackKey();
+    pretranslationTasks.schedule(
+        () => preTranslateAll(lyrics, sourceLanguageHint),
+        delayMs,
+        () => getTrackKey() === expectedTrackKey,
+    );
+}
+
+function normalizeLanguageHint(language: string): TranslationSourceHint {
+    const normalized = String(language || '').toLowerCase().split('-')[0];
+    if (normalized === 'ja' || normalized === 'jp' || normalized === 'japanese') return 'ja';
+    if (normalized === 'zh' || normalized === 'cn' || normalized === 'cmn' || normalized === 'chinese') return 'zh';
+    if (normalized === 'en' || normalized === 'english') return 'en';
+    return 'auto';
+}
+
+function isAlreadyTargetLanguage(
+    text: string,
+    targetLang: string,
+    sourceLanguageHint: TranslationSourceHint = 'auto',
+): boolean {
+    const target = targetLang.toLowerCase().split('-')[0];
+    if (sourceLanguageHint !== 'auto') {
+        return normalizeLanguageHint(target) === sourceLanguageHint;
+    }
+    if (target === 'zh' || target === 'cn') return isChinese(text);
+    if (target === 'ja' || target === 'jp') return /[\u3040-\u30ff]/.test(text);
+    if (target === 'en') return /[a-z]/i.test(text) && !/[\u3040-\u30ff\u4e00-\u9fff]/.test(text);
+    return TranslationService.isTargetLanguage(text, targetLang);
 }
 
 function shouldTickerTranslate(text: string): boolean {
@@ -383,43 +451,61 @@ function shouldTickerTranslate(text: string): boolean {
 
 /** Look-ahead: fire translations for the next N lines after the current one. */
 let lastLookaheadText = '';
-function translateLookahead(currentText: string, targetLang: string): void {
+function translateLookahead(
+    currentText: string,
+    targetLang: string,
+    sourceLanguageHint: TranslationSourceHint = whisperActive ? whisperSourceLanguageHint : 'auto',
+): void {
     if (currentText === lastLookaheadText) return;
-    lastLookaheadText = currentText;
+    // Supersede the previous playhead window even if the new text has not yet
+    // been inserted into the reactive line list.
+    cancelQueue(lookaheadQueueKey);
+    cancelQueue(lookaheadJaQueueKey);
+    lookaheadQueueKey = '';
+    lookaheadJaQueueKey = '';
+
     const lines = whisperActive ? whisperLines : currentLyrics;
     const idx = lines.findIndex(l => l.text?.trim() === currentText);
     if (idx < 0) return;
+    lastLookaheadText = currentText;
+
     const LOOKAHEAD = 10;
     const end = Math.min(lines.length, idx + 1 + LOOKAHEAD);
     const targetTexts = new Set<string>();
     const cnTexts = new Set<string>();
     for (let i = idx + 1; i < end; i++) {
         const t = lines[i].text?.trim();
-        if (t && !TranslationService.peekCached(t, targetLang)) {
+        if (t && !isAlreadyTargetLanguage(t, targetLang, sourceLanguageHint)
+            && !TranslationService.peekCached(t, targetLang, sourceLanguageHint, LEARNER_SECONDARY_TARGET)) {
             targetTexts.add(t);
         }
-        if (t && isChinese(t) && targetLang !== 'ja' && !TranslationService.peekCached(t, 'ja')) {
+        const chineseSource = sourceLanguageHint === 'zh'
+            || (sourceLanguageHint === 'auto' && isChinese(t));
+        if (t && chineseSource && targetLang !== 'ja' && !TranslationService.peekCached(t, 'ja', 'zh')) {
             cnTexts.add(t);
         }
     }
 
     if (targetTexts.size > 0) {
         const queueKey = buildTranslationQueueKey('learner:lookahead', targetLang);
-        lookaheadQueueKey = updateQueueKey(lookaheadQueueKey, queueKey);
-        cancelQueue(lookaheadQueueKey);
+        lookaheadQueueKey = queueKey;
         TranslationService.translateBatch(Array.from(targetTexts), targetLang, {
+            ...LEARNER_SECONDARY_TARGET,
+            priority: Priority.HIGH,
             cancellable: true,
             cancellableKey: lookaheadQueueKey,
+            sourceLanguageHint,
         }).catch(() => {});
     }
 
     if (cnTexts.size > 0) {
         const queueKey = buildTranslationQueueKey('learner:lookahead:ja', 'ja');
-        lookaheadJaQueueKey = updateQueueKey(lookaheadJaQueueKey, queueKey);
-        cancelQueue(lookaheadJaQueueKey);
+        lookaheadJaQueueKey = queueKey;
         TranslationService.translateBatch(Array.from(cnTexts), 'ja', {
+            priority: Priority.HIGH,
             cancellable: true,
             cancellableKey: lookaheadJaQueueKey,
+            sourceLanguageHint: 'zh',
         }).catch(() => {});
     }
 }
@@ -443,6 +529,12 @@ on('config:change', ({ key, value }) => {
         // showJP ref auto-syncs via useConfig
     } else if (key === 'enableWhisper' || key === 'enableJoiTool' || key === 'enableVisualizer') {
         syncOverflowItemVisibility(key, !!value);
+    } else if (key === 'subtitleLang' || key === 'translateMode' || key === 'translateCnToJp'
+        || key === 'translationApiEndpoint' || key === 'translationApiKey' || key === 'translationApiModel') {
+        resetLearnerTranslationQueues();
+        lastPreTranslatedKey = null;
+        resetDedupState({ includeWhisperDisplay: true, bumpTranslationToken: true });
+        updateLyrics();
     }
 });
 
@@ -770,9 +862,18 @@ function findLyricsSource(): Record<string, unknown>[] | null {
 // LRC / subtitle fetching
 // ---------------------------------------------------------------------------
 
-async function fetchSubtitleFromUrl(url: string): Promise<boolean> {
+function isCurrentTrackRequest(generation: number, expectedTrackKey: string): boolean {
+    return trackTasks.isCurrent(generation) && getTrackKey() === expectedTrackKey;
+}
+
+async function fetchSubtitleFromUrl(
+    url: string,
+    generation: number,
+    expectedTrackKey: string,
+): Promise<boolean> {
     try {
         const res = await bridge.axios.get<string>(url, { responseType: 'text' });
+        if (!isCurrentTrackRequest(generation, expectedTrackKey)) return false;
         const content = typeof res.data === 'string' ? res.data : String(res.data);
         if (!content) return false;
         const lyrics = parseSubtitleContent(content);
@@ -780,7 +881,7 @@ async function fetchSubtitleFromUrl(url: string): Promise<boolean> {
             const tk = getTrackKey();
             if (tk) lastTrackKey = tk;
             currentLyrics = lyrics;
-            setTimeout(() => preTranslateAll(lyrics), 100);
+            schedulePreTranslation(lyrics, 100);
             updateLyrics();
             return true;
         }
@@ -790,9 +891,14 @@ async function fetchSubtitleFromUrl(url: string): Promise<boolean> {
     return false;
 }
 
-async function fetchLrcByHash(hash: string): Promise<boolean> {
+async function fetchLrcByHash(
+    hash: string,
+    generation: number,
+    expectedTrackKey: string,
+): Promise<boolean> {
     try {
         const res = await bridge.axios.get<string>(`/api/media/stream/${hash}`, { responseType: 'text' });
+        if (!isCurrentTrackRequest(generation, expectedTrackKey)) return false;
         const content = typeof res.data === 'string' ? res.data : String(res.data);
         if (!content) return false;
         const lyrics = parseLrcContent(content);
@@ -800,7 +906,7 @@ async function fetchLrcByHash(hash: string): Promise<boolean> {
             const tk = getTrackKey();
             if (tk) lastTrackKey = tk;
             currentLyrics = lyrics;
-            setTimeout(() => preTranslateAll(lyrics), 100);
+            schedulePreTranslation(lyrics, 100);
             updateLyrics();
             return true;
         }
@@ -817,12 +923,24 @@ async function fetchLrcForCurrentTrack(): Promise<void> {
     if (!trackHash || trackHash === lastLrcTrackHash) return;
     if (lrcFetchAttemptedHashes.has(trackHash)) return;
     if (lrcFetchPromise) return lrcFetchPromise;
-    lrcFetchPromise = _fetchLrcInner(track, trackHash).finally(() => { lrcFetchPromise = null; });
-    return lrcFetchPromise;
+    const generation = trackTasks.token;
+    const expectedTrackKey = getTrackKey() || trackHash;
+    const request = _fetchLrcInner(track, trackHash, generation, expectedTrackKey);
+    lrcFetchPromise = request;
+    void request.finally(() => {
+        if (lrcFetchPromise === request) lrcFetchPromise = null;
+    });
+    return request;
 }
 
-async function _fetchLrcInner(track: PlayerTrack, trackHash: string): Promise<void> {
+async function _fetchLrcInner(
+    track: PlayerTrack,
+    trackHash: string,
+    generation: number,
+    expectedTrackKey: string,
+): Promise<void> {
     let fetched = false;
+    if (!isCurrentTrackRequest(generation, expectedTrackKey)) return;
 
     // Priority 1: availableLyrics
     if (track.availableLyrics?.length) {
@@ -834,7 +952,7 @@ async function _fetchLrcInner(track: PlayerTrack, trackHash: string): Promise<vo
         });
         for (const lyricFile of sorted) {
             if (!lyricFile.mediaStreamUrl) continue;
-            try { fetched = await fetchSubtitleFromUrl(lyricFile.mediaStreamUrl); if (fetched) break; }
+            try { fetched = await fetchSubtitleFromUrl(lyricFile.mediaStreamUrl, generation, expectedTrackKey); if (fetched) break; }
             catch (err) { Logger.error('[LearnerMode] Error fetching subtitle:', err); }
         }
     }
@@ -851,13 +969,14 @@ async function _fetchLrcInner(track: PlayerTrack, trackHash: string): Promise<vo
             if (Number.isFinite(fallback) && fallback >= 0) candidates.add(fallback);
 
             if (candidates.size === 0) {
-                fetched = await fetchLrcByHash(trackHash);
+                fetched = await fetchLrcByHash(trackHash, generation, expectedTrackKey);
             } else {
                 for (const idx of candidates) {
                     try {
                         const checkRes = await bridge.axios.get<{ result: boolean; hash?: string }>(`/api/media/check-lrc/${workId}/${idx}`);
+                        if (!isCurrentTrackRequest(generation, expectedTrackKey)) return;
                         if (!checkRes.data.result || !checkRes.data.hash) continue;
-                        fetched = await fetchLrcByHash(checkRes.data.hash);
+                        fetched = await fetchLrcByHash(checkRes.data.hash, generation, expectedTrackKey);
                         if (fetched) break;
                     } catch (err) { Logger.debug('[LearnerMode] Error fetching LRC:', err); }
                 }
@@ -865,6 +984,7 @@ async function _fetchLrcInner(track: PlayerTrack, trackHash: string): Promise<vo
         }
     }
 
+    if (!isCurrentTrackRequest(generation, expectedTrackKey)) return;
     if (fetched) lastLrcTrackHash = trackHash;
     lrcFetchAttemptedHashes.add(trackHash);
 }
@@ -873,7 +993,10 @@ async function _fetchLrcInner(track: PlayerTrack, trackHash: string): Promise<vo
 // Pre-translation
 // ---------------------------------------------------------------------------
 
-function preTranslateAll(lyrics: Array<{ time: number; text: string }>): void {
+function preTranslateAll(
+    lyrics: Array<{ time: number; text: string }>,
+    sourceLanguageHint: TranslationSourceHint = 'auto',
+): void {
     if (lyrics.length === 0) return;
     const targetLang = (Config.get('subtitleLang') as string || 'en').toLowerCase();
     const texts = lyrics.map(l => l.text?.trim()).filter(Boolean);
@@ -888,14 +1011,21 @@ function preTranslateAll(lyrics: Array<{ time: number; text: string }>): void {
         windowedPrefetch = true;
     }
 
-    const uncached = prefetchTexts.filter(t => !TranslationService.peekCached(t, targetLang));
+    const uncached = prefetchTexts.filter(t =>
+        (!isAlreadyTargetLanguage(t, targetLang, sourceLanguageHint)
+            && !TranslationService.peekCached(t, targetLang, sourceLanguageHint, LEARNER_SECONDARY_TARGET))
+        || ((sourceLanguageHint === 'zh' || (sourceLanguageHint === 'auto' && isChinese(t)))
+            && !TranslationService.peekCached(t, 'ja', 'zh'))
+    );
     if (uncached.length === 0) return;
 
     const first = uncached[0] || '';
     const last = uncached[uncached.length - 1] || '';
     const key = `${uncached.length}:${first.slice(0, 20)}:${last.slice(0, 20)}`;
-    if (key === lastPreTranslatedKey) return;
-    lastPreTranslatedKey = key;
+    if (key === lastPreTranslatedKey || key === pretranslateInFlightKey) return;
+    pretranslateInFlightKey = key;
+    const generation = pretranslationTasks.token;
+    const expectedTrackKey = getTrackKey();
 
     Logger.debug(`[LearnerMode] Pre-translating ${uncached.length}/${prefetchTexts.length} uncached lines${windowedPrefetch ? ' (windowed)' : ''}...`);
 
@@ -908,35 +1038,74 @@ function preTranslateAll(lyrics: Array<{ time: number; text: string }>): void {
         buildTranslationQueueKey('learner:pretranslate:ja', 'ja'),
     );
 
-    const processBatch = (batch: string[], priority: string) => {
-        if (batch.length === 0) return;
+    const processBatch = async (
+        batch: string[],
+        priorityLabel: string,
+        priority: Priority,
+    ): Promise<boolean> => {
+        if (batch.length === 0 || !pretranslationTasks.isCurrent(generation)) return false;
         const cnTexts: string[] = [];
         const allTexts: string[] = [];
         for (const text of batch) {
-            if (isChinese(text) && !TranslationService.peekCached(text, 'ja')) cnTexts.push(text);
-            if (!TranslationService.peekCached(text, targetLang)) allTexts.push(text);
+            const cn = sourceLanguageHint === 'zh'
+                || (sourceLanguageHint === 'auto' && isChinese(text));
+            if (cn && !TranslationService.peekCached(text, 'ja', 'zh')) cnTexts.push(text);
+            // Chinese->Japanese is handled by the source-hinted lane below.
+            if (!(cn && targetLang === 'ja')
+                && !isAlreadyTargetLanguage(text, targetLang, sourceLanguageHint)
+                && !TranslationService.peekCached(text, targetLang, sourceLanguageHint, LEARNER_SECONDARY_TARGET)) {
+                allTexts.push(text);
+            }
         }
-        if (targetLang !== 'ja' && allTexts.length > 0) {
-            TranslationService.translateBatch(allTexts, targetLang, {
+        const tasks: Array<Promise<TranslationLaneResult>> = [];
+        if (allTexts.length > 0) {
+            tasks.push(TranslationService.translateBatch(allTexts, targetLang, {
+                ...LEARNER_SECONDARY_TARGET,
+                priority,
                 cancellable: true,
                 cancellableKey: pretranslateQueueKey,
-            }).catch(err => Logger.warn(`[LearnerMode] ->${targetLang} ${priority} batch failed:`, err));
+                sourceLanguageHint,
+            }).then(results => ({ inputs: allTexts, results })).catch(err => {
+                Logger.warn(`[LearnerMode] ->${targetLang} ${priorityLabel} batch failed:`, err);
+                return { inputs: allTexts, results: [] };
+            }));
         }
         if (cnTexts.length > 0) {
-            const cnDelay = targetLang === 'ja' ? 0 : (priority === 'initial' ? 100 : 200);
-            setTimeout(() => {
-                TranslationService.translateBatch(cnTexts, 'ja', {
-                    cancellable: true,
-                    cancellableKey: pretranslateJaQueueKey,
-                }).catch(err => Logger.warn(`[LearnerMode] CN->JA ${priority} batch failed:`, err));
-            }, cnDelay);
+            tasks.push(TranslationService.translateBatch(cnTexts, 'ja', {
+                priority,
+                cancellable: true,
+                cancellableKey: pretranslateJaQueueKey,
+                sourceLanguageHint: 'zh',
+            }).then(results => ({ inputs: cnTexts, results })).catch(err => {
+                Logger.warn(`[LearnerMode] CN->JA ${priorityLabel} batch failed:`, err);
+                return { inputs: cnTexts, results: [] };
+            }));
         }
+        const completed = await Promise.all(tasks);
+        if (!pretranslationTasks.isCurrent(generation)) return false;
+        return allTranslationLanesSucceeded(completed);
     };
 
     const PRIORITY_BATCH_SIZE = 150;
-    processBatch(uncached.slice(0, PRIORITY_BATCH_SIZE), 'initial');
+    const finish = (succeeded: boolean) => {
+        if (!pretranslationTasks.isCurrent(generation) || pretranslateInFlightKey !== key) return;
+        pretranslateInFlightKey = null;
+        lastPreTranslatedKey = succeeded ? key : null;
+    };
+
     const bg = uncached.slice(PRIORITY_BATCH_SIZE);
-    if (bg.length > 0) setTimeout(() => processBatch(bg, 'background'), 50);
+    void processBatch(uncached.slice(0, PRIORITY_BATCH_SIZE), 'initial', Priority.NORMAL).then((succeeded) => {
+        if (!pretranslationTasks.isCurrent(generation) || pretranslateInFlightKey !== key) return;
+        if (!succeeded || bg.length === 0) {
+            finish(succeeded);
+            return;
+        }
+        pretranslationTasks.schedule(
+            () => void processBatch(bg, 'background', Priority.LOW).then(finish),
+            50,
+            () => getTrackKey() === expectedTrackKey,
+        );
+    }).catch(() => finish(false));
 }
 
 // ---------------------------------------------------------------------------
@@ -947,6 +1116,7 @@ function updateLyrics() {
     const trackKey = getTrackKey();
     if (trackKey && trackKey !== lastTrackKey) {
         lastTrackKey = trackKey;
+        resetTrackTasks();
         resetDedupState({ includeWhisperDisplay: true, bumpTranslationToken: true });
         currentLyrics = [];
         whisperLines = [];
@@ -955,6 +1125,7 @@ function updateLyrics() {
         whisperFromCache = false;
         whisperLive = false;
         whisperLeadSec = 0;
+        whisperSourceLanguageHint = 'auto';
         clearWhisperTicker();
         resetLearnerTranslationQueues();
         clearDisplay();
@@ -978,7 +1149,7 @@ function updateLyrics() {
                 // Defer batch pre-translation so the REALTIME translate() for the
                 // current line fires first and gets the GpuScheduler fast-path
                 // (worker idle → immediate execution, no queueing).
-                setTimeout(() => preTranslateAll(newLyrics), 20);
+                schedulePreTranslation(newLyrics, 20);
             }
             currentLyrics = newLyrics;
         } else {
@@ -1009,7 +1180,7 @@ function updateLyrics() {
     let splitIdx = -1;
     let hlStart = -1;
     if (cn) {
-        const ja = TranslationService.peekCached(fullText, 'ja');
+        const ja = TranslationService.peekCached(fullText, 'ja', 'zh');
         primary = ja || fullText;
     } else if (karaokeMode.value) {
         // Karaoke ON: always show full text, control visibility via CSS
@@ -1038,31 +1209,39 @@ function updateLyrics() {
 
     if (fullText !== lastText) {
         lastText = fullText;
-        const cached = TranslationService.peekCached(fullText, targetLang);
+        const alreadyTarget = isAlreadyTargetLanguage(fullText, targetLang);
+        const cached = alreadyTarget
+            ? fullText
+            : TranslationService.peekCached(fullText, targetLang, 'auto', LEARNER_SECONDARY_TARGET);
         updateSecondaryLine(cached || progressiveText, !cached);
         lastDisplayedText = fullText;
         const token = ++translationToken;
 
-        if (!cached) {
+        if (!cached && !alreadyTarget) {
             realtimeQueueKey = updateQueueKey(
                 realtimeQueueKey,
                 buildTranslationQueueKey('learner:realtime', targetLang),
             );
             TranslationService.translate(fullText, targetLang, {
+                ...LEARNER_SECONDARY_TARGET,
+                priority: Priority.REALTIME,
                 cancellable: true,
                 cancellableKey: realtimeQueueKey,
+                sourceLanguageHint: 'auto',
             }).then(tr => {
                 if (tr && lastText === fullText && token === translationToken) updateSecondaryLine(tr, false);
             }).catch(() => {});
         }
-        if (cn && !TranslationService.peekCached(fullText, 'ja')) {
+        if (cn && !TranslationService.peekCached(fullText, 'ja', 'zh')) {
             realtimeJaQueueKey = updateQueueKey(
                 realtimeJaQueueKey,
                 buildTranslationQueueKey('learner:realtime:ja', 'ja'),
             );
             TranslationService.translate(fullText, 'ja', {
+                priority: Priority.REALTIME,
                 cancellable: true,
                 cancellableKey: realtimeJaQueueKey,
+                sourceLanguageHint: 'zh',
             }).then(tr => {
                 if (tr && lastText === fullText && token === translationToken) {
                     updatePrimaryLine(tr);
@@ -1083,47 +1262,76 @@ function updateLyrics() {
 
 function _updateWhisperDisplay() {
     const targetLang = (Config.get('subtitleLang') as string || 'en').toLowerCase();
+    const sourceLanguageHint = whisperSourceLanguageHint;
 
     if (whisperLines.length) {
         currentLyrics = whisperLines;
         const display = getWhisperDisplay();
         const fullText = display.fullText;
         if (fullText && fullText !== lastText) lastText = fullText;
+        const secondaryRequestContext: WhisperTextRequestContext = {
+            text: fullText,
+            generation: translationToken,
+            trackKey: getTrackKey(),
+            sourceLanguageHint,
+            targetLanguage: targetLang,
+        };
+        const secondaryRequestIsCurrent = () => isCurrentWhisperTextRequest(secondaryRequestContext, {
+            text: lastDisplayedText,
+            generation: translationToken,
+            trackKey: getTrackKey(),
+            sourceLanguageHint: whisperSourceLanguageHint,
+            targetLanguage: (Config.get('subtitleLang') as string || 'en').toLowerCase(),
+        });
 
         let cachedSecondary: string | null = null;
         const translatable = fullText && isTranslatable(fullText);
         if (translatable) {
-            cachedSecondary = TranslationService.peekCached(fullText, targetLang);
+            const alreadyTarget = isAlreadyTargetLanguage(fullText, targetLang, sourceLanguageHint);
+            cachedSecondary = alreadyTarget
+                ? null
+                : TranslationService.peekCached(
+                    fullText,
+                    targetLang,
+                    sourceLanguageHint,
+                    LEARNER_SECONDARY_TARGET,
+                );
+            if (cachedSecondary?.trim() === fullText.trim()) cachedSecondary = null;
             // If not cached, fire async translation so it's ready next tick.
-            if (!cachedSecondary && shouldTickerTranslate(fullText)) {
+            if (!alreadyTarget && !cachedSecondary && shouldTickerTranslate(fullText)) {
                 realtimeQueueKey = updateQueueKey(
                     realtimeQueueKey,
                     buildTranslationQueueKey('learner:whisper-live', targetLang),
                 );
                 TranslationService.translate(fullText, targetLang, {
+                    ...LEARNER_SECONDARY_TARGET,
+                    priority: Priority.REALTIME,
                     cancellable: true,
                     cancellableKey: realtimeQueueKey,
+                    sourceLanguageHint,
                 }).then(tr => {
-                    // Guard: text still current — accept if either tracker matches.
-                    // No token guard: we WANT late-arriving translations to display.
-                    if (tr && (lastDisplayedText === fullText || lastText === fullText)) {
+                    if (tr && tr.trim() !== fullText.trim() && secondaryRequestIsCurrent()) {
                         updateSecondaryLine(tr, false);
                         lastSecondaryShown = tr;
                     }
                 }).catch(() => {});
-                if (isChinese(fullText) && targetLang !== 'ja') {
-                    realtimeJaQueueKey = updateQueueKey(
-                        realtimeJaQueueKey,
-                        buildTranslationQueueKey('learner:whisper-live:ja', 'ja'),
-                    );
-                    TranslationService.translate(fullText, 'ja', {
-                        cancellable: true,
-                        cancellableKey: realtimeJaQueueKey,
-                    }).catch(() => {});
-                }
+            }
+            const chineseSource = sourceLanguageHint === 'zh'
+                || (sourceLanguageHint === 'auto' && isChinese(fullText));
+            if (chineseSource && targetLang !== 'ja' && !TranslationService.peekCached(fullText, 'ja', 'zh')) {
+                realtimeJaQueueKey = updateQueueKey(
+                    realtimeJaQueueKey,
+                    buildTranslationQueueKey('learner:whisper-live:ja', 'ja'),
+                );
+                TranslationService.translate(fullText, 'ja', {
+                    priority: Priority.REALTIME,
+                    cancellable: true,
+                    cancellableKey: realtimeJaQueueKey,
+                    sourceLanguageHint: 'zh',
+                }).catch(() => {});
             }
             // Look-ahead: pre-translate next 10 upcoming lines
-            translateLookahead(fullText, targetLang);
+            translateLookahead(fullText, targetLang, sourceLanguageHint);
         }
         if (fullText && fullText !== lastDisplayedText) {
             lastDisplayedText = fullText;
@@ -1149,12 +1357,13 @@ function _updateWhisperDisplay() {
         // the rAF 60fps path can take over once the segment is established.
         const karaokeDedup = karaokeMode.value ? (fullText || display.displayText) : display.displayText;
         if (display.displayText && karaokeDedup !== lastWhisperDisplayText) {
-            const cn = isChinese(display.displayText);
+            const cn = sourceLanguageHint === 'zh'
+                || (sourceLanguageHint === 'auto' && isChinese(display.displayText));
             let prim = display.displayText;
             let splitIdx = -1;
             let hlStart = -1;
             if (cn) {
-                const ja = TranslationService.peekCached(fullText, 'ja');
+                const ja = TranslationService.peekCached(fullText, 'ja', 'zh');
                 prim = ja || display.displayText || fullText || '';
                 if (!ja) {
                     realtimeJaQueueKey = updateQueueKey(
@@ -1162,10 +1371,25 @@ function _updateWhisperDisplay() {
                         buildTranslationQueueKey('learner:whisper-live:ja', 'ja'),
                     );
                     TranslationService.translate(fullText, 'ja', {
+                        priority: Priority.REALTIME,
                         cancellable: true,
                         cancellableKey: realtimeJaQueueKey,
+                        sourceLanguageHint: 'zh',
                     }).then(ja2 => {
-                        if (ja2 && lastDisplayedText === fullText) { updatePrimaryLine(ja2); lastWhisperDisplayText = ja2; }
+                        const jaRequestIsCurrent = isCurrentWhisperTextRequest(
+                            { ...secondaryRequestContext, targetLanguage: 'ja' },
+                            {
+                                text: lastDisplayedText,
+                                generation: translationToken,
+                                trackKey: getTrackKey(),
+                                sourceLanguageHint: whisperSourceLanguageHint,
+                                targetLanguage: 'ja',
+                            },
+                        );
+                        if (ja2 && jaRequestIsCurrent) {
+                            updatePrimaryLine(ja2);
+                            lastWhisperDisplayText = ja2;
+                        }
                     }).catch(() => {});
                 }
             } else if (karaokeMode.value && fullText) {
@@ -1213,36 +1437,69 @@ function _updateWhisperDisplay() {
 
     // No whisperLines but whisperText exists
     if (whisperText) {
-        if (whisperText !== lastText) lastText = whisperText;
-        const wtTranslatable = isTranslatable(whisperText);
-        let cached: string | null = wtTranslatable ? TranslationService.peekCached(whisperText, targetLang) : null;
-        if (wtTranslatable && !cached && shouldTickerTranslate(whisperText)) {
+        const requestedText = whisperText;
+        const requestContext: WhisperTextRequestContext = {
+            text: requestedText,
+            generation: whisperTextGeneration,
+            trackKey: getTrackKey(),
+            sourceLanguageHint,
+            targetLanguage: targetLang,
+        };
+        const requestIsCurrent = () => isCurrentWhisperTextRequest(requestContext, {
+            text: whisperText,
+            generation: whisperTextGeneration,
+            trackKey: getTrackKey(),
+            sourceLanguageHint: whisperSourceLanguageHint,
+            targetLanguage: (Config.get('subtitleLang') as string || 'en').toLowerCase(),
+        });
+        if (requestedText !== lastText) lastText = requestedText;
+        const wtTranslatable = isTranslatable(requestedText);
+        const alreadyTarget = wtTranslatable
+            && isAlreadyTargetLanguage(requestedText, targetLang, sourceLanguageHint);
+        const cachedCandidate: string | null = wtTranslatable
+            ? alreadyTarget ? null : TranslationService.peekCached(
+                requestedText,
+                targetLang,
+                sourceLanguageHint,
+                LEARNER_SECONDARY_TARGET,
+            )
+            : null;
+        const cached = cachedCandidate?.trim() === requestedText.trim() ? null : cachedCandidate;
+        if (wtTranslatable && !alreadyTarget && !cached && shouldTickerTranslate(requestedText)) {
             realtimeQueueKey = updateQueueKey(
                 realtimeQueueKey,
                 buildTranslationQueueKey('learner:whisper-live', targetLang),
             );
-            TranslationService.translate(whisperText, targetLang, {
+            TranslationService.translate(requestedText, targetLang, {
+                ...LEARNER_SECONDARY_TARGET,
+                priority: Priority.REALTIME,
                 cancellable: true,
                 cancellableKey: realtimeQueueKey,
+                sourceLanguageHint,
             }).then(tr => {
-                if (tr && (lastDisplayedText === whisperText || lastText === whisperText)) {
+                if (tr && tr.trim() !== requestedText.trim() && requestIsCurrent()
+                    && (lastDisplayedText === requestedText || lastText === requestedText)) {
                     updateSecondaryLine(tr, false);
                     lastSecondaryShown = tr;
                 }
             }).catch(() => {});
-            if (isChinese(whisperText) && targetLang !== 'ja') {
+            const chineseSource = sourceLanguageHint === 'zh'
+                || (sourceLanguageHint === 'auto' && isChinese(requestedText));
+            if (chineseSource && targetLang !== 'ja') {
                 realtimeJaQueueKey = updateQueueKey(
                     realtimeJaQueueKey,
                     buildTranslationQueueKey('learner:whisper-live:ja', 'ja'),
                 );
-                TranslationService.translate(whisperText, 'ja', {
+                TranslationService.translate(requestedText, 'ja', {
+                    priority: Priority.REALTIME,
                     cancellable: true,
                     cancellableKey: realtimeJaQueueKey,
+                    sourceLanguageHint: 'zh',
                 }).catch(() => {});
             }
         }
-        if (whisperText !== lastDisplayedText) {
-            lastDisplayedText = whisperText;
+        if (requestedText !== lastDisplayedText) {
+            lastDisplayedText = requestedText;
             lastSecondaryShown = '';
             if (!wtTranslatable) {
                 updateSecondaryLine('', false);
@@ -1256,22 +1513,28 @@ function _updateWhisperDisplay() {
             updateSecondaryLine(cached, false);
             lastSecondaryShown = cached;
         }
-        if (whisperText !== lastWhisperDisplayText) {
-            const cn = isChinese(whisperText);
-            let prim = whisperText;
+        if (requestedText !== lastWhisperDisplayText) {
+            const cn = sourceLanguageHint === 'zh'
+                || (sourceLanguageHint === 'auto' && isChinese(requestedText));
+            let prim = requestedText;
             if (cn) {
-                const ja = TranslationService.peekCached(whisperText, 'ja');
-                prim = ja || whisperText;
+                const ja = TranslationService.peekCached(requestedText, 'ja', 'zh');
+                prim = ja || requestedText;
                 if (!ja) {
                     realtimeJaQueueKey = updateQueueKey(
                         realtimeJaQueueKey,
                         buildTranslationQueueKey('learner:whisper-live:ja', 'ja'),
                     );
-                    TranslationService.translate(whisperText, 'ja', {
+                    TranslationService.translate(requestedText, 'ja', {
+                        priority: Priority.REALTIME,
                         cancellable: true,
                         cancellableKey: realtimeJaQueueKey,
+                        sourceLanguageHint: 'zh',
                     }).then(ja2 => {
-                        if (ja2 && lastDisplayedText === whisperText) { updatePrimaryLine(ja2); lastWhisperDisplayText = ja2; }
+                        if (ja2 && requestIsCurrent() && lastDisplayedText === requestedText) {
+                            updatePrimaryLine(ja2);
+                            lastWhisperDisplayText = ja2;
+                        }
                     }).catch(() => {});
                 }
             }
@@ -1288,10 +1551,12 @@ function _updateWhisperDisplay() {
 
 function handleWhisperUpdate(payload: WhisperUpdatePayload) {
     if (!payload) return;
+    whisperTextGeneration++;
     whisperActive = true;
     whisperFromCache = !!payload.fromCache;
     whisperLive = typeof payload.live === 'boolean' ? !!payload.live : false;
     whisperLeadSec = typeof payload.leadSec === 'number' ? Math.max(0, payload.leadSec) : whisperLeadSec;
+    whisperSourceLanguageHint = payload.sourceLanguageHint || 'auto';
     whisperText = payload.text || '';
     ensureWhisperTicker(whisperLive ? 80 : 200);
     if (Array.isArray(payload.segments) && payload.segments.length > 0) {
@@ -1299,7 +1564,7 @@ function handleWhisperUpdate(payload: WhisperUpdatePayload) {
             .map(s => ({ time: s.start, endTime: s.end, text: s.text, words: s.words }))
             .sort((a, b) => a.time - b.time);
         const newLines = splitSubtitleSegments(mapped);
-        if (newLines.length > 0) setTimeout(() => preTranslateAll(newLines), 20);
+        if (newLines.length > 0) schedulePreTranslation(newLines, 20, whisperSourceLanguageHint);
         whisperLines = newLines;
         // Don't reset lastWhisperDisplayText here — let _updateWhisperDisplay()
         // naturally detect changes. Resetting forces re-renders that cause flashing
@@ -1311,12 +1576,14 @@ function handleWhisperUpdate(payload: WhisperUpdatePayload) {
 }
 
 function handleWhisperClear() {
+    whisperTextGeneration++;
     whisperActive = false;
     whisperText = '';
     whisperLines = [];
     whisperFromCache = false;
     whisperLive = false;
     whisperLeadSec = 0;
+    whisperSourceLanguageHint = 'auto';
     resetDedupState({ includeWhisperDisplay: true });
     clearWhisperTicker();
     resetLearnerTranslationQueues();
@@ -1346,6 +1613,7 @@ function onTrackOrWorkChange() {
     // Reset blur to default from settings
     isBlurred.value = !!learnerBlur.value;
 
+    resetTrackTasks();
     resetDedupState({ includeWhisperDisplay: true, bumpTranslationToken: true });
     currentLyrics = [];
     whisperLines = [];
@@ -1353,12 +1621,12 @@ function onTrackOrWorkChange() {
     whisperActive = false;
     whisperFromCache = false;
     whisperLeadSec = 0;
+    whisperSourceLanguageHint = 'auto';
     clearWhisperTicker();
     resetLearnerTranslationQueues();
     lastPreTranslatedKey = null;
     lastLrcTrackHash = null;
     lrcFetchAttemptedHashes.clear();
-    lrcFetchPromise = null;
     lastNoLyricsLogHash = null;
     clearDisplay();
     bindAudioTimeUpdate();
@@ -1571,7 +1839,7 @@ function teardownCoverAdjustment() {
 function triggerHostMenuAction(iconName: string) {
     if (!hostMoreBtn) return;
     hostMoreBtn.click();
-    setTimeout(() => {
+    lifecycleTasks.schedule(() => {
         const menus = document.querySelectorAll('.q-menu');
         const menu = menus.length > 0 ? menus[menus.length - 1] : null;
         if (menu) {
@@ -1580,6 +1848,11 @@ function triggerHostMenuAction(iconName: string) {
             if (target) (target as HTMLElement).click();
         }
     }, 100);
+}
+
+function clearOverflowTransientListeners(): void {
+    overflowTransientCleanup?.();
+    overflowTransientCleanup = null;
 }
 
 function downloadCurrentTrack() {
@@ -1650,7 +1923,7 @@ function injectCollapsedControls() {
     } else {
         playerBar.appendChild(ctrl);
     }
-    setTimeout(() => captureControls(playerBar as HTMLElement, ctrl), 0);
+    lifecycleTasks.schedule(() => captureControls(playerBar as HTMLElement, ctrl), 0);
 }
 
 /**
@@ -1668,12 +1941,24 @@ function injectExpandedControls() {
             const slider = createSpeedSliderEl();
             overflowToggle ? existing.insertBefore(slider, overflowToggle) : existing.appendChild(slider);
         }
-        setTimeout(() => captureControls(controls, existing), 0);
+        lifecycleTasks.schedule(() => captureControls(controls, existing), 0);
         return;
     }
     const learnerCtrls = createControlsEl(false);
     controls.insertBefore(learnerCtrls, controls.firstChild);
-    setTimeout(() => captureControls(controls, learnerCtrls), 0);
+    lifecycleTasks.schedule(() => captureControls(controls, learnerCtrls), 0);
+}
+
+/**
+ * Playback can start while the host only renders its collapsed footer. The
+ * controller mounts beside that footer so controls are immediately available;
+ * move the live Vue root beside album art if the expanded player appears.
+ */
+function syncExpandedMountPoint() {
+    const root = document.getElementById('asmr-learner-subs-root');
+    const albumArt = document.querySelector('.audio-player .albumart');
+    if (!root || !albumArt || root.previousElementSibling === albumArt) return;
+    albumArt.after(root);
 }
 
 function createControlsEl(small: boolean): HTMLElement {
@@ -1706,17 +1991,21 @@ function createControlsEl(small: boolean): HTMLElement {
                 const isHidden = overflowMenuEl.classList.toggle('hidden');
                 if (!isHidden) {
                     positionOverflowMenu(b);
+                    clearOverflowTransientListeners();
                     const onResize = () => positionOverflowMenu(b);
                     window.addEventListener('resize', onResize);
                     const close = (e: MouseEvent) => {
                         const target = e.target as Node;
                         if (!overflowMenuEl?.contains(target) && !b.contains(target)) {
                             overflowMenuEl?.classList.add('hidden');
-                            document.removeEventListener('click', close, true);
-                            window.removeEventListener('resize', onResize);
+                            clearOverflowTransientListeners();
                         }
                     };
-                    setTimeout(() => document.addEventListener('click', close, true), 0);
+                    overflowTransientCleanup = () => {
+                        document.removeEventListener('click', close, true);
+                        window.removeEventListener('resize', onResize);
+                    };
+                    lifecycleTasks.schedule(() => document.addEventListener('click', close, true), 0);
                 }
             }, false, 'learner-overflow-toggle');
             btn.classList.add('hidden');
@@ -1862,6 +2151,7 @@ function syncOverflowItemVisibility(configKey: string, enabled: boolean) {
 }
 
 function restoreControls() {
+    clearOverflowTransientListeners();
     originalParents.forEach((loc, btn) => {
         btn.style.display = '';
         if (loc.parent?.isConnected) {
@@ -1916,15 +2206,22 @@ function setupStoreWatchers() {
         const track = player.queue[player.queueIndex];
         return track?.hash || track?.mediaStreamUrl || null;
     }, (trackKey: string | null) => {
-        setTimeout(() => {
+        resetTrackTasks();
+        trackTasks.schedule(() => {
             bindAudioTimeUpdate();
             if (trackKey) fetchLrcForCurrentTrack().catch(err => Logger.error('[LearnerMode] Store watcher LRC fetch failed:', err));
-        }, 100);
+        }, 100, () => !trackKey || getTrackKey() === trackKey);
     }, { immediate: true }));
 
     // Audio source
     add(store.watch((state: KikoeruStoreState) => state.AudioPlayer?.source, (src: string | undefined) => {
-        if (src) setTimeout(() => fetchLrcForCurrentTrack().catch(err => Logger.error('[LearnerMode] Source watcher LRC fetch failed:', err)), 200);
+        if (!src) return;
+        resetTrackTasks();
+        trackTasks.schedule(
+            () => fetchLrcForCurrentTrack().catch(err => Logger.error('[LearnerMode] Source watcher LRC fetch failed:', err)),
+            200,
+            () => bridge.store?.state?.AudioPlayer?.source === src,
+        );
     }, { immediate: true }));
 
     // Playing state
@@ -1971,7 +2268,9 @@ onMounted(() => {
     // Vue route watcher
     const app = bridge.app as KikoeruApp | undefined;
     if (app?.$watch) {
-        app.$watch('$route', (to: VueRoute) => {
+        routeUnwatch = app.$watch('$route', (to: VueRoute) => {
+            lifecycleTasks.cancelAll();
+            resetTrackTasks();
             resetDedupState();
             currentLyrics = [];
             whisperLines = [];
@@ -1985,9 +2284,11 @@ onMounted(() => {
                 clearWhisperTicker();
                 unbindAudio();
             } else {
-                setTimeout(() => {
+                lifecycleTasks.schedule(() => {
+                    syncExpandedMountPoint();
                     injectExpandedControls();
                     injectCollapsedControls();
+                    setupCoverAdjustment();
                     updateLyrics();
                 }, 100);
             }
@@ -2000,6 +2301,7 @@ onMounted(() => {
     setupStoreWatchers();
 
     // Initial injections
+    syncExpandedMountPoint();
     injectExpandedControls();
     injectCollapsedControls();
 
@@ -2008,6 +2310,7 @@ onMounted(() => {
         if (rafPlayerObserver) return;
         rafPlayerObserver = requestAnimationFrame(() => {
             rafPlayerObserver = 0;
+            syncExpandedMountPoint();
             injectExpandedControls();
             injectCollapsedControls();
             syncDrawerWidth();
@@ -2027,7 +2330,7 @@ onMounted(() => {
     syncDrawerWidth();
 
     // Cover height adjustment — reduce album art to fit injected subtitles/visualizer
-    setTimeout(() => setupCoverAdjustment(), 200);
+    lifecycleTasks.schedule(() => setupCoverAdjustment(), 200);
 
     // Bind audio
     bindAudioTimeUpdate();
@@ -2046,6 +2349,8 @@ onUnmounted(() => {
     AppStore.setLearnerState({ isActive: false });
 
     clearWhisperTicker();
+    lifecycleTasks.cancelAll();
+    resetTrackTasks();
     resetLearnerTranslationQueues();
     clearKaraokeState();
     unbindAudio();
@@ -2063,6 +2368,8 @@ onUnmounted(() => {
     restoreControls();
     storeWatcherCleanups.forEach(fn => fn());
     storeWatcherCleanups.length = 0;
+    routeUnwatch?.();
+    routeUnwatch = null;
 
     // Remove imperative controls from DOM
     document.querySelectorAll('.learner-controls, .learner-collapsed-controls').forEach(el => el.remove());

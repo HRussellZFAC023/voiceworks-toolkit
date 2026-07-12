@@ -1,5 +1,6 @@
 import type { DLsiteUserReview } from '../types/dlsite';
 import { escapeHtml } from '../core/DomUtils';
+import { sanitizeAllowedHtml } from '../core/SafeHtml';
 import {
     extractEmbeddedRjCode,
     extractPrimaryRjCode,
@@ -64,6 +65,14 @@ const STOP_MARKERS = [
     '\u63a8\u5968\u74b0\u5883\uff1a\u6700\u65b0\u7248',
 ];
 
+/**
+ * Keep the small formatting subset used by review rendering while removing
+ * arbitrary markup and event attributes before the result reaches `v-html`.
+ */
+export function sanitizeReviewHtml(html: string): string {
+    return sanitizeAllowedHtml(html);
+}
+
 export function sanitizeReviewText(text: string): string {
     let s = text;
 
@@ -118,6 +127,7 @@ export function sanitizeReviewText(text: string): string {
     s = s.replace(/^\*\s*$/gm, '');
     s = s.replace(/^---+$/gm, '');
     s = s.replace(/^={3,}$/gm, '');
+    s = sanitizeReviewHtml(s);
     s = s.replace(/\n{3,}/g, '\n\n');
     s = s.trim();
 

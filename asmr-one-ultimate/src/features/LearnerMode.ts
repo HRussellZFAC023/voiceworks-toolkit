@@ -2,7 +2,7 @@
 import { AppStore } from '../store/AppStore';
 import { TranslationService } from '../services/TranslationService';
 import { EventBus } from '../core/EventBus';
-import type { WhisperUpdatePayload, VueRoute, PlayerTrack, AudioPlayerState } from '../types';
+import type { WhisperUpdatePayload, VueRoute, PlayerTrack, AudioPlayerState, TranslationSourceHint } from '../types';
 import { splitSubtitleSegments } from './subtitleSegmentSplitter';
 import {
     findLyricsSource as findLyricsSourceUtil,
@@ -43,6 +43,7 @@ export class LearnerMode {
     private whisperFromCache = false;
     private whisperLive = false;
     private whisperLeadSec = 0;
+    private whisperSourceLanguageHint: TranslationSourceHint = 'auto';
     private lastWhisperDisplayText = '';
     private whisperTickerId: number | null = null;
     private whisperTickerInterval = 80;
@@ -417,6 +418,7 @@ export class LearnerMode {
         this.whisperActive = false;
         this.whisperFromCache = false;
         this.whisperLeadSec = 0;
+        this.whisperSourceLanguageHint = 'auto';
         this.clearWhisperTicker();
         if (this.seekedDebounceTimer) { clearTimeout(this.seekedDebounceTimer); this.seekedDebounceTimer = null; }
         this.lastPreTranslatedKey = null; // Reset so new lyrics get pre-translated
@@ -1083,6 +1085,7 @@ export class LearnerMode {
             this.whisperFromCache = false;
             this.whisperLive = false;
             this.whisperLeadSec = 0;
+            this.whisperSourceLanguageHint = 'auto';
             this.clearWhisperTicker();
             this.clearDisplay();
         }
@@ -1092,6 +1095,7 @@ export class LearnerMode {
 
         if (useWhisper) {
             const targetLang = (Config.get('subtitleLang') || 'en').toLowerCase();
+            const sourceLanguageHint = this.whisperSourceLanguageHint;
             if (this.whisperLines.length) {
                 this.currentLyrics = this.whisperLines;
                 const display = this.getWhisperDisplay();
@@ -1103,15 +1107,17 @@ export class LearnerMode {
                 let cachedSecondary: string | null = null;
                 const translatable = fullText && isTranslatable(fullText);
                 if (translatable) {
-                    cachedSecondary = TranslationService.peekCached(fullText, targetLang);
+                    cachedSecondary = TranslationService.peekCached(fullText, targetLang, sourceLanguageHint);
+                    if (cachedSecondary?.trim() === fullText.trim()) cachedSecondary = null;
                     // If not cached, fire async translation so it's ready next tick.
                     // Throttled to avoid spamming (translate() has in-flight dedup but we avoid the overhead).
                     if (!cachedSecondary && this.shouldTickerTranslate(fullText)) {
-                        TranslationService.translate(fullText, targetLang).then(translated => {
+                        TranslationService.translate(fullText, targetLang, { sourceLanguageHint }).then(translated => {
                             // Guard: text still current — accept if either tracker matches.
                             // No token guard: we WANT late-arriving translations to display
                             // even if the ticker has since fired for the same text.
-                            if (translated && (this.lastDisplayedText === fullText || this.lastText === fullText)) {
+                            if (translated && translated.trim() !== fullText.trim()
+                                && (this.lastDisplayedText === fullText || this.lastText === fullText)) {
                                 this.updateSecondaryLine(translated, false);
                                 this.lastSecondaryShown = translated;
                             }
@@ -1126,7 +1132,7 @@ export class LearnerMode {
                     // Look-ahead: pre-translate next 10 upcoming lines so translations are
                     // ready before playback reaches them. Uses fire-and-forget translate()
                     // which deduplicates via translateInFlight map.
-                    this.translateLookahead(fullText, targetLang);
+                    this.translateLookahead(fullText, targetLang, sourceLanguageHint);
                 }
 
                 if (fullText && fullText !== this.lastDisplayedText) {
@@ -1211,10 +1217,14 @@ export class LearnerMode {
                 }
                 let cachedFallback: string | null = null;
                 const wtTranslatable = isTranslatable(this.whisperText);
-                if (wtTranslatable) cachedFallback = TranslationService.peekCached(this.whisperText, targetLang);
+                if (wtTranslatable) {
+                    cachedFallback = TranslationService.peekCached(this.whisperText, targetLang, sourceLanguageHint);
+                    if (cachedFallback?.trim() === this.whisperText.trim()) cachedFallback = null;
+                }
                 if (wtTranslatable && !cachedFallback && this.shouldTickerTranslate(this.whisperText)) {
-                    TranslationService.translate(this.whisperText, targetLang).then(translated => {
-                        if (translated && (this.lastDisplayedText === this.whisperText || this.lastText === this.whisperText)) {
+                    TranslationService.translate(this.whisperText, targetLang, { sourceLanguageHint }).then(translated => {
+                        if (translated && translated.trim() !== this.whisperText.trim()
+                            && (this.lastDisplayedText === this.whisperText || this.lastText === this.whisperText)) {
                             this.updateSecondaryLine(translated, false);
                             this.lastSecondaryShown = translated;
                         }
@@ -1403,7 +1413,11 @@ export class LearnerMode {
      * translate() deduplicates via translateInFlight map, so repeated calls are cheap.
      */
     private lastLookaheadText = '';
-    private translateLookahead(currentText: string, targetLang: string): void {
+    private translateLookahead(
+        currentText: string,
+        targetLang: string,
+        sourceLanguageHint: TranslationSourceHint = this.whisperActive ? this.whisperSourceLanguageHint : 'auto',
+    ): void {
         if (currentText === this.lastLookaheadText) return;
         this.lastLookaheadText = currentText;
         const lines = this.whisperActive ? this.whisperLines : this.currentLyrics;
@@ -1413,8 +1427,8 @@ export class LearnerMode {
         const end = Math.min(lines.length, idx + 1 + LOOKAHEAD);
         for (let i = idx + 1; i < end; i++) {
             const t = lines[i].text?.trim();
-            if (t && !TranslationService.peekCached(t, targetLang)) {
-                TranslationService.translate(t, targetLang).catch(() => {});
+            if (t && !TranslationService.peekCached(t, targetLang, sourceLanguageHint)) {
+                TranslationService.translate(t, targetLang, { sourceLanguageHint }).catch(() => {});
             }
             if (t && isChinese(t) && targetLang !== 'ja' && !TranslationService.peekCached(t, 'ja')) {
                 TranslationService.translate(t, 'ja').catch(() => {});
@@ -1445,6 +1459,7 @@ export class LearnerMode {
         this.whisperLeadSec = typeof (payload as { leadSec?: number }).leadSec === 'number'
             ? Math.max(0, (payload as { leadSec?: number }).leadSec as number)
             : this.whisperLeadSec;
+        this.whisperSourceLanguageHint = payload.sourceLanguageHint || 'auto';
         this.whisperText = payload.text || '';
         this.ensureWhisperTicker(this.whisperLive ? 80 : 200);
         if (Array.isArray(payload.segments) && payload.segments.length > 0) {
@@ -1487,6 +1502,7 @@ export class LearnerMode {
         this.whisperFromCache = false;
         this.whisperLive = false;
         this.whisperLeadSec = 0;
+        this.whisperSourceLanguageHint = 'auto';
         this.resetDedupState({ includeWhisperDisplay: true });
         this.clearWhisperTicker();
 
@@ -2262,4 +2278,3 @@ export class LearnerMode {
         this.cachedElsDirty = true;
     }
 }
-

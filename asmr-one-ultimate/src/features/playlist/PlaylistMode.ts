@@ -12,13 +12,17 @@
 import { KikoeruBridge } from '../../infrastructure/KikoeruBridge';
 import { EventBus } from '../../core/EventBus';
 import { Logger, Config } from '../../core/Utils';
-import { RadioMode } from '../radio';
 import { PlaybackController } from '../radio/PlaybackController';
 import { FolderDiver } from '../FolderDiver';
+import {
+    claimExclusivePlaybackMode,
+    registerExclusivePlaybackMode,
+} from '../playbackModeCoordinator';
 import { AUDIO_EXTENSIONS, VIDEO_EXTENSIONS } from '../folderDiverTreeUtils';
 import { PlaylistApi, PlaylistWorkItem } from '../../api/Playlist';
 import { WorkService } from '../../services/WorkService';
 import { getAudioElement } from '../../core/DomUtils';
+import { runPacedBatches } from '../../core/PacedBatch';
 import type { PlaylistModeState, WorkDetail, PlayerTrack, AudioTrack } from '../../types';
 import type { TrackFolder, TrackItem, TracksResponse } from '../../types/api';
 
@@ -60,13 +64,17 @@ export class PlaylistMode {
     private lastQueueIndex = -1;
     private workChangeDebounceTimer: number | null = null;
     private navigationTimer: number | null = null;
-    private isLoadingFromUrl = false;
+    private loadingPlaylistId: string | null = null;
     private lastLoadedPlaylistId: string | null = null;
+    private loadGeneration = 0;
+    private activationGeneration = 0;
+    private navigationGeneration = 0;
 
     private constructor() {
         this.bridge = KikoeruBridge.getInstance();
         this.playbackController = new PlaybackController();
         this.folderDiver = FolderDiver.getInstance();
+        registerExclusivePlaybackMode('playlist', () => this.deactivate());
     }
 
     static getInstance(): PlaylistMode {
@@ -98,6 +106,7 @@ export class PlaylistMode {
         this.bridge = KikoeruBridge.getInstance();
         this.playbackController = new PlaybackController();
         this.folderDiver = FolderDiver.getInstance();
+        registerExclusivePlaybackMode('playlist', () => this.deactivate());
     }
 
     /**
@@ -164,12 +173,9 @@ export class PlaylistMode {
             return;
         }
 
-        // Disable RadioMode if active (mutually exclusive)
-        const radio = RadioMode.getInstance();
-        if (radio.isActive) {
-            Logger.debug('[PlaylistMode] Disabling RadioMode (mutually exclusive)');
-            radio.disable();
-        }
+        claimExclusivePlaybackMode('playlist');
+        this.activationGeneration++;
+        this.navigationGeneration++;
 
         // Clear stale navigation state from previous activation
         if (this.navigationTimer !== null) {
@@ -218,8 +224,8 @@ export class PlaylistMode {
      * Fetches playlist metadata from the API and activates with all work IDs
      */
     async loadFromUrl(playlistId: string): Promise<void> {
-        if (this.isLoadingFromUrl) {
-            Logger.debug('[PlaylistMode] Already loading from URL, ignoring');
+        if (this.loadingPlaylistId === playlistId) {
+            Logger.debug('[PlaylistMode] Already loading this URL playlist, ignoring');
             return;
         }
         if (this._isActive && this.playlistId === playlistId) {
@@ -230,7 +236,8 @@ export class PlaylistMode {
             return;
         }
 
-        this.isLoadingFromUrl = true;
+        const loadGeneration = ++this.loadGeneration;
+        this.loadingPlaylistId = playlistId;
         Logger.debug('[PlaylistMode] Loading playlist from URL, id:', playlistId);
 
         try {
@@ -239,6 +246,11 @@ export class PlaylistMode {
                 PlaylistApi.getPlaylistMetadata(playlistId),
                 PlaylistApi.getPlaylistWorks(playlistId, 1, 100),
             ]);
+
+            if (loadGeneration !== this.loadGeneration || this.loadingPlaylistId !== playlistId) {
+                Logger.debug('[PlaylistMode] Superseded URL playlist load ignored:', playlistId);
+                return;
+            }
 
             const firstWorks = firstPage.works || [];
             if (firstWorks.length === 0) {
@@ -262,15 +274,23 @@ export class PlaylistMode {
 
             // Activate immediately with the first page so user can interact
             this.activate(firstWorkIds, playlistId, metadata.name || undefined, false);
+            const activationGeneration = this.activationGeneration;
 
             // Fetch remaining pages in background and extend the playlist
             if (totalPages > 1) {
-                this.fetchRemainingPages(playlistId, totalPages, totalCount, extractIds);
+                void this.fetchRemainingPages(
+                    playlistId,
+                    totalPages,
+                    totalCount,
+                    extractIds,
+                    activationGeneration,
+                );
             }
         } catch (error) {
+            if (loadGeneration !== this.loadGeneration) return;
             Logger.error('[PlaylistMode] Failed to load playlist from URL:', error);
         } finally {
-            this.isLoadingFromUrl = false;
+            if (loadGeneration === this.loadGeneration) this.loadingPlaylistId = null;
         }
     }
 
@@ -282,33 +302,31 @@ export class PlaylistMode {
         totalPages: number,
         totalCount: number,
         extractIds: (works: PlaylistWorkItem[]) => string[],
+        activationGeneration: number,
     ): Promise<void> {
         try {
             const pages: number[] = [];
             for (let p = 2; p <= totalPages; p++) pages.push(p);
 
-            const batchSize = 20;
             const allRemainingWorks: PlaylistWorkItem[] = [];
 
-            for (let i = 0; i < pages.length; i += batchSize) {
-                const batch = pages.slice(i, i + batchSize);
-                const results = await Promise.allSettled(
-                    batch.map(page => PlaylistApi.getPlaylistWorks(playlistId, page, 100))
-                );
+            // Keep background loading responsive without creating a burst of
+            // dozens of requests against a service that is already unstable.
+            const results = await runPacedBatches(
+                pages,
+                page => PlaylistApi.getPlaylistWorks(playlistId, page, 100),
+                { batchSize: 3, delayMs: 350 },
+            );
 
-                for (const result of results) {
-                    if (result.status === 'fulfilled' && result.value.works?.length) {
-                        allRemainingWorks.push(...result.value.works);
-                    }
-                }
-
-                // Small delay between batches to avoid rate limiting
-                if (i + batchSize < pages.length) {
-                    await new Promise(r => setTimeout(r, 50));
+            for (const result of results) {
+                if (result.status === 'fulfilled' && result.value.works?.length) {
+                    allRemainingWorks.push(...result.value.works);
                 }
             }
 
-            if (allRemainingWorks.length > 0 && this._isActive && this.playlistId === playlistId) {
+            if (allRemainingWorks.length > 0
+                && this.isCurrentActivation(activationGeneration)
+                && this.playlistId === playlistId) {
                 const remainingIds = extractIds(allRemainingWorks);
                 this.workIds.push(...remainingIds);
 
@@ -331,11 +349,17 @@ export class PlaylistMode {
      */
     deactivate(): void {
         if (!this._isActive) {
+            this.loadGeneration++;
+            this.loadingPlaylistId = null;
             Logger.debug('[PlaylistMode] Already inactive');
             return;
         }
 
         this._isActive = false;
+        this.activationGeneration++;
+        this.navigationGeneration++;
+        this.loadGeneration++;
+        this.loadingPlaylistId = null;
         this.workIds = [];
         this.currentWorkIndex = 0;
         this.playlistId = null;
@@ -344,10 +368,6 @@ export class PlaylistMode {
         this.hasAdvanced = false;
         this.playAllInFolder = false;
         this.visitedIndices.clear();
-
-        // Clear route watcher
-        this._routeWatcher?.();
-        this._routeWatcher = null;
 
         // Clear timers
         this.stopQueueMonitor();
@@ -536,11 +556,10 @@ export class PlaylistMode {
      * host app might interfere.
      */
     private async navigateToWork(index: number): Promise<void> {
-        if (this.isNavigating) {
-            Logger.debug('[PlaylistMode] Already navigating, ignoring');
-            return;
-        }
+        if (!this._isActive || index < 0 || index >= this.workIds.length) return;
 
+        const activationGeneration = this.activationGeneration;
+        const navigationGeneration = ++this.navigationGeneration;
         this.isNavigating = true;
         this.hasAdvanced = true;
         const previousIndex = this.currentWorkIndex;
@@ -577,10 +596,15 @@ export class PlaylistMode {
         try {
             // Directly load and start playback (no timer delay — our API fetch
             // is independent of the host app's page load).
-            await this.loadWorkAndStartPlayback(workId);
+            await this.loadWorkAndStartPlayback(
+                workId,
+                activationGeneration,
+                navigationGeneration,
+            );
         } catch (error) {
             Logger.error('[PlaylistMode] Error during navigateToWork playback:', error);
         } finally {
+            if (!this.isCurrentNavigation(activationGeneration, navigationGeneration, workId)) return;
             this.isNavigating = false;
             this.hasAdvanced = false;
         }
@@ -604,7 +628,9 @@ export class PlaylistMode {
                 const newPath = newFullPath.split('?')[0];
 
                 // Auto-deactivate when navigating to home or other non-work pages
-                if (this._isActive && !newPath.startsWith('/playlist') && !newPath.startsWith('/work/')) {
+                if ((this._isActive || this.loadingPlaylistId)
+                    && !newPath.startsWith('/playlist')
+                    && !newPath.startsWith('/work/')) {
                     // Check if this is intentional navigation away
                     if (newPath === '/' || newPath === '/works' || newPath === '/settings') {
                         Logger.debug('[PlaylistMode] Navigated away from playlist context, deactivating');
@@ -628,6 +654,9 @@ export class PlaylistMode {
                         const index = this.workIds.findIndex(id => this.normalizeWorkId(id) === normalizedId);
                         if (index >= 0 && index !== this.currentWorkIndex) {
                             Logger.debug('[PlaylistMode] Work index updated to:', index + 1);
+                            this.navigationGeneration++;
+                            this.isNavigating = false;
+                            this.hasAdvanced = false;
                             this.currentWorkIndex = index;
                             EventBus.emit('playlist:progress', {
                                 current: index + 1,
@@ -686,12 +715,12 @@ export class PlaylistMode {
      * Load work data and explicitly start playback (modeled on RadioMode).
      * This ensures the first track plays reliably instead of relying on auto-play.
      */
-    private async loadWorkAndStartPlayback(workId: string): Promise<void> {
-        if (!this._isActive) return;
-
-        // Verify we're still on the expected work
-        const currentExpected = this.workIds[this.currentWorkIndex];
-        if (currentExpected && this.normalizeWorkId(currentExpected) !== this.normalizeWorkId(workId)) {
+    private async loadWorkAndStartPlayback(
+        workId: string,
+        activationGeneration = this.activationGeneration,
+        navigationGeneration = this.navigationGeneration,
+    ): Promise<void> {
+        if (!this.isCurrentNavigation(activationGeneration, navigationGeneration, workId)) {
             Logger.debug('[PlaylistMode] Work ID mismatch during load, aborting');
             return;
         }
@@ -700,8 +729,7 @@ export class PlaylistMode {
 
         try {
             const work = await WorkService.getWork(workId) as WorkDetail;
-            if (!this._isActive) return;
-            if (currentExpected && this.normalizeWorkId(currentExpected) !== this.normalizeWorkId(workId)) {
+            if (!this.isCurrentNavigation(activationGeneration, navigationGeneration, workId)) {
                 Logger.debug('[PlaylistMode] Work changed during fetch, aborting');
                 return;
             }
@@ -718,6 +746,7 @@ export class PlaylistMode {
                 Logger.debug('[PlaylistMode] Using pooled track selection (all folders)');
                 try {
                     const treeData = await WorkService.getTracks(workId);
+                    if (!this.isCurrentNavigation(activationGeneration, navigationGeneration, workId)) return;
                     tracks = treeData ? this.collectAllAudioFromTree(treeData) : [];
                 } catch (error) {
                     Logger.warn('[PlaylistMode] Flat track fetch failed, falling back:', error);
@@ -729,6 +758,7 @@ export class PlaylistMode {
                 let treeData: TracksResponse | null = null;
                 try {
                     treeData = await WorkService.getTracks(workId);
+                    if (!this.isCurrentNavigation(activationGeneration, navigationGeneration, workId)) return;
                     if (treeData) {
                         const startPath = this.folderDiver.getHostPath();
                         this.folderDiver.syncPath(startPath);
@@ -737,6 +767,7 @@ export class PlaylistMode {
                                 startPath: startPath.join('/') || '(root)',
                             });
                             const result = await this.folderDiver.diveFromPath(treeData, startPath);
+                            if (!this.isCurrentNavigation(activationGeneration, navigationGeneration, workId)) return;
                             Logger.debug('[PlaylistMode] Dive result', {
                                 success: result.success,
                                 reason: result.reason,
@@ -749,7 +780,7 @@ export class PlaylistMode {
                     Logger.warn('[PlaylistMode] Failed to fetch tracks for dive:', error);
                 }
 
-                if (!this._isActive) return;
+                if (!this.isCurrentNavigation(activationGeneration, navigationGeneration, workId)) return;
                 tracks = this.playbackController.getPlayableTracksFromWork(work);
 
                 // Fallback: work metadata often has no file tree — extract from treeData
@@ -763,6 +794,8 @@ export class PlaylistMode {
                 count: tracks.length,
                 firstTrack: tracks[0]?.title || tracks[0]?.hash || '(none)',
             });
+
+            if (!this.isCurrentNavigation(activationGeneration, navigationGeneration, workId)) return;
 
             if (tracks.length > 0) {
                 const shuffle = Config.get('playlistShuffle');
@@ -790,10 +823,26 @@ export class PlaylistMode {
                 this.playbackController.clickPlayButton(Config.get('playlistShuffle'));
             }
         } catch (error) {
+            if (!this.isCurrentNavigation(activationGeneration, navigationGeneration, workId)) return;
             Logger.error('[PlaylistMode] Error loading work for playback:', error);
             // Fallback: try clicking the play button
             this.playbackController.clickPlayButton(Config.get('playlistShuffle'));
         }
+    }
+
+    private isCurrentActivation(generation: number): boolean {
+        return this._isActive && generation === this.activationGeneration;
+    }
+
+    private isCurrentNavigation(
+        activationGeneration: number,
+        navigationGeneration: number,
+        workId: string,
+    ): boolean {
+        if (!this.isCurrentActivation(activationGeneration)) return false;
+        if (navigationGeneration !== this.navigationGeneration) return false;
+        const expected = this.workIds[this.currentWorkIndex];
+        return !!expected && this.normalizeWorkId(expected) === this.normalizeWorkId(workId);
     }
 
     private handleTrackEnd(): void {

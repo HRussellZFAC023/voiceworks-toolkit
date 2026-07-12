@@ -12,12 +12,18 @@ vi.mock('../../src/core/Logger', () => ({
     Logger: { log: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn() },
 }));
 vi.mock('../../src/core/Cache', () => ({
-    SharedCache: { get: vi.fn().mockReturnValue(null), set: vi.fn(), delete: vi.fn() },
+    SharedCache: {
+        get: vi.fn().mockReturnValue(null),
+        set: vi.fn(),
+        getMemory: vi.fn().mockReturnValue(null),
+        setMemory: vi.fn(),
+        delete: vi.fn(),
+    },
     CacheKeys: { translation: (t: string, l: string, s: string) => `${s}:${l}:${t}` },
 }));
 import { _testExports } from '../../src/services/TranslationService';
 import { correctWhisperText } from '../../src/data/nsfw-glossary';
-const { normalizeForModel, isLikelyGarbage, glossaryPreProcess } = _testExports;
+const { normalizeForModel, isLikelyGarbage, isLikelyUntranslated, extractCustomTranslation, glossaryPreProcess } = _testExports;
 
 // ============================================================================
 // normalizeForModel
@@ -221,6 +227,8 @@ describe('isLikelyGarbage', () => {
     it('allows first-person output when input has first-person pronouns', () => {
         expect(isLikelyGarbage('私は好きです', 'I like it.')).toBe(false);
         expect(isLikelyGarbage('僕の耳かき', "I'm cleaning my ears.")).toBe(false);
+        expect(isLikelyGarbage('我喜欢掏耳朵', 'I like ear cleaning.')).toBe(false);
+        expect(isLikelyGarbage('我们喜欢耳语', 'We like whispering.')).toBe(false);
     });
 
     it('allows first-person output for long zero-pronoun Japanese sentences', () => {
@@ -230,6 +238,23 @@ describe('isLikelyGarbage', () => {
             '大人赤ちゃんのための保育園「甘園房」のシリーズ初めての作品から真面目に利用している大ファンなので、再来園verのレビューであります',
             "I'm a big fan who has been seriously using this since the first work in the nursery series for adult babies.",
         )).toBe(false);
+    });
+});
+
+describe('custom translation response handling', () => {
+    it('extracts OpenAI-compatible and simple translation responses', () => {
+        expect(extractCustomTranslation({ choices: [{ message: { content: 'Hello' } }] })).toBe('Hello');
+        expect(extractCustomTranslation({ translatedText: '你好' })).toBe('你好');
+    });
+
+    it('detects source echoes only when source and target languages differ', () => {
+        expect(isLikelyUntranslated('今日は雨です。', '今日は雨です', 'en')).toBe(true);
+        expect(isLikelyUntranslated('今日は雨です。', '今日は雨です — It is raining today.', 'en')).toBe(true);
+        expect(isLikelyUntranslated('今日は雨です。', '今日は雨ですけど', 'en')).toBe(true);
+        expect(isLikelyUntranslated('今日は雨です。', 'It is raining today.', 'en')).toBe(false);
+        expect(isLikelyUntranslated('今日は雨です。', 'きょうは雨です。', 'zh-CN')).toBe(true);
+        expect(isLikelyUntranslated('今日は雨です。', '今天下雨。', 'zh-CN')).toBe(false);
+        expect(isLikelyUntranslated('中文', '中文', 'zh')).toBe(false);
     });
 });
 

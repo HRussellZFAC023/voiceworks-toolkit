@@ -16,6 +16,10 @@ import {
 import { getAudioElement } from '../../core/DomUtils';
 import { findButtonByText, findPlayButtons, findAudioItems } from '../../core/DomUtils';
 import { FolderDiver } from '../FolderDiver';
+import {
+    isHostPlaybackQueueTrackSelected,
+    replaceHostPlaybackQueue,
+} from '../audioPlayerQueueUtils';
 import { Config } from '../../core/Config';
 import type { PlayerTrack, WorkFolder, WorkDetail, AudioTrack } from '../../types';
 
@@ -37,16 +41,10 @@ export class PlaybackController {
      */
     stopPlayback(): void {
         const audio = getAudioElement();
-        if (audio && !audio.paused) {
+        const pauseRequested = this.bridge.requestPause();
+        if (!pauseRequested && audio && !audio.paused) {
             audio.pause();
             Logger.debug('[PlaybackController] Paused audio playback');
-        }
-
-        // Update store state
-        try {
-            this.bridge.commit('AudioPlayer/SET_PLAYING', false);
-        } catch (e) {
-            Logger.debug('[PlaybackController] SET_PLAYING mutation not available');
         }
 
         // Clear the queue to prevent host app from auto-advancing old tracks
@@ -56,11 +54,6 @@ export class PlaybackController {
             Logger.debug('[PlaybackController] SET_QUEUE clear not available');
         }
 
-        if (this.bridge.hasAction('AudioPlayer/pause')) {
-            this.bridge.dispatch('AudioPlayer/pause').catch(err => {
-                Logger.debug('[PlaybackController] Pause dispatch failed:', err);
-            });
-        }
     }
 
     /**
@@ -81,7 +74,11 @@ export class PlaybackController {
             }
         }
 
-        // Try direct audio element
+        const storeRequested = this.bridge.requestPlay();
+
+        // A recognized Vuex mutation means the request was dispatched, not
+        // necessarily that an older host acted on it. Prefer a concrete media
+        // play when an initialized element is available before reporting success.
         const audio = getAudioElement();
         const canUseDirectAudioFallback = queueLength > 0 || hasCurrentTrack;
         if (audio?.paused && canUseDirectAudioFallback && (audio.currentSrc || audio.getAttribute('src'))) {
@@ -92,6 +89,8 @@ export class PlaybackController {
                 // Fall through
             }
         }
+
+        if (storeRequested) return true;
 
         // Try clicking play button
         return this.clickPlayButton();
@@ -105,7 +104,10 @@ export class PlaybackController {
 
         // Ensure every track has `subtitles` — the deployed host's AudioPlayer
         // watcher accesses track.subtitles.length and crashes on undefined.
-        const queue = tracks.map(t => ({ ...t, subtitles: (t as any).subtitles || [] }));
+        const queue = tracks.map(t => ({
+            ...t,
+            subtitles: (t as PlayerTrack & { subtitles?: unknown[] }).subtitles || [],
+        }));
 
         const track = queue[startIndex];
         if (!track) {
@@ -115,27 +117,12 @@ export class PlaybackController {
 
         Logger.debug('[PlaybackController] Playing track:', track.title || track.hash);
 
-        // Set queueIndex BEFORE queue — the host's SET_QUEUE mutation sets
-        // state.queue first, triggering watchers synchronously while queueIndex
-        // is still stale. If the old index is out-of-bounds for the new (smaller)
-        // queue, the watcher crashes on queue[staleIndex].subtitles.length.
         try {
-            this.bridge.commit('AudioPlayer/SET_TRACK', startIndex);
-        } catch {
-            Logger.debug('[PlaybackController] SET_TRACK mutation not available');
-        }
-
-        try {
-            this.bridge.commit('AudioPlayer/SET_QUEUE', { queue, index: startIndex });
+            if (!replaceHostPlaybackQueue(this.bridge.store, this.bridge, queue, startIndex)) {
+                Logger.warn('[PlaybackController] Host queue contract unavailable');
+            }
         } catch (err) {
             Logger.error('[PlaybackController] Failed to set queue:', err);
-            return;
-        }
-
-        try {
-            this.bridge.commit('AudioPlayer/SET_PLAYING', true);
-        } catch {
-            Logger.debug('[PlaybackController] SET_PLAYING mutation not available');
         }
     }
 
@@ -146,16 +133,57 @@ export class PlaybackController {
         const track = queue[targetIndex];
         if (!track) return false;
 
-        // Use mutations only — avoid playTrack action (see setQueueAndPlay comment).
-        try {
-            this.bridge.commit('AudioPlayer/SET_TRACK', targetIndex);
-        } catch (err) {
-            Logger.warn('[PlaybackController] Failed to set queue track index:', err);
+        const normalizedQueue = queue.map(item => ({
+            ...item,
+            subtitles: (item as PlayerTrack & { subtitles?: unknown[] }).subtitles || [],
+        }));
+        let playbackRequested = false;
+        let selectedByQueueReplacement = false;
+
+        // Current hosts expose playTrack as the authoritative selection action.
+        // Await it, then verify state because Vuex silently ignores unknown
+        // contracts and a resolved dispatch is not sufficient proof by itself.
+        if (this.bridge.hasAction('AudioPlayer/playTrack')) {
+            try {
+                await this.bridge.dispatch('AudioPlayer/playTrack', normalizedQueue[targetIndex]);
+                playbackRequested = true;
+            } catch (err) {
+                Logger.warn('[PlaybackController] force playTrack dispatch failed:', err);
+            }
         }
-        try {
-            this.bridge.commit('AudioPlayer/SET_PLAYING', true);
-        } catch {
-            // not critical — fallback below
+
+        let selected = isHostPlaybackQueueTrackSelected(
+            this.bridge.store,
+            normalizedQueue,
+            targetIndex,
+        );
+
+        if (!selected) {
+            try {
+                selectedByQueueReplacement = replaceHostPlaybackQueue(
+                    this.bridge.store,
+                    this.bridge,
+                    normalizedQueue,
+                    targetIndex,
+                    { requestPlayback: false },
+                );
+            } catch (err) {
+                Logger.warn('[PlaybackController] Failed to select queue track:', err);
+            }
+            selected = isHostPlaybackQueueTrackSelected(
+                this.bridge.store,
+                normalizedQueue,
+                targetIndex,
+            );
+        }
+
+        if (!selected) {
+            Logger.warn('[PlaybackController] Host did not select requested queue track');
+            return false;
+        }
+
+        if (selectedByQueueReplacement || !playbackRequested) {
+            playbackRequested = this.bridge.requestPlay() || playbackRequested;
         }
 
         // Fallback: direct audio element play if mutations alone didn't start playback
@@ -169,7 +197,7 @@ export class PlaybackController {
             }
         }
 
-        return false;
+        return playbackRequested || audio?.paused === false;
     }
 
     /**

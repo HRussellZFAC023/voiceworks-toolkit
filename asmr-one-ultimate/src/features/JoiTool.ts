@@ -416,6 +416,7 @@ export class JoiTool {
 
     public disable(): void {
         this.deactivate();
+        CentralObserver.unregister('joi-tool');
         this.persistentCleanups.forEach(fn => fn());
         this.persistentCleanups = [];
         this.destroyBar(this.collapsedBar);
@@ -485,7 +486,6 @@ export class JoiTool {
         this.stopSubtitlePolling();
         this.hideBar();
         this.syncOverflowButton(false);
-        CentralObserver.unregister('joi-tool');
         this.eventCleanups.forEach(fn => fn());
         this.eventCleanups = [];
         Logger.log('[JoiTool] Deactivated');

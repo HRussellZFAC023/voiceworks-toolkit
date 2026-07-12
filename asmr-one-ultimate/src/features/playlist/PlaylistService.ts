@@ -4,6 +4,9 @@ import { HttpClient, HttpError } from '../../infrastructure/HttpClient';
 
 import { DEFAULT_API_SERVER, DEFAULT_API_PROXY } from '../../core/Constants';
 import { Config } from '../../core/Config';
+import { recordProxyUse } from '../../core/ProxyUsage';
+
+export { hasUsedProxy, onProxyUse } from '../../core/ProxyUsage';
 
 /**
  * Get the API base URL from the host app's axios baseURL (set by "Select server" setting)
@@ -106,27 +109,6 @@ export function getApiProxyUrl(): string {
     return DEFAULT_API_PROXY;
 }
 
-// Proxy-usage signal: the donation banner only shows for users whose traffic
-// actually needed the funded proxy (direct-access users never see it).
-const proxyUseListeners = new Set<() => void>();
-let proxyWasUsed = false;
-
-export function onProxyUse(listener: () => void): void {
-    proxyUseListeners.add(listener);
-    if (proxyWasUsed) listener();
-}
-
-export function hasUsedProxy(): boolean {
-    return proxyWasUsed;
-}
-
-function notifyProxyUse(): void {
-    proxyWasUsed = true;
-    for (const listener of proxyUseListeners) {
-        try { listener(); } catch { /* listener errors must not break requests */ }
-    }
-}
-
 /**
  * Last-resort API route: relay the request through the Cloudflare Worker proxy,
  * pinning the currently-selected API mirror via `__host`.
@@ -143,7 +125,7 @@ export async function proxyRequest<T>(endpoint: string, params?: Record<string, 
             headers: { Accept: 'application/json', ...getAuthHeader() },
             retry: { attempts: 2, backoffMs: 500 },
         });
-        notifyProxyUse();
+        recordProxyUse();
         return res.data;
     } catch (proxyError) {
         Logger.warn(`[PlaylistDiscovery] Proxy fallback failed for ${endpoint}: ${(proxyError as Error)?.message || proxyError}`);

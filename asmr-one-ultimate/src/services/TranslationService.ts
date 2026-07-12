@@ -16,12 +16,16 @@ import {
 // Types
 // ============================================================================
 
-export interface TranslationTaskOptions {
+interface TranslationTaskOptions {
     // Kept for compatibility with existing call sites that pass scheduler priorities.
     priority?: number;
-    // Legacy no-op fields retained for call-site compatibility.
+    // Queued remote work with the same key can be cancelled before execution.
     cancellable?: boolean;
     cancellableKey?: string;
+    /** Optional source context for ambiguous Han-only text. */
+    sourceLanguageHint?: 'ja' | 'zh' | 'en' | 'auto';
+    /** Keep an explicitly requested UI lane target instead of applying CN→JA preference. */
+    preserveRequestedTarget?: boolean;
 }
 
 interface GlossaryResult {
@@ -40,10 +44,12 @@ interface DegenerateSampleLog {
 // ============================================================================
 
 const CACHE_TTL_MS = CACHE_TTL.THIRTY_DAYS_MS;
-const TRANSLATION_CACHE_SCHEMA_VERSION = 'v3';
+const NOOP_CACHE_TTL_MS = 60_000;
+const TRANSLATION_CACHE_SCHEMA_VERSION = 'v5';
 const PREFETCH_MAX_LINES = 1000;
 
 const REMOTE_CONCURRENCY = 8;
+const CUSTOM_REMOTE_CONCURRENCY = 2;
 const REMOTE_MIN_INTERVAL_MS = 60;
 const REMOTE_RATE_LIMIT_PAUSE_MS = 15_000;
 
@@ -58,6 +64,57 @@ function nextTranslateHost(): string {
     const host = GOOGLE_TRANSLATE_HOSTS[translateHostIndex % GOOGLE_TRANSLATE_HOSTS.length];
     translateHostIndex++;
     return host;
+}
+
+interface CustomTranslationConfig {
+    endpoint: string;
+    apiKey: string;
+    model: string;
+}
+
+interface RemoteTranslationResult {
+    text: string;
+    source: 'custom' | 'google';
+    customConfigured: boolean;
+}
+
+interface TranslationProviderSnapshot {
+    id: string;
+    custom: CustomTranslationConfig | null;
+}
+
+function readStringConfig(key: 'translationApiEndpoint' | 'translationApiKey' | 'translationApiModel'): string {
+    const value = Config.get(key);
+    return typeof value === 'string' ? value.trim() : '';
+}
+
+function getCustomTranslationConfig(): CustomTranslationConfig | null {
+    const endpoint = readStringConfig('translationApiEndpoint');
+    if (!endpoint) return null;
+    try {
+        const parsed = new URL(endpoint);
+        const hostname = parsed.hostname.replace(/^\[|\]$/g, '');
+        const loopback = hostname === 'localhost'
+            || hostname === '127.0.0.1'
+            || hostname === '::1'
+            || hostname.endsWith('.localhost');
+        if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && loopback)) return null;
+    } catch {
+        return null;
+    }
+    return {
+        endpoint,
+        apiKey: readStringConfig('translationApiKey'),
+        model: readStringConfig('translationApiModel') || 'gpt-4o-mini',
+    };
+}
+
+function getTranslationProviderSnapshot(): TranslationProviderSnapshot {
+    const custom = getCustomTranslationConfig();
+    return {
+        id: custom ? `custom-${hashString(`${custom.endpoint}\u0000${custom.model}`)}` : 'google',
+        custom,
+    };
 }
 
 const quoteMap: Record<string, string> = {
@@ -135,20 +192,69 @@ function detectSourceLanguage(text: string): 'ja' | 'zh' | 'en' {
     return 'ja';
 }
 
-function shouldPreferJapaneseForChinese(text: string, targetLang: string): boolean {
+function isLikelyUntranslated(
+    input: string,
+    output: string,
+    targetLang: string,
+    sourceLanguageHint?: TranslationTaskOptions['sourceLanguageHint'],
+): boolean {
+    const sourceLang = sourceLanguageHint && sourceLanguageHint !== 'auto'
+        ? sourceLanguageHint
+        : detectSourceLanguage(input);
+    const target = normalizeTargetLang(targetLang);
+    if (sourceLang === target) return false;
+    const normalize = (value: string) => value.normalize('NFKC').replace(/[\s\p{P}\p{S}]+/gu, '').toLowerCase();
+    const normalizedInput = normalize(input);
+    const normalizedOutput = normalize(output);
+    if (normalizedInput === normalizedOutput) return true;
+
+    // Some providers return "source + translation" or a mostly-untranslated
+    // Japanese line. The UI already shows the source separately, so retaining
+    // the complete source is both redundant and a strong echo signal.
+    if (normalizedInput.length >= 4 && normalizedOutput.includes(normalizedInput)) return true;
+
+    if (target === 'en' && (sourceLang === 'ja' || sourceLang === 'zh')) {
+        const cjkCount = (output.match(/[\u3040-\u30ff\u4e00-\u9fff]/g) || []).length;
+        const latinCount = (output.match(/[a-z]/gi) || []).length;
+        if (cjkCount >= 4 && cjkCount > latinCount) return true;
+    }
+
+    if (target === 'zh' && sourceLang === 'ja') {
+        const kanaCount = (output.match(/[\u3040-\u30ff]/g) || []).length;
+        const hanCount = (output.match(/[\u4e00-\u9fff]/g) || []).length;
+        if (kanaCount >= 4 && kanaCount * 2 >= Math.max(1, hanCount)) return true;
+    }
+
+    return false;
+}
+
+function shouldPreferJapaneseForChinese(
+    text: string,
+    targetLang: string,
+    sourceLanguageHint?: TranslationTaskOptions['sourceLanguageHint'],
+): boolean {
     if (Config.get('translateCnToJp') !== true) return false;
     const target = normalizeTargetLang(targetLang);
     if (target === 'ja') return false;
-    return detectSourceLanguage(text) === 'zh';
+    const sourceLang = sourceLanguageHint && sourceLanguageHint !== 'auto'
+        ? sourceLanguageHint
+        : detectSourceLanguage(text);
+    return sourceLang === 'zh';
 }
 
-function resolveEffectiveTargetLang(text: string, requestedTargetLang: string): string {
+function resolveEffectiveTargetLang(
+    text: string,
+    requestedTargetLang: string,
+    sourceLanguageHint?: TranslationTaskOptions['sourceLanguageHint'],
+    preserveRequestedTarget = false,
+): string {
     const normalized = normalizeTargetLang(requestedTargetLang);
-    return shouldPreferJapaneseForChinese(text, normalized) ? 'ja' : normalized;
+    if (preserveRequestedTarget) return normalized;
+    return shouldPreferJapaneseForChinese(text, normalized, sourceLanguageHint) ? 'ja' : normalized;
 }
 
 const hallucinationFirstPerson = /^I['\u2019]?m\s|^I\s(don|can|won|didn|couldn|wouldn|shouldn)['\u2019]t\s|^I\s(have|want|need|think|know|like)\s/i;
-const firstPersonJa = /私|僕|俺|自分|わたし|ぼく|おれ|あたし|じぶん/;
+const firstPersonCjk = /私|僕|俺|自分|わたし|ぼく|おれ|あたし|じぶん|我|我们|本人|咱|咱们/;
 
 const degenerateStats: DegenerateSampleLog = {
     remoteRejected: 0,
@@ -210,7 +316,7 @@ function getGarbageReason(input: string, output: string): string | null {
     // Only flag first-person hallucination for short inputs.  Japanese zero-pronoun
     // (主語省略) is extremely common — long sentences routinely omit 私/僕 yet validly
     // translate to "I …".  Short fragments are more likely to be actual hallucinations.
-    if (input.length < 50 && !firstPersonJa.test(input) && hallucinationFirstPerson.test(trimmed)) {
+    if (input.length < 50 && !firstPersonCjk.test(input) && hallucinationFirstPerson.test(trimmed)) {
         return 'first-person-hallucination';
     }
 
@@ -290,52 +396,125 @@ function glossaryPreProcess(text: string, targetLang: string): [string, boolean]
 // Cache helpers
 // ============================================================================
 
-const cacheInput = (text: string): string => `${TRANSLATION_CACHE_SCHEMA_VERSION}:${text}`;
-const cacheKey = (text: string, lang: string): string =>
-    CacheKeys.translation(cacheInput(text), lang, 'remote');
+const sourceContext = (hint?: TranslationTaskOptions['sourceLanguageHint']): string =>
+    hint && hint !== 'auto' ? hint : 'auto';
+const cacheInput = (
+    text: string,
+    providerId: string,
+    sourceLanguageHint?: TranslationTaskOptions['sourceLanguageHint'],
+): string => `${TRANSLATION_CACHE_SCHEMA_VERSION}:${sourceContext(sourceLanguageHint)}:${providerId}:${text}`;
+const cacheKey = (
+    text: string,
+    lang: string,
+    providerId: string,
+    sourceLanguageHint?: TranslationTaskOptions['sourceLanguageHint'],
+): string => CacheKeys.translation(cacheInput(text, providerId, sourceLanguageHint), lang, 'remote');
+const noopCacheKey = (
+    text: string,
+    lang: string,
+    providerId: string,
+    sourceLanguageHint?: TranslationTaskOptions['sourceLanguageHint'],
+): string => `${cacheKey(text, lang, providerId, sourceLanguageHint)}:noop`;
 
-function getCached(text: string, lang: string): string | null {
-    const key = cacheKey(text, lang);
+function getCached(
+    text: string,
+    lang: string,
+    providerId = getTranslationProviderSnapshot().id,
+    sourceLanguageHint?: TranslationTaskOptions['sourceLanguageHint'],
+): string | null {
+    const key = cacheKey(text, lang, providerId, sourceLanguageHint);
     const remote = SharedCache.get<string>(key);
     if (remote) return remote;
+    const noop = SharedCache.getMemory<string>(noopCacheKey(text, lang, providerId, sourceLanguageHint));
+    if (noop) return noop;
 
     // Legacy key fallback for older auto-source caches.
-    return SharedCache.get<string>(CacheKeys.translation(cacheInput(text), lang, 'auto')) || null;
+    return SharedCache.get<string>(CacheKeys.translation(cacheInput(text, providerId, sourceLanguageHint), lang, 'auto')) || null;
 }
 
 // ============================================================================
 // Remote translator state
 // ============================================================================
 
-let remoteActive = 0;
+interface RemotePool {
+    active: number;
+    limit: number;
+    waiters: RemoteWaiter[];
+}
+
+interface RemoteWaiter {
+    priority: number;
+    sequence: number;
+    cancellableKey?: string;
+    resolve: () => void;
+    reject: (reason: unknown) => void;
+}
+
+class TranslationCancelledError extends Error {
+    constructor() {
+        super('Translation task cancelled before network execution');
+        this.name = 'TranslationCancelledError';
+    }
+}
+
+const googleRemotePool: RemotePool = { active: 0, limit: REMOTE_CONCURRENCY, waiters: [] };
+const customRemotePool: RemotePool = { active: 0, limit: CUSTOM_REMOTE_CONCURRENCY, waiters: [] };
 const remoteLastTimeByHost = new Map<string, number>();
 const remotePausedUntilByHost = new Map<string, number>();
-const remoteWaiters: Array<() => void> = [];
 
 const translateInFlight = new Map<string, Promise<string>>();
+let remoteWaiterSequence = 0;
 
-function acquireRemoteSlot(): Promise<void> {
-    if (remoteActive < REMOTE_CONCURRENCY) {
-        remoteActive++;
+function resetRemoteStateForTests(): void {
+    translateHostIndex = 0;
+    googleRemotePool.active = 0;
+    googleRemotePool.waiters = [];
+    customRemotePool.active = 0;
+    customRemotePool.waiters = [];
+    remoteLastTimeByHost.clear();
+    remotePausedUntilByHost.clear();
+    translateInFlight.clear();
+    remoteWaiterSequence = 0;
+}
+
+function acquireRemoteSlot(pool: RemotePool, options?: TranslationTaskOptions): Promise<void> {
+    if (pool.active < pool.limit) {
+        pool.active++;
         return Promise.resolve();
     }
 
-    return new Promise<void>(resolve => {
-        remoteWaiters.push(() => {
-            remoteActive++;
-            resolve();
+    return new Promise<void>((resolve, reject) => {
+        pool.waiters.push({
+            priority: options?.priority ?? 0,
+            sequence: remoteWaiterSequence++,
+            cancellableKey: options?.cancellable ? options.cancellableKey : undefined,
+            resolve: () => {
+                pool.active++;
+                resolve();
+            },
+            reject,
         });
+        pool.waiters.sort((a, b) => a.priority - b.priority || a.sequence - b.sequence);
     });
 }
 
-function releaseRemoteSlot(): void {
-    remoteActive--;
-    const next = remoteWaiters.shift();
-    if (next) next();
+function releaseRemoteSlot(pool: RemotePool): void {
+    pool.active = Math.max(0, pool.active - 1);
+    const next = pool.waiters.shift();
+    if (next) next.resolve();
 }
 
-async function translateRemoteSingle(text: string, targetLang: string): Promise<string> {
-    await acquireRemoteSlot();
+function cancelRemoteWaiters(pool: RemotePool, cancellableKey?: string): number {
+    if (!cancellableKey) return 0;
+    const cancelled = pool.waiters.filter(waiter => waiter.cancellableKey === cancellableKey);
+    if (cancelled.length === 0) return 0;
+    pool.waiters = pool.waiters.filter(waiter => waiter.cancellableKey !== cancellableKey);
+    for (const waiter of cancelled) waiter.reject(new TranslationCancelledError());
+    return cancelled.length;
+}
+
+async function translateGoogleSingle(text: string, targetLang: string, options?: TranslationTaskOptions): Promise<string> {
+    await acquireRemoteSlot(googleRemotePool, options);
 
     let host = nextTranslateHost();
     const now = Date.now();
@@ -345,17 +524,20 @@ async function translateRemoteSingle(text: string, targetLang: string): Promise<
         host = nextTranslateHost();
     }
 
-    const lastTime = remoteLastTimeByHost.get(host) || 0;
-    const elapsed = now - lastTime;
-    if (elapsed < REMOTE_MIN_INTERVAL_MS) {
-        await new Promise(r => setTimeout(r, REMOTE_MIN_INTERVAL_MS - elapsed));
+    // Reserve the host's slot synchronously before awaiting. Concurrent calls
+    // then see the future reservation and cannot wake together in a burst.
+    const previousSlot = remoteLastTimeByHost.get(host) || 0;
+    const reservedSlot = Math.max(now, previousSlot + REMOTE_MIN_INTERVAL_MS);
+    remoteLastTimeByHost.set(host, reservedSlot);
+    if (reservedSlot > now) {
+        await new Promise(r => setTimeout(r, reservedSlot - now));
     }
-    remoteLastTimeByHost.set(host, Date.now());
 
     try {
+        const sourceLang = sourceContext(options?.sourceLanguageHint);
         const res = await retryWithBackoff(
             () => gmRequest({
-                url: `https://${host}/translate_a/single?client=gtx&sl=auto&tl=${targetLang}&dt=t&q=${encodeURIComponent(text)}`,
+                url: `https://${host}/translate_a/single?client=gtx&sl=${sourceLang}&tl=${targetLang}&dt=t&q=${encodeURIComponent(text)}`,
             }),
             {
                 attempts: 2,
@@ -381,8 +563,119 @@ async function translateRemoteSingle(text: string, targetLang: string): Promise<
         }
         throw e;
     } finally {
-        releaseRemoteSlot();
+        releaseRemoteSlot(googleRemotePool);
     }
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+    return value && typeof value === 'object' ? value as Record<string, unknown> : null;
+}
+
+function extractCustomTranslation(payload: unknown): string {
+    const root = asRecord(payload);
+    if (!root) return '';
+
+    for (const key of ['translation', 'translatedText', 'translated_text', 'text', 'output_text']) {
+        if (typeof root[key] === 'string') return root[key].trim();
+    }
+
+    const choices = Array.isArray(root.choices) ? root.choices : [];
+    const choice = asRecord(choices[0]);
+    const message = asRecord(choice?.message);
+    if (typeof message?.content === 'string') return message.content.trim();
+    if (typeof choice?.text === 'string') return choice.text.trim();
+
+    const content = Array.isArray(root.content) ? root.content : [];
+    const contentPart = asRecord(content[0]);
+    if (typeof contentPart?.text === 'string') return contentPart.text.trim();
+
+    const candidates = Array.isArray(root.candidates) ? root.candidates : [];
+    const candidate = asRecord(candidates[0]);
+    const candidateContent = asRecord(candidate?.content);
+    const parts = Array.isArray(candidateContent?.parts) ? candidateContent.parts : [];
+    const part = asRecord(parts[0]);
+    return typeof part?.text === 'string' ? part.text.trim() : '';
+}
+
+async function translateCustomSingle(
+    text: string,
+    targetLang: string,
+    config: CustomTranslationConfig,
+    options?: TranslationTaskOptions,
+): Promise<string> {
+    await acquireRemoteSlot(customRemotePool, options);
+    try {
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+        if (config.apiKey) headers.Authorization = `Bearer ${config.apiKey}`;
+        const sourceInstruction = options?.sourceLanguageHint && options.sourceLanguageHint !== 'auto'
+            ? ` from ${options.sourceLanguageHint}`
+            : '';
+        const res = await retryWithBackoff(
+            () => gmRequest({
+                method: 'POST',
+                url: config.endpoint,
+                headers,
+                data: JSON.stringify({
+                    model: config.model,
+                    temperature: 0,
+                    messages: [
+                        {
+                            role: 'system',
+                            content: `Translate the user text${sourceInstruction} into ${targetLang}. Preserve meaning, names, tone, and line breaks. Return only the translation, with no notes or quotation marks.`,
+                        },
+                        { role: 'user', content: text },
+                    ],
+                }),
+                responseType: 'json',
+                timeout: 60_000,
+            }),
+            {
+                attempts: 2,
+                backoffMs: 500,
+                shouldRetry: (error) => !(error instanceof HttpError) || error.retryable,
+            },
+        );
+        const payload = asRecord(res.response) ? res.response : JSON.parse(res.responseText || '{}');
+        const translated = extractCustomTranslation(payload);
+        if (!translated) throw new Error('Custom translation API returned no text');
+        if (isLikelyUntranslated(text, translated, targetLang, options?.sourceLanguageHint)) {
+            throw new Error('Custom translation API echoed the source text');
+        }
+        return translated;
+    } finally {
+        releaseRemoteSlot(customRemotePool);
+    }
+}
+
+async function translateRemoteSingle(
+    text: string,
+    targetLang: string,
+    custom: CustomTranslationConfig | null,
+    options?: TranslationTaskOptions,
+): Promise<RemoteTranslationResult> {
+    if (custom) {
+        try {
+            return {
+                text: await translateCustomSingle(text, targetLang, custom, options),
+                source: 'custom',
+                customConfigured: true,
+            };
+        } catch (error) {
+            if (error instanceof TranslationCancelledError) throw error;
+            Logger.warn('[TranslationService] Custom translation API failed; using Google fallback:',
+                error instanceof Error ? error.message : 'Unknown request error');
+        }
+        return {
+            text: await translateGoogleSingle(text, targetLang, options),
+            source: 'google',
+            customConfigured: true,
+        };
+    }
+    return {
+        text: await translateGoogleSingle(text, targetLang, options),
+        source: 'google',
+        customConfigured: false,
+    };
 }
 
 // ============================================================================
@@ -392,6 +685,11 @@ async function translateRemoteSingle(text: string, targetLang: string): Promise<
 export const TranslationService = {
     ttlMs: CACHE_TTL_MS,
 
+    /** Target used for user-facing translations. Search/indexing callers may still request English explicitly. */
+    getUiTargetLang(): string {
+        return normalizeTargetLang(I18n.lang || 'en') || 'en';
+    },
+
     isUserLang(text: string): boolean {
         const lang = I18n.lang;
         if (lang === 'ja' && /[ぁ-ヿ一-龯]/.test(text)) return true;
@@ -399,23 +697,54 @@ export const TranslationService = {
         return false;
     },
 
+    isTargetLanguage(text: string, targetLang: string, sourceLanguageHint?: TranslationTaskOptions['sourceLanguageHint']): boolean {
+        const sourceLang = sourceLanguageHint && sourceLanguageHint !== 'auto'
+            ? sourceLanguageHint
+            : detectSourceLanguage(text);
+        return sourceLang === resolveEffectiveTargetLang(text, targetLang, sourceLanguageHint);
+    },
+
     async translate(text: string, targetLang = 'en', options?: TranslationTaskOptions): Promise<string> {
         if (!text) return '';
 
-        targetLang = resolveEffectiveTargetLang(text, targetLang);
+        targetLang = resolveEffectiveTargetLang(
+            text,
+            targetLang,
+            options?.sourceLanguageHint,
+            options?.preserveRequestedTarget,
+        );
+        const provider = getTranslationProviderSnapshot();
 
-        const cached = getCached(text, targetLang);
+        if (options?.sourceLanguageHint && options.sourceLanguageHint !== 'auto'
+            && options.sourceLanguageHint === targetLang) {
+            SharedCache.setMemory(noopCacheKey(text, targetLang, provider.id, options.sourceLanguageHint), text, NOOP_CACHE_TTL_MS);
+            return text;
+        }
+
+        const cached = getCached(text, targetLang, provider.id, options?.sourceLanguageHint);
         if (cached) return cached;
 
         const laneKey = `${options?.priority ?? 0}`;
-        const flightKey = `${laneKey}:${targetLang}:${text}`;
+        const cancellationScope = options?.cancellable
+            ? `cancel:${options.cancellableKey || 'anonymous'}`
+            : 'shared';
+        const flightKey = `${provider.id}:${sourceContext(options?.sourceLanguageHint)}:${laneKey}:${cancellationScope}:${targetLang}:${text}`;
         const existing = translateInFlight.get(flightKey);
         if (existing) return existing;
 
-        const promise = this._translateInner(text, targetLang);
+        const promise = this._translateInner(text, targetLang, provider, options);
         translateInFlight.set(flightKey, promise);
         try {
             return await promise;
+        } catch (error) {
+            if (!(error instanceof TranslationCancelledError)) {
+                SharedCache.setMemory(
+                    noopCacheKey(text, targetLang, provider.id, options?.sourceLanguageHint),
+                    text,
+                    NOOP_CACHE_TTL_MS,
+                );
+            }
+            throw error;
         } finally {
             translateInFlight.delete(flightKey);
         }
@@ -424,25 +753,46 @@ export const TranslationService = {
     async _translateInner(
         text: string,
         targetLang: string,
+        provider = getTranslationProviderSnapshot(),
+        options?: TranslationTaskOptions,
     ): Promise<string> {
         const glossary = processGlossary(text, targetLang);
         if (glossary.full) {
-            SharedCache.set(cacheKey(text, targetLang), glossary.full, CACHE_TTL_MS);
+            SharedCache.set(cacheKey(text, targetLang, provider.id, options?.sourceLanguageHint), glossary.full, CACHE_TTL_MS);
             return glossary.full;
         }
 
         const input = normalizeForModel(glossary.preprocessed);
-        const translated = await translateRemoteSingle(input, targetLang);
+        const remote = await translateRemoteSingle(input, targetLang, provider.custom, options);
+        let translated = remote.text;
+        let source = remote.source;
+
+        // A successful HTTP response can still be an untranslated echo. Retry
+        // once through a different Google host before surfacing source text.
+        if (isLikelyUntranslated(input, translated, targetLang, options?.sourceLanguageHint)) {
+            Logger.debug('[TranslationService] Translation echoed source; retrying alternate provider');
+            translated = await translateGoogleSingle(input, targetLang, options);
+            source = 'google';
+        }
 
         const cleaned = this.cleanQuotes(translated);
-        const reason = getGarbageReason(text, cleaned);
+        const reason = isLikelyUntranslated(text, cleaned, targetLang, options?.sourceLanguageHint)
+            ? 'untranslated-output'
+            : getGarbageReason(text, cleaned);
         if (reason) {
             trackDegenerate(text, cleaned, reason);
+            SharedCache.setMemory(noopCacheKey(text, targetLang, provider.id, options?.sourceLanguageHint), text, NOOP_CACHE_TTL_MS);
             return text;
         }
 
-        if (cleaned && cleaned !== text) {
-            SharedCache.set(cacheKey(text, targetLang), cleaned, CACHE_TTL_MS);
+        // A transient custom-endpoint failure must not pin the Google fallback
+        // in the custom provider's 30-day cache. Retrying later lets a repaired
+        // endpoint become effective without requiring a manual cache clear.
+        const cacheUnderCurrentProvider = source === 'custom' || !remote.customConfigured;
+        if (cacheUnderCurrentProvider && cleaned && cleaned !== text) {
+            SharedCache.set(cacheKey(text, targetLang, provider.id, options?.sourceLanguageHint), cleaned, CACHE_TTL_MS);
+        } else if (!cleaned || cleaned === text) {
+            SharedCache.setMemory(noopCacheKey(text, targetLang, provider.id, options?.sourceLanguageHint), text, NOOP_CACHE_TTL_MS);
         }
 
         return cleaned || text;
@@ -461,8 +811,13 @@ export const TranslationService = {
             const text = texts[i]?.trim();
             if (!text) continue;
 
-            const effectiveTargetLang = resolveEffectiveTargetLang(text, requestedTargetLang);
-            const cached = getCached(text, effectiveTargetLang);
+            const effectiveTargetLang = resolveEffectiveTargetLang(
+                text,
+                requestedTargetLang,
+                options?.sourceLanguageHint,
+                options?.preserveRequestedTarget,
+            );
+            const cached = getCached(text, effectiveTargetLang, undefined, options?.sourceLanguageHint);
             if (cached) {
                 results[i] = cached;
                 continue;
@@ -480,7 +835,10 @@ export const TranslationService = {
         if (uniqueUncached.length === 0) return results;
 
         const translatedByText = new Map<string, string>();
-        const workerCount = Math.min(REMOTE_CONCURRENCY, uniqueUncached.length);
+        const workerCount = Math.min(
+            getCustomTranslationConfig() ? CUSTOM_REMOTE_CONCURRENCY : REMOTE_CONCURRENCY,
+            uniqueUncached.length,
+        );
         let nextIndex = 0;
 
         const run = async () => {
@@ -525,9 +883,9 @@ export const TranslationService = {
     },
 
     cancelPending(options?: { cancellableKey?: string }): number {
-        // No hard-cancel behavior: callers should gate stale results via route/version guards.
-        void options;
-        return 0;
+        const key = options?.cancellableKey;
+        return cancelRemoteWaiters(googleRemotePool, key)
+            + cancelRemoteWaiters(customRemotePool, key);
     },
 
     getDebugStats(): { degenerateRemoteRejected: number } {
@@ -536,14 +894,43 @@ export const TranslationService = {
         };
     },
 
-    peekCached(text: string, targetLang = 'en'): string | null {
+    peekCached(
+        text: string,
+        targetLang = 'en',
+        sourceLanguageHint?: TranslationTaskOptions['sourceLanguageHint'],
+        options?: Pick<TranslationTaskOptions, 'preserveRequestedTarget'>,
+    ): string | null {
         if (!text) return null;
-        return getCached(text, resolveEffectiveTargetLang(text, targetLang));
+        return getCached(
+            text,
+            resolveEffectiveTargetLang(text, targetLang, sourceLanguageHint, options?.preserveRequestedTarget),
+            undefined,
+            sourceLanguageHint,
+        );
+    },
+
+    invalidate(text: string, targetLangs: string[] = ['en', 'ja', 'zh']): void {
+        if (!text) return;
+        const providerId = getTranslationProviderSnapshot().id;
+        const sourceHints: Array<TranslationTaskOptions['sourceLanguageHint']> = ['auto', 'ja', 'zh', 'en'];
+        for (const sourceLanguageHint of sourceHints) {
+            for (const requestedTarget of targetLangs) {
+                const targetLang = resolveEffectiveTargetLang(text, requestedTarget, sourceLanguageHint);
+                const input = cacheInput(text, providerId, sourceLanguageHint);
+                SharedCache.set(CacheKeys.translation(input, targetLang, 'remote'), null, 0);
+                SharedCache.set(CacheKeys.translation(input, targetLang, 'auto'), null, 0);
+                SharedCache.setMemory(
+                    noopCacheKey(text, targetLang, providerId, sourceLanguageHint),
+                    null as unknown as string,
+                    0,
+                );
+            }
+        }
     },
 
     async autoTranslate(text: string, targetLang = 'en'): Promise<string> {
         if (!text || !/[ぁ-ヿ一-龯]/.test(text)) return text;
-        if (this.isUserLang(text) && targetLang === 'en') return text;
+        if (this.isTargetLanguage(text, targetLang)) return text;
         const translated = await this.translate(text, targetLang);
         return this.formatPair(text, translated);
     },
@@ -599,5 +986,8 @@ export const TranslationService = {
 export const _testExports = {
     normalizeForModel,
     isLikelyGarbage,
+    isLikelyUntranslated,
+    extractCustomTranslation,
     glossaryPreProcess,
+    resetRemoteStateForTests,
 };

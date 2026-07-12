@@ -21,8 +21,15 @@ import { AppStore } from '../../store/AppStore';
 import { WorkService } from '../../services/WorkService';
 import { MediaViewerController } from '../MediaViewerController';
 import { Logger } from '../../core/Utils';
+import { DEFAULT_DLSITE_PROXY } from '../../core/Constants';
+import { gmRequest, retryWithBackoff } from '../../infrastructure/HttpClient';
 import type { AudioTrack, TrackFolder, TrackItem } from '../../types/api';
 import { normalizeWorkId, parseWorkIdFromCoverUrl, resolveGalleryWorkId } from '../playerGalleryUtils';
+import {
+    fetchVerifiedImageBlob,
+    isSafeRasterImageBlob,
+    normalizeImageUrl,
+} from '../media/externalImageUtils';
 
 const IMG_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg']);
 
@@ -32,6 +39,7 @@ const { t } = useI18n();
 const { on } = useEventBus();
 const galleryAutoSlideshow = useConfig('galleryAutoSlideshow');
 const galleryAutoSlideshowInterval = useConfig('galleryAutoSlideshowInterval');
+const dlsiteProxyUrl = useConfig('dlsiteProxyUrl');
 
 // -- Reactive state --
 const images = ref<string[]>([]);
@@ -44,6 +52,13 @@ const slideshowPaused = ref(false);
 const imageLoaded = ref(true);
 const imageSeen = ref(new Set<string>());
 const excludedUrls = ref(new Set<string>());
+const verifiedBlobUrls = new Map<string, string>();
+const verifiedDisplayUrls = ref(new Map<string, string>());
+const verifiedFetches = new Map<string, Promise<string | null>>();
+const imageFetchControllers = new Set<AbortController>();
+let imageFetchGeneration = 0;
+let imageSelectionGeneration = 0;
+let componentMounted = false;
 
 // Slideshow timer (non-reactive, just a handle)
 let slideshowTimer: ReturnType<typeof setInterval> | null = null;
@@ -60,7 +75,12 @@ const showCounter = computed(() => hasMultipleImages.value);
 const counterText = computed(() =>
     hasMultipleImages.value ? `${currentIndex.value + 1} / ${imageCount.value}` : ''
 );
-const currentImageUrl = computed(() => images.value[currentIndex.value] || '');
+const currentSourceUrl = computed(() => images.value[currentIndex.value] || '');
+const currentImageUrl = computed(() => {
+    const source = currentSourceUrl.value;
+    if (!source) return '';
+    return verifiedDisplayUrls.value.get(source) || '';
+});
 const showImage = computed(() => currentImageUrl.value !== '');
 
 // -- Image load state --
@@ -71,6 +91,178 @@ watch(currentImageUrl, () => {
 
 function onImageLoad(): void {
     imageLoaded.value = true;
+}
+
+function getImageProxyBaseUrl(): string {
+    let raw = String(dlsiteProxyUrl.value || '').trim().replace(/\/+$/, '');
+    if (!raw) return DEFAULT_DLSITE_PROXY;
+    if (!/^https?:\/\//i.test(raw)) raw = `https://${raw}`;
+    try {
+        const parsed = new URL(raw);
+        if (parsed.protocol === 'https:' || parsed.protocol === 'http:') return raw;
+    } catch {
+        // Fall through to the maintained relay.
+    }
+    return DEFAULT_DLSITE_PROXY;
+}
+
+function storeVerifiedDisplayUrl(sourceUrl: string, displayUrl: string, seq: number): boolean {
+    if (!componentMounted || seq !== loadSeq.value || !sourceUrl || !displayUrl) return false;
+    if (excludedUrls.value.has(sourceUrl) || excludedUrls.value.has(displayUrl)) return false;
+    if (verifiedDisplayUrls.value.get(sourceUrl) === displayUrl) return false;
+
+    verifiedDisplayUrls.value.set(sourceUrl, displayUrl);
+    verifiedDisplayUrls.value = new Map(verifiedDisplayUrls.value);
+    syncAlbumart();
+    return true;
+}
+
+async function resolveVerifiedImage(sourceUrl: string, seq = loadSeq.value): Promise<string | null> {
+    if (!componentMounted) return null;
+    const normalized = normalizeImageUrl(sourceUrl);
+    if (!normalized || excludedUrls.value.has(normalized)) return null;
+    if (normalized.startsWith('data:')) return null;
+
+    const cached = verifiedBlobUrls.get(normalized);
+    if (cached) {
+        storeVerifiedDisplayUrl(normalized, cached, seq);
+        return cached;
+    }
+
+    const existing = verifiedFetches.get(normalized);
+    if (existing) {
+        const displayUrl = await existing;
+        if (displayUrl) storeVerifiedDisplayUrl(normalized, displayUrl, seq);
+        return displayUrl;
+    }
+
+    const generation = imageFetchGeneration;
+    const controller = new AbortController();
+    imageFetchControllers.add(controller);
+
+    const task = (async (): Promise<string | null> => {
+        let blob: Blob | null = null;
+        if (normalized.startsWith('blob:')) {
+            const response = await fetch(normalized, { signal: controller.signal });
+            if (!response.ok) return null;
+            const candidate = await response.blob();
+            if (await isSafeRasterImageBlob(candidate)) blob = candidate;
+        } else {
+            const verified = await fetchVerifiedImageBlob(normalized, {
+                proxyBaseUrl: getImageProxyBaseUrl(),
+                signal: controller.signal,
+                headers: {
+                    Accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+                },
+                dlsiteHeaders: {
+                    Referer: 'https://www.dlsite.com/',
+                    Origin: 'https://www.dlsite.com',
+                },
+                request: (config) => retryWithBackoff(
+                    () => gmRequest(config),
+                    { attempts: 2, backoffMs: 500, multiplier: 2 },
+                ),
+            });
+            blob = verified?.blob || null;
+        }
+        if (!blob || generation !== imageFetchGeneration || controller.signal.aborted) return null;
+
+        const blobUrl = URL.createObjectURL(blob);
+        if (generation !== imageFetchGeneration || controller.signal.aborted) {
+            URL.revokeObjectURL(blobUrl);
+            return null;
+        }
+        verifiedBlobUrls.set(normalized, blobUrl);
+        return blobUrl;
+    })();
+
+    verifiedFetches.set(normalized, task);
+    try {
+        const displayUrl = await task;
+        if (displayUrl) storeVerifiedDisplayUrl(normalized, displayUrl, seq);
+        return displayUrl;
+    } finally {
+        imageFetchControllers.delete(controller);
+        if (verifiedFetches.get(normalized) === task) verifiedFetches.delete(normalized);
+    }
+}
+
+function clearVerifiedImages(): void {
+    imageFetchGeneration++;
+    imageSelectionGeneration++;
+    for (const controller of imageFetchControllers) controller.abort();
+    imageFetchControllers.clear();
+    verifiedFetches.clear();
+    verifiedBlobUrls.forEach((url) => {
+        try { URL.revokeObjectURL(url); } catch { /* already revoked */ }
+    });
+    verifiedBlobUrls.clear();
+    verifiedDisplayUrls.value = new Map();
+}
+
+function cancelPendingImageVerification(): void {
+    imageFetchGeneration++;
+    for (const controller of imageFetchControllers) controller.abort();
+    imageFetchControllers.clear();
+    verifiedFetches.clear();
+}
+
+function addImageSource(url: string): boolean {
+    if (!componentMounted) return false;
+    const normalized = normalizeImageUrl(url);
+    if (!normalized || imageSeen.value.has(normalized) || excludedUrls.value.has(normalized)) return false;
+    imageSeen.value.add(normalized);
+    images.value.push(normalized);
+    syncAlbumart();
+    return true;
+}
+
+async function verifySelectedImage(cancelPending = true): Promise<void> {
+    if (!componentMounted) return;
+    const seq = loadSeq.value;
+    const selection = ++imageSelectionGeneration;
+    if (cancelPending) cancelPendingImageVerification();
+
+    let attempts = 0;
+    while (
+        seq === loadSeq.value
+        && componentMounted
+        && selection === imageSelectionGeneration
+        && images.value.length > 0
+        && attempts < 2
+    ) {
+        attempts++;
+        if (currentIndex.value >= images.value.length) currentIndex.value = 0;
+        const source = images.value[currentIndex.value];
+        const displayUrl = await resolveVerifiedImage(source, seq);
+        if (seq !== loadSeq.value || selection !== imageSelectionGeneration) return;
+        if (displayUrl) {
+            syncCoverUrl();
+            syncAlbumart();
+            return;
+        }
+
+        // The URL resolved only to a restriction/invalid payload. Remove it
+        // from the navigable inventory and try the next source lazily.
+        images.value.splice(currentIndex.value, 1);
+        excludedUrls.value.add(source);
+
+        // Keep the player visually stable when an upstream host image is
+        // restricted. Prefer a source already verified for this work (usually
+        // the cover or a DLsite sample) instead of briefly exposing an empty or
+        // placeholder slide while other unverified host items remain.
+        const knownGoodIndex = images.value.findIndex(candidate =>
+            verifiedDisplayUrls.value.has(candidate)
+        );
+        if (knownGoodIndex >= 0) {
+            currentIndex.value = knownGoodIndex;
+            syncCoverUrl();
+            syncAlbumart();
+            return;
+        }
+    }
+
+    syncAlbumart();
 }
 
 // -- Slideshow --
@@ -89,7 +281,7 @@ function startSlideshow(): void {
             return;
         }
         currentIndex.value = (currentIndex.value + 1) % images.value.length;
-        syncCoverUrl();
+        void verifySelectedImage();
     }, interval * 1000);
     Logger.debug('[PlayerGallery] Slideshow started, interval=', interval, 's');
 }
@@ -156,7 +348,7 @@ function excludeCurrentImage(): void {
         currentIndex.value = 0;
     }
 
-    syncCoverUrl();
+    void verifySelectedImage();
     syncAlbumart();
 
     // Stop slideshow if <2 images remain
@@ -179,7 +371,7 @@ function navigate(dir: number): void {
     if (images.value.length < 2) return;
     pauseSlideshow();
     currentIndex.value = (currentIndex.value + dir + images.value.length) % images.value.length;
-    syncCoverUrl();
+    void verifySelectedImage();
 }
 
 function onPrev(e: Event): void {
@@ -230,11 +422,14 @@ function onAlbumartClick(e: MouseEvent): void {
 }
 
 function openLightbox(): void {
+    if (!images.value.length) return;
     pauseSlideshow();
+    const sourceUrls = [...images.value];
     try {
-        MediaViewerController.getInstance().showExternalImages(images.value, currentIndex.value);
+        MediaViewerController.getInstance().showExternalImages(sourceUrls, currentIndex.value);
     } catch {
-        window.open(images.value[currentIndex.value], '_blank');
+        const verifiedUrl = currentImageUrl.value;
+        if (verifiedUrl) window.open(verifiedUrl, '_blank', 'noopener,noreferrer');
     }
 }
 
@@ -250,6 +445,7 @@ function syncCoverUrl(): void {
 // -- Sync albumart data attribute for CSS hiding rules --
 
 function syncAlbumart(): void {
+    if (!componentMounted) return;
     const albumart = document.querySelector('.audio-player .albumart') as HTMLElement;
     if (albumart) {
         albumart.setAttribute('data-gallery-count', String(images.value.length));
@@ -319,11 +515,13 @@ function scrapeDlsiteGallery(add: (url: string) => void): void {
 }
 
 function observeDlsiteGallery(): void {
+    if (!componentMounted) return;
     disconnectGalleryObserver();
     const gallery = document.querySelector('.asmr-meta-gallery');
     if (!gallery) {
         // Gallery element doesn't exist yet -- watch for it to appear
         const bodyObs = new MutationObserver(() => {
+            if (!componentMounted) return;
             const g = document.querySelector('.asmr-meta-gallery');
             if (g) {
                 bodyObs.disconnect();
@@ -338,21 +536,18 @@ function observeDlsiteGallery(): void {
 }
 
 function attachGalleryObserver(gallery: Element): void {
+    if (!componentMounted) return;
     disconnectGalleryObserver();
     const obs = new MutationObserver(() => {
+        if (!componentMounted) return;
+        const wasEmpty = images.value.length === 0;
         let added = false;
         const imgs = gallery.querySelectorAll('img');
         for (const el of imgs) {
-            const src = (el as HTMLImageElement).src;
-            if (src && !imageSeen.value.has(src) && !excludedUrls.value.has(src)) {
-                imageSeen.value.add(src);
-                images.value.push(src);
-                added = true;
-            }
+            added = addImageSource((el as HTMLImageElement).src) || added;
         }
         if (added) {
-            syncAlbumart();
-            // If slideshow wasn't started because <2 images, try again
+            if (wasEmpty) void verifySelectedImage();
             if (isFullscreen.value && !slideshowPaused.value && slideshowTimer === null && images.value.length >= 2) {
                 startSlideshow();
             }
@@ -420,10 +615,12 @@ function extractImageUrls(items: (TrackItem | TrackFolder)[], add: (url: string)
 }
 
 async function loadImages(workId: string): Promise<void> {
+    if (!componentMounted) return;
     const normalizedWorkId = normalizeWorkId(workId);
     if (!normalizedWorkId) return;
     const seq = ++loadSeq.value;
     loadedWorkId.value = normalizedWorkId;
+    clearVerifiedImages();
 
     // Clear previous work's images
     images.value = [];
@@ -435,9 +632,7 @@ async function loadImages(workId: string): Promise<void> {
     if (playerEl) playerEl.style.removeProperty('--cover-url');
 
     const add = (url: string) => {
-        if (!url || imageSeen.value.has(url) || excludedUrls.value.has(url)) return;
-        imageSeen.value.add(url);
-        images.value.push(url);
+        addImageSource(url);
     };
 
     // Scrape cover from DOM, but validate it belongs to this work
@@ -462,9 +657,14 @@ async function loadImages(workId: string): Promise<void> {
     // Start observing for late-arriving DLsite gallery images
     observeDlsiteGallery();
 
+    // Verify only the currently selected source. The remaining inventory is
+    // kept as URLs and fetched lazily on navigation, avoiding a multi-megabyte
+    // GET for every gallery item during initial player load.
+    if (images.value.length > 0) void verifySelectedImage();
+
     // Try Vue work tree component
     try {
-        if (seq !== loadSeq.value) return;
+        if (!componentMounted || seq !== loadSeq.value) return;
         const wt = bridge.findWorkTreeComponent();
         if (wt) {
             const folder = wt.fatherFolder || wt.$data?.fatherFolder || [];
@@ -477,7 +677,7 @@ async function loadImages(workId: string): Promise<void> {
     // Fetch tracks API
     try {
         const tracks = await WorkService.getTracks(normalizedWorkId);
-        if (seq !== loadSeq.value) return;
+        if (!componentMounted || seq !== loadSeq.value) return;
         if (Array.isArray(tracks)) {
             extractImageUrls(flattenTracks(tracks), add);
             Logger.debug('[PlayerGallery] Tracks loaded, total images:', images.value.length);
@@ -486,8 +686,9 @@ async function loadImages(workId: string): Promise<void> {
         Logger.debug('[PlayerGallery] Tracks fetch failed:', err);
     }
 
-    if (seq !== loadSeq.value) return;
+    if (!componentMounted || seq !== loadSeq.value) return;
     syncAlbumart();
+    if (!currentImageUrl.value && verifiedFetches.size === 0) void verifySelectedImage();
 }
 
 // -- Fullscreen events --
@@ -503,9 +704,10 @@ async function onEnterFullscreen(): Promise<void> {
         const currentWork = detectWorkId();
         const coverWork = parseWorkIdFromCoverUrl(coverUrl);
         if (!coverWork || !currentWork || coverWork === currentWork) {
-            images.value = [coverUrl];
-            imageSeen.value.add(coverUrl);
-            currentIndex.value = 0;
+            if (addImageSource(coverUrl)) {
+                await verifySelectedImage();
+                currentIndex.value = 0;
+            }
         }
     }
     if (images.value.length > 0) {
@@ -524,10 +726,11 @@ async function onEnterFullscreen(): Promise<void> {
     } else {
         // Catch-up: DLsite gallery may have rendered after preload()
         scrapeDlsiteGallery((url) => {
-            if (!url || imageSeen.value.has(url)) return;
-            imageSeen.value.add(url);
-            images.value.push(url);
+            addImageSource(url);
         });
+        if (!currentImageUrl.value && images.value.length > 0) {
+            await verifySelectedImage();
+        }
     }
 
     syncAlbumart();
@@ -542,6 +745,7 @@ function onExitFullscreen(): void {
 }
 
 function onWorkChange(workId: string): void {
+    if (!componentMounted) return;
     // Reset slideshow state for the new work
     stopSlideshow();
     slideshowPaused.value = false;
@@ -569,6 +773,7 @@ function clearRefreshRetryTimers(): void {
 }
 
 function scheduleRefreshRetries(workIdFromEvent?: string): void {
+    if (!componentMounted) return;
     clearRefreshRetryTimers();
     // Host player/work panels re-render asynchronously; retry a few times.
     for (const delay of [80, 220, 500]) {
@@ -579,30 +784,35 @@ function scheduleRefreshRetries(workIdFromEvent?: string): void {
 }
 
 function promoteCoverToFront(cover: string): void {
-    const existingIndex = images.value.indexOf(cover);
+    const normalized = normalizeImageUrl(cover);
+    if (!normalized || excludedUrls.value.has(normalized)) return;
+    const existingIndex = images.value.indexOf(normalized);
     if (existingIndex > 0) {
         images.value.splice(existingIndex, 1);
     }
 
     if (existingIndex !== 0) {
-        images.value.unshift(cover);
-        imageSeen.value.add(cover);
+        images.value.unshift(normalized);
+        imageSeen.value.add(normalized);
         currentIndex.value = 0;
-        syncCoverUrl();
+        void verifySelectedImage();
         syncAlbumart();
     }
 }
 
 function resetToCoverOnly(cover: string): void {
-    images.value = [cover];
+    const normalized = normalizeImageUrl(cover);
+    if (!normalized) return;
+    clearVerifiedImages();
+    images.value = [];
     currentIndex.value = 0;
     imageSeen.value.clear();
-    imageSeen.value.add(cover);
-    syncCoverUrl();
-    syncAlbumart();
+    addImageSource(normalized);
+    void verifySelectedImage();
 }
 
 function refreshGalleryForTrackChange(workIdFromEvent?: string): void {
+    if (!componentMounted) return;
     const normalizedEventWorkId = normalizeWorkId(workIdFromEvent);
     const detectedWorkId = normalizedEventWorkId || detectWorkId();
 
@@ -653,6 +863,7 @@ watch(showImage, (show) => {
 let albumartEl: HTMLElement | null = null;
 
 onMounted(() => {
+    componentMounted = true;
     // Gallery keyboard shortcuts are handled by KeyboardManager via EventBus
     on('gallery:nav', onGalleryNav);
     on('gallery:exclude', onGalleryExclude);
@@ -689,6 +900,8 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
+    componentMounted = false;
+    loadSeq.value++;
     // Clean up albumart event listeners
     if (albumartEl) {
         albumartEl.removeEventListener('click', onAlbumartClick);
@@ -700,10 +913,13 @@ onUnmounted(() => {
     // Clean up gallery-active class to prevent stale state on remount
     const albumart = document.querySelector('.audio-player .albumart') as HTMLElement;
     if (albumart) albumart.classList.remove('asmr-gallery-active');
+    const player = document.querySelector('.audio-player') as HTMLElement | null;
+    player?.style.removeProperty('--cover-url');
 
     stopSlideshow();
     clearRefreshRetryTimers();
     disconnectGalleryObserver();
+    clearVerifiedImages();
     Logger.log('[PlayerGallery] Unmounted');
 });
 </script>
@@ -722,6 +938,7 @@ onUnmounted(() => {
 
     <button
         v-show="showNav"
+        type="button"
         class="asmr-gallery-nav asmr-gallery-prev"
         :aria-label="t('galleryPrev')"
         :title="t('galleryPrev')"
@@ -732,6 +949,7 @@ onUnmounted(() => {
 
     <button
         v-show="showNav"
+        type="button"
         class="asmr-gallery-nav asmr-gallery-next"
         :aria-label="t('galleryNext')"
         :title="t('galleryNext')"
@@ -749,6 +967,7 @@ onUnmounted(() => {
 
     <button
         v-show="showSlideshowToggle"
+        type="button"
         class="asmr-gallery-nav asmr-gallery-slideshow-toggle"
         :aria-label="slideshowToggleLabel"
         :title="slideshowToggleLabel"
@@ -759,6 +978,7 @@ onUnmounted(() => {
 
     <button
         v-show="showExclude"
+        type="button"
         class="asmr-gallery-nav asmr-gallery-exclude"
         :aria-label="t('galleryExclude')"
         :title="t('galleryExclude')"
@@ -766,6 +986,7 @@ onUnmounted(() => {
     >
         <i class="material-icons" aria-hidden="true">visibility_off</i>
     </button>
+
 </template>
 
 <style scoped>
@@ -795,15 +1016,17 @@ onUnmounted(() => {
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 36px;
-    height: 36px;
-    background: rgba(0, 0, 0, 0.2);
+    width: 44px;
+    height: 44px;
+    min-width: 44px;
+    min-height: 44px;
+    background: transparent;
     backdrop-filter: blur(8px);
-    border: 1px solid rgba(255, 255, 255, 0.1);
+    border: 1px solid transparent;
     color: #fff;
     cursor: pointer;
     padding: 0;
-    opacity: 0;
+    opacity: 0.18;
     border-radius: 50%;
     transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
@@ -818,12 +1041,22 @@ onUnmounted(() => {
 
 .asmr-gallery-nav:hover {
     opacity: 1 !important;
-    background: rgba(0, 0, 0, 0.4);
+    background: rgba(17, 24, 39, 0.78);
+    border-color: rgba(255, 255, 255, 0.72);
     transform: translateY(-50%) scale(1.1);
 }
 
 .asmr-gallery-nav:active {
     transform: translateY(-50%) scale(0.95);
+}
+
+.asmr-gallery-nav:focus-visible {
+    opacity: 1 !important;
+    background: rgba(17, 24, 39, 0.78);
+    border-color: rgba(255, 255, 255, 0.72);
+    outline: 3px solid #60a5fa;
+    outline-offset: 2px;
+    box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.85);
 }
 
 .asmr-gallery-nav :deep(.material-icons) {
@@ -834,18 +1067,20 @@ onUnmounted(() => {
 /* Slideshow pause/play toggle — top-right, next to exclude */
 .asmr-gallery-slideshow-toggle {
     top: 8px !important;
-    right: 74px;
+    right: 108px;
     transform: none !important;
-    width: 26px;
-    height: 26px;
-    background: rgba(255, 255, 255, 0.05);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    opacity: 0;
+    width: 40px;
+    height: 40px;
+    min-width: 40px;
+    min-height: 40px;
+    background: transparent;
+    border-color: transparent;
+    opacity: 0.18;
 }
 
 .asmr-gallery-slideshow-toggle :deep(.material-icons) {
-    font-size: 16px;
-    opacity: 0.5;
+    font-size: 20px;
+    opacity: 1;
 }
 
 .asmr-gallery-slideshow-toggle:hover {
@@ -865,18 +1100,20 @@ onUnmounted(() => {
 /* Exclude (hide) button — subtle, top-right near fullscreen exit */
 .asmr-gallery-exclude {
     top: 8px !important;
-    right: 40px;
+    right: 60px;
     transform: none !important;
-    width: 26px;
-    height: 26px;
-    background: rgba(255, 255, 255, 0.05);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    opacity: 0;
+    width: 40px;
+    height: 40px;
+    min-width: 40px;
+    min-height: 40px;
+    background: transparent;
+    border-color: transparent;
+    opacity: 0.18;
 }
 
 .asmr-gallery-exclude :deep(.material-icons) {
-    font-size: 16px;
-    opacity: 0.5;
+    font-size: 20px;
+    opacity: 1;
 }
 
 .asmr-gallery-exclude:hover {
@@ -903,7 +1140,7 @@ onUnmounted(() => {
     font-size: 11px;
     font-weight: 500;
     color: rgba(255, 255, 255, 0.9);
-    background: rgba(0, 0, 0, 0.3);
+    background: rgba(17, 24, 39, 0.9);
     backdrop-filter: blur(4px);
     padding: 2px 8px;
     border-radius: 10px;
@@ -913,23 +1150,14 @@ onUnmounted(() => {
     transition: opacity 0.2s;
 }
 
-/* Parent hover: reveal nav arrows and counter when .albumart is hovered.
-   Uses :global() for the parent selector since .albumart is outside this SFC. */
-:global(.albumart):hover .asmr-gallery-nav {
-    opacity: 0.8;
-}
-
-:global(.albumart):hover .asmr-gallery-counter {
-    opacity: 1;
-}
-
-/* Mobile: always visible and slightly larger touch targets */
+/* Touch devices cannot hover, so keep controls subtly discoverable. */
 @media (max-width: 800px) {
     .asmr-gallery-nav {
-        opacity: 0.7;
+        opacity: 0.58;
         width: 44px;
         height: 44px;
-        background: rgba(0, 0, 0, 0.4);
+        background: rgba(17, 24, 39, 0.28);
+        border-color: rgba(255, 255, 255, 0.28);
     }
 
     .asmr-gallery-prev {
@@ -941,7 +1169,7 @@ onUnmounted(() => {
     }
 
     .asmr-gallery-counter {
-        opacity: 0.8;
+        opacity: 0.58;
     }
 }
 </style>

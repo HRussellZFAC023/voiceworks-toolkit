@@ -2,7 +2,8 @@ import { Logger, Config } from '../core/Utils';
 import { gmRequest, retryWithBackoff } from '../infrastructure/HttpClient';
 import type { GmRequestConfig } from '../infrastructure/HttpClient';
 import type { DLsiteProductApiResponse, DLsiteDynamicEntry, DLsiteUserReview } from '../types/dlsite';
-import { LIMITS } from '../core/Constants';
+import { DEFAULT_DLSITE_PROXY, LIMITS } from '../core/Constants';
+import { runPacedBatches } from '../core/PacedBatch';
 
 const DLSITE_HEADERS = {
     Accept: 'application/json',
@@ -28,18 +29,18 @@ function isValidProxyUrl(url: string): boolean {
 /**
  * Get the user-configured DLsite proxy URL (Cloudflare Worker).
  * When set, all DLsite requests are routed through this proxy.
- * Returns empty string if the configured URL is invalid.
+ * Empty or invalid configuration falls back to the maintained Japan relay.
  */
 function getProxyBaseUrl(): string {
     let raw = (String(Config.get('dlsiteProxyUrl') || '')).replace(/\/+$/, '');
-    if (!raw) return '';
+    if (!raw) return DEFAULT_DLSITE_PROXY;
     // Auto-prepend https:// if no protocol is provided
     if (!/^https?:\/\//i.test(raw)) {
         raw = 'https://' + raw;
     }
     if (!isValidProxyUrl(raw)) {
-        Logger.warn('[DLsiteService] Invalid proxy URL configured, falling back to direct requests:', raw);
-        return '';
+        Logger.warn('[DLsiteService] Invalid proxy URL configured, using the maintained Japan relay:', raw);
+        return DEFAULT_DLSITE_PROXY;
     }
     return raw;
 }
@@ -76,12 +77,18 @@ function proxyDlsiteUrl(originalUrl: string): string {
 /**
  * gmRequest wrapper that routes DLsite URLs through the configured proxy.
  */
-function proxiedGmRequest(config: GmRequestConfig) {
+async function proxiedGmRequest(config: GmRequestConfig) {
     const proxiedUrl = proxyDlsiteUrl(config.url);
     if (proxiedUrl !== config.url) {
         Logger.debug(`[DLsiteService] Proxying request: ${config.url} -> ${proxiedUrl}`);
+        try {
+            return await gmRequest({ ...config, url: proxiedUrl });
+        } catch (error) {
+            Logger.warn('[DLsiteService] Japan relay failed; retrying the original DLsite URL directly', error);
+            return gmRequest(config);
+        }
     }
-    return gmRequest({ ...config, url: proxiedUrl });
+    return gmRequest(config);
 }
 
 const RETRY_JSON = { attempts: 2, backoffMs: 800, multiplier: 2 };
@@ -117,10 +124,13 @@ function isAgeGatePage(html: string): boolean {
  */
 export class DLsiteServiceImpl {
     private static readonly DOMAINS = ['maniax', 'home', 'girls', 'pro', 'ana', 'eng'] as const;
+    private productPageInflight = new Map<string, Promise<string | null>>();
 
     /**
      * Fetch product data from DLsite Product API.
-     * Races all 6 domains in parallel via Promise.any(), returns first success.
+     * Tries domains in small hedged pairs, returning the first success. This
+     * keeps the common maniax/home path quick without firing six requests (and
+     * their retries) at the relay for every work.
      */
     public async fetchProductApi(rjCode: string): Promise<DLsiteProductApiResponse | null> {
         if (!rjCode || !/^(RJ|VJ|BJ)?\d{5,}/i.test(rjCode)) {
@@ -128,30 +138,28 @@ export class DLsiteServiceImpl {
             return null;
         }
         const normalized = rjCode.toUpperCase();
-        Logger.debug(`[DLsiteService] fetchProductApi: ${normalized}, racing ${DLsiteServiceImpl.DOMAINS.length} domains`);
+        Logger.debug(`[DLsiteService] fetchProductApi: ${normalized}`);
 
-        const tasks = DLsiteServiceImpl.DOMAINS.map(async (domain) => {
-            const url = `https://www.dlsite.com/${domain}/api/=/product.json?workno=${normalized}&locale=ja-jp`;
-            Logger.debug(`[DLsiteService] Fetching ${domain} API:`, url);
-
-            const payload = await this.fetchJson(url, domain);
-            const entry = this.extractEntry(payload, normalized);
-            if (!entry) throw new Error(`[DLsiteService] ${domain} empty`);
-            Logger.debug(`[DLsiteService] ${domain} returned entry:`, entry);
-            return entry;
-        });
-
-        try {
-            const result = await Promise.any(tasks);
-            Logger.debug(`[DLsiteService] fetchProductApi succeeded for ${normalized}`, { title: result?.work_name });
-            return result;
-        } catch (err) {
-            if (err instanceof AggregateError) {
-                Logger.debug('[DLsiteService] All strategies failed:', err.errors);
+        for (let index = 0; index < DLsiteServiceImpl.DOMAINS.length; index += 2) {
+            const domains = DLsiteServiceImpl.DOMAINS.slice(index, index + 2);
+            try {
+                const result = await Promise.any(domains.map(async (domain) => {
+                    const url = `https://www.dlsite.com/${domain}/api/=/product.json?workno=${normalized}&locale=ja-jp`;
+                    Logger.debug(`[DLsiteService] Fetching ${domain} API:`, url);
+                    const payload = await this.fetchJson(url, domain);
+                    const entry = this.extractEntry(payload, normalized);
+                    if (!entry) throw new Error(`[DLsiteService] ${domain} empty`);
+                    return entry;
+                }));
+                Logger.debug(`[DLsiteService] fetchProductApi succeeded for ${normalized}`, { title: result?.work_name });
+                return result;
+            } catch (err) {
+                Logger.debug(`[DLsiteService] Product API pair failed for ${normalized}`, err);
             }
-            Logger.warn(`[DLsiteService] fetchProductApi failed for ${normalized}: all domains rejected`, err);
-            return null;
         }
+
+        Logger.warn(`[DLsiteService] fetchProductApi failed for ${normalized}: all domains rejected`);
+        return null;
     }
 
     /**
@@ -203,54 +211,15 @@ export class DLsiteServiceImpl {
 
     /**
      * Fetch the DLsite product HTML page and extract the full description body.
-     * Races multiple domains for faster results through proxy.
+     * Concurrent body/gallery consumers share one in-flight HTML request.
      */
     public async fetchProductPageBody(rjCode: string): Promise<string | null> {
         if (!rjCode || !/^(RJ|VJ|BJ)?\d{5,}/i.test(rjCode)) {
             Logger.warn('[DLsiteService] Invalid RJ code:', rjCode);
             return null;
         }
-        Logger.debug(`[DLsiteService] fetchProductPageBody racing domains for: ${rjCode}`);
-
-        const tasks = DLsiteServiceImpl.DOMAINS.map(async (domain) => {
-            const url = `https://www.dlsite.com/${domain}/work/=/product_id/${rjCode}.html`;
-            try {
-                const res = await retryWithBackoff(
-                    () => proxiedGmRequest({
-                        url,
-                        headers: {
-                            Accept: 'text/html',
-                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                            'Accept-Language': 'ja',
-                            Referer: 'https://www.dlsite.com/',
-                            Cookie: 'adultchecked=1',
-                        },
-                        responseType: 'text',
-                    }),
-                    RETRY_HTML,
-                );
-
-                if (isAgeGatePage(res.responseText)) {
-                    throw new Error(`[DLsiteService] ${domain} hit age gate`);
-                }
-
-                const body = this.extractDescriptionBody(res.responseText);
-                if (!body) throw new Error(`[DLsiteService] ${domain} empty body`);
-                return body;
-            } catch (e) {
-                throw e; // Promise.any expects rejection on failure
-            }
-        });
-
-        try {
-            return await Promise.any(tasks);
-        } catch (e) {
-            if (e instanceof AggregateError) {
-                Logger.debug('[DLsiteService] All strategies failed:', e.errors);
-            }
-            Logger.warn('[DLsiteService] fetchProductPageBody failed on all domains:', e);
-            return null;
-        }
+        const html = await this.fetchProductPageHtml(rjCode.toUpperCase());
+        return html ? this.extractDescriptionBody(html) : null;
     }
 
     /**
@@ -263,42 +232,57 @@ export class DLsiteServiceImpl {
             return [];
         }
 
-        const tasks = DLsiteServiceImpl.DOMAINS.map(async (domain) => {
-            const url = `https://www.dlsite.com/${domain}/work/=/product_id/${rjCode}.html`;
-            const res = await retryWithBackoff(
-                () => proxiedGmRequest({
-                    url,
-                    headers: {
-                        Accept: 'text/html',
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                        'Accept-Language': 'ja',
-                        Referer: 'https://www.dlsite.com/',
-                        Cookie: 'adultchecked=1',
-                    },
-                    responseType: 'text',
-                }),
-                RETRY_HTML,
-            );
+        const html = await this.fetchProductPageHtml(rjCode.toUpperCase());
+        return html ? this.extractSampleImageUrls(html) : [];
+    }
 
-            if (isAgeGatePage(res.responseText)) {
-                throw new Error(`[DLsiteService] ${domain} hit age gate`);
+    private fetchProductPageHtml(rjCode: string): Promise<string | null> {
+        const existing = this.productPageInflight.get(rjCode);
+        if (existing) return existing;
+
+        const request = this.fetchProductPageHtmlFresh(rjCode).finally(() => {
+            if (this.productPageInflight.get(rjCode) === request) {
+                this.productPageInflight.delete(rjCode);
             }
-
-            const urls = this.extractSampleImageUrls(res.responseText);
-            if (!urls.length) throw new Error(`[DLsiteService] ${domain} no sample images`);
-            return urls;
         });
+        this.productPageInflight.set(rjCode, request);
+        return request;
+    }
 
-        try {
-            return await Promise.any(tasks);
-        } catch (e) {
-            if (e instanceof AggregateError) {
-                Logger.debug('[DLsiteService] Sample image extraction failed on all domains:', e.errors);
-            } else {
-                Logger.debug('[DLsiteService] Sample image extraction failed:', e);
+    private async fetchProductPageHtmlFresh(rjCode: string): Promise<string | null> {
+        Logger.debug(`[DLsiteService] Fetching shared product page for: ${rjCode}`);
+        for (let index = 0; index < DLsiteServiceImpl.DOMAINS.length; index += 2) {
+            const domains = DLsiteServiceImpl.DOMAINS.slice(index, index + 2);
+            try {
+                return await Promise.any(domains.map(async (domain) => {
+                    const url = `https://www.dlsite.com/${domain}/work/=/product_id/${rjCode}.html`;
+                    const res = await retryWithBackoff(
+                        () => proxiedGmRequest({
+                            url,
+                            headers: {
+                                Accept: 'text/html',
+                                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                                'Accept-Language': 'ja',
+                                Referer: 'https://www.dlsite.com/',
+                                Cookie: 'adultchecked=1',
+                            },
+                            responseType: 'text',
+                        }),
+                        RETRY_HTML,
+                    );
+                    const html = res.responseText || '';
+                    if (isAgeGatePage(html)) throw new Error(`[DLsiteService] ${domain} hit age gate`);
+                    if (!this.extractDescriptionBody(html) && this.extractSampleImageUrls(html).length === 0) {
+                        throw new Error(`[DLsiteService] ${domain} did not return product details`);
+                    }
+                    return html;
+                }));
+            } catch (error) {
+                Logger.debug(`[DLsiteService] Product page pair failed for ${rjCode}`, error);
             }
-            return [];
         }
+        Logger.warn(`[DLsiteService] Product page unavailable for ${rjCode}`);
+        return null;
     }
 
     /**
@@ -539,8 +523,9 @@ export class DLsiteServiceImpl {
                     const totalPages = Math.min(MAX_PAGES, Math.ceil(totalCount / PAGE_SIZE));
                     const remainingPages = Array.from({ length: totalPages - 1 }, (_, i) => i + 2);
 
-                    const pageResults = await Promise.allSettled(
-                        remainingPages.map(async (page) => {
+                    const pageResults = await runPacedBatches(
+                        remainingPages,
+                        async (page) => {
                             const url = `https://www.dlsite.com/${domain}/api/review?product_id=${rjCode}&limit=${PAGE_SIZE}&mix_pickup=false&page=${page}&order=regist_d&locale=ja_JP`;
                             const res = await retryWithBackoff(
                                 () => proxiedGmRequest({
@@ -553,7 +538,8 @@ export class DLsiteServiceImpl {
                             const payload = this.parseJsonResponse(res, `${domain} review API page ${page}`);
                             const items = this.extractReviewItems(payload);
                             return items;
-                        })
+                        },
+                        { batchSize: 2, delayMs: 400 },
                     );
 
                     for (const result of pageResults) {

@@ -65,9 +65,6 @@
  * NF-5: Hallucination patterns and stage directions must be filtered from
  *        output text (quality).
  *
- * NF-6: Model names from the old Xenova namespace must be auto-migrated to
- *        onnx-community (backwards compatibility).
- *
  * ═══════════════════════════════════════════════════════════════════════════════
  */
 
@@ -75,6 +72,8 @@ import { test as base, expect, Page } from '@playwright/test';
 import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
+import { createSilentWav } from './audioFixture';
+import { ensureLoggedIn, GM_STUBS, loadUserscript } from './fixtures';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -83,137 +82,11 @@ const __dirname = path.dirname(__filename);
 // Test-local fixture: WAV file served, audio not blocked, extended timeouts
 // ---------------------------------------------------------------------------
 
-const USERSCRIPT_PATH = path.join(__dirname, '../../dist/asmr-one-ultimate.user.js');
-const WAV_FIXTURE_PATH = path.join(__dirname, 'fixtures/test-audio.wav');
-const AUTH_PATH = path.join(__dirname, '.auth.json');
+const VIA_PROXY = process.env.E2E_PROXY === '1';
+const E2E_PROXY_URL = (process.env.E2E_PROXY_URL
+    || 'https://asmr-api-proxy.henry-robert-christopher-russell.workers.dev').replace(/\/$/, '');
 
-const SYSTEMJS_URLS = [
-    'https://cdn.jsdelivr.net/npm/systemjs@6.15.1/dist/system.min.js',
-    'https://cdn.jsdelivr.net/npm/systemjs@6.15.1/dist/extras/named-register.min.js',
-];
-
-const GM_STUBS = `
-window.GM_getValue = window.GM_getValue || ((key, def) => {
-    try { const v = localStorage.getItem('GM_' + key); return v !== null ? JSON.parse(v) : def; } catch { return def; }
-});
-window.GM_setValue = window.GM_setValue || ((key, val) => { localStorage.setItem('GM_' + key, JSON.stringify(val)); });
-window.GM_deleteValue = window.GM_deleteValue || ((key) => { localStorage.removeItem('GM_' + key); });
-window.GM_listValues = window.GM_listValues || (() => Object.keys(localStorage).filter(k => k.startsWith('GM_')).map(k => k.slice(3)));
-window.GM_xmlhttpRequest = window.GM_xmlhttpRequest || ((opts) => {
-    const isSameOrigin = (() => { try { return new URL(opts.url, location.href).origin === location.origin; } catch { return false; } })();
-    fetch(opts.url, {
-        method: opts.method || 'GET',
-        headers: opts.headers,
-        body: opts.data,
-        credentials: isSameOrigin ? 'include' : 'omit',
-        ...(opts.responseType === 'blob' ? {} : {})
-    }).then(async (res) => {
-        let response;
-        if (opts.responseType === 'blob') {
-            response = await res.blob();
-        } else {
-            const text = await res.text();
-            response = text;
-            try { response = JSON.parse(text); } catch {}
-        }
-        opts.onload?.({ responseText: typeof response === 'string' ? response : '', response, status: res.status, statusText: res.statusText, responseHeaders: '' });
-    }).catch(err => { opts.onerror?.(err); });
-});
-window.GM_addStyle = window.GM_addStyle || ((css) => { const s = document.createElement('style'); s.textContent = css; document.head.appendChild(s); return s; });
-window.GM_registerMenuCommand = window.GM_registerMenuCommand || (() => {});
-window.GM_unregisterMenuCommand = window.GM_unregisterMenuCommand || (() => {});
-window.GM_notification = window.GM_notification || (() => {});
-window.GM_openInTab = window.GM_openInTab || ((url) => window.open(url));
-window.GM_setClipboard = window.GM_setClipboard || ((text) => navigator.clipboard?.writeText(text));
-window.GM_info = window.GM_info || { script: { name: 'ASMR Ultimate', version: '1.0.0' } };
-window.unsafeWindow = window;
-
-// Pre-set enableLogging so Logger.log calls actually output to console
-// (Logger gates all output behind AppStore.getConfig('enableLogging'))
-if (!localStorage.getItem('GM_enableLogging')) {
-    localStorage.setItem('GM_enableLogging', 'true');
-}
-`;
-
-type AuthConfig = { username: string; password: string };
-
-function loadAuthConfig(): AuthConfig | null {
-    const username = process.env.ASMR_ONE_USER || process.env.E2E_USERNAME || process.env.ASMR_USER;
-    const password = process.env.ASMR_ONE_PASS || process.env.E2E_PASSWORD || process.env.ASMR_PASS;
-    if (username && password) {
-        return { username, password };
-    }
-
-    if (fs.existsSync(AUTH_PATH)) {
-        try {
-            const raw = fs.readFileSync(AUTH_PATH, 'utf-8');
-            const parsed = JSON.parse(raw);
-            if (parsed?.username && parsed?.password) {
-                return { username: String(parsed.username), password: String(parsed.password) };
-            }
-        } catch {
-            // ignore invalid auth file
-        }
-    }
-
-    return null;
-}
-
-async function ensureLoggedIn(page: Page): Promise<boolean> {
-    const context = page.context() as any;
-    if (context.__authReady != null) return context.__authReady;
-
-    const creds = loadAuthConfig();
-    if (!creds) {
-        context.__authReady = false;
-        return false;
-    }
-
-    await page.goto('https://asmr.one', { waitUntil: 'commit', timeout: 30000 });
-    const result = await page.evaluate(async (payload) => {
-        try {
-            const existing = localStorage.getItem('jwt-token');
-            if (existing) return { ok: true, token: existing };
-
-            const res = await fetch('/api/auth/me', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name: payload.username, password: payload.password }),
-                credentials: 'include',
-            });
-            if (!res.ok) {
-                return { ok: false, status: res.status };
-            }
-            const data = await res.json().catch(() => null);
-            const token = data?.token || '';
-            if (token) {
-                localStorage.setItem('jwt-token', token);
-                try {
-                    const bridge = (window as any).__ASMR_KIKOERU_BRIDGE__;
-                    const headers = bridge?.axios?.defaults?.headers?.common;
-                    if (headers) headers.Authorization = `Bearer ${token}`;
-                } catch {
-                    // ignore bridge header issues
-                }
-            }
-            return { ok: !!token, token };
-        } catch (err) {
-            return { ok: false, error: String(err) };
-        }
-    }, creds);
-
-    context.__authReady = !!result?.ok;
-    return context.__authReady;
-}
-
-function loadUserscript(): string {
-    if (!fs.existsSync(USERSCRIPT_PATH)) {
-        throw new Error(`Userscript not found at ${USERSCRIPT_PATH}. Run: npm run build`);
-    }
-    let script = fs.readFileSync(USERSCRIPT_PATH, 'utf-8');
-    script = script.replace(/^\/\/\s*==UserScript==[\s\S]*?\/\/\s*==\/UserScript==\s*/m, '');
-    return script;
-}
+const TEST_WAV_DATA = createSilentWav(16000, 2);
 
 // Extended timeout for model download + transcription
 const WHISPER_TIMEOUT = 5 * 60 * 1000; // 5 minutes
@@ -231,49 +104,91 @@ const test = base.extend<WhisperFixtures>({
 
         await context.addInitScript({ content: GM_STUBS });
         await context.addInitScript({
+            content: `localStorage.setItem('GM_enableLogging', 'true');`,
+        });
+        await context.addInitScript({
             content: `
                 (function() {
                     if (window !== window.top) return;
-                    const SYSTEMJS_URLS = ${JSON.stringify(SYSTEMJS_URLS)};
-                    const USERSCRIPT = ${JSON.stringify(userscript)};
+                    const REQUIRE_URLS = ${JSON.stringify(userscript.requires)};
+                    const REQUIRE_SOURCES = ${JSON.stringify(userscript.requireSources)};
+                    const USERSCRIPT = ${JSON.stringify(userscript.code)};
                     async function init() {
                         if (!location.href.includes('asmr.one') && !location.href.includes('asmr-')) return;
                         if (window.__ASMR_ULTIMATE_INITIALIZED__) return;
                         console.log('[E2E] Starting script injection...');
-                        for (const url of SYSTEMJS_URLS) {
+                        for (let index = 0; index < REQUIRE_URLS.length; index++) {
+                            const url = REQUIRE_URLS[index];
+                            const localSource = REQUIRE_SOURCES[index];
+                            if (typeof localSource === 'string') {
+                                const script = document.createElement('script');
+                                script.textContent = localSource;
+                                document.head.appendChild(script);
+                                continue;
+                            }
+
                             await new Promise((resolve) => {
                                 const script = document.createElement('script');
                                 script.src = url;
-                                script.onload = resolve;
-                                script.onerror = () => { console.error('[E2E] Failed: ' + url); resolve(); };
+                                const timer = setTimeout(() => {
+                                    console.error('[E2E] Timed out loading @require dependency from ' + url);
+                                    resolve();
+                                }, 10000);
+                                script.onload = () => { clearTimeout(timer); resolve(); };
+                                script.onerror = () => {
+                                    clearTimeout(timer);
+                                    console.error('[E2E] Failed: ' + url);
+                                    resolve();
+                                };
                                 document.head.appendChild(script);
                             });
-                        }
-                        if (typeof window.System !== 'undefined') {
-                            window.System = new window.System.constructor();
                         }
                         const scriptEl = document.createElement('script');
                         scriptEl.textContent = USERSCRIPT;
                         document.head.appendChild(scriptEl);
                         console.log('[E2E] Userscript injected');
                     }
-                    if (document.readyState === 'complete') { init(); }
-                    else { window.addEventListener('load', init); }
+                    if (document.readyState === 'loading') {
+                        document.addEventListener('DOMContentLoaded', init, { once: true });
+                    } else {
+                        setTimeout(init, 0);
+                    }
                 })();
             `
         });
+
+        if (VIA_PROXY) {
+            await context.route(url => /^https:\/\/([a-z0-9-]+\.)*asmr(-\d+)?\.(one|com)\//.test(url.toString()), async (route) => {
+                const request = route.request();
+                if (request.method() !== 'GET') return route.continue();
+                const url = new URL(request.url());
+                url.searchParams.set('__host', url.hostname);
+                try {
+                    const response = await context.request.get(
+                        `${E2E_PROXY_URL}${url.pathname}${url.search}`,
+                        { timeout: 30000 },
+                    );
+                    return route.fulfill({
+                        status: response.status(),
+                        contentType: response.headers()['content-type'] || 'text/html',
+                        body: await response.body(),
+                    });
+                } catch {
+                    return route.continue();
+                }
+            });
+        }
 
         // Block heavy resources EXCEPT audio (we need .wav for Whisper)
         await context.route(/\.(?:png|jpg|jpeg|gif|webp|svg|ico|woff2?|ttf|eot)(?:\?|$)/i, (route) => route.abort());
         await context.route(/google-analytics|googletagmanager|hotjar|sentry\.io/, (route) => route.abort());
 
         // Serve our WAV fixture on a predictable URL
-        const wavData = fs.readFileSync(WAV_FIXTURE_PATH);
         await context.route('**/test-whisper-audio.wav', (route) => {
             route.fulfill({
                 status: 200,
                 contentType: 'audio/wav',
-                body: wavData,
+                body: TEST_WAV_DATA,
             });
         });
 
@@ -431,11 +346,10 @@ async function setupWhisperPage(page: Page): Promise<void> {
     // Intercept any audio file requests and serve our test WAV instead
     // (the real track URL will fail or be slow, so we replace it)
     await page.route(/\.(mp3|wav|flac|ogg|m4a)(\?|$)/i, async (route) => {
-        const wavData = fs.readFileSync(WAV_FIXTURE_PATH);
         await route.fulfill({
             status: 200,
             contentType: 'audio/wav',
-            body: wavData,
+            body: TEST_WAV_DATA,
         });
     });
 
@@ -729,19 +643,23 @@ test.describe('Feature: Whisper AI Transcription End-to-End', () => {
          *
          * Covers: US-8
          */
-        test('should show error when no audio source available', async ({
-            whisperPage: page,
-            consoleLogs,
-            waitForWhisperLog,
-        }) => {
+        test('should show error when no audio source available', async ({ whisperPage: page }) => {
             await ensureLoggedIn(page);
             await page.goto(`https://asmr.one/work/${TEST_WORK}`, { waitUntil: 'commit', timeout: 30000 });
 
-            // Wait for script
             await page.waitForFunction(
-                () => !!(window as any).__ASMR_LOGGER__ || !!(window as any).ASMRUlt || !!(window as any).__ASMR_ULTIMATE_INITIALIZED__,
+                () => {
+                    try {
+                        const state = window as any;
+                        return !!state.ASMRUlt
+                            && !!state.__ASMR_KIKOERU_BRIDGE__?.store
+                            && !!state.__ASMR_EVENT_BUS__;
+                    } catch {
+                        return false;
+                    }
+                },
                 { timeout: 20000 }
-            ).catch(() => {});
+            );
 
             await page.waitForTimeout(3000);
 
@@ -755,101 +673,23 @@ test.describe('Feature: Whisper AI Transcription End-to-End', () => {
                 }
             });
 
-            // Trigger whisper
-            await clickWhisperButton(page);
-
-            // Wait for error
-            try {
-                await waitForWhisperLog(/No audio source found/, 15000);
-                console.log('  [E2E] ✓ Got expected "no audio source" error');
-            } catch {
-                // Check if it got a different error or log
-                const errorLogs = consoleLogs.map(l => l.replace(/%c/g, '')).filter(l => l.includes('[Whisper]'));
-                console.log('  [E2E] Whisper logs:', errorLogs.slice(-10));
-                // If whisper wasn't triggered at all, that's also acceptable
-                // (button might not exist without LearnerMode)
-            }
-        });
-    });
-
-    test.describe('Scenario: Model name migration', () => {
-        /**
-         * Given: The user has an old Xenova model name in their settings
-         * When:  Whisper reads the settings
-         * Then:  The model name is migrated to onnx-community
-         *
-         * Covers: NF-6
-         */
-        test('should migrate Xenova model names to onnx-community', async ({
-            whisperPage: page,
-            consoleLogs,
-        }) => {
-            await ensureLoggedIn(page);
-            await page.goto(`https://asmr.one/work/${TEST_WORK}`, { waitUntil: 'commit', timeout: 30000 });
-
-            await page.waitForFunction(
-                () => !!(window as any).__ASMR_LOGGER__ || !!(window as any).ASMRUlt || !!(window as any).__ASMR_ULTIMATE_INITIALIZED__,
-                { timeout: 20000 }
-            ).catch(() => {});
-            await page.waitForTimeout(2000);
-
-            // Set an old Xenova model name in GM storage
             await page.evaluate(() => {
-                localStorage.setItem('GM_whisperModel', JSON.stringify('Xenova/whisper-small'));
+                const state = window as any;
+                state.__E2E_WHISPER_ERRORS__ = [];
+                state.__ASMR_EVENT_BUS__.on('whisper:error', (payload: { message?: string }) => {
+                    state.__E2E_WHISPER_ERRORS__.push(payload?.message || '');
+                });
             });
 
-            // Inject a fake audio source so transcription proceeds far enough to read settings
-            await page.evaluate(() => {
-                let audio = document.querySelector('audio') as HTMLAudioElement;
-                if (!audio) {
-                    audio = document.createElement('audio');
-                    document.body.appendChild(audio);
-                }
-                audio.src = '/test-whisper-audio.wav';
-                audio.load();
+            expect(await clickWhisperButton(page)).toBe(true);
+            await page.waitForFunction(() => {
+                const errors = (window as any).__E2E_WHISPER_ERRORS__ as string[] | undefined;
+                return errors?.some((message) => /No audio source found|音声ソース|未找到音频源/.test(message));
+            }, { timeout: 15000 });
 
-                const bridge = (window as any).__ASMR_KIKOERU_BRIDGE__;
-                if (bridge?.store?.state?.AudioPlayer) {
-                    bridge.store.state.AudioPlayer.currentTrack = {
-                        mediaDownloadUrl: location.origin + '/test-whisper-audio.wav',
-                        title: 'Migration Test',
-                    };
-                }
-            });
-            await page.waitForTimeout(1000);
-
-            // Trigger whisper
-            await clickWhisperButton(page);
-
-            // Wait for settings to be read (the migration log)
-            await page.waitForTimeout(5000);
-
-            const cleanedLogs = consoleLogs.map(l => l.replace(/%c/g, ''));
-            const migrationLog = cleanedLogs.find(l => l.includes('Migrating model'));
-            const settingsLog = cleanedLogs.find(l => l.includes('Using settings'));
-
-            console.log('  [E2E] Migration log:', migrationLog || 'none');
-            console.log('  [E2E] Settings log:', settingsLog || 'none');
-
-            // Check storage was updated
-            const storedModel = await page.evaluate(() => {
-                const v = localStorage.getItem('GM_whisperModel');
-                return v ? JSON.parse(v) : null;
-            });
-            console.log('  [E2E] Stored model after migration:', storedModel);
-
-            if (migrationLog) {
-                expect(storedModel).toBe('onnx-community/whisper-small');
-                console.log('  [E2E] ✓ Model name migrated correctly');
-            }
-
-            // Stop any in-progress transcription
-            await page.evaluate(() => {
-                const btn = document.querySelector('.asmr-whisper-btn');
-                if (btn?.classList.contains('learner-btn-active')) {
-                    btn.dispatchEvent(new Event('click'));
-                }
-            });
+            const errors = await page.evaluate(() => (window as any).__E2E_WHISPER_ERRORS__ as string[]);
+            expect(errors.some((message) => /No audio source found|音声ソース|未找到音频源/.test(message))).toBe(true);
+            console.log('  [E2E] ✓ Got expected no-audio-source error event');
         });
     });
 });

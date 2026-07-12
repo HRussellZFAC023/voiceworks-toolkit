@@ -18,18 +18,22 @@
  * RJ-code lists grouped per playlist).
  */
 
-import { Logger } from '../core/Utils';
+import { I18n, Logger } from '../core/Utils';
 import { GM_setValue } from '$';
 import { apiRequest } from './playlist/PlaylistService';
 import { PlaylistDiscoveryService } from './playlist/PlaylistDiscoveryService';
+import { runPacedBatches } from '../core/PacedBatch';
 import type { PlaylistEntry, PlaylistMetadata, PlaylistWorkItem, PlaylistWorksResponse } from '../api/Playlist';
 
-export const EMERGENCY_EXPORT_STORAGE_KEY = 'asmr-ult:emergency-export';
+const EMERGENCY_EXPORT_STORAGE_KEY = 'asmr-ult:emergency-export';
 const WORKS_PAGE_SIZE = 100;
 /** Soft cap so a huge discovery cache can't turn an export into an API hammer. */
 const MAX_PUBLIC_PLAYLISTS = 200;
-/** Pause between community-playlist fetches — an export must never look like a request storm. */
-const PUBLIC_FETCH_PACING_MS = 50;
+/** Small bounded batches reduce wall time without turning export into a request storm. */
+const OWN_FETCH_BATCH_SIZE = 3;
+const PUBLIC_FETCH_BATCH_SIZE = 3;
+const OWN_FETCH_PACING_MS = 75;
+const PUBLIC_FETCH_PACING_MS = 175;
 
 // ---------------------------------------------------------------------------
 // Export document shape
@@ -63,7 +67,7 @@ export interface EmergencyExportDocument {
     errors: string[];
 }
 
-export interface ExportProgress {
+interface ExportProgress {
     stage: 'own' | 'public' | 'done';
     done: number;
     total: number;
@@ -91,15 +95,20 @@ function workItemToExported(item: PlaylistWorkItem | Record<string, unknown>): E
     };
 }
 
-async function fetchAllWorks(playlistId: string): Promise<ExportedWork[]> {
+async function fetchAllWorks(
+    playlistId: string,
+    firstPage?: PlaylistWorksResponse,
+): Promise<ExportedWork[]> {
     const works: ExportedWork[] = [];
     let page = 1;
     for (;;) {
-        const res = await apiRequest<PlaylistWorksResponse>('/api/playlist/get-playlist-works', {
-            id: playlistId,
-            page,
-            pageSize: WORKS_PAGE_SIZE,
-        });
+        const res = page === 1 && firstPage
+            ? firstPage
+            : await apiRequest<PlaylistWorksResponse>('/api/playlist/get-playlist-works', {
+                id: playlistId,
+                page,
+                pageSize: WORKS_PAGE_SIZE,
+            });
         const items = Array.isArray(res?.works) ? res.works : [];
         works.push(...items.map(workItemToExported));
         const total = res?.pagination?.totalCount ?? works.length;
@@ -109,11 +118,22 @@ async function fetchAllWorks(playlistId: string): Promise<ExportedWork[]> {
     return works;
 }
 
-async function fetchPlaylistAsExported(id: string): Promise<ExportedPlaylist> {
-    const meta = await apiRequest<PlaylistMetadata>('/api/playlist/get-playlist-metadata', { id });
+export async function fetchPlaylistAsExported(id: string): Promise<ExportedPlaylist> {
+    // Metadata and page one are independent. Starting them together removes a
+    // full network round-trip from every playlist in Drive/local exports.
+    const worksRequest = apiRequest<PlaylistWorksResponse>('/api/playlist/get-playlist-works', {
+        id,
+        page: 1,
+        pageSize: WORKS_PAGE_SIZE,
+    }).then(value => ({ value, error: null as unknown }))
+        .catch(error => ({ value: undefined, error }));
+    const [meta, firstWorks] = await Promise.all([
+        apiRequest<PlaylistMetadata>('/api/playlist/get-playlist-metadata', { id }),
+        worksRequest,
+    ]);
     const base: ExportedPlaylist = {
         id,
-        name: meta?.name || 'Unknown Playlist',
+        name: meta?.name || I18n.t('emergencyUnknownPlaylist'),
         description: meta?.description || '',
         privacy: meta?.privacy,
         userName: meta?.user_name,
@@ -121,7 +141,8 @@ async function fetchPlaylistAsExported(id: string): Promise<ExportedPlaylist> {
         works: [],
     };
     try {
-        base.works = await fetchAllWorks(id);
+        if (firstWorks.error) throw firstWorks.error;
+        base.works = await fetchAllWorks(id, firstWorks.value);
         if (!base.works.length && Array.isArray(meta?.works)) {
             // Fallback: metadata sometimes embeds the work list directly.
             base.works = meta.works.map((w) => typeof w === 'string'
@@ -180,59 +201,85 @@ export async function buildEmergencyExport(onProgress?: ProgressCallback): Promi
     try {
         ownEntries = await fetchOwnPlaylistEntries();
     } catch (error) {
-        const msg = `Could not list own playlists (not logged in?): ${(error as Error)?.message || error}`;
-        Logger.warn(`[EmergencyExport] ${msg}`);
-        doc.errors.push(msg);
+        const detail = error instanceof Error ? error.message : 'Unknown request error';
+        Logger.warn('[EmergencyExport] Could not list own playlists', detail);
+        doc.errors.push(I18n.t('emergencyOwnListUnavailable'));
     }
-    for (let i = 0; i < ownEntries.length; i++) {
+    let ownCompleted = 0;
+    const ownResults = await runPacedBatches(
+        ownEntries,
+        async (entry) => {
+            try {
+                return await fetchPlaylistAsExported(entry.id);
+            } finally {
+                ownCompleted += 1;
+                onProgress?.({ stage: 'own', done: ownCompleted, total: ownEntries.length, label: entry.name || entry.id });
+            }
+        },
+        { batchSize: OWN_FETCH_BATCH_SIZE, delayMs: OWN_FETCH_PACING_MS },
+    );
+    ownResults.forEach((result, i) => {
         const entry = ownEntries[i];
-        onProgress?.({ stage: 'own', done: i, total: ownEntries.length, label: entry.name || entry.id });
-        try {
-            const exported = await fetchPlaylistAsExported(entry.id);
+        if (result.status === 'fulfilled') {
+            const exported = result.value;
             // Prefer the authoritative listing's name/privacy for own playlists.
             exported.name = entry.name || exported.name;
             if (typeof entry.privacy === 'number') exported.privacy = entry.privacy;
             doc.ownPlaylists.push(exported);
-        } catch (error) {
+        } else {
             doc.ownPlaylists.push({
                 id: entry.id,
-                name: entry.name || 'Unknown Playlist',
+                name: entry.name || I18n.t('emergencyUnknownPlaylist'),
                 description: entry.description || '',
                 privacy: entry.privacy,
                 worksCount: entry.works_count ?? entry.worksCount ?? 0,
                 works: [],
-                error: (error as Error)?.message || String(error),
+                error: result.reason instanceof Error ? result.reason.message : String(result.reason),
             });
         }
-    }
+    });
 
     // --- Public/community playlists from discovery --------------------------
     const discovery = PlaylistDiscoveryService.getInstance();
     const allPublicIds = discovery.getDiscoveredIds()
-        .filter((id) => !doc.ownPlaylists.some((p) => p.id.toLowerCase() === id));
+        .filter((id) => !doc.ownPlaylists.some((p) => p.id.toLowerCase() === id.toLowerCase()));
     const publicIds = allPublicIds.slice(0, MAX_PUBLIC_PLAYLISTS);
     if (allPublicIds.length > publicIds.length) {
-        doc.errors.push(`Public playlist export capped at ${MAX_PUBLIC_PLAYLISTS} of ${allPublicIds.length} discovered playlists.`);
+        doc.errors.push(I18n.format('emergencyPublicCap', {
+            max: MAX_PUBLIC_PLAYLISTS,
+            total: allPublicIds.length,
+        }));
     }
-    for (let i = 0; i < publicIds.length; i++) {
-        if (i) await new Promise((r) => setTimeout(r, PUBLIC_FETCH_PACING_MS));
+    let publicCompleted = 0;
+    const publicResults = await runPacedBatches(
+        publicIds,
+        async (id) => {
+            try {
+                return await fetchPlaylistAsExported(id);
+            } finally {
+                publicCompleted += 1;
+                onProgress?.({ stage: 'public', done: publicCompleted, total: publicIds.length, label: id });
+            }
+        },
+        { batchSize: PUBLIC_FETCH_BATCH_SIZE, delayMs: PUBLIC_FETCH_PACING_MS },
+    );
+    publicResults.forEach((result, i) => {
         const id = publicIds[i];
-        onProgress?.({ stage: 'public', done: i, total: publicIds.length, label: id });
-        try {
-            doc.publicPlaylists.push(await fetchPlaylistAsExported(id));
-        } catch (error) {
+        if (result.status === 'fulfilled') {
+            doc.publicPlaylists.push(result.value);
+        } else {
             const cached = discovery.getCachedMetadata(id);
             doc.publicPlaylists.push({
                 id,
-                name: cached?.name || 'Unknown Playlist',
+                name: cached?.name || I18n.t('emergencyUnknownPlaylist'),
                 description: '',
                 userName: cached?.user_name,
                 worksCount: cached?.worksCount ?? 0,
                 works: [],
-                error: (error as Error)?.message || String(error),
+                error: result.reason instanceof Error ? result.reason.message : String(result.reason),
             });
         }
-    }
+    });
 
     onProgress?.({ stage: 'done', done: 1, total: 1, label: '' });
 
@@ -254,7 +301,7 @@ function csvEscape(value: string): string {
     return /[",\n\r]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
 }
 
-export function exportToCsv(playlists: ExportedPlaylist[]): string {
+function exportToCsv(playlists: ExportedPlaylist[]): string {
     const rows = ['playlist_id,playlist_name,rj_code,title'];
     for (const p of playlists) {
         if (!p.works.length) {
@@ -268,7 +315,7 @@ export function exportToCsv(playlists: ExportedPlaylist[]): string {
     return rows.join('\n');
 }
 
-export function exportToTxt(playlists: ExportedPlaylist[]): string {
+function exportToTxt(playlists: ExportedPlaylist[]): string {
     return playlists.map((p) => {
         const header = `# ${p.name} (${p.works.length} works)${p.userName ? ` — by ${p.userName}` : ''}`;
         return [header, ...p.works.map((w) => w.title ? `${w.rjCode}\t${w.title}` : w.rjCode)].join('\n');
@@ -283,7 +330,7 @@ function timestampSlug(iso: string): string {
     return iso.replace(/[:T]/g, '-').slice(0, 19);
 }
 
-export function downloadTextFile(filename: string, content: string, mime: string): void {
+function downloadTextFile(filename: string, content: string, mime: string): void {
     const blob = new Blob([content], { type: `${mime};charset=utf-8` });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');

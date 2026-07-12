@@ -21,8 +21,11 @@
                 "hash": "mock_hash_mp3_1",
                 "work_id": "RJ01052162",
                 "stream_url": "https://example.com/01.mp3",
-                "mediaStreamUrl": "https://example.com/01.mp3",
-                "duration": 300
+      "mediaStreamUrl": "https://example.com/01.mp3",
+      "duration": 300,
+      "workTitle": "[Mock] Standard Test Work",
+      "work": { "id": 1052162, "source_id": "RJ01052162", "source_type": "DLSITE" },
+      "subtitles": []
             },
             {
                 "type": "audio",
@@ -30,8 +33,11 @@
                 "hash": "mock_hash_mp3_2",
                 "work_id": "RJ01052162",
                 "stream_url": "https://example.com/02.mp3",
-                "mediaStreamUrl": "https://example.com/02.mp3",
-                "duration": 420
+      "mediaStreamUrl": "https://example.com/02.mp3",
+      "duration": 420,
+      "workTitle": "[Mock] Standard Test Work",
+      "work": { "id": 1052162, "source_id": "RJ01052162", "source_type": "DLSITE" },
+      "subtitles": []
             }
         ]
     },
@@ -45,8 +51,11 @@
                 "hash": "mock_hash_wav_1",
                 "work_id": "RJ01052162",
                 "stream_url": "https://example.com/01.wav",
-                "mediaStreamUrl": "https://example.com/01.wav",
-                "duration": 300
+      "mediaStreamUrl": "https://example.com/01.wav",
+      "duration": 300,
+      "workTitle": "[Mock] Standard Test Work",
+      "work": { "id": 1052162, "source_id": "RJ01052162", "source_type": "DLSITE" },
+      "subtitles": []
             },
             {
                 "type": "audio",
@@ -54,8 +63,11 @@
                 "hash": "mock_hash_wav_2",
                 "work_id": "RJ01052162",
                 "stream_url": "https://example.com/02.wav",
-                "mediaStreamUrl": "https://example.com/02.wav",
-                "duration": 420
+      "mediaStreamUrl": "https://example.com/02.wav",
+      "duration": 420,
+      "workTitle": "[Mock] Standard Test Work",
+      "work": { "id": 1052162, "source_id": "RJ01052162", "source_type": "DLSITE" },
+      "subtitles": []
             }
         ]
     },

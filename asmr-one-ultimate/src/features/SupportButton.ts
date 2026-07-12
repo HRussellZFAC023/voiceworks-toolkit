@@ -1,21 +1,27 @@
 import { HeaderActions } from '../ui/HeaderActions';
-import { SafeUtils } from '../core/Utils';
+import { I18n, SafeUtils } from '../core/Utils';
 import { CentralObserver } from '../core/CentralObserver';
 
 export class SupportButton {
     private button: HTMLElement | null = null;
+    private enabled = false;
+    private lifecycleGeneration = 0;
     // Link from P2-04 task
     private readonly link = 'https://paypal.me/HenryRussell163';
 
     public async enable(): Promise<void> {
-        if (this.button?.isConnected) return; // Already enabled
+        if (this.enabled) return;
+        this.enabled = true;
+        const generation = ++this.lifecycleGeneration;
 
         // Initial wait
         await SafeUtils.waitFor(() => !!HeaderActions.ensure(), 30000);
+        if (!this.enabled || generation !== this.lifecycleGeneration) return;
         this.inject();
 
         // Re-inject when Vue re-renders the header (detected by CentralObserver)
         CentralObserver.register('support-button', () => {
+            if (!this.enabled || generation !== this.lifecycleGeneration) return;
             if (this.button && !this.button.isConnected) {
                 this.button = null;
                 this.inject();
@@ -24,6 +30,8 @@ export class SupportButton {
     }
 
     public disable(): void {
+        this.enabled = false;
+        this.lifecycleGeneration++;
         CentralObserver.unregister('support-button');
         if (this.button) {
             this.button.remove();
@@ -32,6 +40,7 @@ export class SupportButton {
     }
 
     private inject(): void {
+        if (!this.enabled) return;
         const container = HeaderActions.ensure();
         if (!container) return;
 
@@ -45,8 +54,9 @@ export class SupportButton {
         btn.rel = 'noopener noreferrer';
         // Quasar button classes for a flat button with icon and text
         btn.className = 'q-btn q-btn-flat q-btn-dense asmr-support-btn text-white';
-        btn.title = 'Support Development';
-        btn.ariaLabel = 'Support Development';
+        const label = I18n.t('donateLabel');
+        btn.title = label;
+        btn.ariaLabel = label;
 
         btn.innerHTML = '<span class="q-btn__content"><i class="q-icon material-icons" aria-hidden="true" role="presentation">health_and_safety</i></span>';
 

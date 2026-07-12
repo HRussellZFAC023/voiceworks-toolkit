@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { AudioCache } from '../../src/infrastructure/AudioCache';
+import { Config } from '../../src/core/Utils';
 
 // Mock IDB
 const mockDB = {
@@ -14,8 +15,11 @@ vi.mock('idb', () => ({
 
 describe('AudioCache', () => {
     beforeEach(() => {
+        vi.restoreAllMocks();
         vi.clearAllMocks();
+        mockDB.put.mockResolvedValue(undefined);
         AudioCache.objectUrls.clear();
+        document.body.innerHTML = '';
     });
 
     // =========================================================================
@@ -51,6 +55,274 @@ describe('AudioCache', () => {
             url: 'url',
             blob: blob
         }));
+    });
+
+    describe('automatic caching policy', () => {
+        const track = {
+            type: 'audio' as const,
+            hash: 'track-a',
+            title: 'Track A',
+            mediaStreamUrl: 'https://raw.kiko-play-niptan.one/audio/track-a.mp3',
+            mediaDownloadUrl: 'https://api.asmr.one/api/media/download/track-a',
+        };
+
+        it('does not start a full-track background download by default', async () => {
+            vi.spyOn(Config, 'get').mockImplementation((key) => key === 'autoCacheAudio' ? false : 5 as any);
+            mockDB.get.mockResolvedValue(undefined);
+            const cache = new AudioCache();
+            const backgroundDownload = vi.spyOn(cache as any, 'backgroundDownload').mockImplementation(() => {});
+
+            await cache.interceptPlay({ ...track });
+
+            expect(backgroundDownload).not.toHaveBeenCalled();
+        });
+
+        it('starts a background download only after explicit opt-in', async () => {
+            vi.spyOn(Config, 'get').mockImplementation((key) => key === 'autoCacheAudio' ? true : 5 as any);
+            mockDB.get.mockResolvedValue(undefined);
+            const cache = new AudioCache();
+            const backgroundDownload = vi.spyOn(cache as any, 'backgroundDownload').mockImplementation(() => {});
+
+            await cache.interceptPlay({ ...track });
+
+            expect(backgroundDownload).toHaveBeenCalledTimes(1);
+            expect(backgroundDownload).toHaveBeenCalledWith(track.mediaDownloadUrl);
+        });
+    });
+
+    describe('trusted media CORS preparation', () => {
+        it('marks the verified CDN source before load and proves the matching current source', () => {
+            const audio = document.createElement('audio');
+            document.body.appendChild(audio);
+            const cache = new AudioCache();
+            const source = 'https://raw.kiko-play-niptan.one/audio/track-a.mp3';
+            const track = {
+                type: 'audio' as const,
+                hash: 'track-a',
+                title: 'Track A',
+                mediaStreamUrl: source,
+            };
+
+            expect(cache.prepareTrustedCorsPlayback(track)).toBe(true);
+            expect(audio.crossOrigin).toBe('anonymous');
+            expect(audio.dataset.asmrTrustedCorsSource).toBe(source);
+
+            // Simulate the host dispatch selecting the prepared source.
+            audio.src = source;
+            expect(AudioCache.hasTrustedCorsPlayback(audio)).toBe(true);
+
+            audio.src = 'https://raw.kiko-play-niptan.one/audio/different.mp3';
+            expect(AudioCache.hasTrustedCorsPlayback(audio)).toBe(false);
+        });
+
+        it('prepares the live fast CDN used by RJ01503719', () => {
+            const audio = document.createElement('audio');
+            document.body.appendChild(audio);
+            const cache = new AudioCache();
+            const source = 'https://fast.kiko-play-niptan.one/media/stream/1503719/track.m4a';
+            const rawSource = 'https://raw.kiko-play-niptan.one/media/stream/1503719/track.wav';
+
+            expect(cache.prepareTrustedCorsPlayback({
+                type: 'audio',
+                hash: 'rj01503719-track',
+                title: 'RJ01503719 Track',
+                streamLowQualityUrl: source,
+                mediaStreamUrl: rawSource,
+            })).toBe(true);
+
+            audio.src = source;
+            expect(audio.crossOrigin).toBe('anonymous');
+            expect(audio.dataset.asmrTrustedCorsSource).toBe(source);
+            expect(AudioCache.hasTrustedCorsPlayback(audio)).toBe(true);
+        });
+
+        it('does not mark an unverified cross-origin host', () => {
+            const audio = document.createElement('audio');
+            document.body.appendChild(audio);
+            const cache = new AudioCache();
+
+            expect(cache.prepareTrustedCorsPlayback({
+                type: 'audio',
+                hash: 'track-b',
+                title: 'Track B',
+                mediaStreamUrl: 'https://media.example.net/track-b.mp3',
+            })).toBe(false);
+            expect(audio.crossOrigin).toBeNull();
+            expect(audio.dataset.asmrTrustedCorsSource).toBeUndefined();
+        });
+
+        it('clears script-owned CORS state before an unverified next track', () => {
+            const audio = document.createElement('audio');
+            document.body.appendChild(audio);
+            const cache = new AudioCache();
+            const trustedSource = 'https://raw.kiko-play-niptan.one/audio/trusted.mp3';
+
+            expect(cache.prepareTrustedCorsPlayback({
+                type: 'audio',
+                hash: 'trusted',
+                title: 'Trusted',
+                mediaStreamUrl: trustedSource,
+            })).toBe(true);
+            expect(audio.crossOrigin).toBe('anonymous');
+
+            expect(cache.prepareTrustedCorsPlayback({
+                type: 'audio',
+                hash: 'unverified',
+                title: 'Unverified',
+                mediaStreamUrl: 'https://media.example.net/unverified.mp3',
+            })).toBe(false);
+
+            expect(audio.crossOrigin).toBeNull();
+            expect(audio.dataset.asmrTrustedCorsSource).toBeUndefined();
+            audio.src = trustedSource;
+            expect(AudioCache.hasTrustedCorsPlayback(audio)).toBe(false);
+        });
+
+        it('rejects a dataset-only marker that was not recorded before load', () => {
+            const audio = document.createElement('audio');
+            const source = 'https://raw.kiko-play-niptan.one/audio/spoofed.mp3';
+            audio.crossOrigin = 'anonymous';
+            audio.dataset.asmrTrustedCorsSource = source;
+            audio.src = source;
+
+            expect(AudioCache.hasTrustedCorsPlayback(audio)).toBe(false);
+        });
+
+        it('refuses to claim pre-load trust after the target has started loading', () => {
+            const audio = document.createElement('audio');
+            const source = 'https://raw.kiko-play-niptan.one/audio/already-loading.mp3';
+            audio.src = source;
+            Object.defineProperty(audio, 'readyState', { configurable: true, value: 1 });
+            Object.defineProperty(audio, 'networkState', { configurable: true, value: 1 });
+            document.body.appendChild(audio);
+
+            const cache = new AudioCache();
+            expect(cache.prepareTrustedCorsPlayback({
+                type: 'audio',
+                hash: 'track-c',
+                title: 'Track C',
+                mediaStreamUrl: source,
+            })).toBe(false);
+            expect(AudioCache.hasTrustedCorsPlayback(audio)).toBe(false);
+        });
+
+        it('hooks SET_QUEUE before the current host starts loading the selected fast-CDN track', () => {
+            const audio = document.createElement('audio');
+            document.body.appendChild(audio);
+            const cache = new AudioCache();
+            const order: string[] = [];
+            const prepare = vi.spyOn(cache, 'prepareTrustedCorsPlayback').mockImplementation(() => {
+                order.push('prepare');
+                return true;
+            });
+            vi.spyOn(cache, 'interceptPlay').mockResolvedValue(undefined);
+            const store = {
+                state: { AudioPlayer: { currentTime: 0, duration: 0, queue: [], queueIndex: 0 }, User: {} },
+                commit: vi.fn(() => { order.push('commit'); }),
+                dispatch: vi.fn(() => Promise.resolve()),
+            };
+            const track = {
+                type: 'audio' as const,
+                hash: 'rj01503719',
+                title: 'Live track',
+                streamLowQualityUrl: 'https://fast.kiko-play-niptan.one/media/stream/track.m4a',
+                mediaStreamUrl: 'https://raw.kiko-play-niptan.one/media/stream/track.wav',
+            };
+
+            cache.installPlaybackInterceptors(store as any);
+            (store.commit as any)('AudioPlayer/SET_QUEUE', { queue: [track], index: 0 });
+
+            expect(order).toEqual(['prepare', 'commit']);
+            expect(prepare).toHaveBeenCalledWith(track);
+        });
+
+        it('records the same low-quality URL that the host selects when raw and fast sources coexist', () => {
+            const audio = document.createElement('audio');
+            document.body.appendChild(audio);
+            const cache = new AudioCache();
+            const fastSource = 'https://fast.kiko-play-niptan.one/media/stream/track.m4a';
+            const track = {
+                type: 'audio' as const,
+                hash: 'rj01503719',
+                title: 'Live track',
+                streamLowQualityUrl: fastSource,
+                mediaStreamUrl: 'https://raw.kiko-play-niptan.one/media/stream/track.wav',
+            };
+
+            expect(cache.prepareTrustedCorsPlayback(track)).toBe(true);
+            audio.src = fastSource;
+
+            expect(audio.dataset.asmrTrustedCorsSource).toBe(fastSource);
+            expect(AudioCache.hasTrustedCorsPlayback(audio)).toBe(true);
+        });
+
+        it('always reaches the legacy host dispatch when cache lookup rejects', async () => {
+            const audio = document.createElement('audio');
+            document.body.appendChild(audio);
+            const cache = new AudioCache();
+            vi.spyOn(cache, 'interceptPlay').mockRejectedValue(new Error('IndexedDB unavailable'));
+            const originalDispatch = vi.fn(() => Promise.resolve('played'));
+            const store = {
+                state: { AudioPlayer: { currentTime: 0, duration: 0 }, User: {} },
+                commit: vi.fn(),
+                dispatch: originalDispatch,
+            };
+            const track = {
+                type: 'audio' as const,
+                hash: 'track',
+                title: 'Track',
+                mediaStreamUrl: 'https://fast.kiko-play-niptan.one/media/stream/track.m4a',
+            };
+
+            cache.installPlaybackInterceptors(store as any);
+            await expect((store.dispatch as any)('AudioPlayer/playTrack', track)).resolves.toBe('played');
+
+            expect(originalDispatch).toHaveBeenCalledTimes(1);
+            expect(originalDispatch).toHaveBeenCalledWith('AudioPlayer/playTrack', track, undefined);
+        });
+    });
+
+    it('preserves original queue URLs and recreates an evicted blob on replay', async () => {
+        const originalCreateObjectURL = URL.createObjectURL;
+        const originalRevokeObjectURL = URL.revokeObjectURL;
+        let objectUrlId = 0;
+        URL.createObjectURL = vi.fn(() => `blob:https://asmr.one/${++objectUrlId}`);
+        URL.revokeObjectURL = vi.fn();
+        mockDB.get.mockResolvedValue({
+            url: '',
+            blob: new Blob(['cached audio'], { type: 'audio/mp4' }),
+            lastPlayed: 0,
+            size: 12,
+        });
+
+        const cache = new AudioCache();
+        (cache as any).bridge = { store: { state: { AudioPlayer: { playing: true } } } };
+        const tracks = Array.from({ length: 6 }, (_, index) => ({
+            type: 'audio' as const,
+            hash: `track-${index}`,
+            title: `Track ${index}`,
+            mediaStreamUrl: `https://raw.kiko-play-niptan.one/stream/${index}.m4a`,
+            mediaDownloadUrl: `https://raw.kiko-play-niptan.one/download/${index}.m4a`,
+        }));
+
+        try {
+            for (const track of tracks) await cache.interceptPlay(track);
+
+            expect(AudioCache.objectUrls.size).toBe(5);
+            expect(AudioCache.objectUrls.has(tracks[0].mediaDownloadUrl)).toBe(false);
+            for (let index = 0; index < tracks.length; index++) {
+                expect(tracks[index].mediaStreamUrl).toContain(`/stream/${index}.m4a`);
+                expect(tracks[index].mediaDownloadUrl).toContain(`/download/${index}.m4a`);
+            }
+
+            await cache.interceptPlay(tracks[0]);
+            expect(AudioCache.objectUrls.has(tracks[0].mediaDownloadUrl)).toBe(true);
+            expect(tracks[0].mediaStreamUrl).toBe('https://raw.kiko-play-niptan.one/stream/0.m4a');
+            expect(URL.revokeObjectURL).toHaveBeenCalled();
+        } finally {
+            URL.createObjectURL = originalCreateObjectURL;
+            URL.revokeObjectURL = originalRevokeObjectURL;
+        }
     });
 
     // =========================================================================

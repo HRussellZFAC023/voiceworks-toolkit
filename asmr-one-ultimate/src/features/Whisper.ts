@@ -1,7 +1,8 @@
 /**
  * Whisper - Real-time WebGPU transcription (rebuilt)
  *
- * - Captures audio directly from the <audio> element (no file download)
+ * - Captures bounded live audio directly from the <audio> element
+ * - Uses a size-capped compatibility decode only when live capture is unavailable
  * - Uses Transformers.js in a Web Worker (WebGPU required)
  * - Emits live segments to Learner Mode + mini player
  * - Caches transcripts per track for near-instant reloads
@@ -13,18 +14,20 @@ import { EventBus } from '../core/EventBus';
 import { createWhisperWorker } from './WhisperWorkerLoader';
 import { processRawChunks } from './whisperProcessing';
 import type { RawChunk, ProcessedSegment } from './whisperProcessing';
-import { getAudioElement } from '../core/DomUtils';
+import { getAudioElement, isChinese } from '../core/DomUtils';
 import { SharedCache, CacheKeys } from '../core/Cache';
 import { MLCrashGuard } from '../core/MLCrashGuard';
-import type { WhisperSegment, WhisperWord, KikoeruStoreState } from '../types';
+import type { WhisperSegment, WhisperWord, KikoeruStoreState, PlayerTrack, TranslationSourceHint } from '../types';
 import { AppStore } from '../store/AppStore';
 import { TranslationService } from '../services/TranslationService';
 import { AudioCache } from '../infrastructure/AudioCache';
 import { gmRequest } from '../infrastructure/HttpClient';
 import { GpuScheduler, Priority } from '../core/GpuScheduler';
-import { DeviceCapabilities } from '../core/DeviceCapabilities';
+import { DeviceCapabilities, shouldUseTinyWhisperModel } from '../core/DeviceCapabilities';
+import { CentralObserver } from '../core/CentralObserver';
 import { buildLrcFromSegments, buildVttFromSegments } from './transcriptFileUtils';
 import { correctWhisperText } from '../data/nsfw-glossary';
+import { connectAudioPcmTap, hasSharedSourceNode } from '../core/AudioAnalysis';
 
 // ============================================================================
 // Constants
@@ -33,6 +36,8 @@ import { correctWhisperText } from '../data/nsfw-glossary';
 const TARGET_SAMPLE_RATE = 16000;
 const DEFAULT_MAX_PENDING_CHUNKS = 6;
 const DEFAULT_MODEL = 'onnx-community/whisper-small_timestamped';
+const FALLBACK_MODEL = 'onnx-community/whisper-tiny';
+const MODEL_LOAD_STALL_TIMEOUT_MS = 120_000;
 const CACHE_TTL_MS = 1000 * 60 * 60 * 24 * 90; // 90 days
 const MODEL_READY_TTL_MS = 1000 * 60 * 60 * 24 * 30; // 30 days
 // No lookahead limit — transcribe the entire audio from start to finish.
@@ -44,11 +49,79 @@ const DEFAULT_WORKER_UPDATE_INTERVAL_MS = 200;
 const DEFAULT_MIN_WEBGPU_BUFFER_BYTES = 256 * 1024 * 1024;
 const CHUNK_STALL_TIMEOUT_FLOOR_MS = 25_000;
 const CHUNK_STALL_TIMEOUT_MULTIPLIER = 3;
+const AUDIO_DECODE_TIMEOUT_MIN_MS = 90_000;
+const AUDIO_DECODE_TIMEOUT_MAX_MS = 600_000;
+const AUDIO_DECODE_TIMEOUT_PER_MIB_MS = 3_000;
 const INITIAL_BOOTSTRAP_CHUNK_LENGTH_S = 6;
+const MAX_LIVE_PCM_SECONDS = 180;
+const LIVE_PCM_TRIM_SECONDS = 30;
+const INITIAL_LIVE_PCM_SECONDS = 12;
+const MAX_FALLBACK_AUDIO_BYTES = 32 * 1024 * 1024;
+const BOUNDED_AUDIO_STREAM_INACTIVITY_MS = 30_000;
+const BOUNDED_AUDIO_STREAM_TOTAL_MS = 120_000;
 const TRANSLATE_AHEAD_MAX_SEGMENTS_PER_RUN = 50;
 const GPU_ERROR_PATTERN =
     /createBuffer|RangeError|out of memory|OOM|allocation|device lost|GPUDevice|createComputePipeline|createShaderModule|mapAsync|mapping webgpu buffer|invalid buffer|Instance reference|AbortError|release session|invalid session|index out of bounds|reading 'destroy'|reading 'dispose'/i;
 const EXPLICIT_DEVICE_LOSS_PATTERN = /device lost|Instance reference|release session|invalid session|reading 'destroy'|reading 'dispose'/i;
+
+function normalizeLanguageCode(language: string): 'ja' | 'zh' | 'en' | '' {
+    const normalized = String(language || '').trim().toLowerCase().split('-')[0];
+    if (normalized === 'japanese' || normalized === 'ja' || normalized === 'jp') return 'ja';
+    if (normalized === 'chinese' || normalized === 'zh' || normalized === 'cn' || normalized === 'cmn') return 'zh';
+    if (normalized === 'english' || normalized === 'en') return 'en';
+    return '';
+}
+
+type WhisperWorkLanguageContext = {
+    id?: number | string;
+    source_id?: string;
+    original_workno?: string | null;
+    translation_info?: {
+        lang?: string | null;
+        is_original?: boolean;
+    } | null;
+} | null | undefined;
+
+/**
+ * Resolve the model's spoken-language constraint. `auto` is content-aware and
+ * Japanese-first because very short live chunks are otherwise frequently
+ * misdetected as English. `detect` remains available for unconstrained model
+ * detection.
+ */
+export function resolveWhisperLanguage(
+    configuredLanguage: string,
+    work?: WhisperWorkLanguageContext,
+): string {
+    const configured = String(configuredLanguage || 'auto').trim().toLowerCase();
+    if (configured === 'detect') return '';
+
+    const base = configured.split('-')[0];
+    if (configured && configured !== 'auto') {
+        if (base === 'ja' || base === 'jp') return 'japanese';
+        if (base === 'zh' || base === 'cn' || base === 'cmn') return 'chinese';
+        if (base === 'en') return 'english';
+        return base;
+    }
+
+    // A translated catalogue edition describes page text, not necessarily the
+    // spoken audio. RJ01503719, for example, is tagged CHI_HANS with
+    // is_original=false but retains the Japanese source audio. Only constrain
+    // from catalogue metadata when it explicitly describes an original work.
+    if (work?.translation_info?.is_original === true) {
+        const workLang = String(work.translation_info.lang || '').toUpperCase();
+        if (workLang.includes('CHI') || workLang.includes('ZH')) return 'chinese';
+        if (workLang.includes('ENG') || workLang.includes('EN')) return 'english';
+        if (workLang.includes('JPN') || workLang.includes('JA')) return 'japanese';
+    }
+    return 'japanese';
+}
+
+class AudioFallbackLimitError extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = 'AudioFallbackLimitError';
+    }
+}
 
 // ============================================================================
 // Worker message types
@@ -129,6 +202,17 @@ interface WhisperSettings {
     minWebgpuBufferBytes: number;
 }
 
+function getWhisperSourceLanguageHint(language: string): TranslationSourceHint {
+    return normalizeLanguageCode(language) || 'auto';
+}
+
+interface WhisperAudioFallbackSource {
+    url: string;
+    knownSizeBytes: number | null;
+    allowUnknownSize: boolean;
+    preferBoundedStreaming: boolean;
+}
+
 interface CachedTranscript {
     text: string;
     segments: WhisperSegment[];
@@ -169,10 +253,15 @@ export class Whisper {
     private worker: Worker | null = null;
     private audio: HTMLAudioElement | null = null;
 
-    // Pre-decoded PCM buffer for lookahead processing
+    // Pre-decoded or live-captured PCM used by the chunk scheduler.
     private pcmBuffer: Float32Array | null = null;
     private pcmSourceUrl: string | null = null; // URL the pcmBuffer was decoded from
     private pcmDuration = 0; // seconds
+    private pcmBufferStartTime = 0; // absolute media time represented by sample 0
+    private pcmSampleLength = 0; // valid samples when live buffer has spare capacity
+    private liveCaptureCleanup: (() => void) | null = null;
+    private liveCaptureActive = false;
+    private liveCaptureEnded = false;
     private transcribedUpTo = 0; // how far we've sent chunks to worker (seconds)
     private processingLoopId: number | null = null;
 
@@ -196,6 +285,8 @@ export class Whisper {
     private autoWarmupStarted = false;
     private modelLoadTimer: number | null = null;
     private modelReady = false;
+    private workerBackend: 'webgpu' | 'wasm' | null = null;
+    private modelOverride: string | null = null;
     private autoTranscribeWorkId: string | null = null;
 
     private finalizeOnIdle = false;
@@ -203,9 +294,13 @@ export class Whisper {
     private lastTranslatedSegmentCount = 0;
     private translateAheadUpTo = 0; // seconds: segments up to this time already sent for translation
     private lastTranslateAheadAt = 0; // throttle translateAhead calls from update messages
+    private translationGeneration = 0;
+    private activeTranslationQueueKeys = new Set<string>();
     private lastTranscribeProgressAt = 0;
     private lastPersistAt = 0;
     private transcriptionGeneration = 0;
+    private workerInitGeneration = 0;
+    private workerInitPending: { worker: Worker; generation: number } | null = null;
     private static gpuRecoveryAttempts = 0;
     private static readonly MAX_GPU_RECOVERY = 3;
     private static webgpuFailed = false;
@@ -217,7 +312,9 @@ export class Whisper {
     private gpuRecoveryTimer: number | null = null;
     private idleUnloadTimer: number | null = null;
     private loadLeaseRelease: (() => void) | null = null; // GpuScheduler load lease
-    private storeWatcherBound = false;
+    private enabled = false;
+    private eventCleanups: Array<() => void> = [];
+    private storeUnwatch: (() => void) | null = null;
     private loggedTranscriptKeys = new Set<string>();
     private _audioCache: AudioCache | null = null;
     private autoStartTimer: number | null = null;
@@ -234,7 +331,6 @@ export class Whisper {
 
     constructor() {
         this.bridge = KikoeruBridge.getInstance();
-        this.setupEventListeners();
         if (!Whisper.instance) {
             Whisper.instance = this;
         }
@@ -245,7 +341,15 @@ export class Whisper {
     // ------------------------------------------------------------------------
 
     public enable(): void {
+        if (this.enabled) return;
+        this.enabled = true;
         Logger.log('[Whisper] Enabling Whisper...');
+
+        // Mount the no-flow status overlay as soon as the host player exists,
+        // not when model loading begins.
+        this.reserveStatusSlot();
+        CentralObserver.register('whisper-status-slot', () => this.reserveStatusSlot(), 100);
+        this.setupEventListeners();
 
         const settings = this.getWhisperSettings();
         if (settings.autoWarmup && !this.autoWarmupStarted) {
@@ -257,22 +361,62 @@ export class Whisper {
         // This fires whenever AudioPlayer.playing transitions to true —
         // covers initial load, user pressing play, and track advances.
         // Guard against double registration (enable() called multiple times).
-        if (!this.storeWatcherBound) {
-            this.storeWatcherBound = true;
-            this.bridge.store.watch?.(
+        if (!this.storeUnwatch) {
+            this.storeUnwatch = this.bridge.store.watch?.(
                 (state: KikoeruStoreState) => !!state.AudioPlayer?.playing,
                 (playing: boolean) => {
-                    if (playing && Config.get('alwaysTranscribe') && !this.transcribing) {
+                    if (this.enabled && playing && Config.get('alwaysTranscribe') && !this.transcribing) {
                         this.tryAutoStartForCurrentTrack();
                     }
                 }
-            );
+            ) || null;
         }
 
         // Also try immediately in case audio is already playing at enable() time
         if (Config.get('alwaysTranscribe')) {
             this.tryAutoStartForCurrentTrack();
         }
+    }
+
+    public disable(): void {
+        if (!this.enabled) return;
+        this.enabled = false;
+        Logger.log('[Whisper] Disabling Whisper...');
+
+        this.storeUnwatch?.();
+        this.storeUnwatch = null;
+        CentralObserver.unregister('whisper-status-slot');
+        this.eventCleanups.splice(0).forEach((cleanup) => cleanup());
+
+        // Clear auto mode before stopping so stopTranscription cannot preserve
+        // active UI or schedule work for the next track.
+        this.autoTranscribeWorkId = null;
+        if (this.transcribing) {
+            this.stopTranscription('disable');
+        }
+
+        this.clearAutoStartTimer();
+        this.clearIdleUnloadTimer();
+        this.clearModelLoadTimer();
+        this.abortFetch();
+        this.stopProcessingLoop();
+        this.detachAudioListeners();
+        this.resetWorker('disable');
+        this.resetState('disable');
+        this.statusEl?.parentElement?.classList.remove('asmr-whisper-status-host');
+        this.statusEl?.remove();
+        this.statusEl = null;
+        this.audio = null;
+        this.currentTrackSrc = null;
+        this.autoWarmupStarted = false;
+        this.setButtonsActive(false);
+        AppStore.setWhisperState({
+            isTranscribing: false,
+            isLoadingModel: false,
+            progress: 0,
+            progressMessage: '',
+            currentTrackSrc: null,
+        });
     }
 
     /**
@@ -282,7 +426,7 @@ export class Whisper {
     private tryAutoStartForCurrentTrack(): boolean {
         if (this.transcribing) return true;
         const track = this.bridge.currentTrack;
-        const rawSrc = track?.hash || track?.mediaStreamUrl || track?.src;
+        const rawSrc = track?.hash || this.resolveTrackUrl(track);
         if (!rawSrc) return false;
         const src = this.resolveOriginalUrl(rawSrc);
 
@@ -294,8 +438,8 @@ export class Whisper {
     }
 
     public warmupModel(force = false): void {
-        const settings = this.getWhisperSettings();
         if (force) {
+            this.modelOverride = null;
             if (this.transcribing) {
                 this.stopTranscription('model-change');
             }
@@ -311,6 +455,7 @@ export class Whisper {
             });
             this.clearStatus();
         }
+        const settings = this.getWhisperSettings();
         if (!this.autoWarmupStarted) {
             this.autoWarmupStarted = true;
         }
@@ -323,24 +468,29 @@ export class Whisper {
     // ------------------------------------------------------------------------
 
     private setupEventListeners(): void {
-        EventBus.on('whisper:toggle', () => this.toggleTranscription());
+        if (this.eventCleanups.length > 0) return;
+        this.eventCleanups.push(EventBus.on('whisper:toggle', () => {
+            this.reserveStatusSlot();
+            this.toggleTranscription();
+        }));
 
         // Listen for centralized track change events from KikoeruBridge
-        EventBus.on('track:change', (payload) => {
+        this.eventCleanups.push(EventBus.on('track:change', (payload) => {
+            this.reserveStatusSlot();
             const track = payload.track;
             // Use hash as canonical ID (AudioCache mutates mediaStreamUrl/src to blob URLs,
             // which would trigger false change detections). Resolve blob URLs as fallback.
-            const rawSrc = track.hash || track.mediaStreamUrl || track.src || null;
+            const rawSrc = track.hash || this.resolveTrackUrl(track);
             const newSrc = rawSrc ? this.resolveOriginalUrl(rawSrc) : null;
             if (newSrc && newSrc !== this.currentTrackSrc) {
                 Logger.debug('[Whisper] Track change event received via EventBus', { newSrc });
                 this.handleTrackChange(newSrc);
             }
-        });
+        }));
 
         // No cross-service webgpu:failed propagation for dtype failures — Whisper independently
         // tries WebGPU. But true GPU device loss (process crash) affects ALL workers.
-        EventBus.on('gpu:device-lost-broadcast', ({ source }) => {
+        this.eventCleanups.push(EventBus.on('gpu:device-lost-broadcast', ({ source }) => {
             if (source === 'whisper') return; // Already handled by our own error path
             if (Whisper.webgpuFailed) return; // Already on WASM
             Logger.warn(`[Whisper] GPU device lost in ${source} worker — switching to WASM`);
@@ -348,30 +498,36 @@ export class Whisper {
             if (this.worker) {
                 this.worker.postMessage({ type: 'skip-webgpu' });
             }
-        });
+        }));
 
-        EventBus.on('config:change', ({ key, value }) => {
-            if (key !== 'forceWhisperWasm') return;
-            const enabled = value === true;
-            Logger.log(`[Whisper] Force WASM ${enabled ? 'enabled' : 'disabled'} via settings`);
-            if (!enabled) {
-                this.clearWebgpuFailure('force-wasm-disabled');
+        this.eventCleanups.push(EventBus.on('config:change', ({ key, value }) => {
+            if (key === 'subtitleLang' || key === 'translateMode' || key === 'translateCnToJp') {
+                this.resetTranslationAheadState();
+                if (this.segments.length > 0) void this.translateAhead();
+                return;
             }
+            if (key !== 'forceWhisperWasm' && key !== 'whisperModel' && key !== 'whisperLanguage') return;
+            const forceWasmEnabled = key === 'forceWhisperWasm' && value === true;
+            if (key === 'forceWhisperWasm') {
+                Logger.log(`[Whisper] Force WASM ${forceWasmEnabled ? 'enabled' : 'disabled'} via settings`);
+                if (!forceWasmEnabled) this.clearWebgpuFailure('force-wasm-disabled');
+            }
+            if (key === 'whisperModel') this.modelOverride = null;
 
             if (!this.worker) return;
             const wasTranscribing = this.transcribing;
             if (wasTranscribing) {
-                this.stopTranscription('force-wasm-config-change');
+                this.stopTranscription('whisper-config-change');
             }
-            this.resetWorker(enabled ? 'force-wasm-enabled' : 'force-wasm-disabled');
+            this.resetWorker(`config-change-${key}`);
 
             if (wasTranscribing) {
                 const audio = getAudioElement();
                 if (audio && !audio.paused) {
-                    this.startTranscription().catch(err => Logger.error('[Whisper] Restart after WASM toggle failed:', err));
+                    this.startTranscription().catch(err => Logger.error('[Whisper] Restart after settings change failed:', err));
                 }
             }
-        });
+        }));
     }
 
     private handleTrackChange(newSrc: string): void {
@@ -508,7 +664,8 @@ export class Whisper {
     }
 
     private async startTranscription(): Promise<void> {
-        if (this.transcribing) return;
+        if (!this.enabled || this.transcribing) return;
+        this.reserveStatusSlot();
         const reopenedWebgpu = this.maybeReenableWebgpu('start-transcription');
         if (reopenedWebgpu && this.worker) {
             this.resetWorker('webgpu-retry');
@@ -534,19 +691,23 @@ export class Whisper {
         // Resolve blob URLs to original URLs (AudioCache may have mutated track properties)
         const bridgeTrack = this.bridge.currentTrack;
         const audioSrc = audio.currentSrc || audio.src || null;
-        const rawSrc = bridgeTrack?.mediaStreamUrl || bridgeTrack?.src || audioSrc;
+        const rawSrc = this.resolveTrackUrl(bridgeTrack) || audioSrc;
         const src = rawSrc ? this.resolveOriginalUrl(rawSrc) : null;
         if (!src) {
             this.dispatchError(I18n.t('whisperNoAudioSource'));
             return;
         }
 
+        // Each start owns a unique generation. A superseded download or decode
+        // may still settle after abort (not every userscript transport can be
+        // cancelled), but it must never mutate or stop the newer run.
+        const startGeneration = ++this.transcriptionGeneration;
         this.transcribing = true;
         EventBus.emit('whisper:transcribing', { active: true });
         this.setButtonsActive(true);
         this.dispatchProgress(I18n.t('whisperInit'), 0, 'loading');
 
-        const rawTrackId = bridgeTrack?.hash || bridgeTrack?.mediaStreamUrl || src;
+        const rawTrackId = bridgeTrack?.hash || this.resolveTrackUrl(bridgeTrack) || src;
         this.currentTrackSrc = this.resolveOriginalUrl(rawTrackId);
         this.audio = audio;
         const workId = this.bridge.currentWorkId;
@@ -557,11 +718,13 @@ export class Whisper {
         this.lastSegmentEnd = 0;
         this.clearChunkTracking({ resetRecovery: true, resetChunkCounter: true });
         this.finalizeOnIdle = false;
-        this.lastTranslatedSegmentCount = 0;
-        this.translateAheadUpTo = 0;
-        this.lastTranslateAheadAt = 0;
+        this.resetTranslationAheadState();
         this.pcmBuffer = null;
+        this.pcmSourceUrl = null;
         this.pcmDuration = 0;
+        this.pcmBufferStartTime = 0;
+        this.pcmSampleLength = 0;
+        this.liveCaptureEnded = false;
         this.transcribedUpTo = 0;
 
         const settings = this.getWhisperSettings();
@@ -583,7 +746,7 @@ export class Whisper {
                     Logger.debug('[Whisper] Using cached transcript:', { segments: cached.segments.length, complete: !!cached.complete });
                     // Apply hallucination corrections to cached segments (new corrections retroactively fix old caches)
                     for (const seg of cached.segments) {
-                        const corrected = correctWhisperText(seg.text);
+                        const corrected = this.applyLanguageAwareCorrections(seg.text);
                         if (corrected !== seg.text) seg.text = corrected;
                     }
                     this.segments = cached.segments;
@@ -595,6 +758,7 @@ export class Whisper {
                         text: latest?.text || cached.text,
                         segments: cached.segments,
                         final: !!cached.complete,
+                        sourceLanguageHint: getWhisperSourceLanguageHint(settings.language),
                         fromCache: true,
                         live: false,
                         source: 'cache',
@@ -613,36 +777,65 @@ export class Whisper {
             }
         }
 
-        // Resolve the best URL for fetching the audio file
-        const trackUrl = this.resolveTrackUrl() || src;
+        const cacheTranscribedUpTo = this.transcribedUpTo; // 0 if no cache, >0 if partial
 
-        if (this.isHlsUrl(trackUrl)) {
-            Logger.warn('[Whisper] HLS streams are not supported for transcription:', trackUrl);
-            this.dispatchError(I18n.t('whisperHlsWarning'));
-            this.stopTranscription('hls-not-supported');
+        // Load the model while audio becomes available. Previously model startup
+        // waited behind a full-file download/decode, which looked permanently stuck
+        // on long tracks and low-resource machines.
+        this.initWorker(settings);
+
+        audio.addEventListener('seeking', this.handleSeek);
+        audio.addEventListener('pause', this.handlePause);
+        audio.addEventListener('play', this.handlePlay);
+        audio.addEventListener('ended', this.handleEnded);
+
+        // Prefer bounded live PCM from the already-playing element. This avoids a
+        // second download entirely and begins transcription after the first short
+        // chunk is captured. Cross-origin elements without an existing CORS-safe
+        // Web Audio route are intentionally excluded so playback is never silenced.
+        if (this.startLiveAudioCapture(audio, startGeneration, cacheTranscribedUpTo)) {
+            this.startProcessingLoop();
+            this.dispatchProgress(I18n.t('whisperTranscribing'), 0, 'transcribing');
+            Logger.debug('[Whisper] Live transcription started.', { src, settings });
             return;
         }
 
-        // Fetch + decode the full audio file for lookahead processing
-        const cacheTranscribedUpTo = this.transcribedUpTo; // 0 if no cache, >0 if partial
-        const startGeneration = this.transcriptionGeneration;
+        // Live capture is unavailable. A compatibility decode is allowed only for
+        // an existing small cache entry or a host-reported small file; unknown and
+        // large files never trigger an unbounded background download.
+        const fallbackSource = this.resolveFallbackAudioSource(bridgeTrack, src);
+        const trackUrl = fallbackSource.url;
+
+        if (this.isHlsUrl(trackUrl)) {
+            Logger.warn('[Whisper] HLS streams are not supported for transcription:', trackUrl);
+            this.stopTranscription('hls-not-supported');
+            this.dispatchError(I18n.t('whisperHlsWarning'));
+            return;
+        }
+
         this.dispatchProgress(I18n.t('whisperFetchingAudio'), 0, 'loading');
         // Create a fresh AbortController so handleTrackChange can cancel this download
         this.abortFetch();
-        this.fetchAbortController = new AbortController();
+        const fetchController = new AbortController();
+        this.fetchAbortController = fetchController;
         try {
-            this.pcmBuffer = await this.fetchAndDecodeAudio(trackUrl, this.fetchAbortController.signal);
-            this.pcmSourceUrl = trackUrl;
+            const pcmBuffer = await this.fetchAndDecodeAudio(
+                trackUrl,
+                fetchController.signal,
+                fallbackSource.knownSizeBytes,
+                fallbackSource.allowUnknownSize,
+                fallbackSource.preferBoundedStreaming,
+            );
 
-            // Guard: if a track change happened during the async fetch/decode,
-            // this startTranscription call is stale — discard the decoded audio.
-            if (this.transcriptionGeneration !== startGeneration) {
-                Logger.debug('[Whisper] Track changed during fetch/decode, discarding stale audio');
-                this.pcmBuffer = null;
-                this.pcmSourceUrl = null;
+            if (!this.isCurrentFetch(startGeneration, fetchController)) {
+                Logger.debug('[Whisper] Ignoring decoded audio from a superseded transcription');
                 return;
             }
 
+            this.pcmBuffer = pcmBuffer;
+            this.pcmSourceUrl = trackUrl;
+            this.pcmBufferStartTime = 0;
+            this.pcmSampleLength = pcmBuffer.length;
             this.pcmDuration = this.pcmBuffer.length / TARGET_SAMPLE_RATE;
             // Backfill a small window so model load latency does not drop opening lines.
             this.transcribedUpTo = Math.max(0, Math.min(this.pcmDuration, audio.currentTime - INITIAL_BACKFILL_SEC));
@@ -659,6 +852,10 @@ export class Whisper {
                 startFrom: this.transcribedUpTo.toFixed(1) + 's',
             });
         } catch (err) {
+            if (!this.isCurrentFetch(startGeneration, fetchController)) {
+                Logger.debug('[Whisper] Ignoring fetch/decode failure from a superseded transcription');
+                return;
+            }
             // AbortError means track changed while downloading — not a real error
             if (err instanceof DOMException && err.name === 'AbortError') {
                 Logger.debug('[Whisper] Audio fetch aborted (track changed)');
@@ -666,18 +863,15 @@ export class Whisper {
                 return;
             }
             Logger.error('[Whisper] Failed to fetch and decode audio:', err);
-            this.dispatchError(I18n.format('whisperTranscriptionError', { message: String(err) }));
             this.stopTranscription('fetch-failed');
+            const message = err instanceof Error ? err.message : String(err);
+            this.dispatchError(I18n.format('whisperTranscriptionError', { message }));
             return;
+        } finally {
+            if (this.fetchAbortController === fetchController) {
+                this.fetchAbortController = null;
+            }
         }
-
-        // Ensure worker + model
-        this.initWorker(settings);
-
-        audio.addEventListener('seeking', this.handleSeek);
-        audio.addEventListener('pause', this.handlePause);
-        audio.addEventListener('play', this.handlePlay);
-        audio.addEventListener('ended', this.handleEnded);
 
         this.startProcessingLoop();
 
@@ -702,16 +896,18 @@ export class Whisper {
             this.setButtonsActive(false);
         }
         this.clearStatus();
+        // A Web Worker cannot cancel an already-running Transformers.js
+        // pipeline call. Terminate it when a user stop/track change happens
+        // during model load or inference so a slow WASM job cannot keep the
+        // CPU busy and block the next transcription forever.
+        if (this.workerInitPending || this.pendingChunks > 0) {
+            this.resetWorker(`cancel-active-${reason}`);
+        }
         this.clearChunkTracking({ resetRecovery: true, resetChunkCounter: false });
         this.loggedTranscriptKeys.clear();
         AppStore.setWhisperState({ isTranscribing: false, isLoadingModel: false, progress: 0, progressMessage: '', currentTrackSrc: this.currentTrackSrc });
 
-        if (this.audio) {
-            this.audio.removeEventListener('seeking', this.handleSeek);
-            this.audio.removeEventListener('pause', this.handlePause);
-            this.audio.removeEventListener('play', this.handlePlay);
-            this.audio.removeEventListener('ended', this.handleEnded);
-        }
+        this.detachAudioListeners();
 
         if (this.seekDebounceTimer) {
             clearTimeout(this.seekDebounceTimer);
@@ -722,13 +918,30 @@ export class Whisper {
             this.seekingRafId = 0;
         }
         this.stopProcessingLoop();
+        this.stopLiveAudioCapture();
         this.pcmBuffer = null;
         this.pcmSourceUrl = null;
         this.pcmDuration = 0;
+        this.pcmBufferStartTime = 0;
+        this.pcmSampleLength = 0;
         this.transcribedUpTo = 0;
 
         this.persistCache(shouldFinalize);
         this.scheduleIdleUnload();
+    }
+
+    private isCurrentFetch(generation: number, controller: AbortController): boolean {
+        return this.transcribing
+            && this.transcriptionGeneration === generation
+            && this.fetchAbortController === controller;
+    }
+
+    private detachAudioListeners(): void {
+        if (!this.audio) return;
+        this.audio.removeEventListener('seeking', this.handleSeek);
+        this.audio.removeEventListener('pause', this.handlePause);
+        this.audio.removeEventListener('play', this.handlePlay);
+        this.audio.removeEventListener('ended', this.handleEnded);
     }
 
     private scheduleIdleUnload(): void {
@@ -803,12 +1016,13 @@ export class Whisper {
         this.currentCacheIdentity = null;
         this.finalizeOnIdle = false;
         this.modelLoadingKey = '';
-        this.lastTranslatedSegmentCount = 0;
-        this.translateAheadUpTo = 0;
-        this.lastTranslateAheadAt = 0;
+        this.resetTranslationAheadState();
+        this.stopLiveAudioCapture();
         this.pcmBuffer = null;
         this.pcmSourceUrl = null;
         this.pcmDuration = 0;
+        this.pcmBufferStartTime = 0;
+        this.pcmSampleLength = 0;
         this.transcribedUpTo = 0;
         this.stopProcessingLoop();
         this.clearStatus();
@@ -818,11 +1032,177 @@ export class Whisper {
     // URL resolution
     // ------------------------------------------------------------------------
 
-    private resolveTrackUrl(): string | null {
-        const track = this.bridge.currentTrack;
+    private resolveLowQualityTrackUrl(track?: PlayerTrack): string | null {
         if (!track) return null;
-        // Prefer low-quality stream for transcription — smaller download, same Whisper accuracy
-        return track.streamLowQualityUrl || track.mediaDownloadUrl || track.mediaStreamUrl || track.src || null;
+        return track.streamLowQualityUrl || track.stream_low_quality_url || null;
+    }
+
+    private resolveFullQualityTrackUrl(track?: PlayerTrack): string | null {
+        if (!track) return null;
+        return track.mediaStreamUrl
+            || track.media_stream_url
+            || track.stream_url
+            || track.src
+            || track.url
+            || track.mediaDownloadUrl
+            || track.media_download_url
+            || track.file_url
+            || null;
+    }
+
+    private resolveTrackUrl(track: PlayerTrack | undefined = this.bridge.currentTrack): string | null {
+        if (!track) return null;
+        // Playback/stream URLs must win over download URLs. Runtime hosts use
+        // both camelCase and snake_case shapes depending on deployment/version.
+        return this.resolveLowQualityTrackUrl(track) || this.resolveFullQualityTrackUrl(track);
+    }
+
+    private getKnownTrackSize(track?: PlayerTrack): number | null {
+        const size = Number(track?.size);
+        return Number.isFinite(size) && size > 0 ? size : null;
+    }
+
+    private resolveFallbackAudioSource(track: PlayerTrack | undefined, defaultUrl: string): WhisperAudioFallbackSource {
+        const lowQualityUrl = this.resolveLowQualityTrackUrl(track);
+        if (lowQualityUrl) {
+            return {
+                url: lowQualityUrl,
+                knownSizeBytes: null,
+                allowUnknownSize: true,
+                preferBoundedStreaming: true,
+            };
+        }
+        return {
+            url: this.resolveFullQualityTrackUrl(track) || defaultUrl,
+            knownSizeBytes: this.getKnownTrackSize(track),
+            allowUnknownSize: false,
+            preferBoundedStreaming: false,
+        };
+    }
+
+    private canUseLiveAudioCapture(audio: HTMLAudioElement): boolean {
+        if (DeviceCapabilities.profile.isMobile || typeof AudioContext === 'undefined') return false;
+        if (hasSharedSourceNode(audio)) return true;
+        if (AudioCache.hasTrustedCorsPlayback(audio)) return true;
+
+        const currentSource = audio.currentSrc || audio.src;
+        if (!currentSource) return false;
+        try {
+            const parsed = new URL(currentSource, window.location.href);
+            if (parsed.protocol === 'blob:') return true;
+            if ((parsed.protocol === 'http:' || parsed.protocol === 'https:')
+                && parsed.origin === window.location.origin) return true;
+            // crossOrigin="anonymous" requests CORS but does not prove the
+            // response supplied ACAO. Creating a new MediaElementSource for a
+            // tainted response can mandate silence, so only reuse a source that
+            // another feature has already established (handled above).
+            return false;
+        } catch {
+            return false;
+        }
+    }
+
+    private startLiveAudioCapture(
+        audio: HTMLAudioElement,
+        generation: number,
+        cacheContinuationTime: number,
+    ): boolean {
+        this.stopLiveAudioCapture();
+        if (!this.canUseLiveAudioCapture(audio)) return false;
+
+        const startTime = Math.max(0, Number.isFinite(audio.currentTime) ? audio.currentTime : 0);
+        this.liveCaptureActive = true;
+        this.liveCaptureEnded = audio.ended;
+        this.resetLivePcmBuffer(startTime, Math.max(startTime, cacheContinuationTime));
+
+        const tap = connectAudioPcmTap(audio, {
+            tag: 'Whisper',
+            targetSampleRate: TARGET_SAMPLE_RATE,
+            onData: (samples) => this.handleLivePcm(samples, audio, generation),
+        });
+
+        if (!tap) {
+            this.liveCaptureActive = false;
+            this.pcmBuffer = null;
+            this.pcmDuration = 0;
+            this.pcmSampleLength = 0;
+            return false;
+        }
+
+        this.liveCaptureCleanup = tap.disconnect;
+        Logger.debug('[Whisper] Attached bounded live PCM capture', {
+            startTime,
+            sampleRate: TARGET_SAMPLE_RATE,
+            maxBufferedSeconds: MAX_LIVE_PCM_SECONDS,
+        });
+        return true;
+    }
+
+    private handleLivePcm(samples: Float32Array, audio: HTMLAudioElement, generation: number): void {
+        if (!this.liveCaptureActive
+            || !this.transcribing
+            || this.transcriptionGeneration !== generation
+            || this.audio !== audio
+            || audio.paused
+            || audio.ended
+            || audio.seeking) return;
+        this.appendLivePcm(samples);
+    }
+
+    private stopLiveAudioCapture(): void {
+        const cleanup = this.liveCaptureCleanup;
+        this.liveCaptureCleanup = null;
+        this.liveCaptureActive = false;
+        this.liveCaptureEnded = false;
+        if (cleanup) {
+            try { cleanup(); } catch { /* already detached */ }
+        }
+    }
+
+    private resetLivePcmBuffer(startTime: number, cursorTime = startTime): void {
+        this.pcmBufferStartTime = Math.max(0, startTime);
+        this.pcmDuration = this.pcmBufferStartTime;
+        this.pcmSampleLength = 0;
+        this.pcmBuffer = new Float32Array(INITIAL_LIVE_PCM_SECONDS * TARGET_SAMPLE_RATE);
+        this.pcmSourceUrl = null;
+        this.transcribedUpTo = Math.max(this.pcmBufferStartTime, cursorTime);
+        this.finalizeOnIdle = false;
+        this.liveCaptureEnded = false;
+    }
+
+    private appendLivePcm(samples: Float32Array): void {
+        if (!this.liveCaptureActive || samples.length === 0 || !this.pcmBuffer) return;
+
+        const maxSamples = MAX_LIVE_PCM_SECONDS * TARGET_SAMPLE_RATE;
+        let incoming = samples;
+        if (incoming.length > maxSamples) incoming = incoming.subarray(incoming.length - maxSamples);
+
+        const requiredDrop = Math.max(0, this.pcmSampleLength + incoming.length - maxSamples);
+        if (requiredDrop > 0) {
+            // Trim in batches so a full buffer does not shift ~11 MB on every
+            // 4096-sample callback.
+            const trimBatch = LIVE_PCM_TRIM_SECONDS * TARGET_SAMPLE_RATE;
+            const droppedSamples = Math.min(this.pcmSampleLength, Math.max(requiredDrop, trimBatch));
+            this.pcmBuffer.copyWithin(0, droppedSamples, this.pcmSampleLength);
+            this.pcmSampleLength -= droppedSamples;
+            this.pcmBufferStartTime += droppedSamples / TARGET_SAMPLE_RATE;
+            // A slow CPU must not accumulate unbounded work. Stay near live
+            // playback after the capped window is exhausted.
+            this.transcribedUpTo = Math.max(this.transcribedUpTo, this.pcmBufferStartTime);
+        }
+
+        const required = this.pcmSampleLength + incoming.length;
+        if (this.pcmBuffer.length < required) {
+            let capacity = Math.max(this.pcmBuffer.length, TARGET_SAMPLE_RATE);
+            while (capacity < required) capacity = Math.min(maxSamples, capacity * 2);
+            const expanded = new Float32Array(capacity);
+            expanded.set(this.pcmBuffer.subarray(0, this.pcmSampleLength));
+            this.pcmBuffer = expanded;
+        }
+
+        this.pcmBuffer.set(incoming, this.pcmSampleLength);
+        this.pcmSampleLength += incoming.length;
+        this.pcmDuration = this.pcmBufferStartTime + this.pcmSampleLength / TARGET_SAMPLE_RATE;
     }
 
     private isHlsUrl(url: string): boolean {
@@ -882,12 +1262,99 @@ export class Whisper {
         return url;
     }
 
-    private async fetchAndDecodeAudio(url: string, signal?: AbortSignal): Promise<Float32Array> {
-        let arrayBuffer: ArrayBuffer;
+    private assertFallbackAudioSize(size: number | null | undefined): void {
+        if (!Number.isFinite(size) || Number(size) <= 0 || Number(size) > MAX_FALLBACK_AUDIO_BYTES) {
+            throw new AudioFallbackLimitError(I18n.format('whisperLiveCaptureFallbackLimit', {
+                max: Math.round(MAX_FALLBACK_AUDIO_BYTES / 1024 / 1024),
+            }));
+        }
+    }
+
+    private async readResponseArrayBufferBounded(response: Response, signal?: AbortSignal): Promise<ArrayBuffer> {
+        const contentLengthHeader = response.headers.get('content-length');
+        const contentLength = contentLengthHeader === null ? null : Number(contentLengthHeader);
+        if (contentLength !== null && Number.isFinite(contentLength) && contentLength > 0) {
+            this.assertFallbackAudioSize(contentLength);
+        }
+
+        if (!response.body) {
+            // Without a streaming body there is no way to abort at the byte
+            // cap, so require a trustworthy Content-Length before allocating.
+            this.assertFallbackAudioSize(contentLength);
+            const blob = await response.blob();
+            this.assertFallbackAudioSize(blob.size);
+            return blob.arrayBuffer();
+        }
+
+        const reader = response.body.getReader();
+        const chunks: Uint8Array[] = [];
+        let total = 0;
+        const startedAt = performance.now();
+        try {
+            while (true) {
+                if (signal?.aborted) throw new DOMException('Download aborted (track changed)', 'AbortError');
+                const totalRemainingMs = BOUNDED_AUDIO_STREAM_TOTAL_MS - (performance.now() - startedAt);
+                if (totalRemainingMs <= 0) throw new Error(I18n.t('whisperFetchAudioFailed'));
+                const readTimeoutMs = Math.min(BOUNDED_AUDIO_STREAM_INACTIVITY_MS, totalRemainingMs);
+                const { done, value } = await new Promise<ReadableStreamReadResult<Uint8Array>>((resolve, reject) => {
+                    const timer = window.setTimeout(
+                        () => reject(new Error(I18n.t('whisperFetchAudioFailed'))),
+                        readTimeoutMs,
+                    );
+                    reader.read().then(
+                        (result) => {
+                            clearTimeout(timer);
+                            resolve(result);
+                        },
+                        (error) => {
+                            clearTimeout(timer);
+                            reject(error);
+                        },
+                    );
+                });
+                if (done) break;
+                if (!value || value.byteLength === 0) continue;
+                total += value.byteLength;
+                this.assertFallbackAudioSize(total);
+                chunks.push(value);
+            }
+        } catch (error) {
+            try { await reader.cancel(); } catch { /* already closed */ }
+            throw error;
+        }
+
+        const combined = new Uint8Array(total);
+        let offset = 0;
+        for (const chunk of chunks) {
+            combined.set(chunk, offset);
+            offset += chunk.byteLength;
+        }
+        return combined.buffer;
+    }
+
+    private async fetchAndDecodeAudio(
+        url: string,
+        signal?: AbortSignal,
+        knownSizeBytes?: number | null,
+        allowUnknownSize = false,
+        preferBoundedStreaming = false,
+    ): Promise<Float32Array> {
+        let arrayBuffer: ArrayBuffer | null = null;
 
         // Resolve blob: URLs back to original source URLs for cache lookups and downloads
         const originalUrl = this.resolveOriginalUrl(url);
         const isBlobUrl = url.startsWith('blob:');
+        if (!isBlobUrl) {
+            let protocol = '';
+            try {
+                protocol = new URL(originalUrl, window.location.href).protocol;
+            } catch {
+                throw new Error('Invalid audio URL');
+            }
+            if (protocol !== 'http:' && protocol !== 'https:') {
+                throw new Error(`Unsupported audio URL protocol: ${protocol || 'unknown'}`);
+            }
+        }
 
         // 1. Try AudioCache first (player already downloaded this)
         // Timeout: getBlob can hang if StorageManager eviction holds a readwrite
@@ -907,15 +1374,38 @@ export class Whisper {
         }
 
         if (blob) {
+            this.assertFallbackAudioSize(blob.size);
             Logger.debug('[Whisper] Using AudioCache blob:', (blob.size / 1024 / 1024).toFixed(2) + 'MB');
             this.dispatchProgress(I18n.t('whisperDecodingAudio'), 50, 'loading');
             arrayBuffer = await blob.arrayBuffer();
+        } else {
+            // Never begin a compatibility download whose size is unknown or
+            // exceeds the explicit small-file cap. The lower-quality source is
+            // the sole exception to the preflight-size requirement: it is read
+            // through the strictly bounded streaming reader below, which aborts
+            // as soon as the same hard byte cap is exceeded.
+            if (!allowUnknownSize || (knownSizeBytes !== null && knownSizeBytes !== undefined)) {
+                this.assertFallbackAudioSize(knownSizeBytes);
+            }
+        }
+
+        if (blob) {
+            // Filled from AudioCache above.
         } else if (isBlobUrl) {
             // 2a. For blob URLs, fetch directly (gmRequest can't handle blob: protocol)
             Logger.debug('[Whisper] Fetching blob URL directly:', url);
             this.dispatchProgress(I18n.t('whisperDecodingAudio'), 10, 'loading');
             const res = await fetch(url, { signal });
-            arrayBuffer = await res.arrayBuffer();
+            arrayBuffer = await this.readResponseArrayBufferBounded(res, signal);
+        } else if (preferBoundedStreaming) {
+            // The low-quality CDN response is CORS-enabled. Stream it directly
+            // so an absent/misreported Content-Length can never turn into an
+            // unbounded full-file allocation or a fallback to mediaDownloadUrl.
+            Logger.debug('[Whisper] Streaming bounded low-quality audio:', originalUrl);
+            this.dispatchProgress(I18n.t('whisperFetchingAudio'), 0, 'loading');
+            const res = await fetch(originalUrl, { signal });
+            if (!res.ok) throw new Error(I18n.t('whisperFetchAudioFailed'));
+            arrayBuffer = await this.readResponseArrayBufferBounded(res, signal);
         } else {
             // 2b. Download audio file — try methods in order of reliability:
             //   1. bridge.axios OR gmRequest, selected by URL characteristics
@@ -957,6 +1447,7 @@ export class Whisper {
                 signal?.addEventListener('abort', onExternalAbort);
                 let inactivityReject: (err: Error) => void;
                 let activityTimer: ReturnType<typeof setTimeout>;
+                let limitError: AudioFallbackLimitError | null = null;
                 const resetTimer = () => {
                     clearTimeout(activityTimer);
                     activityTimer = setTimeout(
@@ -976,6 +1467,15 @@ export class Whisper {
                     timeout: 0, // disabled — we use inactivity guard instead
                     signal: abortController.signal,
                     onDownloadProgress: (e: { loaded?: number; total?: number }) => {
+                        try {
+                            if (e.total) this.assertFallbackAudioSize(e.total);
+                            if (e.loaded) this.assertFallbackAudioSize(e.loaded);
+                        } catch (error) {
+                            limitError = error as AudioFallbackLimitError;
+                            abortController.abort();
+                            inactivityReject(limitError);
+                            return;
+                        }
                         resetTimer();
                         reportProgress(e.loaded || 0, e.total || null);
                     },
@@ -983,20 +1483,50 @@ export class Whisper {
                     clearTimeout(activityTimer);
                     signal?.removeEventListener('abort', onExternalAbort);
                 });
-                const response = await Promise.race([download, inactivityGuard]);
-                return response.data;
+                try {
+                    const response = await Promise.race([download, inactivityGuard]);
+                    this.assertFallbackAudioSize(response.data.byteLength);
+                    return response.data;
+                } catch (error) {
+                    if (limitError) throw limitError;
+                    throw error;
+                }
             };
 
             const tryGmRequestDownload = async (): Promise<ArrayBuffer> => {
-                const res = await gmRequest({
-                    url: originalUrl,
-                    responseType: 'arraybuffer',
-                    timeout: 600_000, // 10 min — large audio files need generous total timeout
-                    onprogress: (event) => {
-                        reportProgress(event.loaded, event.lengthComputable ? event.total : null);
-                    },
-                });
-                return res.response as ArrayBuffer;
+                const abortController = new AbortController();
+                const onExternalAbort = () => abortController.abort();
+                signal?.addEventListener('abort', onExternalAbort);
+                let limitError: AudioFallbackLimitError | null = null;
+                try {
+                    const res = await gmRequest({
+                        url: originalUrl,
+                        responseType: 'arraybuffer',
+                        timeout: 120_000,
+                        signal: abortController.signal,
+                        onprogress: (event) => {
+                            try {
+                                if (event.lengthComputable && event.total > 0) {
+                                    this.assertFallbackAudioSize(event.total);
+                                }
+                                if (event.loaded > 0) this.assertFallbackAudioSize(event.loaded);
+                            } catch (error) {
+                                limitError = error as AudioFallbackLimitError;
+                                abortController.abort();
+                                return;
+                            }
+                            reportProgress(event.loaded, event.lengthComputable ? event.total : null);
+                        },
+                    });
+                    const response = res.response as ArrayBuffer;
+                    this.assertFallbackAudioSize(response.byteLength);
+                    return response;
+                } catch (error) {
+                    if (limitError) throw limitError;
+                    throw error;
+                } finally {
+                    signal?.removeEventListener('abort', onExternalAbort);
+                }
             };
 
             try {
@@ -1010,6 +1540,7 @@ export class Whisper {
             } catch (primaryErr) {
                 // If aborted due to track change, propagate immediately — don't try fallbacks
                 if (signal?.aborted) throw new DOMException('Download aborted (track changed)', 'AbortError');
+                if (primaryErr instanceof AudioFallbackLimitError) throw primaryErr;
                 Logger.warn(
                     `[Whisper] ${preferGmRequest ? 'gmRequest' : 'axios'} download failed, trying ${preferGmRequest ? 'axios' : 'gmRequest'}:`,
                     primaryErr,
@@ -1022,11 +1553,12 @@ export class Whisper {
                         arrayBuffer = await tryGmRequestDownload();
                         Logger.debug('[Whisper] Audio downloaded via gmRequest:', (arrayBuffer.byteLength / 1024 / 1024).toFixed(2) + 'MB');
                     }
-                } catch {
+                } catch (secondaryErr) {
                     if (signal?.aborted) throw new DOMException('Download aborted (track changed)', 'AbortError');
+                    if (secondaryErr instanceof AudioFallbackLimitError) throw secondaryErr;
                     Logger.warn('[Whisper] Secondary download transport failed, trying fetch');
                     const res = await fetch(originalUrl, { signal });
-                    arrayBuffer = await res.arrayBuffer();
+                    arrayBuffer = await this.readResponseArrayBufferBounded(res, signal);
                     Logger.debug('[Whisper] Audio downloaded via fetch:', (arrayBuffer.byteLength / 1024 / 1024).toFixed(2) + 'MB');
                 }
             }
@@ -1039,27 +1571,80 @@ export class Whisper {
             }
         }
 
+        if (!arrayBuffer) throw new Error(I18n.t('whisperFetchAudioFailed'));
+        this.assertFallbackAudioSize(arrayBuffer.byteLength);
+
         // Check abort signal before starting decode — OfflineAudioContext is not cancellable
         if (signal?.aborted) {
             throw new DOMException('Decode aborted (track changed)', 'AbortError');
         }
 
         this.dispatchProgress(I18n.t('whisperDecodingAudio'), 55, 'loading');
-        return this.decodeToPcm(arrayBuffer);
+        return this.decodeToPcm(arrayBuffer, signal);
     }
 
-    private async decodeToPcm(arrayBuffer: ArrayBuffer): Promise<Float32Array> {
-        const tempCtx = new OfflineAudioContext(1, 1, TARGET_SAMPLE_RATE);
-        const audioBuffer = await tempCtx.decodeAudioData(arrayBuffer);
+    private getAudioDecodeTimeoutMs(byteLength: number): number {
+        const sizeMiB = Math.max(1, byteLength / (1024 * 1024));
+        return Math.min(
+            AUDIO_DECODE_TIMEOUT_MAX_MS,
+            Math.max(AUDIO_DECODE_TIMEOUT_MIN_MS, Math.round(sizeMiB * AUDIO_DECODE_TIMEOUT_PER_MIB_MS)),
+        );
+    }
+
+    private waitForAudioOperation<T>(operation: Promise<T>, timeoutMs: number, signal?: AbortSignal): Promise<T> {
+        return new Promise<T>((resolve, reject) => {
+            let settled = false;
+            const cleanup = () => {
+                clearTimeout(timer);
+                signal?.removeEventListener('abort', onAbort);
+            };
+            const finish = (callback: () => void) => {
+                if (settled) return;
+                settled = true;
+                cleanup();
+                callback();
+            };
+            const onAbort = () => finish(() => reject(new DOMException('Decode aborted (track changed)', 'AbortError')));
+            const timer = window.setTimeout(() => {
+                finish(() => reject(new Error(I18n.format('whisperDecodeTimeout', {
+                    seconds: Math.round(timeoutMs / 1000),
+                }))));
+            }, timeoutMs);
+
+            if (signal?.aborted) {
+                onAbort();
+                return;
+            }
+            signal?.addEventListener('abort', onAbort, { once: true });
+            operation.then(
+                (value) => finish(() => resolve(value)),
+                (error) => finish(() => reject(error)),
+            );
+        });
+    }
+
+    private async decodeToPcm(arrayBuffer: ArrayBuffer, signal?: AbortSignal): Promise<Float32Array> {
+        const timeoutMs = this.getAudioDecodeTimeoutMs(arrayBuffer.byteLength);
+        // Offline contexts do not consume Chrome's small live-AudioContext
+        // quota, so rapid track changes cannot exhaust the six-context cap.
+        const decoderContext = new OfflineAudioContext(1, 1, TARGET_SAMPLE_RATE);
+        const audioBuffer = await this.waitForAudioOperation(
+            decoderContext.decodeAudioData(arrayBuffer),
+            timeoutMs,
+            signal,
+        );
 
         // Downmix to mono + resample to 16kHz in one native call
         const totalSamples = Math.ceil(audioBuffer.duration * TARGET_SAMPLE_RATE);
+        if (!Number.isFinite(totalSamples) || totalSamples <= 0) {
+            throw new Error(I18n.t('whisperDecodeInvalidAudio'));
+        }
         const offlineCtx = new OfflineAudioContext(1, totalSamples, TARGET_SAMPLE_RATE);
         const source = offlineCtx.createBufferSource();
         source.buffer = audioBuffer;
         source.connect(offlineCtx.destination);
         source.start(0);
-        const rendered = await offlineCtx.startRendering();
+        const rendered = await this.waitForAudioOperation(offlineCtx.startRendering(), timeoutMs, signal);
 
         return rendered.getChannelData(0);
     }
@@ -1105,7 +1690,7 @@ export class Whisper {
         // Sentinel: detect track changes that EventBus missed
         // Resolve blob URLs so comparison isn't fooled by AudioCache URL mutation
         const bridgeTrack = this.bridge.currentTrack;
-        const rawBridgeSrc = bridgeTrack?.hash || bridgeTrack?.mediaStreamUrl || null;
+        const rawBridgeSrc = bridgeTrack?.hash || this.resolveTrackUrl(bridgeTrack);
         const bridgeSrc = rawBridgeSrc ? this.resolveOriginalUrl(rawBridgeSrc) : null;
         if (bridgeSrc && this.currentTrackSrc && bridgeSrc !== this.currentTrackSrc) {
             Logger.warn('[Whisper] Stale track in processing loop, triggering reset', {
@@ -1147,9 +1732,14 @@ export class Whisper {
         const chunkSamples = Math.floor(chunkLengthS * TARGET_SAMPLE_RATE);
         const playhead = audio.currentTime;
 
-        // Don't process past the end of the audio
+        if (this.transcribedUpTo < this.pcmBufferStartTime) {
+            this.transcribedUpTo = this.pcmBufferStartTime;
+        }
+
+        // Don't process past currently available audio. A live buffer is not
+        // complete until the media element actually ends.
         if (this.transcribedUpTo >= this.pcmDuration) {
-            if (this.pendingChunks === 0) {
+            if ((!this.liveCaptureActive || this.liveCaptureEnded) && this.pendingChunks === 0) {
                 this.finalizeOnIdle = true;
                 this.maybeFinalizeTranscript();
             }
@@ -1157,13 +1747,24 @@ export class Whisper {
         }
 
         // Extract chunk from PCM buffer
-        const startSample = Math.floor(this.transcribedUpTo * TARGET_SAMPLE_RATE);
-        const endSample = Math.min(startSample + chunkSamples, this.pcmBuffer.length);
+        const availableSamples = this.liveCaptureActive ? this.pcmSampleLength : this.pcmBuffer.length;
+        const relativeStartTime = Math.max(0, this.transcribedUpTo - this.pcmBufferStartTime);
+        const startSample = Math.floor(relativeStartTime * TARGET_SAMPLE_RATE);
+        const endSample = Math.min(startSample + chunkSamples, availableSamples);
+        if (endSample <= startSample) return;
         let chunk = this.pcmBuffer.subarray(startSample, endSample);
+
+        // Wait for a complete live chunk. At end-of-track the final partial
+        // chunk is padded below so short tracks are still transcribed.
+        if (this.liveCaptureActive && !this.liveCaptureEnded && chunk.length < chunkSamples) return;
 
         // Skip silence
         if (settings.silenceThreshold > 0 && this.computeRms(chunk) < settings.silenceThreshold) {
-            this.transcribedUpTo += chunkLengthS - overlapSec;
+            const availableSeconds = chunk.length / TARGET_SAMPLE_RATE;
+            const isFinalAvailableChunk = endSample >= availableSamples
+                && (!this.liveCaptureActive || this.liveCaptureEnded);
+            if (isFinalAvailableChunk) this.transcribedUpTo = this.pcmDuration;
+            else this.transcribedUpTo += Math.max(0.01, availableSeconds - overlapSec);
             return;
         }
 
@@ -1186,13 +1787,12 @@ export class Whisper {
         const floorTimeout = DeviceCapabilities.profile.isMobile
             ? CHUNK_STALL_TIMEOUT_FLOOR_MS * 2
             : CHUNK_STALL_TIMEOUT_FLOOR_MS;
-        return Math.max(floorTimeout, scaledTimeout);
+        const backendFloor = this.workerBackend === 'wasm' ? 130_000 : floorTimeout;
+        return Math.max(backendFloor, scaledTimeout);
     }
 
     private checkForStalledChunks(settings: WhisperSettings): void {
         if (!this.transcribing || this.pendingChunks <= 0 || this.chunkSendTimes.size === 0) return;
-        // Avoid resetting during cold-start when the very first chunk is still in-flight.
-        if (!this.hasWorkerChunkActivity && this.pendingChunks <= 1) return;
         const timeoutMs = this.getChunkStallTimeoutMs(settings);
         const now = performance.now();
         let stalledChunkId: number | null = null;
@@ -1232,17 +1832,39 @@ export class Whisper {
         });
         this.dispatchProgress(I18n.t('whisperRecovering'), 0, 'transcribing');
 
+        if (this.chunkStallRecoveryCount > Whisper.MAX_CHUNK_STALL_RECOVERIES) {
+            const message = I18n.t('whisperProcessingStalled');
+            this.resetWorker('chunk-stall-terminal');
+            this.stopTranscription('chunk-stall-terminal');
+            AppStore.setWhisperState({
+                isTranscribing: false,
+                isLoadingModel: false,
+                progress: 0,
+                progressMessage: message,
+            });
+            this.showStatus(`<span class="whisper-error-indicator">${this.escapeHtml(message)}</span>`);
+            return;
+        }
+
+        if (settings.model !== FALLBACK_MODEL) {
+            this.modelOverride = FALLBACK_MODEL;
+            EventBus.emit('whisper:fallback', {
+                originalModel: settings.model,
+                fallbackModel: FALLBACK_MODEL,
+                reason: 'chunk-stall',
+            });
+        } else if (this.workerBackend !== 'wasm' && !this.shouldForceWasm()) {
+            this.markWebgpuFailed('chunk-stall');
+            EventBus.emit('webgpu:failed', { source: 'whisper' });
+        }
+
         this.resetWorker('chunk-stall-timeout');
         this.clearChunkTracking({ resetRecovery: false, resetChunkCounter: false });
         // Don't rewind into regions we've already transcribed — existing segments
         // are still valid and re-processing creates duplicates.
         this.transcribedUpTo = Math.max(resumeFrom, this.lastSegmentEnd);
         this.modelReady = false;
-        this.initWorker(settings);
-
-        if (this.chunkStallRecoveryCount > Whisper.MAX_CHUNK_STALL_RECOVERIES) {
-            Logger.warn('[Whisper] Repeated chunk stalls detected; continuing in recovery mode');
-        }
+        this.initWorker(this.getWhisperSettings());
     }
 
     private seekDebounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1273,6 +1895,19 @@ export class Whisper {
         this.seekDebounceTimer = setTimeout(() => {
             const seekTime = this.audio!.currentTime;
             Logger.debug('[Whisper] Seek settled:', seekTime.toFixed(2));
+
+            if (this.liveCaptureActive) {
+                // Captured PCM cannot bridge a discontinuous media timeline.
+                // Drop the bounded window and generation-filter all queued work
+                // before accepting samples from the seek destination.
+                this.clearChunkTracking({ resetRecovery: true, resetChunkCounter: false });
+                if (this.worker) this.worker.postMessage({ type: 'flush-queue' });
+                this.resetLivePcmBuffer(seekTime);
+                this.emitWhisperSnapshot('seek');
+                this.maybeProcessNextChunk();
+                this.seekDebounceTimer = null;
+                return;
+            }
 
             // Rewind processing window on backward scrubs, jump on forward scrubs.
             // Keep all existing segments — they're already transcribed correctly.
@@ -1326,13 +1961,15 @@ export class Whisper {
 
     private handlePlay = (): void => {
         // Refresh subtitle state after resume and continue processing loop naturally.
+        if (this.liveCaptureActive) this.liveCaptureEnded = false;
         this.emitWhisperSnapshot('seek');
     };
 
     private handleEnded = (): void => {
         if (!this.transcribing) return;
         Logger.debug('[Whisper] Audio ended');
-        // maybeProcessNextChunk handles finalization naturally
+        if (this.liveCaptureActive) this.liveCaptureEnded = true;
+        this.maybeProcessNextChunk();
     };
 
     private emitWhisperSnapshot(source: 'seek' | 'update' | 'complete' | 'cache' = 'seek'): void {
@@ -1344,6 +1981,7 @@ export class Whisper {
             text: active?.text || '',
             segments: [...this.segments],
             final: false,
+            sourceLanguageHint: getWhisperSourceLanguageHint(this.getWhisperSettings().language),
             live: true,
             source,
         });
@@ -1372,8 +2010,12 @@ export class Whisper {
 
     private ensureWorker(): void {
         if (this.worker) return;
-        this.worker = createWhisperWorker();
-        this.worker.onmessage = (e: MessageEvent<WorkerMessage>) => this.handleWorkerMessage(e);
+        const worker = createWhisperWorker();
+        this.worker = worker;
+        worker.onmessage = (e: MessageEvent<WorkerMessage>) => {
+            if (this.worker !== worker) return;
+            this.handleWorkerMessage(e);
+        };
         this.maybeReenableWebgpu('ensure-worker');
 
         // Only skip WebGPU if it failed THIS session — don't inherit from translation's
@@ -1382,9 +2024,10 @@ export class Whisper {
             if (this.shouldForceWasm()) {
                 Logger.debug('[Whisper] WebGPU disabled by policy (' + this.getWasmPolicyReason() + ')');
             }
-            this.worker.postMessage({ type: 'skip-webgpu' });
+            worker.postMessage({ type: 'skip-webgpu' });
         }
-        this.worker.onerror = (e: ErrorEvent) => {
+        worker.onerror = (e: ErrorEvent) => {
+            if (this.worker !== worker) return;
             if (this.gpuCrashed) return; // Already showing crash UI
             const errObj = (e as ErrorEvent & { error?: unknown }).error;
             const errorMsg = e.message || (errObj instanceof Error ? errObj.message : '') || 'Unknown worker error';
@@ -1467,20 +2110,38 @@ export class Whisper {
         Logger.debug('[Whisper] Worker created');
     }
 
+    private settleWorkerInitSentinel(): void {
+        if (!this.workerInitPending) return;
+        // CrashGuard's negative sentinel is only meant to survive a hard page/
+        // process crash. Any reset reached in this process is a handled outcome
+        // and must not accumulate toward a future false auto-disable.
+        MLCrashGuard.initComplete('whisper');
+        this.workerInitPending = null;
+    }
+
     private resetWorker(reason: string): void {
         this.releaseLoadLease();
+        this.clearModelLoadTimer();
+        this.workerInitGeneration++;
+        this.settleWorkerInitSentinel();
         if (this.worker) {
-            // Send reset so worker can dispose GPU pipeline before we kill it
-            try { this.worker.postMessage({ type: 'reset' }); } catch { /* ignore */ }
             const dyingWorker = this.worker;
-            setTimeout(() => { try { dyingWorker.terminate(); } catch { /* ignore */ } }, 500);
+            // Invalidate and detach synchronously. The reset message is allowed
+            // a short cleanup window, but late ready/error events from this
+            // worker must not affect a replacement worker or a re-enabled run.
             this.worker = null;
+            dyingWorker.onmessage = null;
+            dyingWorker.onerror = null;
+            // Send reset so worker can dispose GPU pipeline before we kill it
+            try { dyingWorker.postMessage({ type: 'reset' }); } catch { /* ignore */ }
+            setTimeout(() => { try { dyingWorker.terminate(); } catch { /* ignore */ } }, 500);
         }
         // Clear timers that reference the dead worker
         if (this.gpuRecoveryTimer) { clearTimeout(this.gpuRecoveryTimer); this.gpuRecoveryTimer = null; }
         if (this.errorDismissTimer) { clearTimeout(this.errorDismissTimer); this.errorDismissTimer = null; }
         this.modelLoadingKey = '';
         this.modelReady = false;
+        this.workerBackend = null;
         this.clearChunkTracking({ resetRecovery: false, resetChunkCounter: false });
         Logger.warn('[Whisper] Worker reset:', reason);
     }
@@ -1496,8 +2157,21 @@ export class Whisper {
             this.gpuCrashed = false;
             this.maybeReenableWebgpu('init-worker');
         }
-        MLCrashGuard.initStarted('whisper');
         this.ensureWorker();
+        const worker = this.worker;
+        if (!worker) return;
+        if (this.modelReady) {
+            Logger.debug('[Whisper] Reusing ready model on current worker');
+            return;
+        }
+        if (this.workerInitPending?.worker === worker) {
+            Logger.debug('[Whisper] Reusing in-flight model initialization');
+            return;
+        }
+
+        MLCrashGuard.initStarted('whisper');
+        const initGeneration = ++this.workerInitGeneration;
+        this.workerInitPending = { worker, generation: initGeneration };
         this.modelReady = false;
         this.dispatchProgress(I18n.t('whisperLoading'), 5, 'model');
 
@@ -1506,15 +2180,17 @@ export class Whisper {
         // The lease is released when the worker reports 'ready' or on error/reset.
         this.releaseLoadLease(); // Release any stale lease from a previous init attempt
         GpuScheduler.acquireLoadLease('whisper').then(release => {
-            this.loadLeaseRelease = release;
-            if (!this.worker) {
+            if (!this.enabled || this.worker !== worker || this.workerInitGeneration !== initGeneration) {
                 // Worker was terminated while waiting for lease
                 release();
-                this.loadLeaseRelease = null;
+                if (this.workerInitPending?.generation === initGeneration) {
+                    this.settleWorkerInitSentinel();
+                }
                 return;
             }
+            this.loadLeaseRelease = release;
             // No timeout - large models can take a while to download
-            this.worker.postMessage({
+            worker.postMessage({
                 type: 'init',
                 model: settings.model,
                 multilingual: settings.multilingual,
@@ -1526,6 +2202,18 @@ export class Whisper {
                 minWebgpuBufferBytes: settings.minWebgpuBufferBytes,
                 gpuVendorHint: DeviceCapabilities.profile.gpuVendor,
             });
+            this.armModelLoadTimer(settings, initGeneration);
+        }).catch(error => {
+            if (this.workerInitPending?.generation === initGeneration) {
+                this.settleWorkerInitSentinel();
+            }
+            Logger.error('[Whisper] Failed to acquire model load lease:', error);
+            if (this.worker === worker) {
+                this.releaseLoadLease();
+                this.dispatchError(I18n.format('whisperWorkerError', {
+                    message: error instanceof Error ? error.message : String(error),
+                }));
+            }
         });
     }
 
@@ -1541,6 +2229,56 @@ export class Whisper {
             clearTimeout(this.modelLoadTimer);
             this.modelLoadTimer = null;
         }
+    }
+
+    private armModelLoadTimer(settings: WhisperSettings, initGeneration = this.workerInitGeneration): void {
+        this.clearModelLoadTimer();
+        this.modelLoadTimer = window.setTimeout(() => {
+            if (this.modelReady || !this.worker || initGeneration !== this.workerInitGeneration) return;
+            this.handleModelLoadStall(settings);
+        }, MODEL_LOAD_STALL_TIMEOUT_MS);
+    }
+
+    private handleModelLoadStall(settings: WhisperSettings): void {
+        Logger.warn('[Whisper] Model load stalled; applying bounded fallback', {
+            model: settings.model,
+            backend: this.workerBackend,
+        });
+
+        if (settings.model !== FALLBACK_MODEL) {
+            this.modelOverride = FALLBACK_MODEL;
+            EventBus.emit('whisper:fallback', {
+                originalModel: settings.model,
+                fallbackModel: FALLBACK_MODEL,
+                reason: 'model-load-timeout',
+            });
+            this.dispatchProgress(I18n.format('whisperFallbackModel', {
+                model: FALLBACK_MODEL.split('/').pop() || FALLBACK_MODEL,
+            }), 10, 'model');
+            this.resetWorker('model-load-timeout-smaller-model');
+            this.initWorker(this.getWhisperSettings());
+            return;
+        }
+
+        if (this.workerBackend !== 'wasm' && !this.shouldForceWasm()) {
+            this.markWebgpuFailed('model-load-timeout');
+            EventBus.emit('webgpu:failed', { source: 'whisper' });
+            this.resetWorker('model-load-timeout-wasm');
+            this.initWorker(this.getWhisperSettings());
+            return;
+        }
+
+        const message = I18n.t('whisperModelLoadStalled');
+        const wasTranscribing = this.transcribing;
+        this.resetWorker('model-load-timeout-terminal');
+        if (wasTranscribing) this.stopTranscription('model-load-timeout');
+        AppStore.setWhisperState({
+            isTranscribing: false,
+            isLoadingModel: false,
+            progress: 0,
+            progressMessage: message,
+        });
+        this.showStatus(`<span class="whisper-error-indicator">${this.escapeHtml(message)}</span>`);
     }
 
     private sendChunk(
@@ -1582,6 +2320,8 @@ export class Whisper {
         switch (message.status) {
             case 'initiate':
                 if (message.backend) {
+                    this.workerBackend = message.backend === 'wasm' ? 'wasm' : 'webgpu';
+                    this.armModelLoadTimer(this.getWhisperSettings());
                     Logger.debug(`[Whisper] Worker backend: ${message.backend}${message.vendor ? ` (${message.vendor})` : ''}`);
                     if (message.backend === 'wasm') {
                         Logger.warn('[Whisper] Worker using WASM backend (WebGPU unavailable on this device)');
@@ -1591,7 +2331,7 @@ export class Whisper {
 
             case 'ready':
                 // Model ready - clear loading status and hide transcribing indicator
-                MLCrashGuard.initComplete('whisper');
+                this.settleWorkerInitSentinel();
                 this.releaseLoadLease();
                 this.clearModelLoadTimer();
                 this.modelReady = true;
@@ -1610,6 +2350,7 @@ export class Whisper {
 
             case 'progress': {
                 if (this.modelReady) return;
+                this.armModelLoadTimer(this.getWhisperSettings());
                 const fileName = message.file?.split('/').pop() || message.file || '';
                 const progress = this.normalizeModelProgress(message);
                 const customMessage = (message as { message?: string }).message;
@@ -1633,6 +2374,8 @@ export class Whisper {
 
             case 'fallback': {
                 const fallback = message as WorkerFallbackMessage;
+                this.modelOverride = fallback.fallbackModel;
+                this.armModelLoadTimer(this.getWhisperSettings());
                 const fallbackModelShort = fallback.fallbackModel.split('/').pop() || fallback.fallbackModel;
                 Logger.warn('[Whisper] Falling back from', fallback.originalModel, 'to', fallback.fallbackModel, '- reason:', fallback.reason);
                 // Notify user that a different model is being loaded
@@ -1665,6 +2408,7 @@ export class Whisper {
                     text: latest?.text || '',
                     segments: [...this.segments],
                     final: false,
+                    sourceLanguageHint: getWhisperSourceLanguageHint(this.getWhisperSettings().language),
                     chunkIndex: update.chunkId,
                     live: true,
                     source: 'update',
@@ -1705,6 +2449,7 @@ export class Whisper {
                     text: latest?.text || fullText || '',
                     segments: [...this.segments],
                     final: this.pendingChunks === 0,
+                    sourceLanguageHint: getWhisperSourceLanguageHint(this.getWhisperSettings().language),
                     chunkIndex: complete.chunkId,
                     live: true,
                     source: 'complete',
@@ -1720,7 +2465,8 @@ export class Whisper {
             }
 
             case 'gpu-device-lost': {
-                // Fatal GPU device loss — GPU is dead, transcription cannot continue.
+                // The WebGPU device is dead, but a fresh worker can continue on
+                // the bounded WASM/smaller-model path.
                 this.releaseLoadLease();
                 const deviceLostMsg = message.data?.message || 'GPU device lost';
                 Logger.error('[Whisper] Fatal GPU device loss:', deviceLostMsg);
@@ -1732,25 +2478,28 @@ export class Whisper {
                     EventBus.emit('webgpu:failed', { source: 'whisper' });
                 }
 
-                // Stop transcription if running
-                if (this.transcribing) {
-                    this.stopTranscription('gpu-device-lost');
-                }
+                const wasTranscribing = this.transcribing;
+                if (wasTranscribing) this.stopTranscription('gpu-device-lost');
                 this.resetWorker('gpu-device-lost');
 
-                // Show persistent crash status (no auto-dismiss)
-                const crashMsg = I18n.t('whisperGpuCrashed');
-                AppStore.setWhisperState({
-                    isTranscribing: false,
-                    isLoadingModel: false,
-                    progress: 0,
-                    progressMessage: crashMsg,
-                });
-                this.showStatus(`<span class="whisper-error-indicator whisper-crash-persistent">${this.escapeHtml(crashMsg)}</span>`);
-                // Do NOT auto-dismiss — user must refresh
-                if (this.errorDismissTimer) {
-                    clearTimeout(this.errorDismissTimer);
-                    this.errorDismissTimer = null;
+                const audio = getAudioElement();
+                if (wasTranscribing && audio && !audio.paused) {
+                    this.modelOverride = FALLBACK_MODEL;
+                    this.showStatus(`<span class="whisper-status-text">${this.escapeHtml(I18n.t('whisperRecovering'))}</span>`);
+                    window.setTimeout(() => {
+                        this.startTranscription().catch((error) => {
+                            Logger.error('[Whisper] WASM recovery after device loss failed', error);
+                        });
+                    }, 250);
+                } else {
+                    const crashMsg = I18n.t('whisperGpuCrashed');
+                    AppStore.setWhisperState({
+                        isTranscribing: false,
+                        isLoadingModel: false,
+                        progress: 0,
+                        progressMessage: crashMsg,
+                    });
+                    this.showStatus(`<span class="whisper-error-indicator">${this.escapeHtml(crashMsg)}</span>`);
                 }
                 break;
             }
@@ -1779,6 +2528,9 @@ export class Whisper {
                 const requestedGpuFallback = (message as WorkerErrorMessage).data?.gpuFallback === true;
                 const isInferenceTimeout = /inference timed out/i.test(errMsg);
                 const isGpuError = this.isGpuErrorMessage(errMsg) || requestedGpuFallback;
+                const isWebgpuInferenceTimeout = isInferenceTimeout
+                    && requestedGpuFallback
+                    && this.workerBackend !== 'wasm';
                 // "WebGPU is required" means worker tried WebGPU, it failed, but WASM
                 // fallback is disabled. This is a terminal GPU failure — do NOT retry.
                 const isWebgpuRequiredError = /WebGPU is required/i.test(errMsg);
@@ -1788,10 +2540,15 @@ export class Whisper {
                 const isExplicitDeviceLoss = this.isExplicitDeviceLossMessage(errMsg);
 
                 if (isGpuError || isTerminalGpuFailure) {
-                    // Timeout can be transient: keep WebGPU enabled for retry.
-                    if (!isInferenceTimeout) {
+                    // An uncancellable WebGPU inference timeout leaves that
+                    // worker/pipeline wedged. Restart once on tiny/WASM instead
+                    // of immediately retrying the same backend.
+                    if (!isInferenceTimeout || isWebgpuInferenceTimeout) {
                         const firstFailure = !Whisper.webgpuFailed;
-                        this.markWebgpuFailed(isTerminalGpuFailure ? 'terminal-worker-message' : 'worker-message');
+                        this.markWebgpuFailed(isTerminalGpuFailure
+                            ? 'terminal-worker-message'
+                            : isWebgpuInferenceTimeout ? 'webgpu-inference-timeout' : 'worker-message');
+                        if (isWebgpuInferenceTimeout) this.modelOverride = FALLBACK_MODEL;
                         if (firstFailure) {
                             EventBus.emit('webgpu:failed', { source: 'whisper' });
                         }
@@ -1803,7 +2560,7 @@ export class Whisper {
                             Logger.warn('[Whisper] Recoverable GPU failure — keeping device-loss local:', errMsg);
                         }
                     } else {
-                        Logger.warn('[Whisper] WebGPU inference timeout; keeping WebGPU enabled for retry:', errMsg);
+                        Logger.warn('[Whisper] Inference timeout on bounded fallback backend:', errMsg);
                     }
                 }
 
@@ -2158,13 +2915,23 @@ export class Whisper {
 
     private wordTimestampDiagLogged = false;
 
+    private applyLanguageAwareCorrections(text: string): string {
+        const language = this.getWhisperSettings().language;
+        // The glossary is Japanese-specific and contains replacements that are
+        // valid Chinese vocabulary. Never run it for explicit Chinese/other
+        // sources, or for auto-detected Han-only Chinese output.
+        if (language && language !== 'japanese') return text;
+        if (!language && isChinese(text)) return text;
+        return correctWhisperText(text);
+    }
+
     private parseSegments(raw: ChunkEntry[] | ProcessedSegment[] | undefined): WhisperSegment[] {
         if (!raw) return [];
         const segments: WhisperSegment[] = [];
         let realWordCount = 0;
         let fallbackWordCount = 0;
         for (const item of raw) {
-            const text = correctWhisperText(this.cleanText(item.text || ''));
+            const text = this.applyLanguageAwareCorrections(this.cleanText(item.text || ''));
             const ts = item.timestamp || [null, null];
             const start = ts[0];
             const end = ts[1];
@@ -2245,7 +3012,7 @@ export class Whisper {
     }
 
     /** Whisper-generated non-speech annotations that should be dropped. */
-    private static readonly NOISE_RE = /^\s*[\[\]()（）「」]*\s*(?:音楽|拍手|効果音|music|laughter|applause|silence|inaudible|noise|ドラゴンの音|スタッフ)\s*[\[\]()（）「」]*\s*$/i;
+    private static readonly NOISE_RE = /^\s*[\[\]()（）「」]*\s*(?:音楽|音乐|音樂|拍手|掌声|掌聲|笑声|笑聲|哭声|哭聲|叹气|嘆氣|静音|靜音|効果音|music|laughter|applause|silence|inaudible|noise|ドラゴンの音|スタッフ|谢谢观看|謝謝觀看|请订阅|請訂閱|下次见|下次見)\s*[\[\]()（）「」.!。！]*\s*$/i;
 
     private isNoiseOnly(text: string): boolean {
         return Whisper.NOISE_RE.test(text);
@@ -2274,7 +3041,7 @@ export class Whisper {
 
         // Apply hallucination corrections (same as startTranscription cache path)
         for (const seg of cached.segments) {
-            const corrected = correctWhisperText(seg.text);
+            const corrected = this.applyLanguageAwareCorrections(seg.text);
             if (corrected !== seg.text) seg.text = corrected;
         }
 
@@ -2289,6 +3056,7 @@ export class Whisper {
             text: latest?.text || cached.text,
             segments: cached.segments,
             final: !!cached.complete,
+            sourceLanguageHint: getWhisperSourceLanguageHint(settings.language),
             fromCache: true,
             live: false,
             source: 'cache',
@@ -2338,7 +3106,7 @@ export class Whisper {
 
     private getTrackIdentity(): { trackKey: string; title?: string; workId?: string; duration?: number } {
         const track = this.bridge.currentTrack;
-        const trackKey = track?.hash || track?.mediaStreamUrl || track?.src || this.currentTrackSrc || '';
+        const trackKey = track?.hash || this.resolveTrackUrl(track) || this.currentTrackSrc || '';
         const title = track?.title || track?.workTitle || '';
         const workId = this.bridge.currentWorkId || undefined;
         const duration = typeof track?.duration === 'number' ? track.duration : undefined;
@@ -2376,7 +3144,8 @@ export class Whisper {
         const translateMode = Config.get('translateMode') !== false;
         const cnToJp = Config.get('translateCnToJp') === true;
         const targetLang = (Config.get('subtitleLang') as string | undefined)?.toLowerCase() || 'en';
-        if ((!translateMode && !cnToJp) || !targetLang || targetLang === settings.language) return;
+        const sourceLang = normalizeLanguageCode(settings.language);
+        if ((!translateMode && !cnToJp) || !targetLang || targetLang === sourceLang) return;
 
         const cacheKey = this.currentCacheKey;
         if (!cacheKey || this.translationInFlight.has(`${cacheKey}:${targetLang}`)) return;
@@ -2384,11 +3153,21 @@ export class Whisper {
         this.translationInFlight.add(`${cacheKey}:${targetLang}`);
         try {
             const texts = payload.segments.map((seg) => seg.text);
+            const translatable = payload.segments
+                .map((seg, index) => ({ text: seg.text, index }))
+                .filter(({ text }) => this.shouldTranslateText(text, targetLang, settings));
+            if (translatable.length === 0) return;
             const transcriptKey = `whisper:transcript:${cacheKey}:${targetLang}`;
-            const translated = await TranslationService.translateBatch(texts, targetLang, {
+            const translatedSubset = await TranslationService.translateBatch(translatable.map(item => item.text), targetLang, {
+                preserveRequestedTarget: true,
                 priority: Priority.NORMAL,
                 cancellable: true,
                 cancellableKey: transcriptKey,
+                sourceLanguageHint: sourceLang || 'auto',
+            });
+            const translated = [...texts];
+            translatable.forEach((item, index) => {
+                translated[item.index] = translatedSubset[index] || item.text;
             });
             const translatedSegments: WhisperSegment[] = payload.segments.map((seg, idx) => ({
                 ...seg,
@@ -2406,7 +3185,7 @@ export class Whisper {
             };
 
             // Also batch-translate Chinese segments to 'ja' for LearnerMode primary display
-            if (targetLang !== 'ja') {
+            if (targetLang !== 'ja' && (sourceLang === '' || sourceLang === 'zh')) {
                 const cnTexts = texts.filter(t =>
                     /[\u4e00-\u9fff]/.test(t) && !/[\u3040-\u309f\u30a0-\u30ff]/.test(t)
                 );
@@ -2415,6 +3194,7 @@ export class Whisper {
                         priority: Priority.NORMAL,
                         cancellable: true,
                         cancellableKey: `${transcriptKey}:ja`,
+                        sourceLanguageHint: 'zh',
                     }).catch(() => { /* fire-and-forget */ });
                 }
             }
@@ -2443,7 +3223,10 @@ export class Whisper {
         const cnToJp = Config.get('translateCnToJp') === true;
         const targetLang = (Config.get('subtitleLang') as string | undefined)?.toLowerCase() || 'en';
         const settings = this.getWhisperSettings();
-        if ((!translateMode && !cnToJp) || !targetLang || targetLang === settings.language) return;
+        const sourceLang = normalizeLanguageCode(settings.language);
+        if ((!translateMode && !cnToJp) || !targetLang || targetLang === sourceLang) return;
+        const generation = ++this.translationGeneration;
+        const cacheIdentity = this.currentCacheIdentity;
 
         // Collect untranslated segments.
         const toTranslate = this.segments.filter(
@@ -2460,41 +3243,71 @@ export class Whisper {
         const jaAheadKey = `${aheadKey}:ja`;
 
         // Drop stale queued/in-flight translate-ahead jobs so the newest audio context wins.
-        TranslationService.cancelPending({ cancellableKey: aheadKey });
-        TranslationService.cancelPending({ cancellableKey: jaAheadKey });
+        for (const key of this.activeTranslationQueueKeys) {
+            TranslationService.cancelPending({ cancellableKey: key });
+        }
+        this.activeTranslationQueueKeys = new Set([aheadKey, jaAheadKey]);
 
         // Use translateBatch() for bulk throughput — a single batch call is far faster than
         // N individual translate() calls (one GpuScheduler task vs N serialized tasks for local;
         // better request packing for remote).
-        const texts = selected.map(seg => seg.text);
-        const batchPromises: Promise<unknown>[] = [];
+        const primarySegments = selected.filter(seg => this.shouldTranslateText(seg.text, targetLang, settings));
+        const texts = primarySegments.map(seg => seg.text);
+        let primaryPromise: Promise<string[]> | null = null;
 
-        batchPromises.push(
-            TranslationService.translateBatch(texts, targetLang, {
+        if (texts.length > 0) {
+            primaryPromise = TranslationService.translateBatch(texts, targetLang, {
+                preserveRequestedTarget: true,
                 priority: Priority.HIGH,
                 cancellable: true,
                 cancellableKey: aheadKey,
-            }).catch(() => null)
-        );
+                sourceLanguageHint: sourceLang || 'auto',
+            });
+        }
 
         // Also pre-translate Chinese segments to 'ja' for LearnerMode primary display
         // (LearnerMode shows JA as primary line when source is Chinese)
-        if (targetLang !== 'ja') {
+        let jaPromise: Promise<string[]> | null = null;
+        if (targetLang !== 'ja' && (sourceLang === '' || sourceLang === 'zh')) {
             const cnTexts = selected
                 .filter(seg => /[\u4e00-\u9fff]/.test(seg.text) && !/[\u3040-\u309f\u30a0-\u30ff]/.test(seg.text))
                 .map(seg => seg.text);
             if (cnTexts.length > 0) {
-                batchPromises.push(
-                    TranslationService.translateBatch(cnTexts, 'ja', {
+                jaPromise = TranslationService.translateBatch(cnTexts, 'ja', {
                         priority: Priority.HIGH,
                         cancellable: true,
                         cancellableKey: jaAheadKey,
-                    }).catch(() => null)
-                );
+                        sourceLanguageHint: 'zh',
+                    });
             }
         }
 
-        await Promise.allSettled(batchPromises);
+        const [primaryResult, jaResult] = await Promise.all([
+            primaryPromise ? primaryPromise.catch(() => null) : Promise.resolve<string[] | null>([]),
+            jaPromise ? jaPromise.catch(() => null) : Promise.resolve<string[] | null>([]),
+        ]);
+        if (generation !== this.translationGeneration || cacheIdentity !== this.currentCacheIdentity) return;
+
+        const primarySucceeded = primaryPromise === null || (
+            primaryResult !== null
+            && primaryResult.length === texts.length
+            && primaryResult.every((translated, index) => !!translated && translated !== texts[index])
+        );
+        const jaTexts = sourceLang === '' || sourceLang === 'zh'
+            ? selected
+                .filter(seg => /[\u4e00-\u9fff]/.test(seg.text) && !/[\u3040-\u309f\u30a0-\u30ff]/.test(seg.text))
+                .map(seg => seg.text)
+            : [];
+        const jaSucceeded = jaPromise === null || (
+            jaResult !== null
+            && jaResult.length === jaTexts.length
+            && jaResult.every((translated, index) => !!translated && translated !== jaTexts[index])
+        );
+        // Do not advance the retry cursor when either requested translation lane
+        // fell back to source text. This is especially important for Chinese
+        // source + Chinese UI, where only the auxiliary CN->JA lane is needed.
+        if (!primarySucceeded || !jaSucceeded) return;
+
         const furthest = selected[selected.length - 1];
         const furthestIdx = this.segments.indexOf(furthest);
         if (furthestIdx >= 0) {
@@ -2504,6 +3317,27 @@ export class Whisper {
         }
         this.translateAheadUpTo = Math.max(this.translateAheadUpTo, furthest.end);
         EventBus.emit('whisper:segment-translated', { count: selected.length });
+    }
+
+    private shouldTranslateText(text: string, targetLang: string, settings: WhisperSettings): boolean {
+        const target = normalizeLanguageCode(targetLang);
+        const configuredSource = normalizeLanguageCode(settings.language);
+        if (configuredSource) return configuredSource !== target;
+        if (target === 'zh' && isChinese(text)) return false;
+        if (target === 'ja' && /[\u3040-\u30ff]/.test(text)) return false;
+        if (target === 'en' && /[a-z]/i.test(text) && !/[\u3040-\u30ff\u4e00-\u9fff]/.test(text)) return false;
+        return true;
+    }
+
+    private resetTranslationAheadState(): void {
+        this.translationGeneration++;
+        for (const key of this.activeTranslationQueueKeys) {
+            TranslationService.cancelPending({ cancellableKey: key });
+        }
+        this.activeTranslationQueueKeys.clear();
+        this.lastTranslatedSegmentCount = 0;
+        this.translateAheadUpTo = 0;
+        this.lastTranslateAheadAt = 0;
     }
 
     // ------------------------------------------------------------------------
@@ -2555,8 +3389,23 @@ export class Whisper {
             preferLowPowerAdapter = true;
         }
 
-        const primaryLang = (Config.get('primarySubtitleLang') as string | undefined) || 'ja';
-        const language = primaryLang.toLowerCase() === 'ja' ? 'japanese' : primaryLang.toLowerCase();
+        const configuredModel = String(Config.get('whisperModel') || DEFAULT_MODEL).trim() || DEFAULT_MODEL;
+        // A desktop without WebGPU (including Apple Silicon in browsers that do
+        // not expose navigator.gpu) must start on the bounded tiny/WASM path.
+        // Loading whisper-small on CPU first can otherwise look permanently hung.
+        const useConservativeModel = forceWasm
+            || !profile.hasGpu
+            || profile.tier === 'constrained'
+            || shouldUseTinyWhisperModel(profile);
+        const model = this.modelOverride || (useConservativeModel ? FALLBACK_MODEL : configuredModel);
+        const configuredLanguage = String(Config.get('whisperLanguage') || 'auto');
+        let currentWork: WhisperWorkLanguageContext;
+        try {
+            currentWork = this.bridge.currentWork;
+        } catch {
+            currentWork = undefined;
+        }
+        const language = resolveWhisperLanguage(configuredLanguage, currentWork);
         const configuredTask = String(Config.get('whisperTask') || 'transcribe').toLowerCase();
         const subtask = configuredTask === 'translate' ? 'translate' : 'transcribe';
         const autoWarmupConfigured = Config.get('whisperAutoWarmup') !== false;
@@ -2564,7 +3413,7 @@ export class Whisper {
         const idleUnloadMs = DeviceCapabilities.budget.whisperIdleMs;
 
         return {
-            model: DEFAULT_MODEL,
+            model,
             subtask,
             language,
             multilingual: true,
@@ -2665,7 +3514,7 @@ export class Whisper {
         const displayMessage = I18n.format('whisperError', { message });
         EventBus.emit('whisper:error', { message });
         AppStore.setWhisperState({ isTranscribing: false, isLoadingModel: false, progress: 0, progressMessage: displayMessage });
-        if (!this.transcribing) return;
+        if (!this.enabled) return;
         this.showStatus(`<span class="whisper-error-indicator" aria-label="${this.escapeHtml(displayMessage)}">${this.escapeHtml(displayMessage)}</span>`);
 
         if (this.errorDismissTimer) clearTimeout(this.errorDismissTimer);
@@ -2675,9 +3524,28 @@ export class Whisper {
         }, 5000);
     }
 
+    private reserveStatusSlot(): void {
+        if (!this.enabled || this.statusEl?.isConnected) return;
+        // Reserve only inside the expanded player. Reserving against the global
+        // footer would leave a permanent blank 72px strip on unrelated routes.
+        const mount = document.querySelector('.audio-player');
+        if (!mount) return;
+
+        // Preserve an active message if the host re-render detached the old
+        // node while a model was loading.
+        const previousHtml = this.statusEl?.innerHTML || '';
+        const wasVisible = !!previousHtml && this.statusEl?.style.visibility !== 'hidden';
+        this.ensureStatusEl();
+        if (wasVisible) this.showStatus(previousHtml);
+        else this.clearStatus();
+    }
+
     private ensureStatusEl(): HTMLElement {
         if (this.statusEl && this.statusEl.isConnected) return this.statusEl;
 
+        document.querySelectorAll('.asmr-whisper-status-host').forEach((el) => {
+            el.classList.remove('asmr-whisper-status-host');
+        });
         this.statusEl = document.createElement('div');
         this.statusEl.className = 'whisper-status';
         this.statusEl.setAttribute('aria-label', I18n.t('whisperStatus') || 'Transcription status');
@@ -2686,12 +3554,21 @@ export class Whisper {
         const player = document.querySelector('.audio-player');
         const albumArt = player?.querySelector('.albumart');
         if (albumArt) {
-            albumArt.after(this.statusEl);
+            // Overlay the transient model status on the cover. This removes the
+            // status from document flow, so neither initial insertion nor later
+            // show/hide transitions move the player content.
+            this.statusEl.classList.add('whisper-status--overlay');
+            albumArt.classList.add('asmr-whisper-status-host');
+            albumArt.appendChild(this.statusEl);
         } else if (player) {
+            this.statusEl.classList.add('whisper-status--inline');
             player.prepend(this.statusEl);
         } else {
             const bar = document.querySelector('.player-bar-container, .player-bar, .q-footer');
-            if (bar) bar.insertAdjacentElement('beforebegin', this.statusEl);
+            if (bar) {
+                this.statusEl.classList.add('whisper-status--inline');
+                bar.insertAdjacentElement('beforebegin', this.statusEl);
+            }
         }
 
         return this.statusEl;
@@ -2702,11 +3579,15 @@ export class Whisper {
         if (el.innerHTML === html) return;
         el.innerHTML = html;
         el.style.display = '';
+        el.style.visibility = 'visible';
     }
 
     private clearStatus(): void {
         if (this.statusEl) {
-            this.statusEl.style.display = 'none';
+            // Inline fallback keeps its reserved slot; the normal cover overlay
+            // has no layout footprint and can be removed from paint entirely.
+            this.statusEl.style.display = this.statusEl.classList.contains('whisper-status--overlay') ? 'none' : '';
+            this.statusEl.style.visibility = 'hidden';
             this.statusEl.innerHTML = '';
         }
     }

@@ -140,10 +140,14 @@ export class TagFilters {
             chip.type = 'button';
             chip.className = 'q-chip row inline no-wrap items-center q-chip--dense bg-primary text-white';
             chip.ariaLabel = I18n.format('filtersRemove', { name }) || `Remove filter: ${name}`;
-            chip.innerHTML = `
-                <span class="q-chip__content col row no-wrap items-center">${name}</span>
-                <i class="q-icon material-icons q-chip__icon q-chip__icon--remove" aria-hidden="true">cancel</i>
-            `;
+            const content = document.createElement('span');
+            content.className = 'q-chip__content col row no-wrap items-center';
+            content.textContent = name;
+            const icon = document.createElement('i');
+            icon.className = 'q-icon material-icons q-chip__icon q-chip__icon--remove';
+            icon.setAttribute('aria-hidden', 'true');
+            icon.textContent = 'cancel';
+            chip.append(content, icon);
             chip.addEventListener('click', () => this.removeFilter(id));
             this.overlay.appendChild(chip);
         }

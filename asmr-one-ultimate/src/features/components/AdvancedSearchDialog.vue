@@ -32,9 +32,16 @@ import {
 } from '../advancedSearchSortUtils';
 
 import { LIMITS } from '../../core/Constants';
+import { Priority } from '../../core/GpuScheduler';
 import TagSelector from './TagSelector.vue';
 import EntitySelector from './EntitySelector.vue';
 import type { EntityItem } from './EntitySelector.vue';
+import {
+    FAVORITE_ENTITY_KEYS,
+    normalizeFavoriteEntities,
+    toggleFavoriteEntity,
+    type FavoriteEntity,
+} from '../favoriteEntities';
 
 // ---------------------------------------------------------------------------
 // Sort option types and fallback data
@@ -92,6 +99,8 @@ const selectedIncludes = ref<TagEntry[]>([]);
 const selectedExcludes = ref<TagEntry[]>([]);
 const selectedVA = ref<VAEntry | null>(null);
 const selectedCircle = ref<CircleEntry | null>(null);
+const favoriteVAs = ref<FavoriteEntity[]>(normalizeFavoriteEntities(GM_getValue(FAVORITE_ENTITY_KEYS.vas, [])));
+const favoriteCircles = ref<FavoriteEntity[]>(normalizeFavoriteEntities(GM_getValue(FAVORITE_ENTITY_KEYS.circles, [])));
 
 const minDuration = ref('');
 const maxDuration = ref('');
@@ -113,7 +122,7 @@ const tagList = shallowRef<TagEntry[]>([]);
 const vaList = shallowRef<VAEntry[]>([]);
 const circleList = shallowRef<CircleEntry[]>([]);
 
-// Translation cache for VA/Circle names (original -> English)
+// Translation cache for VA/Circle names (original -> current UI language)
 const translationCache = ref(new Map<string, string>());
 
 // ---------------------------------------------------------------------------
@@ -450,6 +459,7 @@ function ensureHostSortWatcher(): void {
 // ---------------------------------------------------------------------------
 
 let metadataLoadingPromise: Promise<void> | null = null;
+let metadataTranslationGeneration = 0;
 
 function looksTranslatable(text: string): boolean {
     return /[\u3040-\u30ff\u4e00-\u9faf\uac00-\ud7af]/.test(text);
@@ -457,13 +467,15 @@ function looksTranslatable(text: string): boolean {
 
 /** Strip " (English text)" suffix added by TranslationService.formatPair() */
 function stripTranslationSuffix(name: string): string {
-    return name.replace(/\s+\([A-Za-z][-A-Za-z\s.,!?;:'"…()]*\)$/, '');
+    return name.replace(/\s+\([^()]+\)$/u, '');
 }
 
 async function translateInBackground<T extends { name?: string; ja?: string }>(
     items: T[],
-    applyFn: (item: T, en: string) => void,
+    applyFn: (item: T, translated: string) => void,
     refreshFn: () => void,
+    targetLang: string,
+    generation: number,
 ): Promise<void> {
     const BATCH_SIZE = 30;
     const batches: T[][] = [];
@@ -476,15 +488,19 @@ async function translateInBackground<T extends { name?: string; ja?: string }>(
             const text = (item as T & { ja?: string; name?: string }).ja || (item as T & { ja?: string; name?: string }).name || '';
             if (!text) return;
             try {
-                const en = await TranslationService.translate(text, 'en');
-                if (en && en !== text) {
-                    applyFn(item, en);
+                const translated = await TranslationService.translate(
+                    text,
+                    targetLang,
+                    { priority: Priority.LOW, sourceLanguageHint: 'ja' },
+                );
+                if (generation === metadataTranslationGeneration && translated && translated !== text) {
+                    applyFn(item, translated);
                 }
             } catch (e) { Logger.warn('[AdvancedSearch] Background translation failed for:', text, e); }
         }));
 
         // Refresh UI after each batch if dialog is open
-        if (isOpen.value) {
+        if (generation === metadataTranslationGeneration && isOpen.value) {
             refreshFn();
         }
     }
@@ -492,6 +508,8 @@ async function translateInBackground<T extends { name?: string; ja?: string }>(
 
 async function loadMetadataLists(): Promise<void> {
     if (metadataLoadingPromise) return metadataLoadingPromise;
+    const generation = ++metadataTranslationGeneration;
+    const targetLang = TranslationService.getUiTargetLang();
 
     metadataLoadingPromise = (async () => {
         try {
@@ -505,17 +523,21 @@ async function loadMetadataLists(): Promise<void> {
             const vaArray = Array.isArray(vas) ? vas : [];
             const circlesArray = Array.isArray(circles) ? circles : [];
             const apiTagsArray = Array.isArray(apiTags) ? apiTags : [];
+            if (generation !== metadataTranslationGeneration) return;
 
             // Sort by count (popularity) descending
             vaList.value = vaArray.sort((a, b) => (b.count || 0) - (a.count || 0));
             circleList.value = circlesArray.sort((a, b) => (b.count || 0) - (a.count || 0));
 
-            // Build translation map from TranslatedTags
+            // Build the fast pretranslated map only for English. Other UI
+            // languages must not inherit English-only labels.
             const englishTagsList = englishTags.getTagList();
             const enMap = new Map<number, string>();
-            englishTagsList.forEach(t => {
-                if (t.en) enMap.set(t.id, t.en);
-            });
+            if (targetLang === 'en') {
+                englishTagsList.forEach(t => {
+                    if (t.en) enMap.set(t.id, t.en);
+                });
+            }
 
             // Use API tags as base, merge English translations
             tagList.value = apiTagsArray.map(t => {
@@ -529,25 +551,35 @@ async function loadMetadataLists(): Promise<void> {
                 };
             }).sort((a, b) => (b.count || 0) - (a.count || 0));
 
+            const currentTags = new Map(tagList.value.map(tag => [String(tag.id), tag]));
+            selectedIncludes.value = selectedIncludes.value.map(tag => currentTags.get(String(tag.id)) || { ...tag, en: '' });
+            selectedExcludes.value = selectedExcludes.value.map(tag => currentTags.get(String(tag.id)) || { ...tag, en: '' });
+
             Logger.debug('[AdvancedSearch] Metadata loaded:', vaArray.length, 'VAs,', circlesArray.length, 'circles, and', tagList.value.length, 'tags');
 
             // Start background translation for tags without translations
             translateInBackground(
                 tagList.value.filter(t => !t.en && looksTranslatable(t.ja || t.name)),
                 (item, en) => { item.en = en; },
-                () => { triggerRef(tagList); }
+                () => { triggerRef(tagList); },
+                targetLang,
+                generation,
             );
 
             // Background translation for VAs and Circles
             translateInBackground(
                 vaList.value.filter(v => looksTranslatable(v.name)),
                 (item, en) => { translationCache.value.set(item.name, en); },
-                () => { translationCache.value = new Map(translationCache.value); }
+                () => { translationCache.value = new Map(translationCache.value); },
+                targetLang,
+                generation,
             );
             translateInBackground(
                 circleList.value.filter(c => looksTranslatable(c.name)),
                 (item, en) => { translationCache.value.set(item.name, en); },
-                () => { translationCache.value = new Map(translationCache.value); }
+                () => { translationCache.value = new Map(translationCache.value); },
+                targetLang,
+                generation,
             );
         } catch (e) {
             Logger.warn('[AdvancedSearch] Failed to load metadata lists:', e);
@@ -614,6 +646,16 @@ function onVASelect(item: EntityItem): void {
 
 function onCircleSelect(item: EntityItem): void {
     selectedCircle.value = item as CircleEntry;
+}
+
+function toggleFavoriteVA(item: EntityItem): void {
+    favoriteVAs.value = toggleFavoriteEntity(favoriteVAs.value, item);
+    GM_setValue(FAVORITE_ENTITY_KEYS.vas, favoriteVAs.value);
+}
+
+function toggleFavoriteCircle(item: EntityItem): void {
+    favoriteCircles.value = toggleFavoriteEntity(favoriteCircles.value, item);
+    GM_setValue(FAVORITE_ENTITY_KEYS.circles, favoriteCircles.value);
 }
 
 // ---------------------------------------------------------------------------
@@ -850,9 +892,9 @@ async function fetchWorks(maxWorks: number): Promise<FetchedWork[]> {
 
             let url: string;
             if (selectedVA.value) {
-                url = `/api/vas/${selectedVA.value.id}/works`;
+                url = `/api/vas/${encodeURIComponent(String(selectedVA.value.id))}/works`;
             } else if (selectedCircle.value) {
-                url = `/api/circles/${selectedCircle.value.id}/works`;
+                url = `/api/circles/${encodeURIComponent(String(selectedCircle.value.id))}/works`;
             } else {
                 url = '/api/works';
             }
@@ -975,6 +1017,13 @@ watch(isOpen, (open) => {
     }
 });
 
+watch(lang, () => {
+    metadataTranslationGeneration++;
+    metadataLoadingPromise = null;
+    translationCache.value = new Map();
+    void loadMetadataLists();
+});
+
 // When the dialog first mounts, start loading metadata in background
 onMounted(() => {
     void loadMetadataLists();
@@ -983,6 +1032,7 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
+    metadataTranslationGeneration++;
     document.removeEventListener('keydown', onKeydown);
     if (sortWatcherCleanup) {
         sortWatcherCleanup();
@@ -1018,6 +1068,7 @@ onUnmounted(() => {
                     <!-- Row 1: Tags (Include/Exclude) -->
                     <div class="asmr-form-row">
                         <TagSelector
+                            kind="include"
                             :label="t('advIncludeTags')"
                             :filter-placeholder="t('advFilterTags')"
                             :tags="tagList"
@@ -1027,6 +1078,7 @@ onUnmounted(() => {
                             @remove="onIncludeTagRemove"
                         />
                         <TagSelector
+                            kind="exclude"
                             :label="t('advExcludeTags')"
                             :filter-placeholder="t('advFilterTags')"
                             :tags="tagList"
@@ -1042,6 +1094,7 @@ onUnmounted(() => {
                     <!-- Row 2: VA and Circle -->
                     <div class="asmr-form-row">
                         <EntitySelector
+                            kind="va"
                             :label="t('advVoiceActor')"
                             :filter-placeholder="t('advSearchVA')"
                             :items="(vaList as EntityItem[])"
@@ -1049,10 +1102,14 @@ onUnmounted(() => {
                             :translation-cache="translationCache"
                             :empty-message="t('advLoadingVA')"
                             :remove-aria-label="selectedVA ? format('advRemoveVA', { name: selectedVA.name }) : ''"
+                            :favorite-ids="favoriteVAs.map(item => item.id)"
+                            :favorite-aria-label="selectedVA ? format(favoriteVAs.some(item => String(item.id) === String(selectedVA?.id)) ? 'advUnfavoriteEntity' : 'advFavoriteEntity', { name: selectedVA.name }) : ''"
                             @select="onVASelect"
                             @clear="selectedVA = null"
+                            @toggle-favorite="toggleFavoriteVA"
                         />
                         <EntitySelector
+                            kind="circle"
                             :label="t('advCircle')"
                             :filter-placeholder="t('advSearchCircle')"
                             :items="(circleList as EntityItem[])"
@@ -1060,8 +1117,11 @@ onUnmounted(() => {
                             :translation-cache="translationCache"
                             :empty-message="t('advLoadingCircles')"
                             :remove-aria-label="selectedCircle ? format('advRemoveCircle', { name: selectedCircle.name }) : ''"
+                            :favorite-ids="favoriteCircles.map(item => item.id)"
+                            :favorite-aria-label="selectedCircle ? format(favoriteCircles.some(item => String(item.id) === String(selectedCircle?.id)) ? 'advUnfavoriteEntity' : 'advFavoriteEntity', { name: selectedCircle.name }) : ''"
                             @select="onCircleSelect"
                             @clear="selectedCircle = null"
+                            @toggle-favorite="toggleFavoriteCircle"
                         />
                     </div>
 
@@ -1091,7 +1151,7 @@ onUnmounted(() => {
                                 />
                                 <div class="asmr-presets-group">
                                     <button
-                                        class="asmr-preset-btn"
+                                        class="asmr-preset-btn asmr-preset-short"
                                         :class="{ active: activePreset === 'short' }"
                                         :title="t('advPresetShortTitle')"
                                         :aria-label="t('advPresetShortAria')"
@@ -1100,7 +1160,7 @@ onUnmounted(() => {
                                         @click="setDuration('0', '30')"
                                     >{{ t('advShort') }}</button>
                                     <button
-                                        class="asmr-preset-btn"
+                                        class="asmr-preset-btn asmr-preset-medium"
                                         :class="{ active: activePreset === 'medium' }"
                                         :title="t('advPresetMediumTitle')"
                                         :aria-label="t('advPresetMediumAria')"
@@ -1109,7 +1169,7 @@ onUnmounted(() => {
                                         @click="setDuration('30', '120')"
                                     >{{ t('advMedium') }}</button>
                                     <button
-                                        class="asmr-preset-btn"
+                                        class="asmr-preset-btn asmr-preset-long"
                                         :class="{ active: activePreset === 'long' }"
                                         :title="t('advPresetLongTitle')"
                                         :aria-label="t('advPresetLongAria')"
@@ -1135,14 +1195,14 @@ onUnmounted(() => {
                             </select>
                             <div class="asmr-sort-direction">
                                 <button
-                                    class="asmr-sort-dir-btn"
+                                    class="asmr-sort-dir-btn asmr-sort-desc"
                                     :class="{ active: sortDirection === 'desc' }"
                                     :aria-label="t('advSortDescAria')"
                                     :aria-pressed="sortDirection === 'desc'"
                                     @click="setSortDirection('desc')"
                                 >{{ t('advDesc') }}</button>
                                 <button
-                                    class="asmr-sort-dir-btn"
+                                    class="asmr-sort-dir-btn asmr-sort-asc"
                                     :class="{ active: sortDirection === 'asc' }"
                                     :aria-label="t('advSortAscAria')"
                                     :aria-pressed="sortDirection === 'asc'"

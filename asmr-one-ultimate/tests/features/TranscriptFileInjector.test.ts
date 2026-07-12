@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { eventListeners, eventBusOnMock, sharedCacheGetMock } = vi.hoisted(() => {
+const { eventListeners, eventBusOnMock, sharedCacheGetMock, bridgeState } = vi.hoisted(() => {
     const listeners: Array<{ event: string; callback: (payload: unknown) => void }> = [];
     return {
         eventListeners: listeners,
@@ -10,8 +10,15 @@ const { eventListeners, eventBusOnMock, sharedCacheGetMock } = vi.hoisted(() => 
         }),
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         sharedCacheGetMock: vi.fn((..._args: any[]): unknown => null),
+        bridgeState: { currentWorkId: 'work-current' },
     };
 });
+
+vi.mock('../../src/infrastructure/KikoeruBridge', () => ({
+    KikoeruBridge: {
+        getInstance: () => bridgeState,
+    },
+}));
 
 vi.mock('../../src/core/Utils', () => ({
     Logger: { log: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn() },
@@ -52,10 +59,11 @@ function makeWorkTree(): HTMLElement {
     return tree;
 }
 
-function addItem(tree: HTMLElement, title: string): HTMLElement {
+function addItem(tree: HTMLElement, title: string, hash = ''): HTMLElement {
     const list = tree.querySelector('.q-list')!;
     const item = document.createElement('div');
     item.className = 'q-item';
+    if (hash) item.dataset.asmrHash = hash;
     const label = document.createElement('div');
     label.className = 'q-item__label';
     label.textContent = title;
@@ -71,6 +79,7 @@ describe('TranscriptFileInjector', () => {
         eventBusOnMock.mockClear();
         eventListeners.length = 0;
         sharedCacheGetMock.mockReset();
+        bridgeState.currentWorkId = 'work-current';
         vi.useFakeTimers();
         tree = makeWorkTree();
     });
@@ -145,9 +154,10 @@ describe('TranscriptFileInjector', () => {
 
         const badge = tree.querySelector('[data-asmr-transcript]');
         expect(badge).not.toBeNull();
-        // Should have LRC and VTT buttons
+        // Should have raw TXT, LRC, and VTT buttons
         const buttons = badge!.querySelectorAll('button');
-        expect(buttons.length).toBeGreaterThanOrEqual(2);
+        expect(buttons.length).toBeGreaterThanOrEqual(3);
+        expect(Array.from(buttons).some(button => button.title === 'whisperTranscriptDownloadTxt')).toBe(true);
 
         injector.disable();
     });
@@ -178,6 +188,63 @@ describe('TranscriptFileInjector', () => {
 
         expect(tree.querySelector('[data-asmr-transcript]')).toBeNull();
 
+        injector.disable();
+    });
+
+    it('prefers the exact row hash over a newer same-title transcript from another work', () => {
+        const injector = new TranscriptFileInjector();
+        const transcript = {
+            text: 'text',
+            segments: [{ start: 0, end: 1, text: 'text' }],
+            model: 'whisper-tiny',
+            subtask: 'transcribe',
+            language: 'ja',
+            createdAt: 1000,
+            complete: true,
+        };
+        sharedCacheGetMock.mockImplementation((key: string) => {
+            if (key === 'whisper-index') return {
+                'hash-current': [{
+                    cacheKey: 'cache-current', trackKey: 'hash-current', trackTitle: 'track01.mp3',
+                    workId: 'work-current', model: 'whisper-tiny', subtask: 'transcribe', language: 'ja', updatedAt: 1000,
+                }],
+                'hash-other': [{
+                    cacheKey: 'cache-other', trackKey: 'hash-other', trackTitle: 'track01.mp3',
+                    workId: 'work-other', model: 'whisper-tiny', subtask: 'transcribe', language: 'ja', updatedAt: 2000,
+                }],
+            };
+            if (key === 'cache-current' || key === 'cache-other') return transcript;
+            return null;
+        });
+
+        const item = addItem(tree, 'track01.mp3', 'hash-current');
+        injector.enable();
+
+        const badge = item.querySelector<HTMLElement>('[data-asmr-transcript]');
+        expect(badge?.dataset.asmrTranscriptKey).toBe('cache-current:');
+        injector.disable();
+    });
+
+    it('does not title-match duplicate filenames from different tracks in the same work', () => {
+        const injector = new TranscriptFileInjector();
+        sharedCacheGetMock.mockImplementation((key: string) => {
+            if (key === 'whisper-index') return {
+                'hash-a': [{
+                    cacheKey: 'cache-a', trackKey: 'hash-a', trackTitle: 'track01.mp3', workId: 'work-current',
+                    model: 'whisper-tiny', subtask: 'transcribe', language: 'ja', updatedAt: 1000,
+                }],
+                'hash-b': [{
+                    cacheKey: 'cache-b', trackKey: 'hash-b', trackTitle: 'track01.mp3', workId: 'work-current',
+                    model: 'whisper-tiny', subtask: 'transcribe', language: 'ja', updatedAt: 2000,
+                }],
+            };
+            return null;
+        });
+
+        const item = addItem(tree, 'track01.mp3');
+        injector.enable();
+
+        expect(item.querySelector('[data-asmr-transcript]')).toBeNull();
         injector.disable();
     });
 
@@ -245,5 +312,19 @@ describe('TranscriptFileInjector', () => {
         // No error = coalescing worked
 
         injector.disable();
+    });
+
+    it('does not attach a flat-panel observer after being disabled', () => {
+        const injector = new TranscriptFileInjector();
+        const attachSpy = vi.spyOn(injector as any, 'attachFlatPanel');
+        injector.enable();
+
+        const toggleListener = eventListeners.find(l => l.event === 'flatview:toggle');
+        toggleListener?.callback({ active: true });
+        injector.disable();
+        vi.advanceTimersByTime(250);
+
+        expect(attachSpy).not.toHaveBeenCalled();
+        expect((injector as any).flatObserver).toBeNull();
     });
 });

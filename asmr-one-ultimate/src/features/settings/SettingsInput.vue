@@ -8,6 +8,7 @@ const props = defineProps<{
     sublabel?: string;
     placeholder?: string;
     icon: string;
+    inputType?: 'text' | 'password' | 'url';
 }>();
 
 const value = useConfig(props.configKey);
@@ -19,7 +20,7 @@ function onInput(event: Event) {
 </script>
 
 <template>
-    <div role="listitem" class="q-py-sm q-item q-item-type row no-wrap q-item--dark">
+    <div role="listitem" class="q-py-sm q-item q-item-type row no-wrap asmr-settings-item">
         <div class="q-item__section column q-item__section--avatar q-item__section--side justify-center">
             <i class="q-icon notranslate material-icons asmr-settings-icon">{{ icon }}</i>
         </div>
@@ -31,7 +32,8 @@ function onInput(event: Event) {
             <input
                 class="asmr-input q-field__native"
                 :placeholder="placeholder || ''"
-                type="text"
+                :type="inputType || 'text'"
+                :autocomplete="inputType === 'password' ? 'off' : undefined"
                 :value="value"
                 :data-key="configKey"
                 :data-asmr-input="configKey"

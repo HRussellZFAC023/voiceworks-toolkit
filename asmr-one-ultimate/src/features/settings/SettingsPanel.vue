@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import SettingsToggle from './SettingsToggle.vue';
 import SettingsInput from './SettingsInput.vue';
 import SettingsHotkeyInput from './SettingsHotkeyInput.vue';
@@ -13,7 +13,14 @@ import { CacheKeys, SharedCache } from '../../core/Cache';
 import { Logger } from '../../core/Utils';
 import { gmRequest } from '../../infrastructure/HttpClient';
 import { Whisper } from '../Whisper';
-import { runEmergencyExport, type ExportFormat } from '../EmergencyExport';
+import { buildEmergencyExport, runEmergencyExport, type ExportFormat } from '../EmergencyExport';
+import {
+    DriveBackupUploadError,
+    preloadGoogleDriveIdentity,
+    requestGoogleDriveAccessToken,
+    uploadDriveBackupFile,
+    uploadEmergencyExportToDrive,
+} from '../GoogleDriveBackup';
 import { DeviceCapabilities } from '../../core/DeviceCapabilities';
 import type { ConfigKey } from '../../types';
 // @ts-ignore – Vite ?raw import
@@ -69,6 +76,8 @@ const featureToggleItems: FeatureToggleItem[] = [
     { key: 'enableWhisper', labelKey: 'enableWhisper', sublabelKey: 'enableWhisperSub', icon: 'record_voice_over', hideOnIPhone: true },
     { key: 'enableFavicon', labelKey: 'enableFavicon', sublabelKey: 'enableFaviconSub', icon: 'image' },
     { key: 'enableMediaSession', labelKey: 'enableMediaSession', sublabelKey: 'enableMediaSessionSub', icon: 'play_circle' },
+    { key: 'enablePlayerFullscreen', labelKey: 'enablePlayerFullscreen', sublabelKey: 'enablePlayerFullscreenSub', icon: 'fullscreen' },
+    { key: 'enablePlayerGallery', labelKey: 'enablePlayerGallery', sublabelKey: 'enablePlayerGallerySub', icon: 'collections' },
     { key: 'enableMenuIconFixer', labelKey: 'enableMenuIconFixer', sublabelKey: 'enableMenuIconFixerSub', icon: 'build' },
     { key: 'enableStoreBackup', labelKey: 'enableStoreBackup', sublabelKey: 'enableStoreBackupSub', icon: 'save' },
     { key: 'enableHVDBLink', labelKey: 'enableHVDBLink', sublabelKey: 'enableHVDBLinkSub', icon: 'link' },
@@ -242,24 +251,91 @@ function backupSettings() {
 
 const emergencyExportBusy = ref(false);
 const emergencyExportStatus = ref('');
+const googleDriveClientId = useConfig('googleDriveClientId');
+const googleDriveIdentityReady = ref(false);
+let googleDriveIdentityLoading: Promise<void> | null = null;
+
+function prepareGoogleDriveIdentity(): Promise<void> {
+    if (googleDriveIdentityReady.value) return Promise.resolve();
+    if (googleDriveIdentityLoading) return googleDriveIdentityLoading;
+    googleDriveIdentityLoading = preloadGoogleDriveIdentity()
+        .then(() => { googleDriveIdentityReady.value = true; })
+        .finally(() => { googleDriveIdentityLoading = null; });
+    return googleDriveIdentityLoading;
+}
+
+watch(googleDriveClientId, (value) => {
+    if (String(value || '').trim()) void prepareGoogleDriveIdentity().catch(() => undefined);
+}, { immediate: true });
+
+function updateEmergencyProgress(p: { stage: 'own' | 'public' | 'done'; done: number; total: number; label: string }) {
+    if (p.stage === 'done') return;
+    const stageLabel = p.stage === 'own' ? t('emergencyExportStageOwn') : t('emergencyExportStagePublic');
+    emergencyExportStatus.value = `${stageLabel} ${Math.min(p.done, p.total)}/${p.total} — ${p.label}`;
+}
 
 async function emergencyExport(fmt: ExportFormat) {
     if (emergencyExportBusy.value) return;
     emergencyExportBusy.value = true;
     emergencyExportStatus.value = t('emergencyExportRunning');
     try {
-        const doc = await runEmergencyExport(fmt, (p) => {
-            if (p.stage === 'done') return;
-            const stageLabel = p.stage === 'own' ? t('emergencyExportStageOwn') : t('emergencyExportStagePublic');
-            emergencyExportStatus.value = `${stageLabel} ${Math.min(p.done + 1, p.total)}/${p.total} — ${p.label}`;
-        });
+        const doc = await runEmergencyExport(fmt, updateEmergencyProgress);
         emergencyExportStatus.value = format('emergencyExportDone', {
             own: doc.ownPlaylists.length,
             public: doc.publicPlaylists.length,
         });
     } catch (error) {
-        emergencyExportStatus.value = `${t('emergencyExportFailed')}: ${(error as Error)?.message || error}`;
-        Logger.warn('[EmergencyExport] Export failed', error);
+        emergencyExportStatus.value = t('emergencyExportFailed');
+        Logger.warn('[EmergencyExport] Export failed',
+            error instanceof Error ? error.message : 'Unknown export error');
+    } finally {
+        emergencyExportBusy.value = false;
+    }
+}
+
+async function emergencyDriveBackup() {
+    if (emergencyExportBusy.value) return;
+    const clientId = String(googleDriveClientId.value || '').trim();
+    if (!clientId) {
+        emergencyExportStatus.value = t('emergencyDriveClientIdRequired');
+        return;
+    }
+    if (!googleDriveIdentityReady.value) {
+        emergencyExportStatus.value = t('emergencyDriveAuthLoading');
+        try {
+            await prepareGoogleDriveIdentity();
+            emergencyExportStatus.value = t('emergencyDriveAuthReady');
+        } catch {
+            emergencyExportStatus.value = t('emergencyDriveAuthFailed');
+        }
+        return;
+    }
+    emergencyExportBusy.value = true;
+    emergencyExportStatus.value = t('emergencyDriveRunning');
+    try {
+        // GIS is already loaded, so requestAccessToken() opens its consent UI
+        // synchronously from this click before the long export begins.
+        const accessToken = await requestGoogleDriveAccessToken(clientId);
+        const doc = await buildEmergencyExport(updateEmergencyProgress);
+        const uploaded = await uploadEmergencyExportToDrive(doc, clientId, {
+            getAccessToken: async () => accessToken,
+            uploadFile: uploadDriveBackupFile,
+        });
+        emergencyExportStatus.value = format('emergencyDriveDone', {
+            own: uploaded[0]?.name || '',
+            public: uploaded[1]?.name || '',
+        });
+    } catch (error) {
+        if (error instanceof DriveBackupUploadError && error.successful.length > 0) {
+            emergencyExportStatus.value = format('emergencyDrivePartial', {
+                uploaded: error.successful.map(result => result.name).join(', '),
+                failed: error.failures.map(failure => failure.name).join(', '),
+            });
+        } else {
+            emergencyExportStatus.value = t('emergencyDriveFailed');
+        }
+        Logger.warn('[EmergencyExport] Google Drive backup failed',
+            error instanceof Error ? error.message : 'Unknown Google Drive error');
     } finally {
         emergencyExportBusy.value = false;
     }
@@ -447,10 +523,10 @@ const credits = [
         <!-- General Settings                                             -->
         <!-- ============================================================ -->
         <span class="text-weight-medium text-center flex q-my-md asmr-settings-header" id="asmr-general-settings-section-header">{{ t('generalSettings') }}</span>
-        <div id="asmr-general-settings" class="asmr-settings-section rounded-borders q-list q-list--bordered q-list--dark bg-black" role="group" aria-labelledby="asmr-general-settings-section-header">
+        <div id="asmr-general-settings" class="asmr-settings-section rounded-borders q-list q-list--bordered" role="group" aria-labelledby="asmr-general-settings-section-header">
             <SettingsToggle config-key="enableLogging" :label="t('enableLogging')" :sublabel="t('enableLoggingSub')" icon="terminal" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
-            <div role="listitem" class="q-py-sm q-item q-item-type row no-wrap q-item--dark">
+            <hr class="q-separator q-separator--horizontal asmr-settings-separator">
+            <div role="listitem" class="q-py-sm q-item q-item-type row no-wrap asmr-settings-item">
                 <div class="q-item__section column q-item__section--avatar q-item__section--side justify-center">
                     <i class="q-icon notranslate material-icons asmr-settings-icon" aria-hidden="true" role="presentation">public</i>
                 </div>
@@ -483,9 +559,9 @@ const credits = [
         <!-- ============================================================ -->
         <!-- Subtitle Settings                                            -->
         <!-- ============================================================ -->
-        <div id="asmr-subtitle-settings" class="asmr-settings-section rounded-borders q-list q-list--bordered q-list--dark bg-black">
+        <div id="asmr-subtitle-settings" class="asmr-settings-section rounded-borders q-list q-list--bordered">
             <SettingsInput config-key="primarySubtitleLang" :label="t('primaryLang')" :sublabel="t('primaryLangSub')" placeholder="e.g. ja, zh" icon="translate" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <hr class="q-separator q-separator--horizontal asmr-settings-separator">
             <SettingsInput config-key="subtitleLang" :label="t('targetLang')" :sublabel="t('targetLangSub')" placeholder="e.g. en, es, fr" icon="language" />
         </div>
 
@@ -493,7 +569,7 @@ const credits = [
         <!-- Feature Toggles                                              -->
         <!-- ============================================================ -->
         <span class="text-weight-medium text-center flex q-my-md asmr-settings-header" id="asmr-feature-settings-section-header">{{ t('featureToggles') }}</span>
-        <div id="asmr-feature-settings-section" class="asmr-settings-section rounded-borders q-list q-list--bordered q-list--dark bg-black" role="group" aria-labelledby="asmr-feature-settings-section-header">
+        <div id="asmr-feature-settings-section" class="asmr-settings-section rounded-borders q-list q-list--bordered" role="group" aria-labelledby="asmr-feature-settings-section-header">
             <template v-for="item in featureToggleItems" :key="item.key">
                 <template v-if="!item.hideOnIPhone || !isIPhone">
                     <SettingsToggle
@@ -502,7 +578,7 @@ const credits = [
                         :sublabel="t(item.sublabelKey)"
                         :icon="item.icon"
                     />
-                    <hr class="q-separator q-separator--horizontal q-separator--dark">
+                    <hr class="q-separator q-separator--horizontal asmr-settings-separator">
                 </template>
             </template>
             <SettingsInput config-key="galleryAutoSlideshowInterval" :label="t('galleryAutoSlideshowInterval')" :sublabel="t('galleryAutoSlideshowIntervalSub')" placeholder="6" icon="timer" />
@@ -512,49 +588,49 @@ const credits = [
         <!-- Keyboard Shortcuts                                           -->
         <!-- ============================================================ -->
         <span class="text-weight-medium text-center flex q-my-md asmr-settings-header" id="asmr-hotkey-settings-section-header">{{ t('keyboardShortcuts') }}</span>
-        <div id="asmr-hotkey-settings-section" class="asmr-settings-section rounded-borders q-list q-list--bordered q-list--dark bg-black" role="group" aria-labelledby="asmr-hotkey-settings-section-header">
+        <div id="asmr-hotkey-settings-section" class="asmr-settings-section rounded-borders q-list q-list--bordered" role="group" aria-labelledby="asmr-hotkey-settings-section-header">
             <SettingsHotkeyInput config-key="hotkeyPlayPause" :label="t('hotkeyPlayPause')" placeholder="Space" icon="play_arrow" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <hr class="q-separator q-separator--horizontal asmr-settings-separator">
             <SettingsHotkeyInput config-key="hotkeyMute" :label="t('hotkeyMute')" placeholder="m" icon="volume_off" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <hr class="q-separator q-separator--horizontal asmr-settings-separator">
             <SettingsHotkeyInput config-key="hotkeyFullscreen" :label="t('hotkeyFullscreen')" placeholder="f" icon="fullscreen" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <hr class="q-separator q-separator--horizontal asmr-settings-separator">
             <SettingsHotkeyInput config-key="hotkeySeekBack" :label="t('hotkeySeekBack')" placeholder="←" icon="fast_rewind" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <hr class="q-separator q-separator--horizontal asmr-settings-separator">
             <SettingsHotkeyInput config-key="hotkeySeekForward" :label="t('hotkeySeekForward')" placeholder="→" icon="fast_forward" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <hr class="q-separator q-separator--horizontal asmr-settings-separator">
             <SettingsHotkeyInput config-key="hotkeySeekBackLong" :label="t('hotkeySeekBackLong')" placeholder="j" icon="fast_rewind" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <hr class="q-separator q-separator--horizontal asmr-settings-separator">
             <SettingsHotkeyInput config-key="hotkeySeekForwardLong" :label="t('hotkeySeekForwardLong')" placeholder="l" icon="fast_forward" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <hr class="q-separator q-separator--horizontal asmr-settings-separator">
             <SettingsHotkeyInput config-key="hotkeyVolumeUp" :label="t('hotkeyVolumeUp')" placeholder="↑" icon="volume_up" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <hr class="q-separator q-separator--horizontal asmr-settings-separator">
             <SettingsHotkeyInput config-key="hotkeyVolumeDown" :label="t('hotkeyVolumeDown')" placeholder="↓" icon="volume_down" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <hr class="q-separator q-separator--horizontal asmr-settings-separator">
             <SettingsHotkeyInput config-key="hotkeyPrevLine" :label="t('hotkeyPrevLine')" placeholder="[" icon="skip_previous" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <hr class="q-separator q-separator--horizontal asmr-settings-separator">
             <SettingsHotkeyInput config-key="hotkeyNextLine" :label="t('hotkeyNextLine')" placeholder="]" icon="skip_next" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <hr class="q-separator q-separator--horizontal asmr-settings-separator">
             <SettingsHotkeyInput config-key="hotkeyPrevTrack" :label="t('hotkeyPrevTrack')" placeholder="p" icon="skip_previous" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <hr class="q-separator q-separator--horizontal asmr-settings-separator">
             <SettingsHotkeyInput config-key="hotkeyNextTrack" :label="t('hotkeyNextTrack')" placeholder="n" icon="skip_next" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <hr class="q-separator q-separator--horizontal asmr-settings-separator">
             <SettingsHotkeyInput config-key="hotkeySpeedUp" :label="t('hotkeySpeedUp')" placeholder=">" icon="speed" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <hr class="q-separator q-separator--horizontal asmr-settings-separator">
             <SettingsHotkeyInput config-key="hotkeySpeedDown" :label="t('hotkeySpeedDown')" placeholder="<" icon="speed" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <hr class="q-separator q-separator--horizontal asmr-settings-separator">
             <SettingsHotkeyInput config-key="hotkeySpeedReset" :label="t('hotkeySpeedReset')" placeholder="=" icon="speed" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <hr class="q-separator q-separator--horizontal asmr-settings-separator">
             <SettingsHotkeyInput config-key="hotkeyToggleBlur" :label="t('hotkeyToggleBlur')" placeholder="b" icon="blur_on" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <hr class="q-separator q-separator--horizontal asmr-settings-separator">
             <SettingsHotkeyInput config-key="hotkeyToggleJP" :label="t('hotkeyToggleJP')" placeholder="J" icon="translate" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <hr class="q-separator q-separator--horizontal asmr-settings-separator">
             <SettingsHotkeyInput config-key="hotkeyGalleryPrev" :label="t('hotkeyGalleryPrev')" placeholder="←" icon="navigate_before" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <hr class="q-separator q-separator--horizontal asmr-settings-separator">
             <SettingsHotkeyInput config-key="hotkeyGalleryNext" :label="t('hotkeyGalleryNext')" placeholder="→" icon="navigate_next" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <hr class="q-separator q-separator--horizontal asmr-settings-separator">
             <SettingsHotkeyInput config-key="hotkeyGalleryExclude" :label="t('hotkeyGalleryExclude')" placeholder="Del" icon="visibility_off" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <hr class="q-separator q-separator--horizontal asmr-settings-separator">
             <SettingsHotkeyInput config-key="hotkeyJpdbPopover" :label="t('hotkeyJpdbPopover')" placeholder="Shift+D" icon="menu_book" />
         </div>
 
@@ -562,11 +638,11 @@ const credits = [
         <!-- Radio Settings                                               -->
         <!-- ============================================================ -->
         <span class="text-weight-medium text-center flex q-my-md asmr-settings-header" id="asmr-radio-settings-section-header">{{ t('radioSettings') }}</span>
-        <div id="asmr-radio-settings-section" class="asmr-settings-section rounded-borders q-list q-list--bordered q-list--dark bg-black" role="group" aria-labelledby="asmr-radio-settings-section-header">
+        <div id="asmr-radio-settings-section" class="asmr-settings-section rounded-borders q-list q-list--bordered" role="group" aria-labelledby="asmr-radio-settings-section-header">
             <SettingsToggle config-key="playAllInFolder" :label="t('playAll')" :sublabel="t('playAllSub')" icon="playlist_play" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <hr class="q-separator q-separator--horizontal asmr-settings-separator">
             <SettingsToggle config-key="shuffle" :label="t('shuffle')" :sublabel="t('shuffleSub')" icon="shuffle" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <hr class="q-separator q-separator--horizontal asmr-settings-separator">
             <SettingsToggle config-key="autoProgress" :label="t('autoProgress')" :sublabel="t('autoProgressSub')" icon="fast_forward" />
         </div>
 
@@ -574,13 +650,13 @@ const credits = [
         <!-- Playlist Settings                                            -->
         <!-- ============================================================ -->
         <span class="text-weight-medium text-center flex q-my-md asmr-settings-header" id="asmr-playlist-settings-section-header">{{ t('playlistSettings') }}</span>
-        <div id="asmr-playlist-settings-section" class="asmr-settings-section rounded-borders q-list q-list--bordered q-list--dark bg-black" role="group" aria-labelledby="asmr-playlist-settings-section-header">
+        <div id="asmr-playlist-settings-section" class="asmr-settings-section rounded-borders q-list q-list--bordered" role="group" aria-labelledby="asmr-playlist-settings-section-header">
             <SettingsToggle config-key="playlistPlayAllInFolder" :label="t('playAll')" :sublabel="t('playAllSub')" icon="playlist_play" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <hr class="q-separator q-separator--horizontal asmr-settings-separator">
             <SettingsToggle config-key="playlistShuffle" :label="t('shuffle')" :sublabel="t('shuffleSub')" icon="shuffle" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <hr class="q-separator q-separator--horizontal asmr-settings-separator">
             <SettingsToggle config-key="playlistLoopPlaylist" :label="t('loopPlaylist')" :sublabel="t('loopPlaylistSub')" icon="repeat" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <hr class="q-separator q-separator--horizontal asmr-settings-separator">
             <SettingsToggle config-key="playlistAutoProgress" :label="t('autoProgress')" :sublabel="t('autoProgressSub')" icon="fast_forward" />
         </div>
 
@@ -588,11 +664,11 @@ const credits = [
         <!-- Folder & Track Pool Settings                                -->
         <!-- ============================================================ -->
         <span class="text-weight-medium text-center flex q-my-md asmr-settings-header" id="asmr-folder-pool-settings-section-header">{{ t('folderPoolSettings') }}</span>
-        <div id="asmr-folder-pool-settings-section" class="asmr-settings-section rounded-borders q-list q-list--bordered q-list--dark bg-black" role="group" aria-labelledby="asmr-folder-pool-settings-section-header">
+        <div id="asmr-folder-pool-settings-section" class="asmr-settings-section rounded-borders q-list q-list--bordered" role="group" aria-labelledby="asmr-folder-pool-settings-section-header">
             <SettingsToggle config-key="playlistUseFlatTracks" :label="t('trackPoolAllFolders')" :sublabel="t('trackPoolAllFoldersSub')" icon="view_list" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <hr class="q-separator q-separator--horizontal asmr-settings-separator">
             <SettingsToggle config-key="sePref" :label="t('sePref')" :sublabel="t('sePrefSub')" icon="surround_sound" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <hr class="q-separator q-separator--horizontal asmr-settings-separator">
             <SettingsToggle config-key="bgmPref" :label="t('bgmPref')" :sublabel="t('bgmPrefSub')" icon="music_note" />
         </div>
 
@@ -606,9 +682,9 @@ const credits = [
         <!-- ============================================================ -->
         <template v-if="sectionVisibility.whisper">
             <span class="text-weight-medium text-center flex q-my-md asmr-settings-header" id="asmr-whisper-settings-section-header">{{ t('whisperSettings') }}</span>
-            <div id="asmr-whisper-settings-section" class="asmr-settings-section rounded-borders q-list q-list--bordered q-list--dark bg-black" role="group" aria-labelledby="asmr-whisper-settings-section-header">
+            <div id="asmr-whisper-settings-section" class="asmr-settings-section rounded-borders q-list q-list--bordered" role="group" aria-labelledby="asmr-whisper-settings-section-header">
                 <!-- Download Whisper Model -->
-                <div role="listitem" class="q-py-sm q-item q-item-type row no-wrap q-item--dark">
+                <div role="listitem" class="q-py-sm q-item q-item-type row no-wrap asmr-settings-item">
                     <div class="q-item__section column q-item__section--avatar q-item__section--side justify-center">
                         <i class="q-icon notranslate material-icons asmr-settings-icon" aria-hidden="true" role="presentation">cloud_download</i>
                     </div>
@@ -637,11 +713,13 @@ const credits = [
                     </div>
                 </div>
                 <div class="q-px-md q-pb-md asmr-settings-hint">
-                    <div class="text-caption text-grey-7 asmr-settings-hint-text" :style="{ color: whisperModelStatusColor }">{{ whisperModelStatusText }}</div>
+                    <div class="text-caption asmr-settings-muted asmr-settings-hint-text" :style="{ color: whisperModelStatusColor }">{{ whisperModelStatusText }}</div>
                 </div>
-                <hr class="q-separator q-separator--horizontal q-separator--dark">
+                <hr class="q-separator q-separator--horizontal asmr-settings-separator">
                 <SettingsToggle config-key="alwaysTranscribe" :label="t('alwaysTranscribe')" :sublabel="t('alwaysTranscribeSub')" icon="auto_fix_high" />
-                <hr class="q-separator q-separator--horizontal q-separator--dark">
+                <hr class="q-separator q-separator--horizontal asmr-settings-separator">
+                <SettingsInput config-key="whisperLanguage" :label="t('whisperLanguage')" :sublabel="t('whisperLanguageSub')" placeholder="auto, ja, zh" icon="record_voice_over" />
+                <hr class="q-separator q-separator--horizontal asmr-settings-separator">
                 <SettingsToggle config-key="forceWhisperWasm" :label="t('forceWhisperWasm')" :sublabel="t('forceWhisperWasmSub')" icon="developer_board_off" />
             </div>
         </template>
@@ -651,12 +729,18 @@ const credits = [
         <!-- ============================================================ -->
         <template v-if="sectionVisibility.translation">
             <span class="text-weight-medium text-center flex q-my-md asmr-settings-header" id="asmr-translation-settings-section-header">{{ t('translationSettings') }}</span>
-            <div id="asmr-translation-settings-section" class="asmr-settings-section rounded-borders q-list q-list--bordered q-list--dark bg-black" role="group" aria-labelledby="asmr-translation-settings-section-header">
+            <div id="asmr-translation-settings-section" class="asmr-settings-section rounded-borders q-list q-list--bordered" role="group" aria-labelledby="asmr-translation-settings-section-header">
                 <SettingsToggle config-key="translateCnToJp" :label="t('translateCnToJp')" :sublabel="t('translateCnToJpSub')" icon="swap_horiz" />
-                <hr class="q-separator q-separator--horizontal q-separator--dark">
+                <hr class="q-separator q-separator--horizontal asmr-settings-separator">
+                <SettingsInput config-key="translationApiEndpoint" :label="t('translationApiEndpoint')" :sublabel="t('translationApiEndpointSub')" placeholder="https://api.example.com/v1/chat/completions" icon="hub" input-type="url" />
+                <hr class="q-separator q-separator--horizontal asmr-settings-separator">
+                <SettingsInput config-key="translationApiModel" :label="t('translationApiModel')" :sublabel="t('translationApiModelSub')" placeholder="gpt-4o-mini" icon="smart_toy" />
+                <hr class="q-separator q-separator--horizontal asmr-settings-separator">
+                <SettingsInput config-key="translationApiKey" :label="t('translationApiKey')" :sublabel="t('translationApiKeySub')" placeholder="Optional bearer token" icon="key" input-type="password" />
+                <hr class="q-separator q-separator--horizontal asmr-settings-separator">
 
                 <!-- Clear Translation Cache -->
-                <div role="listitem" class="q-py-sm q-item q-item-type row no-wrap q-item--dark">
+                <div role="listitem" class="q-py-sm q-item q-item-type row no-wrap asmr-settings-item">
                     <div class="q-item__section column q-item__section--avatar q-item__section--side justify-center">
                         <i class="q-icon notranslate material-icons asmr-settings-icon" aria-hidden="true" role="presentation">delete_sweep</i>
                     </div>
@@ -688,9 +772,9 @@ const credits = [
         <!-- ============================================================ -->
         <template v-if="sectionVisibility.jpdb">
             <span class="text-weight-medium text-center flex q-my-md asmr-settings-header" id="asmr-jpdb-settings-section-header">{{ t('jpdbSection') }}</span>
-            <div id="asmr-jpdb-settings-section" class="asmr-settings-section rounded-borders q-list q-list--bordered q-list--dark bg-black" role="group" aria-labelledby="asmr-jpdb-settings-section-header">
+            <div id="asmr-jpdb-settings-section" class="asmr-settings-section rounded-borders q-list q-list--bordered" role="group" aria-labelledby="asmr-jpdb-settings-section-header">
                 <SettingsInput config-key="jpdbApiToken" :label="t('jpdbApiToken')" :sublabel="t('jpdbApiTokenSub')" :placeholder="t('jpdbApiTokenPlaceholder')" icon="key" input-type="password" />
-                <div class="q-item q-item--dark" style="min-height: 36px; padding: 4px 16px;">
+                <div class="q-item asmr-settings-item" style="min-height: 36px; padding: 4px 16px;">
                     <a href="https://jpdb.io/settings#:~:text=in%20the%20future.-,Account%20information,-Username" target="_blank" rel="noopener noreferrer" class="q-btn q-btn-item non-selectable no-outline q-btn--standard q-btn--rectangle q-btn--actionable q-focusable q-hoverable" style="text-decoration: none; font-size: 0.85em;">
                         <span class="q-btn__content text-center col items-center q-anchor--skip justify-center row">
                             <i class="q-icon notranslate material-icons" aria-hidden="true" role="presentation" style="font-size: 18px;">open_in_new</i>
@@ -698,25 +782,25 @@ const credits = [
                         </span>
                     </a>
                 </div>
-                <hr class="q-separator q-separator--horizontal q-separator--dark">
+                <hr class="q-separator q-separator--horizontal asmr-settings-separator">
                 <SettingsToggle config-key="jpdbShowFurigana" :label="t('jpdbShowFurigana')" :sublabel="t('jpdbShowFuriganaSub')" icon="translate" />
-                <hr class="q-separator q-separator--horizontal q-separator--dark">
+                <hr class="q-separator q-separator--horizontal asmr-settings-separator">
                 <SettingsToggle config-key="jpdbSiteFurigana" :label="t('jpdbSiteFurigana')" :sublabel="t('jpdbSiteFuriganaSub')" icon="language" />
-                <hr class="q-separator q-separator--horizontal q-separator--dark">
+                <hr class="q-separator q-separator--horizontal asmr-settings-separator">
                 <SettingsToggle config-key="jpdbSubtitleFurigana" :label="t('jpdbSubtitleFurigana')" :sublabel="t('jpdbSubtitleFuriganaSub')" icon="subtitles" />
-                <hr class="q-separator q-separator--horizontal q-separator--dark">
+                <hr class="q-separator q-separator--horizontal asmr-settings-separator">
                 <SettingsToggle config-key="jpdbShowPitchAccent" :label="t('jpdbShowPitchAccent')" :sublabel="t('jpdbShowPitchAccentSub')" icon="graphic_eq" />
-                <hr class="q-separator q-separator--horizontal q-separator--dark">
+                <hr class="q-separator q-separator--horizontal asmr-settings-separator">
                 <SettingsInput config-key="jpdbMiningDeck" :label="t('jpdbMiningDeck')" :sublabel="t('jpdbMiningDeckSub')" placeholder="Mining" icon="style" />
-                <hr class="q-separator q-separator--horizontal q-separator--dark">
+                <hr class="q-separator q-separator--horizontal asmr-settings-separator">
                 <SettingsToggle config-key="jpdbAddToForq" :label="t('jpdbAddToForq')" :sublabel="t('jpdbAddToForqSub')" icon="priority_high" />
-                <hr class="q-separator q-separator--horizontal q-separator--dark">
+                <hr class="q-separator q-separator--horizontal asmr-settings-separator">
                 <SettingsToggle config-key="jpdbDisableReviews" :label="t('jpdbDisableReviews')" :sublabel="t('jpdbDisableReviewsSub')" icon="grading" />
-                <hr class="q-separator q-separator--horizontal q-separator--dark">
+                <hr class="q-separator q-separator--horizontal asmr-settings-separator">
                 <SettingsToggle config-key="jpdbUseTwoGrades" :label="t('jpdbUseTwoGrades')" :sublabel="t('jpdbUseTwoGradesSub')" icon="thumbs_up_down" />
-                <hr class="q-separator q-separator--horizontal q-separator--dark">
+                <hr class="q-separator q-separator--horizontal asmr-settings-separator">
                 <SettingsInput config-key="jpdbNeverForgetDeck" :label="t('jpdbNeverForgetDeck')" :sublabel="t('jpdbNeverForgetDeckSub')" placeholder="never-forget" icon="favorite" />
-                <hr class="q-separator q-separator--horizontal q-separator--dark">
+                <hr class="q-separator q-separator--horizontal asmr-settings-separator">
                 <SettingsInput config-key="jpdbBlacklistDeck" :label="t('jpdbBlacklistDeck')" :sublabel="t('jpdbBlacklistDeckSub')" placeholder="blacklist" icon="block" />
             </div>
         </template>
@@ -726,19 +810,19 @@ const credits = [
         <!-- ============================================================ -->
         <template v-if="sectionVisibility.autoprogress">
             <span class="text-weight-medium text-center flex q-my-md asmr-settings-header" id="asmr-autoprogress-settings-section-header">{{ t('autoProgressSection') }}</span>
-            <div id="asmr-autoprogress-settings-section" class="asmr-settings-section rounded-borders q-list q-list--bordered q-list--dark bg-black" role="group" aria-labelledby="asmr-autoprogress-settings-section-header">
+            <div id="asmr-autoprogress-settings-section" class="asmr-settings-section rounded-borders q-list q-list--bordered" role="group" aria-labelledby="asmr-autoprogress-settings-section-header">
                 <SettingsToggle config-key="autoProgressMarked" :label="t('autoProgressMarked')" :sublabel="t('autoProgressMarkedDesc')" icon="bookmark" />
-                <hr class="q-separator q-separator--horizontal q-separator--dark">
+                <hr class="q-separator q-separator--horizontal asmr-settings-separator">
                 <SettingsToggle config-key="autoProgressListening" :label="t('autoProgressListening')" :sublabel="t('autoProgressListeningDesc')" icon="headset" />
-                <hr class="q-separator q-separator--horizontal q-separator--dark">
+                <hr class="q-separator q-separator--horizontal asmr-settings-separator">
                 <SettingsToggle config-key="autoProgressListened" :label="t('autoProgressListened')" :sublabel="t('autoProgressListenedDesc')" icon="check" />
-                <hr class="q-separator q-separator--horizontal q-separator--dark">
+                <hr class="q-separator q-separator--horizontal asmr-settings-separator">
                 <SettingsToggle config-key="autoProgressReplay" :label="t('autoProgressReplay')" :sublabel="t('autoProgressReplayDesc')" icon="replay" />
-                <hr class="q-separator q-separator--horizontal q-separator--dark">
+                <hr class="q-separator q-separator--horizontal asmr-settings-separator">
                 <SettingsToggle config-key="autoProgressPostponed" :label="t('autoProgressPostponed')" :sublabel="t('autoProgressPostponedDesc')" icon="schedule" />
-                <hr class="q-separator q-separator--horizontal q-separator--dark">
+                <hr class="q-separator q-separator--horizontal asmr-settings-separator">
                 <SettingsInput config-key="autoProgressReplayThreshold" :label="t('autoProgressReplayThreshold')" :sublabel="t('autoProgressReplayThresholdDesc')" placeholder="2" icon="repeat_one" />
-                <hr class="q-separator q-separator--horizontal q-separator--dark">
+                <hr class="q-separator q-separator--horizontal asmr-settings-separator">
                 <SettingsInput config-key="autoProgressRadioSkipThreshold" :label="t('autoProgressRadioSkipThreshold')" :sublabel="t('autoProgressRadioSkipThresholdDesc')" placeholder="3" icon="visibility_off" />
             </div>
         </template>
@@ -748,9 +832,12 @@ const credits = [
         <!-- ============================================================ -->
         <template v-if="sectionVisibility.storage">
             <span class="text-weight-medium text-center flex q-my-md asmr-settings-header" id="asmr-storage-settings-section-header">{{ t('storageData') }}</span>
-            <div id="asmr-storage-settings-section" class="asmr-settings-section rounded-borders q-list q-list--bordered q-list--dark bg-black" role="group" aria-labelledby="asmr-storage-settings-section-header">
+            <div id="asmr-storage-settings-section" class="asmr-settings-section rounded-borders q-list q-list--bordered" role="group" aria-labelledby="asmr-storage-settings-section-header">
+                <SettingsToggle config-key="autoCacheAudio" :label="t('autoCacheAudio')" :sublabel="t('autoCacheAudioSub')" icon="offline_pin" />
+                <hr class="q-separator q-separator--horizontal asmr-settings-separator">
+
                 <!-- Backup -->
-                <div role="listitem" class="q-py-sm q-item q-item-type row no-wrap q-item--dark">
+                <div role="listitem" class="q-py-sm q-item q-item-type row no-wrap asmr-settings-item">
                     <div class="q-item__section column q-item__section--avatar q-item__section--side justify-center">
                         <i class="q-icon notranslate material-icons asmr-settings-icon" aria-hidden="true">save_alt</i>
                     </div>
@@ -759,15 +846,15 @@ const credits = [
                         <div class="q-item__label q-item__label--caption text-caption">{{ t('backupSettingsSub') }}</div>
                     </div>
                     <div class="q-item__section column q-item__section--side justify-center">
-                        <button type="button" class="q-btn q-btn-item non-selectable no-outline q-btn--standard q-btn--rectangle q-btn--actionable q-focusable q-hoverable" :aria-label="t('backupSettings') || 'Backup settings'" :title="t('backupSettings') || 'Backup settings'" @click="backupSettings">
+                        <button type="button" data-testid="settings-backup" class="q-btn q-btn-item non-selectable no-outline q-btn--standard q-btn--rectangle q-btn--actionable q-focusable q-hoverable" :aria-label="t('backupSettings') || 'Backup settings'" :title="t('backupSettings') || 'Backup settings'" @click="backupSettings">
                             <span class="q-btn__content text-center col items-center row"><i class="q-icon notranslate material-icons" aria-hidden="true" role="presentation">download</i></span>
                         </button>
                     </div>
                 </div>
-                <hr class="q-separator q-separator--horizontal q-separator--dark">
+                <hr class="q-separator q-separator--horizontal asmr-settings-separator">
 
                 <!-- Restore -->
-                <div role="listitem" class="q-py-sm q-item q-item-type row no-wrap q-item--dark">
+                <div role="listitem" class="q-py-sm q-item q-item-type row no-wrap asmr-settings-item">
                     <div class="q-item__section column q-item__section--avatar q-item__section--side justify-center">
                         <i class="q-icon notranslate material-icons asmr-settings-icon" aria-hidden="true">upload</i>
                     </div>
@@ -781,10 +868,10 @@ const credits = [
                         </button>
                     </div>
                 </div>
-                <hr class="q-separator q-separator--horizontal q-separator--dark">
+                <hr class="q-separator q-separator--horizontal asmr-settings-separator">
 
                 <!-- Factory Reset -->
-                <div role="listitem" class="q-py-sm q-item q-item-type row no-wrap q-item--dark">
+                <div role="listitem" class="q-py-sm q-item q-item-type row no-wrap asmr-settings-item">
                     <div class="q-item__section column q-item__section--avatar q-item__section--side justify-center">
                         <i class="q-icon notranslate material-icons asmr-settings-icon" aria-hidden="true">delete_forever</i>
                     </div>
@@ -805,8 +892,8 @@ const credits = [
         <!-- Emergency Playlist Backup                                    -->
         <!-- ============================================================ -->
         <span class="text-weight-medium text-center flex q-my-md asmr-settings-header" id="asmr-emergency-export-section-header">{{ t('emergencyExport') }}</span>
-        <div id="asmr-emergency-export-section" class="asmr-settings-section rounded-borders q-list q-list--bordered q-list--dark bg-black" role="group" aria-labelledby="asmr-emergency-export-section-header">
-            <div role="listitem" class="q-py-sm q-item q-item-type row no-wrap q-item--dark">
+        <div id="asmr-emergency-export-section" class="asmr-settings-section rounded-borders q-list q-list--bordered" role="group" aria-labelledby="asmr-emergency-export-section-header">
+            <div role="listitem" class="q-py-sm q-item q-item-type row no-wrap asmr-settings-item">
                 <div class="q-item__section column q-item__section--avatar q-item__section--side justify-center">
                     <i class="q-icon notranslate material-icons asmr-settings-icon" aria-hidden="true">medical_services</i>
                 </div>
@@ -815,6 +902,7 @@ const credits = [
                     <div class="q-item__label q-item__label--caption text-caption">{{ t('emergencyExportSub') }}</div>
                 </div>
             </div>
+            <SettingsInput config-key="googleDriveClientId" :label="t('emergencyDriveClientId')" :sublabel="t('emergencyDriveClientIdSub')" placeholder="1234567890-….apps.googleusercontent.com" icon="cloud" />
             <div class="q-px-md q-pb-md row q-gutter-sm">
                 <button type="button" data-testid="emergency-export-json" class="q-btn q-btn-item non-selectable no-outline q-btn--standard q-btn--rectangle q-btn--actionable q-focusable q-hoverable q-btn--dense" :disabled="emergencyExportBusy" @click="emergencyExport('json')">
                     <span class="q-btn__content text-center col items-center q-anchor--skip justify-center row">
@@ -834,6 +922,12 @@ const credits = [
                         {{ t('emergencyExportTxt') }}
                     </span>
                 </button>
+                <button type="button" data-testid="emergency-export-drive" class="q-btn q-btn-item non-selectable no-outline q-btn--standard q-btn--rectangle q-btn--actionable q-focusable q-hoverable q-btn--dense" :disabled="emergencyExportBusy" @click="emergencyDriveBackup">
+                    <span class="q-btn__content text-center col items-center q-anchor--skip justify-center row">
+                        <i class="q-icon notranslate material-icons q-mr-xs" aria-hidden="true" role="presentation" style="font-size: 16px">add_to_drive</i>
+                        {{ t('emergencyDriveUpload') }}
+                    </span>
+                </button>
             </div>
             <div v-if="emergencyExportStatus" class="q-px-md q-pb-md text-caption" data-testid="emergency-export-status">{{ emergencyExportStatus }}</div>
         </div>
@@ -842,9 +936,9 @@ const credits = [
         <!-- Proxy Settings                                               -->
         <!-- ============================================================ -->
         <span class="text-weight-medium text-center flex q-my-md asmr-settings-header" id="asmr-proxy-settings-section-header">{{ t('dlsiteProxy') }}</span>
-        <div id="asmr-proxy-settings-section" class="asmr-settings-section rounded-borders q-list q-list--bordered q-list--dark bg-black" role="group" aria-labelledby="asmr-proxy-settings-section-header">
+        <div id="asmr-proxy-settings-section" class="asmr-settings-section rounded-borders q-list q-list--bordered" role="group" aria-labelledby="asmr-proxy-settings-section-header">
             <SettingsInput config-key="apiProxyUrl" :label="t('apiProxyUrl')" :sublabel="t('apiProxyUrlSub')" placeholder="https://asmr-api-proxy.your-name.workers.dev" icon="cloud_sync" />
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <hr class="q-separator q-separator--horizontal asmr-settings-separator">
             <SettingsInput config-key="dlsiteProxyUrl" :label="t('dlsiteProxyUrl')" :sublabel="t('dlsiteProxyUrlSub')" placeholder="https://your-worker.workers.dev" icon="vpn_lock" />
             <div class="q-px-md q-pb-md">
                 <details class="asmr-setup-guide">
@@ -872,8 +966,8 @@ const credits = [
         <!-- About & Links                                                -->
         <!-- ============================================================ -->
         <span class="text-weight-medium text-center flex q-my-md asmr-settings-header" id="asmr-about-section-header">{{ t('aboutHeader') }}</span>
-        <div id="asmr-about-section" class="asmr-settings-section rounded-borders q-list q-list--bordered q-list--dark bg-black" role="group" aria-labelledby="asmr-about-section-header">
-            <div role="listitem" class="q-py-sm q-item q-item-type row no-wrap q-item--dark">
+        <div id="asmr-about-section" class="asmr-settings-section rounded-borders q-list q-list--bordered" role="group" aria-labelledby="asmr-about-section-header">
+            <div role="listitem" class="q-py-sm q-item q-item-type row no-wrap asmr-settings-item">
                 <div class="q-item__section column q-item__section--avatar q-item__section--side justify-center">
                     <i class="q-icon notranslate material-icons asmr-settings-icon" aria-hidden="true" role="presentation">menu_book</i>
                 </div>
@@ -889,8 +983,8 @@ const credits = [
                     </a>
                 </div>
             </div>
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
-            <div role="listitem" class="q-py-sm q-item q-item-type row no-wrap q-item--dark">
+            <hr class="q-separator q-separator--horizontal asmr-settings-separator">
+            <div role="listitem" class="q-py-sm q-item q-item-type row no-wrap asmr-settings-item">
                 <div class="q-item__section column q-item__section--avatar q-item__section--side justify-center">
                     <i class="q-icon notranslate material-icons asmr-settings-icon" aria-hidden="true" role="presentation">bug_report</i>
                 </div>
@@ -906,8 +1000,8 @@ const credits = [
                     </a>
                 </div>
             </div>
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
-            <div role="listitem" class="q-py-sm q-item q-item-type row no-wrap q-item--dark">
+            <hr class="q-separator q-separator--horizontal asmr-settings-separator">
+            <div role="listitem" class="q-py-sm q-item q-item-type row no-wrap asmr-settings-item">
                 <div class="q-item__section column q-item__section--avatar q-item__section--side justify-center">
                     <i class="q-icon notranslate material-icons asmr-settings-icon" aria-hidden="true" role="presentation" style="color: #7289da">forum</i>
                 </div>
@@ -923,7 +1017,7 @@ const credits = [
                     </button>
                 </div>
             </div>
-            <hr class="q-separator q-separator--horizontal q-separator--dark">
+            <hr class="q-separator q-separator--horizontal asmr-settings-separator">
             <div role="listitem" class="q-py-sm q-item q-item-type row no-wrap asmr-donate-item">
                 <div class="q-item__section column q-item__section--avatar q-item__section--side justify-center">
                     <i class="q-icon notranslate material-icons asmr-settings-icon" aria-hidden="true" role="presentation" style="color: #e57373">volunteer_activism</i>
@@ -946,8 +1040,8 @@ const credits = [
         <!-- Credits                                                      -->
         <!-- ============================================================ -->
         <span class="text-weight-medium text-center flex q-my-md asmr-settings-header" id="asmr-credits-section-header">{{ t('creditsHeader') }}</span>
-        <div id="asmr-credits-section" class="asmr-settings-section rounded-borders q-list q-list--bordered q-list--dark bg-black" role="group" aria-labelledby="asmr-credits-section-header">
-            <div class="q-pa-md text-caption text-grey-7">
+        <div id="asmr-credits-section" class="asmr-settings-section rounded-borders q-list q-list--bordered" role="group" aria-labelledby="asmr-credits-section-header">
+            <div class="q-pa-md text-caption asmr-settings-muted">
                 <div class="q-mb-sm">{{ t('creditsSub') }}</div>
                 <ul class="asmr-credits-list q-pl-md q-my-sm" style="list-style: disc; margin: 0;">
                     <li v-for="credit in credits" :key="credit.name">
@@ -974,4 +1068,3 @@ const credits = [
     transform: scale(1.05);
 }
 </style>
-

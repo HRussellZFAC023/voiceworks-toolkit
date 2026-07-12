@@ -17,6 +17,7 @@ export abstract class FeatureController {
     protected mounted: MountedApp | null = null;
     protected containerId: string;
     private routeUnwatch: (() => void) | undefined;
+    private enabled = false;
 
     constructor(containerId: string) {
         this.bridge = KikoeruBridge.getInstance();
@@ -50,6 +51,8 @@ export abstract class FeatureController {
     }
 
     public enable(): void {
+        if (this.enabled) return;
+        this.enabled = true;
         CentralObserver.register(this.containerId, () => this.tryInject(), this.debounceMs);
 
         this.routeUnwatch = this.bridge.$watch?.('$route', () => this.onRouteChange());
@@ -59,20 +62,37 @@ export abstract class FeatureController {
     }
 
     public disable(): void {
+        if (!this.enabled) return;
+        this.enabled = false;
         CentralObserver.unregister(this.containerId);
         this.routeUnwatch?.();
+        this.routeUnwatch = undefined;
         this.unmount();
+        // A failed mount may still have created the injection container.
+        document.getElementById(this.containerId)?.remove();
     }
 
     protected onRouteChange(): void {
+        if (!this.enabled) return;
         if (!this.shouldBeActive()) {
             this.unmount();
+            return;
         }
-        // CentralObserver will trigger tryInject if DOM changes
+        // Route changes do not always cause an observable body mutation (for
+        // example when a host reuses its shell), so also attempt immediately.
+        this.tryInject();
     }
 
     protected tryInject(): void {
-        if (!this.shouldBeActive()) return;
+        // Observer/route callbacks may already be queued when disable() tears
+        // down their registrations. Never let a stale callback resurrect UI.
+        if (!this.enabled) return;
+        if (!this.shouldBeActive()) {
+            this.unmount();
+            // Also clean up a container left behind by an earlier failed mount.
+            document.getElementById(this.containerId)?.remove();
+            return;
+        }
 
         // Already mounted and container still in DOM
         const existingContainer = document.getElementById(this.containerId);

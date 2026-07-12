@@ -84,11 +84,53 @@ function isIPad(): boolean {
 }
 
 /** Intel Macs (especially 2018-2020) often expose WebGPU but have weak iGPU throughput */
-export function isIntelMac(ua: string, platform: string): boolean {
+export function isIntelMac(ua: string, platform: string, gpuVendor = ''): boolean {
+    // Apple Silicon browsers commonly retain the legacy MacIntel platform and
+    // an "Intel Mac OS X" UA for compatibility. A GPU renderer identifying
+    // Apple silicon is stronger evidence and must win.
+    if (/apple\s+(?:m\d|gpu)|\bm[1-9]\b/i.test(gpuVendor)) return false;
     const uaLooksMac = /Macintosh|Mac OS X/i.test(ua);
     const platformLooksIntelMac = /MacIntel/i.test(platform);
     const uaLooksIntel = /Intel/i.test(ua);
     return uaLooksMac && (platformLooksIntelMac || uaLooksIntel);
+}
+
+/**
+ * Firefox exposes this privacy-preserving renderer for the affected M1-class
+ * WebGPU profile instead of detailed adapter information.
+ */
+export function isAppleM1CompatibilityGpu(gpuVendor = ''): boolean {
+    return /\bapple\s+m1(?:\s+gpu|\s*,\s*or\s+similar|\b)/i.test(gpuVendor);
+}
+
+/**
+ * Keep the overall device tier intact, but start Whisper on its smaller model
+ * when Firefox exposes an M1-compatible renderer and withholds system memory.
+ * Known-memory M1 browsers and explicitly newer Apple renderers are unaffected.
+ */
+export function shouldUseTinyWhisperModel(profile: Pick<
+    DeviceProfile,
+    'hasGpu' | 'memory' | 'isMobile' | 'gpuVendor'
+>, ua = navigator.userAgent || '', platform = navigator.platform || ''): boolean {
+    // Firefox withholds deviceMemory on macOS and can expose its Apple renderer
+    // only after the first graphics context is fully ready. The UA/platform
+    // fallback protects the same document-start runtime if that probe is blank.
+    const isUnknownMemoryFirefoxMac = /firefox/i.test(ua)
+        && /macintosh|mac os x/i.test(ua)
+        && /mac/i.test(platform || 'Mac');
+    return profile.hasGpu
+        && !profile.isMobile
+        && profile.memory < 0
+        && (isAppleM1CompatibilityGpu(profile.gpuVendor) || isUnknownMemoryFirefoxMac);
+}
+
+/** Keep optional background ML from competing with live Whisper on weak profiles. */
+export function shouldRunBackgroundMl(
+    profile: Pick<DeviceProfile, 'tier' | 'hasGpu' | 'memory' | 'isMobile' | 'gpuVendor'>,
+    ua = navigator.userAgent || '',
+    platform = navigator.platform || '',
+): boolean {
+    return profile.tier === 'full' && !shouldUseTinyWhisperModel(profile, ua, platform);
 }
 
 export function classifyDeviceTier(
@@ -99,6 +141,7 @@ export function classifyDeviceTier(
     isMobile: boolean,
     ua: string,
     platform: string,
+    gpuVendor = '',
 ): DeviceTier {
     // iPhone: always constrained — strict per-tab memory (~80-120MB),
     // Safari WebGPU + ONNX unreliable, deviceMemory unavailable
@@ -119,7 +162,7 @@ export function classifyDeviceTier(
 
     // Intel macOS laptops are often GPU-constrained for real-time Whisper WebGPU.
     // Treat as limited to enable safer backpressure and avoid eager warmup stalls.
-    if (isIntelMac(ua, platform)) {
+    if (isIntelMac(ua, platform, gpuVendor)) {
         return 'limited';
     }
 
@@ -140,7 +183,7 @@ function buildReason(profile: Omit<DeviceProfile, 'reason'>): string {
     if (profile.cores > 0) parts.push(`${profile.cores} cores`);
     if (isIPhone()) parts.push('iPhone');
     else if (isIPad()) parts.push('iPad');
-    else if (isIntelMac(navigator.userAgent || '', navigator.platform || '')) parts.push('intel-mac');
+    else if (isIntelMac(navigator.userAgent || '', navigator.platform || '', profile.gpuVendor)) parts.push('intel-mac');
     if (profile.isMobile) parts.push('mobile');
     else if (profile.isTouch) parts.push('touch');
     parts.push(`${profile.screenWidth}px`);
@@ -202,9 +245,8 @@ export const DeviceCapabilities = {
         const isMobile = (isTouch && screenWidth < 1024)
             || /Mobi|Android|iPhone|iPod/i.test(ua);
 
-        const tier = classifyDeviceTier(hasGpu, memory, cores, isTouch, isMobile, ua, platform);
-
         const gpuVendor = hasGpu ? detectGpuVendorViaWebGL() : '';
+        const tier = classifyDeviceTier(hasGpu, memory, cores, isTouch, isMobile, ua, platform, gpuVendor);
         const partial = { tier, hasGpu, memory, cores, isTouch, isMobile, screenWidth, gpuVendor, reason: '' };
         partial.reason = buildReason(partial);
 
@@ -228,7 +270,7 @@ export const DeviceCapabilities = {
 
     /** Should ML models be eagerly warmed up at startup? */
     get shouldWarmup(): boolean {
-        return this.profile.tier === 'full';
+        return shouldRunBackgroundMl(this.profile);
     },
 
     /** Get model budget for current device tier */

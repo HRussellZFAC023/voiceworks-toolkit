@@ -1,5 +1,5 @@
 
-import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from 'vitest';
 import { AutoProgress } from '../../src/features/AutoProgress';
 import { KikoeruBridge } from '../../src/infrastructure/KikoeruBridge';
 import { Config } from '../../src/core/Utils';
@@ -38,6 +38,7 @@ vi.mock('../../src/core/DomUtils', () => ({
 
 // Re-import so we can mutate RadioMode.isActive in tests
 import { RadioMode } from '../../src/features/radio';
+import { PlaylistMode } from '../../src/features/playlist';
 
 vi.mock('../../src/infrastructure/KikoeruBridge', () => {
     const mockStore = {
@@ -172,6 +173,7 @@ describe('AutoProgress', () => {
         };
         // Reset RadioMode
         (RadioMode as any).isActive = false;
+        (PlaylistMode as any).isActive = false;
         // Reset GM storage mocks
         (globalThis as any).GM_getValue.mockReturnValue('{}');
         // Reset config to defaults
@@ -181,11 +183,30 @@ describe('AutoProgress', () => {
         ap.enable();
     });
 
+    afterEach(() => {
+        ap.disable();
+    });
+
     // =========================================================================
     // Master toggle
     // =========================================================================
 
     describe('master toggle', () => {
+        it('is idempotent and removes injected checkmarks on disable', () => {
+            const watchCalls = bridge.app.$watch.mock.calls.length;
+            ap.enable();
+            expect(bridge.app.$watch).toHaveBeenCalledTimes(watchCalls);
+
+            const check = document.createElement('i');
+            check.className = 'asmr-check';
+            document.body.appendChild(check);
+            ap.disable();
+            expect(document.querySelector('.asmr-check')).toBeNull();
+
+            // Keep afterEach idempotent after this explicit lifecycle assertion.
+            ap.enable();
+        });
+
         it('should not update if autoProgress is false', () => {
             setConfig({ autoProgress: false, playlistAutoProgress: false });
             (ap as any).checkAndMark(50);
@@ -197,6 +218,24 @@ describe('AutoProgress', () => {
             (ap as any).handleRouteChange({ path: '/work/RJ99999' });
             expect(mockUpdateReview).not.toHaveBeenCalled();
         });
+
+        it('does not let the playlist-only toggle affect ordinary playback', () => {
+            setConfig({ autoProgress: false, playlistAutoProgress: true });
+            (PlaylistMode as any).isActive = false;
+
+            (ap as any).checkAndMark(6);
+            expect(mockUpdateReview).not.toHaveBeenCalled();
+        });
+
+        it('uses the playlist-only toggle while Playlist Mode is active', () => {
+            setConfig({ autoProgress: false, playlistAutoProgress: true });
+            (PlaylistMode as any).isActive = true;
+
+            (ap as any).checkAndMark(6);
+            expect(mockUpdateReview).toHaveBeenCalledWith(
+                expect.objectContaining({ work_id: 12345, progress: 'listening' })
+            );
+        });
     });
 
     // =========================================================================
@@ -204,6 +243,39 @@ describe('AutoProgress', () => {
     // =========================================================================
 
     describe('marked on visit', () => {
+        it('registers the route watcher as immediate for hard-refresh visits', () => {
+            expect(bridge.app.$watch).toHaveBeenCalledWith(
+                '$route',
+                expect.any(Function),
+                { immediate: true },
+            );
+        });
+
+        it('initializes visit tracking from the current route on hard refresh', () => {
+            ap.disable();
+            mockUpdateReview.mockClear();
+            bridge.router.currentRoute = { path: '/work/RJ77777', query: {} };
+            bridge.app.$watch.mockImplementationOnce((
+                _expression: string,
+                callback: (route: { path: string }) => void,
+                options?: { immediate?: boolean },
+            ) => {
+                if (options?.immediate) callback(bridge.router.currentRoute);
+                return vi.fn();
+            });
+
+            ap = createAutoProgress();
+            ap.enable();
+
+            expect((ap as any).currentVisitWorkId).toBe('77777');
+            expect(mockUpdateReview).toHaveBeenCalledWith({
+                work_id: 77777,
+                progress: 'marked',
+                progressOnly: true,
+            });
+            bridge.router.currentRoute = { path: '/work/RJ12345', query: { path: '[]' } };
+        });
+
         it('should mark "marked" when visiting a work page with no prior status', () => {
             (ap as any).handleRouteChange({ path: '/work/RJ99999' });
             expect(mockUpdateReview).toHaveBeenCalledWith({

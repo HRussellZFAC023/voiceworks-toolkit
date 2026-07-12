@@ -10,6 +10,8 @@
 import { type Component } from 'vue';
 import { FeatureController } from './FeatureController';
 import LearnerSubtitles from './components/LearnerSubtitles.vue';
+import { getPlayerBar } from '../core/DomUtils';
+import { AppStore } from '../store/AppStore';
 
 export class LearnerModeController extends FeatureController {
     constructor() {
@@ -29,23 +31,22 @@ export class LearnerModeController extends FeatureController {
     }
 
     protected shouldBeActive(): boolean {
-        // Always active — visibility is handled by the component based on
-        // whether there is content to show and the player state.
-        return true;
+        return AppStore.getConfig('enableLearnerMode');
     }
 
     findInjectionPoint(): HTMLElement | null {
         // Inject right after the album art inside the expanded audio player,
         // mirroring the old LearnerMode.injectExpanded() placement.
         const player = document.querySelector('.audio-player') as HTMLElement | null;
-        if (!player) return null;
+        if (player) {
+            // Prefer album art as anchor so we insert after it.
+            const albumArt = player.querySelector('.albumart') as HTMLElement | null;
+            return albumArt || player;
+        }
 
-        // Prefer album art as anchor so we insert after it
-        const albumArt = player.querySelector('.albumart') as HTMLElement | null;
-        if (albumArt) return albumArt;
-
-        // Fallback: prepend to the player itself (insertMode won't matter here,
-        // but the component still renders correctly)
-        return player;
+        // Newer host builds keep the compact player in the footer and do not
+        // create the legacy `.audio-player` wrapper. Mount beside that bar so
+        // the component can still render collapsed controls and react to state.
+        return getPlayerBar();
     }
 }

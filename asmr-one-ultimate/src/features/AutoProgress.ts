@@ -50,6 +50,7 @@ export class AutoProgress {
     private listenedTracks: Set<string> = new Set();
     private pollId: number | null = null;
     private sentUpdates: Set<string> = new Set();
+    private enabled = false;
 
     /** Cached flattened audio tracks for isLastTrackInWork (invalidated on work change) */
     private cachedFlatTracks: (AudioTrack | TrackItem)[] | null = null;
@@ -88,14 +89,20 @@ export class AutoProgress {
     }
 
     public enable(): void {
+        if (this.enabled) return;
+        this.enabled = true;
         this.setupCurrentTimeWatcher();
         this.setupRouteWatcher();
         this.setupEventListeners();
         this.injectCheckmarks();
-        CentralObserver.register('auto-progress-checkmarks', () => this.injectCheckmarks(), TIMING.OBSERVER_REGISTER_DEBOUNCE_MS);
+        CentralObserver.register('auto-progress-checkmarks', () => {
+            if (this.enabled) this.injectCheckmarks();
+        }, TIMING.OBSERVER_REGISTER_DEBOUNCE_MS);
     }
 
     public disable(): void {
+        if (!this.enabled) return;
+        this.enabled = false;
         if (this.audioRetryId !== null) {
             clearInterval(this.audioRetryId);
             this.audioRetryId = null;
@@ -117,6 +124,7 @@ export class AutoProgress {
         this.cleanups = [];
         this.sentUpdates.clear();
         CentralObserver.unregister('auto-progress-checkmarks');
+        document.querySelectorAll('.asmr-check').forEach((check) => check.remove());
     }
 
     // =========================================================================
@@ -135,6 +143,7 @@ export class AutoProgress {
                 // Audio element may not exist yet; retry briefly
                 let retries = 0;
                 this.audioRetryId = window.setInterval(() => {
+                    if (!this.enabled) return;
                     const el = getAudioElement();
                     if (el) {
                         this.bindAudioElement(el);
@@ -153,6 +162,7 @@ export class AutoProgress {
         // Re-attach when track changes (audio element may be replaced)
         this.cleanups.push(
             EventBus.on('track:change', () => {
+                if (!this.enabled) return;
                 const audio = getAudioElement();
                 if (audio && audio !== this.boundAudio) {
                     this.bindAudioElement(audio);
@@ -172,7 +182,7 @@ export class AutoProgress {
 
         this.boundAudio = audio;
         this.timeupdateHandler = () => {
-            this.checkAndMark(audio.currentTime);
+            if (this.enabled) this.checkAndMark(audio.currentTime);
         };
         audio.addEventListener('timeupdate', this.timeupdateHandler);
         Logger.debug('[AutoProgress] Bound to audio element timeupdate');
@@ -181,6 +191,7 @@ export class AutoProgress {
     private startPoll(): void {
         if (this.pollId !== null) return;
         this.pollId = window.setInterval(() => {
+            if (!this.enabled) return;
             const audio = getAudioElement();
             if (audio) {
                 this.checkAndMark(audio.currentTime);
@@ -195,8 +206,8 @@ export class AutoProgress {
         const app = this.bridge.app;
         if (app?.$watch) {
             this._routeUnwatch = app.$watch('$route', (newRoute: VueRoute) => {
-                this.handleRouteChange(newRoute);
-            });
+                if (this.enabled) this.handleRouteChange(newRoute);
+            }, { immediate: true });
         }
     }
 
@@ -206,10 +217,10 @@ export class AutoProgress {
     private setupEventListeners(): void {
         this.cleanups.push(
             EventBus.on('radio:skip', (event) => {
-                this.handleRadioSkip(event.fromWorkId);
+                if (this.enabled) this.handleRadioSkip(event.fromWorkId);
             }),
             EventBus.on('work:change', (event) => {
-                this.handleWorkChange(event.workId);
+                if (this.enabled) this.handleWorkChange(event.workId);
             })
         );
     }
@@ -221,10 +232,13 @@ export class AutoProgress {
     private isAutoProgressEnabled(): boolean {
         if (RadioMode.isActive) return Config.get('autoProgress');
         if (PlaylistMode.isActive) return Config.get('playlistAutoProgress');
-        return Config.get('autoProgress') || Config.get('playlistAutoProgress');
+        // playlistAutoProgress is scoped to Playlist Mode. Enabling it must not
+        // mutate progress during ordinary work-page playback.
+        return Config.get('autoProgress');
     }
 
     private handleRouteChange(route: VueRoute): void {
+        if (!this.enabled) return;
         const path: string = route?.path || '';
         const workIdMatch = path.match(/\/work\/(?:RJ)?(\d+)/i);
         const newWorkId = workIdMatch?.[1] || null;
@@ -256,6 +270,7 @@ export class AutoProgress {
     private lastDiagTime = 0;
 
     private checkAndMark(currentTime: number): void {
+        if (!this.enabled) return;
         if (!this.isAutoProgressEnabled()) return;
 
         const now = Date.now();
@@ -774,6 +789,7 @@ export class AutoProgress {
     }
 
     private injectCheckmarks(): void {
+        if (!this.enabled) return;
         if (!this.isAutoProgressEnabled()) return;
 
         const items = document.querySelectorAll('.q-item, .file-list-item');

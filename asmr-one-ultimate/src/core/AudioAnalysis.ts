@@ -25,6 +25,11 @@ import { getAudioElement, hasValidAudioSource } from './DomUtils';
 const sourceNodes = new WeakMap<HTMLMediaElement, MediaElementAudioSourceNode>();
 const contexts = new WeakMap<HTMLMediaElement, AudioContext>();
 
+/** Whether another feature has already routed this element through Web Audio. */
+export function hasSharedSourceNode(audio: HTMLMediaElement): boolean {
+    return sourceNodes.has(audio);
+}
+
 /**
  * Get (or create) a shared AudioContext + MediaElementSourceNode for the given
  * audio element.  The source is automatically connected to `ctx.destination`
@@ -95,6 +100,104 @@ export interface ConnectedAudioAnalyser {
     ctx: AudioContext;
     source: MediaElementAudioSourceNode;
     analyser: AnalyserNode;
+}
+
+export interface AudioPcmTapOptions {
+    tag: string;
+    targetSampleRate: number;
+    onData: (monoPcm: Float32Array) => void;
+}
+
+export interface ConnectedAudioPcmTap {
+    ctx: AudioContext;
+    disconnect: () => void;
+}
+
+/**
+ * Resample a short mono block with linear interpolation. The audio tap uses a
+ * 4096-frame block, so this keeps allocations bounded while producing the
+ * 16 kHz input expected by Whisper.
+ */
+export function resampleMonoPcm(
+    input: Float32Array,
+    sourceSampleRate: number,
+    targetSampleRate: number,
+): Float32Array {
+    if (input.length === 0 || sourceSampleRate <= 0 || targetSampleRate <= 0) {
+        return new Float32Array(0);
+    }
+    if (sourceSampleRate === targetSampleRate) return input.slice();
+
+    const outputLength = Math.max(1, Math.floor(input.length * targetSampleRate / sourceSampleRate));
+    const output = new Float32Array(outputLength);
+    const sourceStep = sourceSampleRate / targetSampleRate;
+    for (let i = 0; i < outputLength; i++) {
+        const sourcePosition = i * sourceStep;
+        const leftIndex = Math.min(input.length - 1, Math.floor(sourcePosition));
+        const rightIndex = Math.min(input.length - 1, leftIndex + 1);
+        const fraction = sourcePosition - leftIndex;
+        output[i] = input[leftIndex] + (input[rightIndex] - input[leftIndex]) * fraction;
+    }
+    return output;
+}
+
+/**
+ * Attach a silent PCM analysis branch to the existing shared media source.
+ * Playback remains on the source -> destination connection established by
+ * getOrCreateSourceNode(); the zero-gain branch merely keeps audio callbacks
+ * alive and can be disconnected independently.
+ */
+export function connectAudioPcmTap(
+    audio: HTMLAudioElement,
+    options: AudioPcmTapOptions,
+): ConnectedAudioPcmTap | null {
+    const result = getOrCreateSourceNode(audio);
+    if (!result) return null;
+
+    try {
+        // ScriptProcessor is deprecated but remains the only synchronous,
+        // CSP-safe PCM tap available to userscripts in Firefox and Safari.
+        // A small bounded buffer is sufficient for speech transcription.
+        const processor = result.ctx.createScriptProcessor(4096, 2, 1);
+        const silentGain = result.ctx.createGain();
+        silentGain.gain.value = 0;
+        let disconnected = false;
+
+        processor.onaudioprocess = (event: AudioProcessingEvent) => {
+            if (disconnected) return;
+            try {
+                const input = event.inputBuffer;
+                const channels = Math.max(1, input.numberOfChannels);
+                const mono = new Float32Array(input.length);
+                for (let channel = 0; channel < channels; channel++) {
+                    const data = input.getChannelData(channel);
+                    for (let i = 0; i < data.length; i++) mono[i] += data[i] / channels;
+                }
+                options.onData(resampleMonoPcm(mono, result.ctx.sampleRate, options.targetSampleRate));
+            } catch (err) {
+                Logger.debug(`[${options.tag}] PCM callback failed:`, err);
+            }
+        };
+
+        result.source.connect(processor);
+        processor.connect(silentGain);
+        silentGain.connect(result.ctx.destination);
+
+        return {
+            ctx: result.ctx,
+            disconnect: () => {
+                if (disconnected) return;
+                disconnected = true;
+                processor.onaudioprocess = null;
+                try { result.source.disconnect(processor); } catch { /* already disconnected */ }
+                try { processor.disconnect(); } catch { /* already disconnected */ }
+                try { silentGain.disconnect(); } catch { /* already disconnected */ }
+            },
+        };
+    } catch (err) {
+        Logger.debug(`[${options.tag}] PCM tap failed:`, err);
+        return null;
+    }
 }
 
 /**

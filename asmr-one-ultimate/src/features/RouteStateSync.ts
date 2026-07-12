@@ -56,6 +56,8 @@ export class RouteStateSync {
     private interceptorInstalled = false;
     private _enabled = false;
     private routeUnwatch: (() => void) | null = null;
+    private lifecycleGeneration = 0;
+    private applyRetryTimers = new Set<ReturnType<typeof setTimeout>>();
 
     /**
      * Cache of the last consumed pending sort values.
@@ -79,13 +81,16 @@ export class RouteStateSync {
     public enable(): void {
         if (this._enabled) return;
         this._enabled = true;
+        this.lifecycleGeneration++;
         Logger.info('[RouteStateSync] System enabled');
 
         this.installAxiosInterceptor();
 
         this.routeUnwatch = this.bridge.$watch(
             () => this.bridge.route.fullPath,
-            () => this.syncFromRoute()
+            () => {
+                if (this._enabled) this.syncFromRoute();
+            }
         ) || null;
 
         // Initial sync
@@ -94,8 +99,11 @@ export class RouteStateSync {
 
     public disable(): void {
         this._enabled = false;
+        this.lifecycleGeneration++;
         this.routeUnwatch?.();
         this.routeUnwatch = null;
+        this.clearApplyRetries();
+        this.lastSyncKey = '';
     }
 
     // =========================================================================
@@ -221,6 +229,7 @@ export class RouteStateSync {
     // =========================================================================
 
     private syncFromRoute(): void {
+        if (!this._enabled) return;
         const route = this.bridge.route;
         if (route.path !== '/works') {
             // Reset sync key when leaving /works so re-entering always syncs
@@ -344,10 +353,17 @@ export class RouteStateSync {
     }
 
     private applySortToComponent(order?: WorkOrder, sort?: SortOrder): void {
+        if (!this._enabled) return;
+        this.clearApplyRetries();
+        const generation = this.lifecycleGeneration;
+        const routeKey = this.bridge.route.fullPath;
         let attempts = 0;
         const maxAttempts = 50;
 
         const tryApply = () => {
+            if (!this._enabled
+                || generation !== this.lifecycleGeneration
+                || this.bridge.route.fullPath !== routeKey) return;
             attempts++;
             const vm = this.findWorksComponent();
             if (vm) {
@@ -359,7 +375,11 @@ export class RouteStateSync {
             if (attempts < maxAttempts) {
                 // Decay: fast at first (50ms), then slower
                 const delay = Math.min(200, 50 + attempts * 5);
-                setTimeout(tryApply, delay);
+                const timer = setTimeout(() => {
+                    this.applyRetryTimers.delete(timer);
+                    tryApply();
+                }, delay);
+                this.applyRetryTimers.add(timer);
             } else {
                 Logger.warn('[RouteStateSync] Works component not found after', maxAttempts, 'attempts');
                 this.consumedSort = null;
@@ -369,7 +389,13 @@ export class RouteStateSync {
         tryApply();
     }
 
+    private clearApplyRetries(): void {
+        for (const timer of this.applyRetryTimers) clearTimeout(timer);
+        this.applyRetryTimers.clear();
+    }
+
     private setSortOption(vm: KikoeruApp, order?: WorkOrder, sort?: SortOrder): void {
+        if (!this._enabled) return;
         const current = vm.sortOption as SortOptionItem | undefined;
         const options = this.getVmSortOptions(vm);
 

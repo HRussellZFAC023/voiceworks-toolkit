@@ -11,9 +11,12 @@ export class PlayerTranslator {
     private bridge = KikoeruBridge.getInstance();
     private trackChangeCleanup?: () => void;
     private workChangeCleanup?: () => void;
+    private configChangeCleanup?: () => void;
+    private langChangeCleanup?: () => void;
     private storeWatchCleanups: Array<() => void> = [];
     private _enabled = false;
     private retryTimers: ReturnType<typeof setTimeout>[] = [];
+    private retryFrame: number | null = null;
     /** Incremented on every track/work change to invalidate stale async callbacks */
     private _epoch = 0;
 
@@ -54,18 +57,36 @@ export class PlayerTranslator {
             );
             if (typeof unwatchWork === 'function') this.storeWatchCleanups.push(unwatchWork);
         }
+
+        this.configChangeCleanup = EventBus.on('config:change', ({ key }) => {
+            if (key !== 'translateMode' && key !== 'translateCnToJp') return;
+            this.onTrackOrWorkChange(this.getCurrentTrackTitle(), this.getCurrentWorkTitle());
+        });
+        this.langChangeCleanup = EventBus.on('lang:change', () => {
+            this.onTrackOrWorkChange(this.getCurrentTrackTitle(), this.getCurrentWorkTitle());
+        });
+
+        // The player may already be mounted before this feature is enabled and
+        // therefore produce no subsequent mutation for CentralObserver to see.
+        this.onTrackOrWorkChange(this.getCurrentTrackTitle(), this.getCurrentWorkTitle());
     }
 
     public disable(): void {
+        this._epoch++;
         this._enabled = false;
         CentralObserver.unregister('PlayerTranslator');
         this.trackChangeCleanup?.();
         this.trackChangeCleanup = undefined;
         this.workChangeCleanup?.();
         this.workChangeCleanup = undefined;
+        this.configChangeCleanup?.();
+        this.configChangeCleanup = undefined;
+        this.langChangeCleanup?.();
+        this.langChangeCleanup = undefined;
         this.clearRetryTimers();
         for (const cleanup of this.storeWatchCleanups) cleanup();
         this.storeWatchCleanups = [];
+        this.resetTranslationState();
     }
 
     /**
@@ -73,6 +94,7 @@ export class PlayerTranslator {
      * schedule multiple retry attempts to catch Vue re-renders.
      */
     private onTrackOrWorkChange(nextTrackTitle = '', nextWorkTitle = ''): void {
+        if (!this._enabled) return;
         this._epoch++;
         this.clearRetryTimers();
         // Strip jpdb ruby annotations BEFORE resetting translation state.
@@ -95,13 +117,21 @@ export class PlayerTranslator {
         }
         // Multiple attempts: Vue re-renders asynchronously and may take varying time.
         // rAF catches immediate renders, 200ms/500ms/1000ms catch slower transitions.
-        requestAnimationFrame(() => this.checkPlayer());
+        this.retryFrame = requestAnimationFrame(() => {
+            this.retryFrame = null;
+            if (!this._enabled) return;
+            void this.checkPlayer();
+        });
         for (const delay of [200, 500, 1000]) {
             this.retryTimers.push(setTimeout(() => this.checkPlayer(), delay));
         }
     }
 
     private clearRetryTimers(): void {
+        if (this.retryFrame !== null) {
+            cancelAnimationFrame(this.retryFrame);
+            this.retryFrame = null;
+        }
         for (const t of this.retryTimers) clearTimeout(t);
         this.retryTimers = [];
     }
@@ -122,6 +152,15 @@ export class PlayerTranslator {
         for (const container of containers) {
             const els = container.querySelectorAll<HTMLElement>('[data-asmr-translated]');
             for (const el of els) {
+                const source = el.dataset.asmrSource;
+                const translated = el.dataset.asmrTranslatedText;
+                // CN→JP mode replaces textContent rather than using the
+                // translation-pair pseudo-element. Restore that exact
+                // replacement when the feature is disabled or reset.
+                if (source && translated && !el.classList.contains('asmr-translation-pair')
+                    && (el.textContent || '').trim() === translated.trim()) {
+                    el.textContent = source;
+                }
                 // With ::after approach we never modify textContent for translations,
                 // so no need to restore — just clear our data attributes and class.
                 el.title = '';
@@ -154,11 +193,15 @@ export class PlayerTranslator {
                 el.classList.remove('asmr-worktree-translation');
             }
 
-            const marquees = container.querySelectorAll<HTMLElement>('.asmr-marquee-fix');
-            for (const marquee of marquees) {
-                marquee.classList.remove('asmr-marquee-fix');
-                marquee.style.removeProperty('--asmr-scroll-distance');
-                marquee.style.removeProperty('--asmr-scroll-duration');
+            const stableTitleEls = container.querySelectorAll<HTMLElement>(
+                '.asmr-mini-title-ellipsis, .asmr-mini-title-ellipsis-content, .asmr-mini-title-ellipsis-container'
+            );
+            for (const stableTitleEl of stableTitleEls) {
+                stableTitleEl.classList.remove(
+                    'asmr-mini-title-ellipsis',
+                    'asmr-mini-title-ellipsis-content',
+                    'asmr-mini-title-ellipsis-container',
+                );
             }
         }
     }
@@ -176,6 +219,7 @@ export class PlayerTranslator {
     }
 
     private async checkPlayer() {
+        if (!this._enabled) return;
         const translateMode = !!AppStore.getConfig('translateMode');
         const cnToJp = !!AppStore.getConfig('translateCnToJp');
         if (!translateMode && !cnToJp) return;
@@ -362,7 +406,8 @@ export class PlayerTranslator {
         return best;
     }
 
-    private async translateElement(el: HTMLElement, _type: 'title' | 'artist', cnOnlyMode = false) {
+    private async translateElement(el: HTMLElement, type: 'title' | 'artist', cnOnlyMode = false) {
+        if (!this._enabled || !el.isConnected) return;
         const rawText = getCleanText(el);
         if (!rawText) return;
 
@@ -382,9 +427,18 @@ export class PlayerTranslator {
 
         const epoch = this._epoch;
         const targetLang = cnOnlyMode ? 'ja' : (I18n.lang === 'zh' ? 'zh-CN' : I18n.lang);
+        const sourceLanguageHint = cnOnlyMode
+            ? 'zh'
+            : type === 'title'
+                ? this.getCurrentWorkSourceHint()
+                : 'auto';
         try {
-            const translated = await TranslationService.translate(text, targetLang);
-            if (this._epoch !== epoch) return; // track changed while translating
+            const translated = await TranslationService.translate(text, targetLang, {
+                sourceLanguageHint,
+            });
+            if (!this._enabled || this._epoch !== epoch || !el.isConnected) return;
+            const currentText = getCleanText(el);
+            if (currentText !== text && currentText !== rawText) return;
             if (translated && translated !== text) {
                 if (cnOnlyMode) {
                     // CN→JP: silently replace text content
@@ -392,6 +446,8 @@ export class PlayerTranslator {
                     el.dataset.asmrTranslated = 'true';
                     el.dataset.asmrSource = text;
                     el.dataset.asmrTranslatedText = translated;
+                    el.title = `${text} (${translated})`;
+                    this.applyStableMiniTitleLayout(el);
                 } else {
                     this.updateElement(el, text, translated);
                 }
@@ -399,7 +455,7 @@ export class PlayerTranslator {
                 this.markOriginal(el, text);
             }
         } catch {
-            if (this._epoch !== epoch) return;
+            if (!this._enabled || this._epoch !== epoch || !el.isConnected) return;
             this.markOriginal(el, text);
         }
     }
@@ -410,6 +466,7 @@ export class PlayerTranslator {
      * then displays as "Original (Translated)" using updateElement.
      */
     private async translateTrackName(el: HTMLElement, cnOnlyMode = false) {
+        if (!this._enabled || !el.isConnected) return;
         const rawText = getCleanText(el);
         if (!rawText) return;
 
@@ -439,8 +496,11 @@ export class PlayerTranslator {
         const epoch = this._epoch;
         const targetLang = cnOnlyMode ? 'ja' : (I18n.lang === 'zh' ? 'zh-CN' : I18n.lang);
         try {
-            const translated = await TranslationService.translate(stripped, targetLang);
-            if (this._epoch !== epoch) return; // track changed while translating
+            const translated = await TranslationService.translate(stripped, targetLang, {
+                sourceLanguageHint: cnOnlyMode ? 'zh' : this.getCurrentWorkSourceHint(),
+            });
+            if (!this._enabled || this._epoch !== epoch || !el.isConnected) return;
+            if (getCleanText(el) !== rawText) return;
             if (translated && translated !== stripped) {
                 const cleaned = TranslationService.cleanQuotes(translated);
                 if (cnOnlyMode) {
@@ -451,6 +511,8 @@ export class PlayerTranslator {
                     el.dataset.asmrTranslated = 'true';
                     el.dataset.asmrSource = rawText;
                     el.dataset.asmrTranslatedText = el.textContent;
+                    el.title = `${rawText} (${el.textContent})`;
+                    this.applyStableMiniTitleLayout(el);
                 } else {
                     this.updateElement(el, rawText, cleaned);
                 }
@@ -458,9 +520,19 @@ export class PlayerTranslator {
                 this.markOriginal(el, rawText);
             }
         } catch {
-            if (this._epoch !== epoch) return;
+            if (!this._enabled || this._epoch !== epoch || !el.isConnected) return;
             this.markOriginal(el, rawText);
         }
+    }
+
+    private getCurrentWorkSourceHint(): 'ja' | 'zh' | 'en' | 'auto' {
+        const work = this.bridge.currentWork;
+        const lang = String(work?.translation_info?.lang || '').toUpperCase();
+        if (lang.includes('CHI') || lang.includes('ZH')) return 'zh';
+        if (lang.includes('JPN') || lang.includes('JA')) return 'ja';
+        if (lang.includes('ENG') || lang.includes('EN')) return 'en';
+        if (work?.translation_info?.is_original) return 'ja';
+        return 'auto';
     }
 
     private markOriginal(el: HTMLElement, original: string) {
@@ -475,47 +547,22 @@ export class PlayerTranslator {
         el.dataset.asmrTranslatedText = translated;
         el.classList.add('asmr-translation-pair');
         el.title = `${original} (${translated})`;
-
-        // Recalculate marquee — ::after content changes effective text length
-        this.recalculateMarquee(el);
+        this.applyStableMiniTitleLayout(el);
     }
 
     /**
-     * Fix marquee after translation changes text length.
-     *
-     * Kikoeru sets --max-scroll and animation-duration as inline styles
-     * via Vue reactivity. Changing textContent outside Vue leaves those
-     * values stale (typically 0). Vue will overwrite any inline style
-     * changes we make, so instead we:
-     *   1. Add .asmr-marquee-fix on the container (CSS kills Kikoeru's
-     *      animation and applies our own @keyframes on .one-line-expand)
-     *   2. Set --asmr-scroll-distance and --asmr-scroll-duration as CSS
-     *      custom properties on the container (Vue doesn't touch these)
+     * Keep translated mini-player titles on a stable single line. The host
+     * marquee was measured before our ::after translation existed, which can
+     * hard-clip text and move adjacent controls. A native ellipsis is stable,
+     * pointer-independent, and the full pair remains available via `title`.
      */
-    private recalculateMarquee(el: HTMLElement): void {
-        const container = el.closest('.container') as HTMLElement;
-        if (!container) return;
+    private applyStableMiniTitleLayout(el: HTMLElement): void {
+        if (!el.closest(PLAYER_BAR_SELECTOR)) return;
 
-        // Wait for layout after text change
-        requestAnimationFrame(() => {
-            const oneLineExpand = container.querySelector('.one-line-expand') as HTMLElement;
-            if (!oneLineExpand) return;
-
-            const contentWidth = oneLineExpand.scrollWidth;
-            const containerWidth = container.clientWidth;
-            const overflow = contentWidth - containerWidth;
-
-            if (overflow > 0) {
-                // ~40px/s for a smooth, readable scroll; alternate direction
-                const duration = Math.max(3, overflow / 40);
-                container.classList.add('asmr-marquee-fix');
-                container.style.setProperty('--asmr-scroll-distance', `-${overflow}px`);
-                container.style.setProperty('--asmr-scroll-duration', `${duration}s`);
-            } else {
-                container.classList.remove('asmr-marquee-fix');
-                container.style.removeProperty('--asmr-scroll-distance');
-                container.style.removeProperty('--asmr-scroll-duration');
-            }
-        });
+        el.classList.add('asmr-mini-title-ellipsis');
+        const content = el.closest('.one-line-expand') as HTMLElement | null;
+        content?.classList.add('asmr-mini-title-ellipsis-content');
+        const container = el.closest('.container') as HTMLElement | null;
+        container?.classList.add('asmr-mini-title-ellipsis-container');
     }
 }

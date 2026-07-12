@@ -83,7 +83,7 @@ describe('DLsiteApi', () => {
             );
         });
 
-        it('falls back to direct dlsite URL for invalid proxy config', async () => {
+        it('falls back to the maintained Japan relay for invalid proxy config', async () => {
             (globalThis as any).GM_setValue('dlsiteProxyUrl', 'javascript:alert(1)');
             (HttpClient.getJsonViaCors as Mock).mockResolvedValue({
                 data: [{ workno: 'RJ01510683', work_name: 'Direct Product' }],
@@ -93,7 +93,7 @@ describe('DLsiteApi', () => {
             await DLsiteApi.getProduct('RJ01510683');
 
             expect(HttpClient.getJsonViaCors).toHaveBeenCalledWith(
-                'https://www.dlsite.com/maniax/api/=/product.json',
+                'https://wild-sun-1a84.henry-85d.workers.dev/maniax/api/=/product.json',
                 expect.any(Object),
             );
         });

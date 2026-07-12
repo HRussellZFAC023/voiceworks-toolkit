@@ -10,6 +10,19 @@ function isAbsoluteUrl(url: string): boolean {
     return /^https?:\/\//i.test(url) || url.startsWith('//');
 }
 
+function isSupportedMediaSource(url: string): boolean {
+    if (!url) return false;
+    // Let the URL parser canonicalize embedded ASCII whitespace/control
+    // characters before checking the protocol. A regex-only check can miss
+    // values such as `java\tscript:` that browsers normalize to javascript:.
+    const parsed = parseUrl(url);
+    return !!parsed && (
+        parsed.protocol === 'http:'
+        || parsed.protocol === 'https:'
+        || parsed.protocol === 'blob:'
+    );
+}
+
 function getRuntimeOrigin(): string {
     if (typeof window !== 'undefined' && window.location?.origin && window.location.origin !== 'null') {
         return window.location.origin;
@@ -91,7 +104,9 @@ export function buildMediaStreamUrl(
     item: Pick<MediaFile, 'mediaStreamUrl' | 'media_stream_url'> | undefined,
     token: string,
 ): string {
-    const sourceUrl = item?.mediaStreamUrl || item?.media_stream_url;
-    if (sourceUrl) return appendTokenToUrl(sourceUrl, token);
+    const sourceUrl = (item?.mediaStreamUrl || item?.media_stream_url || '').trim();
+    if (sourceUrl && isSupportedMediaSource(sourceUrl)) {
+        return appendTokenToUrl(sourceUrl, token);
+    }
     return appendTokenToUrl(normalizeLocalStreamPath(hash), token);
 }

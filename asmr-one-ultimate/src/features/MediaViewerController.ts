@@ -35,6 +35,7 @@ import {
     isVideoExtension,
 } from './media/mediaFileUtils';
 import { buildMediaStreamUrl } from './media/mediaStreamUrlUtils';
+import { replaceHostPlaybackQueue } from './audioPlayerQueueUtils';
 import {
     applyMediaViewerWorkTreePatch,
     restoreMediaViewerWorkTreePatch,
@@ -84,6 +85,7 @@ export class MediaViewerController {
     private workTreeHooked = false;
     private folderWatcherSetup = false;
     private activeRequestId = 0;
+    private enabled = false;
     private delegatedClickInstalled = false;
     private thumbnailCache = new Map<string, string>();
     private thumbnailManager: ThumbnailManager;
@@ -97,6 +99,7 @@ export class MediaViewerController {
     private playerWatcher: (() => void) | undefined;
     private routeCleanupUnsubscribe: (() => void) | undefined;
     private folderPathWatcherCleanup: (() => void) | undefined;
+    private delayedTasks = new Set<number>();
 
     private constructor() {
         this.bridge = KikoeruBridge.getInstance();
@@ -141,6 +144,8 @@ export class MediaViewerController {
     // =========================================================================
 
     public enable(): void {
+        if (this.enabled) return;
+        this.enabled = true;
         Logger.log('[MediaViewerController] Enabling...');
 
         this.ensureMounted();
@@ -154,7 +159,10 @@ export class MediaViewerController {
     }
 
     public disable(): void {
+        this.enabled = false;
         CentralObserver.unregister('MediaViewer');
+        for (const timer of this.delayedTasks) window.clearTimeout(timer);
+        this.delayedTasks.clear();
 
         if (this.delegatedClickInstalled) {
             document.removeEventListener('click', this.boundDelegatedClick, true);
@@ -273,7 +281,12 @@ export class MediaViewerController {
         let itemData: MediaFile | null = null;
 
         if (hash) {
-            itemData = { hash, title, type: mediaType };
+            // Preserve stream/download URLs and expected size from the host
+            // item. They let the lightbox validate the real upstream image
+            // instead of falling back to an opaque synthetic stream URL.
+            itemData = vueItem
+                ? { ...vueItem, hash, title, type: mediaType }
+                : { hash, title, type: mediaType };
         }
 
         // Try thumbnail as fallback
@@ -397,13 +410,22 @@ export class MediaViewerController {
 
     private setupObserver(): void {
         CentralObserver.register('MediaViewer', () => {
-            if (!this.findWorkTreeElement()) return;
-            setTimeout(() => {
+            if (!this.enabled || !this.findWorkTreeElement()) return;
+            this.scheduleTask(() => {
                 this.hookWorkTree();
                 this.thumbnailManager.injectThumbnails();
                 this.watchFolderNavigation();
             }, 100);
         }, 500);
+    }
+
+    private scheduleTask(callback: () => void, delayMs: number): void {
+        if (!this.enabled) return;
+        const timer = window.setTimeout(() => {
+            this.delayedTasks.delete(timer);
+            if (this.enabled) callback();
+        }, delayMs);
+        this.delayedTasks.add(timer);
     }
 
     private watchFolderNavigation(): void {
@@ -416,9 +438,9 @@ export class MediaViewerController {
             const unwatch = workTree.$watch('path', () => {
                 const doInject = () => this.thumbnailManager.injectThumbnails();
                 if (typeof workTree.$nextTick === 'function') {
-                    workTree.$nextTick(() => setTimeout(doInject, 50));
+                    workTree.$nextTick(() => this.scheduleTask(doInject, 50));
                 } else {
-                    setTimeout(doInject, 200);
+                    this.scheduleTask(doInject, 200);
                 }
             }, { deep: true });
 
@@ -649,23 +671,13 @@ export class MediaViewerController {
             index = 0;
         }
 
-        // Match PlaylistController pattern: just SET_QUEUE + SET_TRACK.
+        // Use the host player contract directly, with the track/index moved
+        // before the queue to protect the deployed synchronous queue watcher.
         // Do NOT call stopNativePlayback() — audio.pause() queues a DOM pause
         // event that fires AFTER SET_TRACK, racing PAUSE vs PLAY and resetting
         // playing=false. SET_TRACK sets playing=true and the source watcher in
         // AudioElement.vue handles load() + canplay → play() naturally.
-        store.commit('AudioPlayer/SET_QUEUE', { queue, index });
-        try {
-            store.commit('AudioPlayer/SET_TRACK', index);
-        } catch { /* optional mutation across host versions */ }
-
-        // Always set currentPlayingFile directly on the reactive state.
-        // The deployed host's SET_QUEUE/SET_TRACK mutations may not copy it,
-        // leaving PlayerBar and AudioElement with undefined → crash.
-        const track = queue[index];
-        if (track && store.state.AudioPlayer) {
-            store.state.AudioPlayer.currentPlayingFile = { ...track };
-        }
+        replaceHostPlaybackQueue(store, this.bridge, queue, index);
 
         this.minimizeNativePlayerIfExpanded();
 
@@ -1002,13 +1014,19 @@ export class MediaViewerController {
                 if (item.type === 'folder') {
                     if (item.children) traverse(item.children);
                 } else {
-                    const trackWithAlt = item as TrackItem & { media_stream_url?: string };
+                    const trackWithAlt = item as TrackItem & {
+                        media_stream_url?: string;
+                        media_download_url?: string;
+                    };
                     result.push({
                         hash: item.hash,
                         title: item.title,
                         type: item.type,
                         mediaStreamUrl: item.mediaStreamUrl || trackWithAlt.media_stream_url,
-                        media_stream_url: trackWithAlt.media_stream_url
+                        media_stream_url: trackWithAlt.media_stream_url,
+                        mediaDownloadUrl: item.mediaDownloadUrl || trackWithAlt.media_download_url,
+                        media_download_url: trackWithAlt.media_download_url,
+                        size: item.size,
                     });
                 }
             }

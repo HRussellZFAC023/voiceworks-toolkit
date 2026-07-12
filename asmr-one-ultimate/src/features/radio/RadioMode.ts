@@ -16,6 +16,10 @@ import { PlaybackController } from './PlaybackController';
 import { FolderDiver } from '../FolderDiver';
 import { WorkService } from '../../services/WorkService';
 import { getAudioElement } from '../../core/DomUtils';
+import {
+    claimExclusivePlaybackMode,
+    registerExclusivePlaybackMode,
+} from '../playbackModeCoordinator';
 import type { PlayerTrack, RadioState, WorkDetail, AudioTrack } from '../../types';
 import type { TrackFolder, TrackItem, TracksResponse } from '../../types/api';
 
@@ -60,8 +64,10 @@ export class RadioMode {
     private pendingWorkChange: string | null = null;
     private playbackTimeoutId: number | null = null;
     private playbackRetryCount = 0;
+    private workLoadRetryTimer: number | null = null;
     private deferredSkipRequested = false;
     private eventCleanups: (() => void)[] = [];
+    private activationGeneration = 0;
 
     // Queue monitoring
     private checkInterval: number | null = null;
@@ -96,6 +102,7 @@ export class RadioMode {
         this.workSelector = new WorkSelector();
         this.playbackController = new PlaybackController();
         this.folderDiver = FolderDiver.getInstance();
+        registerExclusivePlaybackMode('radio', () => this.disable());
     }
 
     static getInstance(): RadioMode {
@@ -129,6 +136,7 @@ export class RadioMode {
         // DO NOT recreate workSelector — it holds recentWorkIds for back-button history
         this.playbackController = new PlaybackController();
         this.folderDiver = FolderDiver.getInstance();
+        registerExclusivePlaybackMode('radio', () => this.disable());
     }
 
     static get isActive(): boolean {
@@ -168,6 +176,12 @@ export class RadioMode {
             Logger.debug('[RadioMode] Already active, ignoring enable request');
             return;
         }
+
+        // disable() tears down all host/EventBus subscriptions. Recreate them
+        // before every later activation so disable -> enable remains functional.
+        if (!this.isInitialized) this.initialize();
+        claimExclusivePlaybackMode('radio');
+        this.activationGeneration++;
 
         // Check if we were manually paused before (survives page refresh via GM storage)
         const wasPaused = this.manuallyPaused;
@@ -233,6 +247,7 @@ export class RadioMode {
         }
 
         this._isActive = false;
+        this.activationGeneration++;
         this._state = 'idle';
         this.manuallyPaused = false;
 
@@ -297,6 +312,8 @@ export class RadioMode {
             return;
         }
 
+        const generation = this.activationGeneration;
+
         Logger.debug('[RadioMode] skipToNext called', {
             currentWorkId: this.currentWorkId,
             state: this._state,
@@ -323,7 +340,7 @@ export class RadioMode {
             const nextWork = await this.workSelector.selectRandomWork(this.currentWorkId || undefined);
 
             // Re-check after await: radio may have been disabled while we waited
-            if (!this._isActive) {
+            if (!this.isCurrentActivation(generation)) {
                 Logger.debug('[RadioMode] Disabled during skip, aborting');
                 return;
             }
@@ -350,24 +367,23 @@ export class RadioMode {
 
                 // Directly handle work change (bypass debounce).
                 // isSkipping stays true so queue monitor / health check won't interfere.
-                await this.handleWorkChange(toWorkId);
+                await this.handleWorkChange(toWorkId, generation);
             } else {
                 Logger.warn('[RadioMode] Failed to select next work - no candidate returned');
             }
         } catch (error) {
             Logger.error('[RadioMode] Skip error:', error);
         } finally {
+            if (!this.isCurrentActivation(generation)) return;
             this.isSkipping = false;
-            if (this._isActive && this.deferredSkipRequested) {
+            if (this.deferredSkipRequested) {
                 this.deferredSkipRequested = false;
                 void this.skipToNext();
                 return;
             }
             // Only restore playing state if radio is still active
-            if (this._isActive) {
-                this._state = 'playing';
-                AppStore.setRadioState({ state: 'playing' });
-            }
+            this._state = 'playing';
+            AppStore.setRadioState({ state: 'playing' });
         }
     }
 
@@ -387,6 +403,8 @@ export class RadioMode {
             Logger.debug('[RadioMode] skipToPrevious ignored: no previous work in history');
             return;
         }
+
+        const generation = this.activationGeneration;
 
         this.isSkipping = true;
         this.manuallyPaused = false;
@@ -416,20 +434,19 @@ export class RadioMode {
 
             // Cancel debounce and directly handle (same pattern as skipToNext)
             this.cancelPendingWorkChange();
-            await this.handleWorkChange(targetWorkId);
+            await this.handleWorkChange(targetWorkId, generation);
         } catch (error) {
             Logger.error('[RadioMode] skipToPrevious error:', error);
         } finally {
+            if (!this.isCurrentActivation(generation)) return;
             this.isSkipping = false;
-            if (this._isActive && this.deferredSkipRequested) {
+            if (this.deferredSkipRequested) {
                 this.deferredSkipRequested = false;
                 void this.skipToNext();
                 return;
             }
-            if (this._isActive) {
-                this._state = 'playing';
-                AppStore.setRadioState({ state: 'playing' });
-            }
+            this._state = 'playing';
+            AppStore.setRadioState({ state: 'playing' });
         }
     }
 
@@ -453,6 +470,11 @@ export class RadioMode {
         this.pendingWorkChange = null;
         this.playbackRetryCount = 0;
         this.deferredSkipRequested = false;
+        this.isSkipping = false;
+        if (this.workLoadRetryTimer !== null) {
+            clearTimeout(this.workLoadRetryTimer);
+            this.workLoadRetryTimer = null;
+        }
 
         // Detach audio ended listener
         this.unbindAudioEndedListener();
@@ -628,11 +650,13 @@ export class RadioMode {
      * Attempt to recover from a stuck state
      */
     private async attemptRecovery(): Promise<void> {
+        const generation = this.activationGeneration;
         Logger.debug('[RadioMode] Attempting auto-recovery');
         this.recordActivity();
 
         // Try to resume playback first
         const resumed = await this.playbackController.tryPlay();
+        if (!this.isCurrentActivation(generation)) return;
         if (!resumed) {
             // If can't resume, skip to next work
             Logger.debug('[RadioMode] Recovery: could not resume, skipping to next work');
@@ -822,19 +846,33 @@ export class RadioMode {
             clearTimeout(this.workChangeDebounceTimer);
         }
 
+        const generation = this.activationGeneration;
         this.workChangeDebounceTimer = window.setTimeout(() => {
             this.workChangeDebounceTimer = null;
-            if (this.pendingWorkChange) {
-                this.handleWorkChange(this.pendingWorkChange);
+            if (this.pendingWorkChange && this.isCurrentActivation(generation)) {
+                void this.handleWorkChange(this.pendingWorkChange, generation);
                 this.pendingWorkChange = null;
             }
         }, WORK_CHANGE_DEBOUNCE_MS);
     }
 
-    private async handleWorkChange(workId: string): Promise<void> {
+    private async handleWorkChange(
+        workId: string,
+        generation = this.activationGeneration,
+    ): Promise<void> {
         Logger.debug('[RadioMode] handleWorkChange:', workId, 'isActive:', this._isActive);
 
+        if (!this.isCurrentActivation(generation)) return;
+
+        const changedWork = this.currentWorkId !== workId;
         this.currentWorkId = workId;
+        if (changedWork) {
+            this.playbackRetryCount = 0;
+            if (this.workLoadRetryTimer !== null) {
+                clearTimeout(this.workLoadRetryTimer);
+                this.workLoadRetryTimer = null;
+            }
+        }
 
         if (this._isActive) {
             this.syncRecentWorkHistory(workId);
@@ -848,14 +886,14 @@ export class RadioMode {
 
         this.folderDiver.reset();
 
-        if (this._isActive) {
-            await this.loadWorkAndStartPlayback(workId);
-        }
+        await this.loadWorkAndStartPlayback(workId, generation);
     }
 
-    private async loadWorkAndStartPlayback(workId: string): Promise<void> {
-        if (!this._isActive) return;
-        if (workId !== this.currentWorkId) {
+    private async loadWorkAndStartPlayback(
+        workId: string,
+        generation = this.activationGeneration,
+    ): Promise<void> {
+        if (!this.isCurrentActivation(generation, workId)) {
             Logger.debug('[RadioMode] Work ID changed during load, aborting');
             return;
         }
@@ -865,14 +903,14 @@ export class RadioMode {
         try {
             const work = await WorkService.getWork(workId) as WorkDetail;
 
-            if (!this._isActive || workId !== this.currentWorkId) {
+            if (!this.isCurrentActivation(generation, workId)) {
                 Logger.debug('[RadioMode] State changed during fetch, aborting');
                 return;
             }
 
             if (!work) {
                 Logger.warn('[RadioMode] Failed to fetch work data for:', workId);
-                this.handlePlaybackFailure('No work data');
+                this.handlePlaybackFailure('No work data', workId, generation);
                 return;
             }
 
@@ -889,6 +927,7 @@ export class RadioMode {
 
             try {
                 treeData = await WorkService.getTracks(workId);
+                if (!this.isCurrentActivation(generation, workId)) return;
                 if (treeData) {
                     const startPath = this.folderDiver.getHostPath();
                     this.folderDiver.syncPath(startPath);
@@ -897,6 +936,7 @@ export class RadioMode {
                             startPath: startPath.join('/') || '(root)',
                         });
                         const result = await this.folderDiver.diveFromPath(treeData, startPath);
+                        if (!this.isCurrentActivation(generation, workId)) return;
                         Logger.debug('[RadioMode] Dive result', {
                             success: result.success,
                             reason: result.reason,
@@ -912,7 +952,7 @@ export class RadioMode {
                     }
                 }
 
-                if (!this._isActive || workId !== this.currentWorkId) {
+                if (!this.isCurrentActivation(generation, workId)) {
                     Logger.debug('[RadioMode] State changed during dive, aborting');
                     return;
                 }
@@ -940,15 +980,21 @@ export class RadioMode {
                 count: tracks.length,
                 firstTrack: tracks[0]?.title || tracks[0]?.hash || '(none)',
             });
-            this.beginPlayback(tracks);
+            if (!this.isCurrentActivation(generation, workId)) return;
+            this.beginPlayback(tracks, workId, generation);
         } catch (error) {
+            if (!this.isCurrentActivation(generation, workId)) return;
             Logger.error('[RadioMode] Error loading work:', error);
-            this.handlePlaybackFailure('API error');
+            this.handlePlaybackFailure('API error', workId, generation);
         }
     }
 
-    private handlePlaybackFailure(reason: string): void {
-        if (!this._isActive) return;
+    private handlePlaybackFailure(
+        reason: string,
+        workId = this.currentWorkId,
+        generation = this.activationGeneration,
+    ): void {
+        if (!workId || !this.isCurrentActivation(generation, workId)) return;
 
         this.playbackRetryCount++;
         Logger.warn(`[RadioMode] Playback failure (${reason}), retry ${this.playbackRetryCount}/${MAX_PLAYBACK_RETRIES}`);
@@ -963,9 +1009,11 @@ export class RadioMode {
             }
             void this.skipToNext();
         } else {
-            setTimeout(() => {
-                if (this._isActive && this.currentWorkId) {
-                    void this.loadWorkAndStartPlayback(this.currentWorkId);
+            if (this.workLoadRetryTimer !== null) clearTimeout(this.workLoadRetryTimer);
+            this.workLoadRetryTimer = window.setTimeout(() => {
+                this.workLoadRetryTimer = null;
+                if (this.isCurrentActivation(generation, workId)) {
+                    void this.loadWorkAndStartPlayback(workId, generation);
                 }
             }, WORK_LOAD_RETRY_DELAY);
         }
@@ -1080,8 +1128,12 @@ export class RadioMode {
     /**
      * Begin playback with extracted tracks, handling shuffle and fallback
      */
-    private beginPlayback(tracks: AudioTrack[]): void {
-        if (!this._isActive) return;
+    private beginPlayback(
+        tracks: AudioTrack[],
+        workId = this.currentWorkId,
+        generation = this.activationGeneration,
+    ): void {
+        if (!workId || !this.isCurrentActivation(generation, workId)) return;
 
         const shuffle = Config.get('shuffle');
         const playAll = this.playAllInFolder;
@@ -1118,18 +1170,18 @@ export class RadioMode {
             this.playbackRetryCount = 0;
             this.lastQueueIndex = 0; // Reset queue tracking for new work
             Logger.debug('[RadioMode] Playback started successfully');
-            this.ensurePlaying();
+            this.ensurePlaying(generation);
         } else {
             Logger.warn('[RadioMode] No tracks found, triggering recovery');
-            this.handlePlaybackFailure('No playable tracks');
+            this.handlePlaybackFailure('No playable tracks', workId, generation);
         }
     }
 
-    private ensurePlaying(): void {
+    private ensurePlaying(generation = this.activationGeneration): void {
         this.cancelEnsurePlaying();
         this.ensurePlayingTimeoutId = window.setTimeout(async () => {
             this.ensurePlayingTimeoutId = null;
-            if (!this._isActive) return;
+            if (!this.isCurrentActivation(generation)) return;
             if (this.manuallyPaused) return;
 
             // Trust the actual audio element over Vuex state — the host app's
@@ -1142,11 +1194,18 @@ export class RadioMode {
             if (!player.playing) {
                 Logger.debug('[RadioMode] Ensuring playback starts...');
                 const started = await this.playbackController.tryPlay();
-                if (!started && !this.isSkipping && !this.manuallyPaused) {
-                    this.handlePlaybackFailure('Playback did not start');
+                if (!this.isCurrentActivation(generation)) return;
+                if (!started && !this.isSkipping && !this.manuallyPaused && this.currentWorkId) {
+                    this.handlePlaybackFailure('Playback did not start', this.currentWorkId, generation);
                 }
             }
         }, PLAYBACK_START_TIMEOUT);
+    }
+
+    private isCurrentActivation(generation: number, workId?: string): boolean {
+        return this._isActive
+            && generation === this.activationGeneration
+            && (!workId || workId === this.currentWorkId);
     }
 
     private cancelEnsurePlaying(): void {

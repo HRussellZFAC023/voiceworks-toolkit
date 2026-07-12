@@ -22,7 +22,8 @@ describe('ShuffleFeature', () => {
                     const idx = modes.indexOf(current);
                     mockStore.state.AudioPlayer.playMode = modes[(idx + 1) % modes.length];
                 }
-            })
+            }),
+            watch: vi.fn(() => vi.fn()),
         };
 
         document.body.innerHTML = '<div id="q-app"></div>';
@@ -36,7 +37,7 @@ describe('ShuffleFeature', () => {
         await bridge.initialize();
         const shuffle = new ShuffleFeature();
 
-        shuffle.toggle();
+        await shuffle.toggle();
 
         expect(mockStore.commit).toHaveBeenCalledWith('AudioPlayer/CHANGE_PLAY_MODE');
         expect(mockStore.state.AudioPlayer.playMode).toBe('shuffle');
@@ -47,9 +48,64 @@ describe('ShuffleFeature', () => {
         await bridge.initialize();
         const shuffle = new ShuffleFeature();
 
-        shuffle.toggle();
+        await shuffle.toggle();
 
         expect(mockStore.commit).toHaveBeenCalledWith('AudioPlayer/CHANGE_PLAY_MODE');
         expect(mockStore.state.AudioPlayer.playMode).toBe('order');
+    });
+
+    it('uses the action contract when the mutation contract is unavailable', async () => {
+        mockStore._mutations = {};
+        mockStore._actions = { 'AudioPlayer/CHANGE_PLAY_MODE': [] };
+        mockStore.dispatch = vi.fn(async (action: string) => {
+            if (action === 'AudioPlayer/CHANGE_PLAY_MODE') {
+                mockStore.state.AudioPlayer.playMode = 'shuffle';
+            }
+        });
+        await bridge.initialize();
+        const shuffle = new ShuffleFeature();
+
+        await shuffle.toggle();
+
+        expect(mockStore.dispatch).toHaveBeenCalledTimes(1);
+        expect(mockStore.dispatch).toHaveBeenCalledWith('AudioPlayer/CHANGE_PLAY_MODE');
+        expect(mockStore.commit).not.toHaveBeenCalled();
+        expect(mockStore.state.AudioPlayer.playMode).toBe('shuffle');
+    });
+
+    it('does not call unsupported mutation or action contracts', async () => {
+        mockStore._mutations = {};
+        mockStore._actions = {};
+        mockStore.dispatch = vi.fn();
+        await bridge.initialize();
+        const shuffle = new ShuffleFeature();
+
+        await shuffle.toggle();
+
+        expect(mockStore.commit).not.toHaveBeenCalled();
+        expect(mockStore.dispatch).not.toHaveBeenCalled();
+        expect(mockStore.state.AudioPlayer.playMode).toBe('order');
+    });
+
+    it('does not stack store watchers and cleans up its global API on disable', async () => {
+        await bridge.initialize();
+        const unwatch = vi.fn();
+        mockStore.watch.mockReturnValue(unwatch);
+        mockStore.watch.mockClear();
+        const shuffle = new ShuffleFeature();
+
+        shuffle.enable();
+        shuffle.enable();
+        expect(mockStore.watch).toHaveBeenCalledOnce();
+        const capturedToggle = (window as any).ASMRUlt.toggleShuffle;
+        expect(capturedToggle).toBeTypeOf('function');
+
+        shuffle.disable();
+        expect(unwatch).toHaveBeenCalledOnce();
+        expect((window as any).ASMRUlt.toggleShuffle).toBeUndefined();
+
+        mockStore.commit.mockClear();
+        await capturedToggle();
+        expect(mockStore.commit).not.toHaveBeenCalled();
     });
 });

@@ -3,6 +3,7 @@ import { Config, Logger } from '../core/Utils';
 import { AppStore } from '../store/AppStore';
 import { AudioCache } from './AudioCache';
 import type { ConfigKey, PluginConfig, VectorEntry } from '../types';
+import { omitSensitiveConfig } from '../core/configSecrets';
 
 import { GM_listValues, GM_deleteValue, GM_getValue, GM_setValue } from '$';
 
@@ -86,7 +87,9 @@ export class StorageManager {
 
         const exportData = {
             version: 4 as const,
-            config: { ...AppStore.getAllConfig() },
+            // API credentials remain in userscript storage. Downloadable JSON
+            // backups are convenient to copy/share and must not contain them.
+            config: omitSensitiveConfig(AppStore.getAllConfig() as unknown as Record<string, unknown>),
             cache,
             vectors
         };

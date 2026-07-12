@@ -3,6 +3,7 @@ import type { ConfigKey, PluginConfig } from '../types';
 import { enLocale } from './locales/en';
 import { zhLocale } from './locales/zh';
 import { jaLocale } from './locales/ja';
+import { EventBus } from './EventBus';
 
 // ============================================================================
 // Config
@@ -34,41 +35,73 @@ const i18nData: I18nData = {
     ja: jaLocale,
 };
 
+function supportedLanguage(locale: string): SupportedLang {
+    const lower = String(locale || '').toLowerCase();
+    if (lower.startsWith('zh') || lower === 'cn') return 'zh';
+    if (lower.startsWith('ja') || lower === 'jp') return 'ja';
+    return 'en';
+}
+
+let browserSeedLocale: SupportedLang | null = /^(?:zh|ja)(?:-|$)/i.test(navigator.language || '')
+    ? supportedLanguage(navigator.language)
+    : null;
+let initialHostLocale: SupportedLang | null = null;
+
 export const I18n = {
     lang: (navigator.language.startsWith('zh') ? 'zh' : navigator.language.startsWith('ja') ? 'ja' : 'en') as SupportedLang,
     data: i18nData,
 
     /** Detect and sync language from the host Kikoeru app */
     syncFromHost(): void {
-        // Priority 1: Kikoeru Vue app's $i18n locale (reads from the live Vue instance)
-        try {
-            const root = document.getElementById('q-app') as HTMLElement & { __vue__?: Record<string, unknown> } | null;
-            const vueApp = root?.__vue__;
-            const i18nLocale = (vueApp?.$i18n as Record<string, unknown> | undefined)?.locale as string | undefined;
-            if (i18nLocale) {
-                this.setLang(i18nLocale);
-                return;
-            }
-        } catch {
-            // Ignore if Vue app not accessible
-        }
-
-        // Priority 2: localStorage keys used by Kikoeru/asmr.one
+        // Priority 1: an explicit persisted host language choice.
         for (const key of ['locale', 'lang', 'language', 'i18n-locale']) {
             const stored = localStorage.getItem(key);
             if (stored) {
+                browserSeedLocale = null;
                 this.setLang(stored);
                 return;
             }
         }
 
-        // Priority 3: navigator.language (browser locale - more reliable than <html lang>)
+        // Read the Kikoeru Vue app's live locale. A CJK browser seed wins over
+        // the host's first observed fallback, but a subsequent host-locale
+        // change becomes authoritative (for example, the user selecting EN).
+        let liveHostLocale = '';
+        try {
+            const root = document.getElementById('q-app') as HTMLElement & { __vue__?: Record<string, unknown> } | null;
+            const vueApp = root?.__vue__;
+            const i18nLocale = (vueApp?.$i18n as Record<string, unknown> | undefined)?.locale as string | undefined;
+            if (i18nLocale) liveHostLocale = i18nLocale;
+        } catch {
+            // Ignore if Vue app not accessible
+        }
+
+        if (browserSeedLocale) {
+            if (liveHostLocale) {
+                const normalizedHost = supportedLanguage(liveHostLocale);
+                if (initialHostLocale === null) initialHostLocale = normalizedHost;
+                if (normalizedHost !== initialHostLocale) {
+                    browserSeedLocale = null;
+                    this.setLang(liveHostLocale);
+                    return;
+                }
+            }
+            this.setLang(browserSeedLocale);
+            return;
+        }
+
+        if (liveHostLocale) {
+            this.setLang(liveHostLocale);
+            return;
+        }
+
+        // Next: navigator.language.
         if (navigator.language) {
             this.setLang(navigator.language);
             return;
         }
 
-        // Priority 4: <html lang="..."> (often set to 'en' by default, least reliable)
+        // Last: <html lang="..."> (often set to 'en' by default, least reliable)
         const htmlLang = document.documentElement.lang;
         if (htmlLang) {
             this.setLang(htmlLang);
@@ -78,14 +111,17 @@ export const I18n = {
 
     /** Set language from a locale string like 'en', 'zh-CN', 'ja', 'cn' */
     setLang(locale: string): void {
-        const lower = locale.toLowerCase();
-        if (lower.startsWith('zh') || lower === 'cn') {
-            this.lang = 'zh';
-        } else if (lower.startsWith('ja') || lower === 'jp') {
-            this.lang = 'ja';
-        } else {
-            this.lang = 'en';
-        }
+        const previous = this.lang;
+        this.lang = supportedLanguage(locale);
+        if (this.lang !== previous) EventBus.emit('lang:change', { lang: this.lang });
+    },
+
+    /** Re-run first-install locale seeding (also useful after clearing settings). */
+    resetAutoDetection(): void {
+        browserSeedLocale = /^(?:zh|ja)(?:-|$)/i.test(navigator.language || '')
+            ? supportedLanguage(navigator.language)
+            : null;
+        initialHostLocale = null;
     },
 
     t(key: string): string {
@@ -100,6 +136,4 @@ export const I18n = {
         return text;
     },
 };
-
-
 

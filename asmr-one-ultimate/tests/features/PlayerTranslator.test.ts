@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import fs from 'node:fs';
+import path from 'node:path';
 
 const mocks = vi.hoisted(() => {
     const appStoreMock = {
@@ -112,6 +114,7 @@ describe('PlayerTranslator', () => {
         `;
 
         const translator = new PlayerTranslator();
+        (translator as any)._enabled = true;
         (translator as any).checkPlayer = vi.fn();
         (translator as any).onTrackOrWorkChange('', 'New Work Title');
 
@@ -146,5 +149,77 @@ describe('PlayerTranslator', () => {
         expect(el.hasAttribute('data-asmrtag-translation')).toBe(false);
         expect(el.classList.contains('asmr-translated')).toBe(false);
         expect(el.classList.contains('asmr-worktree-translation')).toBe(false);
+    });
+
+    it('restores an exact CN-to-JP text replacement when disabled', () => {
+        document.body.innerHTML = `
+            <div class="audio-player">
+                <span
+                    data-asmr-translated="true"
+                    data-asmr-source="晚安耳语"
+                    data-asmr-translated-text="おやすみ囁き"
+                >おやすみ囁き</span>
+            </div>
+        `;
+
+        const translator = new PlayerTranslator();
+        (translator as any)._enabled = true;
+        translator.disable();
+
+        const el = document.querySelector('.audio-player span') as HTMLElement;
+        expect(el.textContent).toBe('晚安耳语');
+        expect(el.hasAttribute('data-asmr-translated')).toBe(false);
+        expect(el.hasAttribute('data-asmr-source')).toBe(false);
+        expect(el.hasAttribute('data-asmr-translated-text')).toBe(false);
+    });
+
+    it('uses a stable accessible ellipsis for translated mini-player titles', () => {
+        document.body.innerHTML = `
+            <footer class="q-footer">
+                <div class="container">
+                    <div class="one-line-expand scrolling">
+                        <div class="ellipsis-2-lines">非常に長い作品タイトル.mp3</div>
+                    </div>
+                </div>
+            </footer>
+        `;
+
+        const translator = new PlayerTranslator();
+        const el = document.querySelector('.ellipsis-2-lines') as HTMLElement;
+        (translator as any).updateElement(el, '非常に長い作品タイトル.mp3', 'A very long translated work title');
+
+        expect(el.classList.contains('asmr-mini-title-ellipsis')).toBe(true);
+        expect(el.closest('.one-line-expand')?.classList.contains('asmr-mini-title-ellipsis-content')).toBe(true);
+        expect(el.closest('.container')?.classList.contains('asmr-mini-title-ellipsis-container')).toBe(true);
+        expect(el.title).toBe('非常に長い作品タイトル.mp3 (A very long translated work title)');
+
+        const css = fs.readFileSync(path.resolve('src/styles/fixes.css'), 'utf8');
+        const stableRule = css.slice(css.indexOf('.asmr-mini-title-ellipsis {'));
+        expect(stableRule).toContain('white-space: nowrap !important');
+        expect(stableRule).toContain('text-overflow: ellipsis !important');
+        expect(stableRule).toContain('animation: none !important');
+    });
+
+    it('cancels and rejects a queued animation-frame translation after disable', () => {
+        let queuedFrame: FrameRequestCallback | null = null;
+        const requestSpy = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+            queuedFrame = callback;
+            return 42;
+        });
+        const cancelSpy = vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => {});
+        const translator = new PlayerTranslator();
+        const checkPlayer = vi.spyOn(translator as any, 'checkPlayer');
+
+        translator.enable();
+        expect(requestSpy).toHaveBeenCalled();
+        translator.disable();
+        expect(cancelSpy).toHaveBeenCalledWith(42);
+
+        expect(queuedFrame).not.toBeNull();
+        (queuedFrame as unknown as FrameRequestCallback)(performance.now());
+        expect(checkPlayer).not.toHaveBeenCalled();
+
+        requestSpy.mockRestore();
+        cancelSpy.mockRestore();
     });
 });

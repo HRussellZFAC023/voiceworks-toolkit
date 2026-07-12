@@ -213,6 +213,27 @@ describe('gmRequest', () => {
             timeout: 5000,
         }));
     });
+
+    it('aborts the underlying userscript request and rejects with AbortError', async () => {
+        const abort = vi.fn();
+        (globalThis as any).GM_xmlhttpRequest = vi.fn((options: { onabort?: () => void }) => ({
+            abort: () => {
+                abort();
+                // Tampermonkey can deliver this synchronously from abort().
+                options.onabort?.();
+            },
+        }));
+        const controller = new AbortController();
+
+        const request = gmRequest({
+            url: 'https://example.com/slow',
+            signal: controller.signal,
+        });
+        controller.abort();
+
+        await expect(request).rejects.toMatchObject({ name: 'AbortError' });
+        expect(abort).toHaveBeenCalledTimes(1);
+    });
 });
 
 describe('KikoeruApiClient', () => {

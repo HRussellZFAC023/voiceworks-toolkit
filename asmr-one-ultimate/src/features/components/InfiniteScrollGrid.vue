@@ -15,6 +15,11 @@ import { useI18n } from '../../composables/useI18n';
 import { Logger } from '../../core/Utils';
 import { escapeHtml } from '../../core/DomUtils';
 import { buildInfiniteScrollApiUrl } from '../infiniteScrollApiUtils';
+import {
+    finiteWorkMetric,
+    normalizeInfiniteScrollRjCode,
+    resolveInfiniteScrollCoverUrl,
+} from '../infiniteScrollCardUtils';
 
 // ============================================================================
 // Types
@@ -114,10 +119,16 @@ interface PrefetchResult {
 }
 let prefetchedResult: PrefetchResult | null = null;
 let prefetching = false;
+let componentMounted = false;
+let lifecycleGeneration = 0;
 
 // Template refs
 const sentinelRef = ref<HTMLElement | null>(null);
 let observer: IntersectionObserver | null = null;
+
+function isLifecycleCurrent(generation: number): boolean {
+    return componentMounted && enabled.value && generation === lifecycleGeneration;
+}
 
 // ============================================================================
 // Computed
@@ -134,8 +145,7 @@ const hasMorePages = computed(() => {
 // ============================================================================
 
 function getRjCode(work: WorkItem): string {
-    const workId = work.id || work.source_id;
-    return String(workId).startsWith('RJ') ? String(workId) : `RJ${workId}`;
+    return normalizeInfiniteScrollRjCode(work.id, work.source_id, work.sourceId);
 }
 
 function getTitle(work: WorkItem): string {
@@ -146,9 +156,8 @@ function getCircleName(work: WorkItem): string {
     return work.circle?.name || work.maker?.name || '';
 }
 
-function getCoverUrl(work: WorkItem): string {
-    const workId = work.id || work.source_id;
-    return work.mainCoverUrl || `/api/cover/${workId}.jpg?type=main`;
+function getCoverUrl(work: WorkItem, rjCode: string): string {
+    return resolveInfiniteScrollCoverUrl(work.mainCoverUrl, rjCode);
 }
 
 function getReleaseDate(work: WorkItem): string {
@@ -161,15 +170,15 @@ function getReleaseDate(work: WorkItem): string {
 }
 
 function getRating(work: WorkItem): number {
-    return work.rate_average_2dp || work.rating || 0;
+    return finiteWorkMetric(work.rate_average_2dp || work.rating);
 }
 
 function getRatingCount(work: WorkItem): number {
     const detail = work.rate_count_detail;
     if (detail && !Array.isArray(detail) && typeof detail === 'object' && 'total' in detail) {
-        return (detail as { total?: number }).total || 0;
+        return finiteWorkMetric((detail as { total?: number }).total);
     }
-    return work.rate_count || 0;
+    return finiteWorkMetric(work.rate_count);
 }
 
 function formatDuration(seconds: number): string {
@@ -259,36 +268,42 @@ function appendWorksToHostGrid(newWorks: WorkItem[]): string[] {
     const addedIds: string[] = [];
     for (const work of newWorks) {
         const rjCode = getRjCode(work);
+        if (!rjCode) {
+            Logger.warn('[InfiniteScrollGrid] Skipping work with invalid identifier');
+            continue;
+        }
         if (document.getElementById(rjCode) || injectedCardIds.has(rjCode)) continue;
 
         const title = getTitle(work);
         const circle = getCircleName(work);
-        const coverUrl = getCoverUrl(work);
+        const coverUrl = getCoverUrl(work, rjCode);
         const releaseDate = getReleaseDate(work);
         const rating = getRating(work);
         const ratingCount = getRatingCount(work);
-        const reviewCount = work.review_count || 0;
-        const price = work.price || 0;
-        const sales = work.dl_count || work.sales || 0;
-        const duration = work.duration ? formatDuration(work.duration) : '';
+        const reviewCount = finiteWorkMetric(work.review_count);
+        const price = finiteWorkMetric(work.price);
+        const sales = finiteWorkMetric(work.dl_count || work.sales);
+        const durationSeconds = finiteWorkMetric(work.duration);
+        const duration = durationSeconds > 0 ? formatDuration(durationSeconds) : '';
         const allAges = work.age_category_string === 'all-ages' || work.nsfw === false;
 
         const col = document.createElement('div');
         col.className = 'col-xs-12 col-sm-4 col-md-3 col-lg-2 col-xl-2';
         col.id = rjCode;
+        col.dataset.asmrInfiniteFallback = 'true';
         col.innerHTML = `
             <div class="fit work-card-intersection" style="min-height: 200px;">
                 <div>
-                    <div class="fit q-card q-card--dark q-dark">
+                    <div class="fit q-card asmr-infinite-fallback-card">
                         <a href="/work/${rjCode}">
                             <div role="img" aria-label="Cover of ${escapeHtml(title)}" class="q-img overflow-hidden q-img--menu" style="max-width: 560px;">
                                 <div style="padding-bottom: 75%;"></div>
-                                <div class="q-img__image absolute-full" style="background-size: cover; background-position: 50% 50%; background-image: url('${coverUrl}');">
-                                    <img src="${coverUrl}" aria-hidden="true" class="absolute-full fit">
+                                <div class="q-img__image absolute-full asmr-infinite-cover" style="background-size: cover; background-position: 50% 50%;">
+                                    <img aria-hidden="true" class="absolute-full fit asmr-infinite-cover-img">
                                 </div>
                                 <div class="q-img__content absolute-full">
                                     <div class="absolute-top-left transparent" style="padding: 0px;">
-                                        <div class="q-chip row inline no-wrap items-center q-ma-sm bg-brown text-white q-chip--colored q-chip--dense q-chip--square q-chip--dark q-dark">
+                                        <div class="q-chip row inline no-wrap items-center q-ma-sm bg-brown q-chip--colored q-chip--dense q-chip--square asmr-infinite-rj-chip">
                                             <div class="q-chip__content col row no-wrap items-center q-anchor--skip">${rjCode}</div>
                                         </div>
                                     </div>
@@ -296,7 +311,7 @@ function appendWorksToHostGrid(newWorks: WorkItem[]): string[] {
                                 </div>
                             </div>
                         </a>
-                        <hr class="q-separator q-separator--horizontal q-separator--dark">
+                        <hr class="q-separator q-separator--horizontal asmr-infinite-fallback-separator">
                         <div>
                             <div class="q-mx-sm text-h6 text-weight-regular ellipsis-2-lines">${escapeHtml(title)}</div>
                             <div class="q-ml-sm q-mb-xs text-subtitle1 text-weight-regular">
@@ -313,8 +328,8 @@ function appendWorksToHostGrid(newWorks: WorkItem[]): string[] {
                                     <span class="text-grey">(${reviewCount})</span>
                                 </div>
                                 ${duration ? `<div class="col-auto q-ml-xs">
-                                    <i class="q-icon text-white notranslate material-icons" style="font-size: 18px;">schedule</i>
-                                    <span class="text-white">(${duration})</span>
+                                    <i class="q-icon notranslate material-icons asmr-infinite-duration" style="font-size: 18px;">schedule</i>
+                                    <span class="asmr-infinite-duration">(${duration})</span>
                                 </div>` : ''}
                                 <div class="col-auto q-ml-xs">
                                     <i class="q-icon notranslate material-icons" style="font-size: 18px;">launch</i>
@@ -324,12 +339,20 @@ function appendWorksToHostGrid(newWorks: WorkItem[]): string[] {
                             <div>
                                 <span class="q-mx-sm text-weight-medium text-h6 text-red">${price} JPY </span>
                                 <span>Sales: ${sales}</span>
-                                ${allAges ? '<div class="q-chip row inline no-wrap items-center q-py-sm q-chip--dense q-chip--outline q-chip--square q-chip--dark q-dark text-green" style="font-size: 10px; margin-top: 0px;"><div class="q-chip__content col row no-wrap items-center q-anchor--skip">All-ages</div></div>' : ''}
+                                ${allAges ? '<div class="q-chip row inline no-wrap items-center q-py-sm q-chip--dense q-chip--outline q-chip--square text-green" style="font-size: 10px; margin-top: 0px;"><div class="q-chip__content col row no-wrap items-center q-anchor--skip">All-ages</div></div>' : ''}
                             </div>
                         </div>
                     </div>
                 </div>
             </div>`;
+
+        // Set remote URLs through DOM/CSS properties so API strings never enter
+        // the HTML parser. resolveInfiniteScrollCoverUrl has already restricted
+        // the protocol to HTTP(S).
+        const coverLayer = col.querySelector<HTMLElement>('.asmr-infinite-cover');
+        const coverImage = col.querySelector<HTMLImageElement>('.asmr-infinite-cover-img');
+        if (coverLayer) coverLayer.style.backgroundImage = `url(${JSON.stringify(coverUrl)})`;
+        if (coverImage) coverImage.src = coverUrl;
 
         grid.appendChild(col);
         injectedCardIds.add(rjCode);
@@ -507,8 +530,12 @@ function appendWorksViaVue(newWorks: WorkItem[]): boolean {
 // Image Loading
 // ============================================================================
 
-function loadImageWithRetry(img: HTMLImageElement, attempt = 0): Promise<void> {
+function loadImageWithRetry(img: HTMLImageElement, attempt = 0, generation = lifecycleGeneration): Promise<void> {
     return new Promise((resolve, reject) => {
+        if (!isLifecycleCurrent(generation)) {
+            resolve();
+            return;
+        }
         if (img.complete && img.naturalWidth > 0) {
             resolve();
             return;
@@ -527,6 +554,10 @@ function loadImageWithRetry(img: HTMLImageElement, attempt = 0): Promise<void> {
 
         img.onerror = () => {
             cleanup();
+            if (!isLifecycleCurrent(generation)) {
+                resolve();
+                return;
+            }
             if (attempt >= MAX_RETRIES) {
                 Logger.warn(`[InfiniteScrollGrid] Image failed after ${attempt} retries: ${originalSrc}`);
                 reject(new Error('Max retries exceeded'));
@@ -535,13 +566,22 @@ function loadImageWithRetry(img: HTMLImageElement, attempt = 0): Promise<void> {
             const delay = INITIAL_BACKOFF_MS * Math.pow(BACKOFF_MULTIPLIER, attempt);
             Logger.debug(`[InfiniteScrollGrid] Image load failed, retry ${attempt + 1} in ${delay}ms`);
             timeoutId = window.setTimeout(() => {
+                if (!isLifecycleCurrent(generation)) {
+                    resolve();
+                    return;
+                }
                 const separator = originalSrc.includes('?') ? '&' : '?';
                 img.src = `${originalSrc}${separator}_retry=${Date.now()}`;
-                loadImageWithRetry(img, attempt + 1).then(resolve).catch(reject);
+                loadImageWithRetry(img, attempt + 1, generation).then(resolve).catch(reject);
             }, delay);
         };
 
         timeoutId = window.setTimeout(() => {
+            if (!isLifecycleCurrent(generation)) {
+                cleanup();
+                resolve();
+                return;
+            }
             if (!img.complete) {
                 cleanup();
                 Logger.debug('[InfiniteScrollGrid] Image load timeout, continuing');
@@ -556,8 +596,9 @@ function loadImageWithRetry(img: HTMLImageElement, attempt = 0): Promise<void> {
     });
 }
 
-async function waitForImagesToLoad(workIds: string[]): Promise<void> {
+async function waitForImagesToLoad(workIds: string[], generation: number): Promise<void> {
     await new Promise(resolve => setTimeout(resolve, 100));
+    if (!isLifecycleCurrent(generation)) return;
 
     const images: HTMLImageElement[] = [];
     for (const workId of workIds) {
@@ -575,7 +616,8 @@ async function waitForImagesToLoad(workIds: string[]): Promise<void> {
 
     Logger.debug(`[InfiniteScrollGrid] Waiting for ${images.length} images to load`);
 
-    const results = await Promise.allSettled(images.map(img => loadImageWithRetry(img)));
+    const results = await Promise.allSettled(images.map(img => loadImageWithRetry(img, 0, generation)));
+    if (!isLifecycleCurrent(generation)) return;
     const failed = results.filter(r => r.status === 'rejected').length;
     if (failed > 0) {
         Logger.warn(`[InfiniteScrollGrid] ${failed}/${images.length} images failed to load after retries`);
@@ -597,7 +639,8 @@ function resetBackoff(): void {
     }
 }
 
-function handleRateLimit(): void {
+function handleRateLimit(generation: number): void {
+    if (!isLifecycleCurrent(generation)) return;
     if (retryCount >= MAX_RETRIES) {
         Logger.error('[InfiniteScrollGrid] Max retries exceeded for rate limit');
         sentinelState.value = 'rate-limit-error';
@@ -613,6 +656,7 @@ function handleRateLimit(): void {
     sentinelState.value = 'rate-limit';
 
     retryTimer = window.setTimeout(() => {
+        if (!isLifecycleCurrent(generation)) return;
         retryTimer = null;
         isLoading.value = false;
         sentinelState.value = 'idle';
@@ -629,6 +673,8 @@ function handleRateLimit(): void {
  * when the observer triggers.
  */
 async function prefetchNext(): Promise<void> {
+    const generation = lifecycleGeneration;
+    if (!isLifecycleCurrent(generation)) return;
     if (prefetching || reachedEnd.value) return;
     if (!paginationUnknown.value && currentPage.value >= totalPages.value) return;
 
@@ -641,6 +687,7 @@ async function prefetchNext(): Promise<void> {
 
     try {
         const response = await bridge.axios.get<{ pagination?: PaginationData; works?: WorkItem[] }>(apiUrl);
+        if (!isLifecycleCurrent(generation)) return;
         const rawWorks = response.data?.works || response.data?.pagination?.works || response.data;
         prefetchedResult = {
             page: targetPage,
@@ -649,13 +696,14 @@ async function prefetchNext(): Promise<void> {
         };
         Logger.debug(`[InfiniteScrollGrid] Prefetched page ${targetPage} (${prefetchedResult.works.length} works)`);
     } catch (error) {
+        if (!isLifecycleCurrent(generation)) return;
         const status = (error as { response?: { status?: number } })?.response?.status;
         if (status === 429) {
             Logger.debug('[InfiniteScrollGrid] Prefetch rate limited, skipping');
         }
         prefetchedResult = null;
     } finally {
-        prefetching = false;
+        if (generation === lifecycleGeneration) prefetching = false;
     }
 }
 
@@ -686,7 +734,8 @@ function processPagination(pagination: PaginationData): void {
 /**
  * Append works to the grid (Vue store or DOM fallback) and wait for images.
  */
-async function appendAndWait(typedWorks: WorkItem[]): Promise<void> {
+async function appendAndWait(typedWorks: WorkItem[], generation: number): Promise<boolean> {
+    if (!isLifecycleCurrent(generation)) return false;
     const workIdList = typedWorks.map(work => {
         const id = work.id || work.source_id;
         return id ? (String(id).startsWith('RJ') ? String(id) : `RJ${id}`) : null;
@@ -709,11 +758,14 @@ async function appendAndWait(typedWorks: WorkItem[]): Promise<void> {
     if (workIdList.length > 0) {
         loadingImageCount.value = workIdList.length;
         sentinelState.value = 'loading-images';
-        await waitForImagesToLoad(workIdList);
+        await waitForImagesToLoad(workIdList, generation);
     }
+    return isLifecycleCurrent(generation);
 }
 
 async function triggerNextPage(): Promise<void> {
+    const generation = lifecycleGeneration;
+    if (!isLifecycleCurrent(generation)) return;
     if (isLoading.value) return;
     if (!hasMorePages.value) {
         Logger.info('[InfiniteScrollGrid] No more pages');
@@ -748,14 +800,17 @@ async function triggerNextPage(): Promise<void> {
             }
 
             const response = await bridge.axios.get<{ pagination?: PaginationData; works?: WorkItem[] }>(apiUrl);
+            if (!isLifecycleCurrent(generation)) return;
             rawWorks = response.data?.works || response.data?.pagination?.works || response.data;
             pagination = response.data?.pagination;
         }
 
+        if (!isLifecycleCurrent(generation)) return;
         if (pagination) processPagination(pagination);
 
         if (Array.isArray(rawWorks) && rawWorks.length > 0) {
-            await appendAndWait(rawWorks as WorkItem[]);
+            const appended = await appendAndWait(rawWorks as WorkItem[], generation);
+            if (!appended || !isLifecycleCurrent(generation)) return;
             // Start prefetching the next page
             void prefetchNext();
         } else {
@@ -765,10 +820,11 @@ async function triggerNextPage(): Promise<void> {
             reachedEnd.value = true;
         }
     } catch (error) {
+        if (!isLifecycleCurrent(generation)) return;
         const status = (error as { response?: { status?: number }; status?: number })?.response?.status || (error as { status?: number })?.status;
         if (status === 429) {
             currentPage.value--;
-            handleRateLimit();
+            handleRateLimit(generation);
             return;
         }
         Logger.error('[InfiniteScrollGrid] Failed to load next page:', error);
@@ -782,6 +838,7 @@ async function triggerNextPage(): Promise<void> {
             Logger.warn(`[InfiniteScrollGrid] Error ${status || 'network'}, retry ${retryCount}/${MAX_RETRIES} in ${delay}ms`);
             sentinelState.value = 'loading';
             retryTimer = window.setTimeout(() => {
+                if (!isLifecycleCurrent(generation)) return;
                 retryTimer = null;
                 isLoading.value = false;
                 sentinelState.value = 'idle';
@@ -796,7 +853,7 @@ async function triggerNextPage(): Promise<void> {
         // Only reset loading state if no retry timer is pending.
         // When a retry is scheduled, keep isLoading=true and sentinelState
         // as-is (loading spinner or rate-limit indicator) until the retry fires.
-        if (retryTimer === null) {
+        if (isLifecycleCurrent(generation) && retryTimer === null) {
             isLoading.value = false;
             if (sentinelState.value === 'loading' || sentinelState.value === 'loading-images') {
                 sentinelState.value = reachedEnd.value ? 'end' : 'idle';
@@ -867,14 +924,16 @@ function attachToCurrentPage(): void {
 // ============================================================================
 
 function setupObserver(): void {
+    const generation = lifecycleGeneration;
     // Wait for sentinel to be in DOM after nextTick
     nextTick(() => {
+        if (!isLifecycleCurrent(generation)) return;
         if (!sentinelRef.value || typeof IntersectionObserver === 'undefined') return;
 
         observer = new IntersectionObserver(
             (entries) => {
                 entries.forEach(entry => {
-                    if (entry.isIntersecting && !isLoading.value) {
+                    if (isLifecycleCurrent(generation) && entry.isIntersecting && !isLoading.value) {
                         void triggerNextPage();
                     }
                 });
@@ -897,7 +956,11 @@ function setupObserver(): void {
 }
 
 function cleanup(): void {
+    lifecycleGeneration++;
     restorePagination();
+    document.querySelectorAll<HTMLElement>('[data-asmr-infinite-fallback="true"]')
+        .forEach((card) => card.remove());
+    injectedCardIds.clear();
 
     if (observer) {
         observer.disconnect();
@@ -945,12 +1008,14 @@ watch(enabled, (val) => {
 });
 
 onMounted(() => {
+    componentMounted = true;
     if (enabled.value) {
         attachToCurrentPage();
     }
 });
 
 onUnmounted(() => {
+    componentMounted = false;
     cleanup();
 });
 </script>

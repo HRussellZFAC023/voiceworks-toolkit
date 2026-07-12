@@ -1,7 +1,7 @@
 /**
  * E2E: Infinite Scroll Manager
  *
- * Tests for InfiniteScrollManager which replaces pagination
+ * Tests for the InfiniteScrollController/Vue grid which replaces pagination
  * with automatic page loading on scroll.
  */
 
@@ -30,16 +30,13 @@ test.describe('Infinite Scroll Manager', () => {
         }
     });
 
-    test('infinite scroll singleton is accessible', async ({ injectedPage, isScriptLoaded, waitForBridge }) => {
+    test('infinite scroll controller mounts only one root', async ({ injectedPage, isScriptLoaded, waitForBridge }) => {
         await helpers.gotoHome(injectedPage);
         await isScriptLoaded();
         await waitForBridge();
         await injectedPage.waitForTimeout(2000);
 
-        const hasInstance = await injectedPage.evaluate(() => {
-            return !!(window as any).__ASMR_INFINITE_SCROLL_MANAGER__;
-        });
-        console.log(`InfiniteScrollManager singleton: ${hasInstance}`);
+        await expect(injectedPage.locator('#asmr-infinite-scroll-root')).toHaveCount(1);
     });
 
     test('pagination is hidden when infinite scroll is active', async ({ injectedPage, isScriptLoaded, waitForBridge }) => {
@@ -82,7 +79,7 @@ test.describe('Infinite Scroll Manager', () => {
         await waitForBridge();
         await injectedPage.waitForTimeout(2000);
 
-        // InfiniteScrollManager explicitly skips /playlists route
+        // InfiniteScrollController explicitly skips /playlists route
         const sentinel = await injectedPage.locator('#infinite-scroll-sentinel').count();
         expect(sentinel).toBe(0);
     });

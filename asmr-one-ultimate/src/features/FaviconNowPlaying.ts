@@ -35,6 +35,9 @@ export class FaviconNowPlaying {
     // MutationObserver to defend against site overwriting our favicon
     private faviconObserver: MutationObserver | null = null;
     private watcherInitialized = false;
+    private enabled = false;
+    /** Invalidates in-flight cover fetch/decode work on navigation or disable. */
+    private updateGeneration = 0;
 
     constructor() {
         this.bridge = KikoeruBridge.getInstance();
@@ -46,6 +49,10 @@ export class FaviconNowPlaying {
             Logger.log('[FaviconNowPlaying] Disabled in settings');
             return;
         }
+        if (this.enabled) return;
+
+        this.enabled = true;
+        this.updateGeneration++;
 
         Logger.log('[FaviconNowPlaying] Enabling dynamic favicon');
         this.saveOriginalFavicon();
@@ -118,6 +125,8 @@ export class FaviconNowPlaying {
                 if (workId && Config.get('dynamicFavicon')) {
                     this.updateFaviconByWorkId(workId);
                 } else {
+                    this.updateGeneration++;
+                    this.lastWorkId = null;
                     this.setFavicon(DEFAULT_FAVICON);
                 }
             }
@@ -132,11 +141,15 @@ export class FaviconNowPlaying {
      * Update favicon using just a workId (when full work object isn't available)
      */
     private async updateFaviconByWorkId(workId: string): Promise<void> {
+        if (!this.enabled || !Config.get('dynamicFavicon')) return;
         if (this.lastWorkId === workId) return;
         this.lastWorkId = workId;
+        const generation = ++this.updateGeneration;
 
         if (this.faviconCache.has(workId)) {
-            this.setFavicon(this.faviconCache.get(workId)!);
+            if (this.isCurrentUpdate(generation, workId)) {
+                this.setFavicon(this.faviconCache.get(workId)!);
+            }
             return;
         }
 
@@ -144,7 +157,14 @@ export class FaviconNowPlaying {
         const numericId = workId.replace(/^RJ0*/i, '');
         const coverUrl = buildCoverUrl(numericId, 'main', getApiBaseUrl());
         Logger.log('[Favicon] Generating by workId:', workId, 'numericId:', numericId);
-        await this.generateFavicon(coverUrl, workId);
+        await this.generateFavicon(coverUrl, workId, generation);
+    }
+
+    private isCurrentUpdate(generation: number, workId: string): boolean {
+        return this.enabled
+            && Config.get('dynamicFavicon')
+            && generation === this.updateGeneration
+            && workId === this.lastWorkId;
     }
 
     private saveOriginalFavicon(): void {
@@ -207,6 +227,7 @@ export class FaviconNowPlaying {
     }
 
     public restoreFavicon(): void {
+        this.updateGeneration++;
         this.currentFaviconUrl = null;
         this.lastWorkId = null;
         if (this.originalFavicon) {
@@ -214,8 +235,9 @@ export class FaviconNowPlaying {
         }
     }
 
-    private async generateFavicon(imageUrl: string, workId: string): Promise<void> {
+    private async generateFavicon(imageUrl: string, workId: string, generation: number): Promise<void> {
         try {
+            if (!this.isCurrentUpdate(generation, workId)) return;
             // First, try setting the URL directly (works in some browsers)
             // This avoids CORS issues with cross-origin images
             Logger.log('[Favicon] Trying direct URL approach first:', imageUrl);
@@ -227,9 +249,11 @@ export class FaviconNowPlaying {
                 Logger.warn('[Favicon] Failed to fetch image, keeping direct URL:', imageUrl);
                 return;
             }
+            if (!this.isCurrentUpdate(generation, workId)) return;
 
             const dataUrl = await this.blobToFavicon(blob);
             this.faviconCache.set(workId, dataUrl);
+            if (!this.isCurrentUpdate(generation, workId)) return;
             this.setFavicon(dataUrl);
             Logger.log('[Favicon] Successfully updated with data URL for work:', workId);
         } catch (e) {
@@ -343,6 +367,9 @@ export class FaviconNowPlaying {
     }
 
     public disable(): void {
+        if (!this.enabled) return;
+        this.enabled = false;
+        this.updateGeneration++;
         this.stopFaviconGuard();
         // Clean up event listeners
         for (const cleanup of this.eventCleanups) {
@@ -350,7 +377,10 @@ export class FaviconNowPlaying {
         }
         this.eventCleanups = [];
         // Clean up route watcher
-        if (this.unwatchRoute) this.unwatchRoute();
+        if (this.unwatchRoute) {
+            this.unwatchRoute();
+            this.unwatchRoute = null;
+        }
         this.restoreFavicon();
     }
 

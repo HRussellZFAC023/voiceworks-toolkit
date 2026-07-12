@@ -175,18 +175,18 @@ function postChunkError(chunkId, message, gpuFallback = false) {
     self.postMessage({ status: 'error', data, chunkId });
 }
 
-function withInferenceTimeout(promise, ms) {
+function withInferenceTimeout(promise, ms, backendName) {
     let timer;
     const timeout = new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new Error('WebGPU inference timed out after ' + (ms / 1000) + 's')), ms);
+        timer = setTimeout(() => reject(new Error(backendName + ' inference timed out after ' + (ms / 1000) + 's')), ms);
     });
     return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
 function getInferenceTimeoutMs(currentBackend, chunkLengthS) {
-    if (currentBackend !== 'webgpu') return INFERENCE_TIMEOUT_MS;
     const chunkS = Number(chunkLengthS) || 30;
-    return Math.max(INFERENCE_TIMEOUT_MS, chunkS * 5 * 1000);
+    if (currentBackend === 'webgpu') return Math.max(INFERENCE_TIMEOUT_MS, chunkS * 5 * 1000);
+    return Math.min(180_000, Math.max(90_000, chunkS * 4 * 1000));
 }
 
 // ------------------------------------------------------------
@@ -197,7 +197,7 @@ let pipelinePromise = null;
 let currentModel = null;
 let currentMultilingual = null;
 
-async function ensurePipeline(settings, progressCb) {
+async function loadPipelineForModel(settings, progressCb) {
     await loadTransformers();
 
     const modelName = resolveModelName(settings.model, settings.multilingual);
@@ -299,6 +299,28 @@ async function ensurePipeline(settings, progressCb) {
     throw lastErr || new Error('Failed to load model');
 }
 
+const FALLBACK_MODEL = 'onnx-community/whisper-tiny';
+let fallbackModelOverride = null;
+
+async function ensurePipeline(settings, progressCb) {
+    const effective = fallbackModelOverride
+        ? { ...settings, model: fallbackModelOverride }
+        : settings;
+    try {
+        return await loadPipelineForModel(effective, progressCb);
+    } catch (error) {
+        if (effective.model === FALLBACK_MODEL) throw error;
+        fallbackModelOverride = FALLBACK_MODEL;
+        self.postMessage({
+            status: 'fallback',
+            originalModel: effective.model,
+            fallbackModel: FALLBACK_MODEL,
+            reason: toErrorMessage(error),
+        });
+        return loadPipelineForModel({ ...settings, model: FALLBACK_MODEL }, progressCb);
+    }
+}
+
 // ------------------------------------------------------------
 // Transcription — raw chunk output
 // ------------------------------------------------------------
@@ -355,11 +377,11 @@ async function transcribe(msg) {
         do_sample: false,
         chunk_length_s: msg.chunkLengthS,
         stride_length_s: msg.strideLengthS,
-        language: msg.language,
         task: msg.subtask,
         return_timestamps: useWordTimestamps ? 'word' : true,
         chunk_callback,
     };
+    if (msg.language) pipeOpts.language = msg.language;
 
     const resetStreamState = (wordLevel) => {
         wordBuffer = [];
@@ -367,12 +389,9 @@ async function transcribe(msg) {
     };
 
     const runInference = async (targetPipe, opts, backendName, timeoutOverrideMs) => {
-        const useTimeout = backendName === 'webgpu';
         const timeoutMs = timeoutOverrideMs ?? getInferenceTimeoutMs(backendName, msg.chunkLengthS);
-        console.log('[Whisper Worker] Starting inference on ' + backendName + (useTimeout ? ' (timeout=' + timeoutMs / 1000 + 's)' : ''));
-        return useTimeout
-            ? withInferenceTimeout(targetPipe(msg.audio, opts), timeoutMs)
-            : targetPipe(msg.audio, opts);
+        console.log('[Whisper Worker] Starting inference on ' + backendName + ' (timeout=' + timeoutMs / 1000 + 's)');
+        return withInferenceTimeout(targetPipe(msg.audio, opts), timeoutMs, backendName);
     };
 
     const fallbackToWasmAndRetry = async (reasonMsg) => {
@@ -405,6 +424,14 @@ async function transcribe(msg) {
         result = await runInference(pipe, pipeOpts, currentBackend);
     } catch (initialError) {
         const initialMsg = toErrorMessage(initialError);
+        // Promise.race cannot cancel the underlying Transformers pipeline call.
+        // Starting a word->segment retry after a timeout would run a second
+        // inference concurrently on the same wedged pipeline. Let the host
+        // terminate/recreate this worker instead.
+        if (/inference timed out/i.test(initialMsg)) {
+            postChunkError(chunkId, initialMsg, currentBackend !== 'wasm');
+            return null;
+        }
         const canRetryWithoutWords = pipeOpts.return_timestamps === 'word';
 
         if (canRetryWithoutWords) {
@@ -517,6 +544,7 @@ self.addEventListener('message', async (event) => {
         }
         currentModel = null;
         currentMultilingual = null;
+        fallbackModelOverride = null;
         return;
     }
 

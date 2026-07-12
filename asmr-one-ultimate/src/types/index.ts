@@ -94,5 +94,5 @@ export type {
     AppEventName,
     AppEventPayload,
     WhisperUpdatePayload,
+    TranslationSourceHint,
 } from './store';
-

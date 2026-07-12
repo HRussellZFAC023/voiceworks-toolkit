@@ -10,13 +10,13 @@ A comprehensive browser-based toolkit for Japanese language learning through imm
 Real-time synced subtitles purpose-built for immersion-based Japanese study. Japanese text is displayed as the primary line with blurrable English translations underneath — hover or press B to reveal. Automatically loads LRC lyric files when available and integrates with live Whisper transcriptions for unstudied content. Chinese-language subtitles are auto-translated to Japanese via Google Translate so learners always see kana/kanji as the primary line. Playback speed controls and configurable lead-time let you study at your own pace.
 
 #### Live Transcription — On-Device Speech-to-Text
-Turns any voicework into study material by transcribing audio in real-time directly from the player element — no file downloads or uploads needed. Powered by [Transformers.js](https://huggingface.co/docs/transformers.js) running the `whisper-small` model inside a dedicated Web Worker with WebGPU acceleration. Transcripts are cached per-track with a 90-day TTL for instant reloads on revisit. Supports 8 language modes (Japanese, English, Chinese, Korean, etc.) and exports to LRC, VTT, and SRT subtitle formats for use in external tools like Anki or mpv.
+Turns any voicework into study material by transcribing bounded live audio directly from the player element — no file uploads or duplicate full-track download on the normal path. [Transformers.js](https://huggingface.co/docs/transformers.js) runs multilingual Whisper in a dedicated worker, using WebGPU when reliable and the smaller `whisper-tiny`/WASM path on constrained devices. If live capture is unavailable, Whisper tries the host's lower-quality stream before a compatibility decode; a full stream is eligible only when its reported size is at most 32 MiB. Model loading, inference, streaming, and decode operations all have bounded recovery paths instead of stalling indefinitely. Transcripts are cached per-track with a 90-day TTL and export to LRC, VTT, or raw untranslated Japanese TXT.
 
 #### Neural Translation - Web Translation Pipeline
-Translations use a remote web pipeline (Google Translate endpoints) with host rotation, retry/backoff, rate-limit cooldowns, in-flight request deduplication, stale-batch cancellation, and shared caching. This keeps subtitle, title, tag, and UI translation low-latency without extra model downloads.
+Translations use a remote web pipeline (Google Translate endpoints) with host rotation, retry/backoff, rate-limit cooldowns, in-flight request deduplication, source-echo rejection, and shared caching. User-facing text targets the active English, Chinese, or Japanese UI language, including Japanese-to-Chinese translation. An optional OpenAI-compatible endpoint/model/API key can be configured; failures fall back to Google.
 
 #### Interface Translation
-Localizes the platform's Chinese and Japanese UI strings to English using a hardcoded translation map for static elements (sort options, buttons, menus) and pattern-based regex replacements for dynamic text. Combined with the neural tag translator, this makes the entire interface accessible to English-speaking learners.
+Localizes the platform's Chinese and Japanese UI strings to the active English, Chinese, or Japanese locale using static maps for common controls and pattern replacements for dynamic text.
 
 ### Search & Discovery
 
@@ -38,15 +38,15 @@ Curated playlist playback with forward/back navigation controls injected into th
 Enhanced playlist shuffling that integrates with the host app's native shuffle controls. Applies a hard shuffle that maintains playback of the current track and persists the shuffle preference across sessions.
 
 #### Audio Cache — Offline Playback
-IndexedDB-backed audio caching with TTL-based expiration. Automatically caches tracks during playback for offline replay and reduced bandwidth on revisits — useful for reviewing previously studied content without re-downloading.
+Optional IndexedDB-backed audio caching for offline replay and reduced bandwidth on revisits. Full-track background downloads are disabled by default to avoid duplicating the player stream; enable Offline Audio Cache in settings when you explicitly want local copies.
 
 ### Media & Visualization
 
 #### Media Viewer — Inline Gallery
-Click-to-expand lightbox for images and video files bundled with voiceworks. Supports JPG, PNG, GIF, WebP, MP4, WebM, MOV, AVI, MKV, PDF, TXT, and SRT. Slideshow mode with auto-advance, keyboard navigation (arrow keys, ESC), and swipe support on touch devices. Thumbnail caching and lazy loading for performance.
+Click-to-expand lightbox for images and video files bundled with voiceworks. Pointer, keyboard, and swipe navigation are supported without adding a redundant open button. Image blobs are fetched lazily and verified before display; DLsite images prefer the maintained Japan relay, while Cloudflare's HTTP-200 restriction placeholder is rejected rather than shown as content. Supports JPG, PNG, GIF, WebP, MP4, WebM, MOV, AVI, MKV, PDF, TXT, and SRT.
 
 #### Player Gallery — Album Art Slideshow
-Image gallery integrated into the player's album art area. Displays work cover images with slideshow navigation, arrow controls, swipe support, and keyboard shortcuts.
+Image gallery integrated into the player's album art area. Displays work cover images with transparent-until-hover/focus controls, swipe support, keyboard shortcuts, and lazy adjacent-image loading.
 
 #### Audio Visualizer — Real-time Spectrum Display
 40-bar frequency spectrum visualization using the Web Audio API's AnalyserNode. Renders in both a collapsible compact view (fixed position) and an expanded player-integrated view. Smooth animations with configurable bar styling.
@@ -122,14 +122,20 @@ Hides all images and thumbnails site-wide for discreet browsing in public or sha
 #### Store Backup — Export/Import Settings
 Export all settings and preferences to a JSON file. Import to restore configuration on a new browser or after a reinstall.
 
+#### Emergency Playlist Backup
+Exports playlist metadata and every RJ code even during site instability. JSON is the canonical snapshot and is also retained in userscript storage; CSV and TXT downloads keep the user's own playlists separate from community/public playlists. Optional Google Drive upload creates two explicitly named JSON files under the least-privilege `drive.file` scope. See [Resilience and backups](docs/resilience-and-backups.md).
+
 #### Player Translator — Track Title Translation
-Translates Japanese and Chinese track titles in the player to English in real-time using the web translation pipeline.
+Translates Japanese and Chinese track titles in the player to the active UI language in real time using the web translation pipeline.
 
 #### Translated Tags — CJK Tag Translation
-Translates CJK tags throughout the entire UI (work cards, search, filters) to English using cached translations stored in IndexedDB.
+Translates CJK tags throughout the entire UI (work cards, search, filters) to the active UI language using cached translations.
 
 #### CORS Fixer
 Transparent proxy workaround for cross-origin restrictions on content delivery, ensuring media files load reliably.
+
+#### Region-Gate Frontend Recovery & API Fallback
+If ASMR.one replaces the site with its English-language gate, the userscript automatically reloads the trusted application shell, bootstrap assets, and validated lazy-route chunks through Chinese-first privileged requests while keeping the real ASMR.one origin, login, and local storage. Preloading the route chunks prevents later navigation from falling back to an English-first browser request. It does not change the browser's global language preference. Playlist API reads separately try the selected mirror first and use the Tokyo-placed read-only Cloudflare Worker only after direct and CORS requests fail. The proxy forwards authentication for the user's own playlist backup, never caches authorized responses, and accepts only GET/HEAD.
 
 #### Localization
 Full English, Chinese, and Japanese UI localization. All user-facing strings use `I18n.t()` with interpolation support via `I18n.format()`.
@@ -137,6 +143,7 @@ Full English, Chinese, and Japanese UI localization. All user-facing strings use
 ## Installation
 
 1. Install [Tampermonkey](https://www.tampermonkey.net/) in your browser. On Chromium-based browsers (Edge, Chrome), go to the Tampermonkey extension details page and enable **Allow User Scripts**.
+   No Firefox website-language change is required; the userscript recovers the ASMR.one frontend in place when the English-language gate appears.
 2. Clone this repo and install dependencies:
    ```bash
    git clone https://github.com/HRussellZFAC023/voiceworks-toolkit.git
@@ -158,7 +165,7 @@ Full English, Chinese, and Japanese UI localization. All user-facing strings use
 ## Testing
 
 ```bash
-npm test                # Vitest unit tests (240 tests across 31 suites)
+npm test                # Vitest unit tests (1,522 tests across 136 files)
 npm run test:e2e        # Playwright E2E (headless Chromium)
 npm run test:e2e:headed # E2E with visible browser
 npm run test:e2e:ui     # Playwright UI mode
@@ -166,6 +173,15 @@ npm run test:e2e:debug  # Step-through debugging
 ```
 
 Tests run in a headless Chromium browser with automatic userscript injection — no manual browser setup or Tampermonkey installation needed. GM_* APIs are stubbed using localStorage.
+
+From a region-blocked network, route the site frontend through the configured worker:
+
+```bash
+npm run build
+E2E_PROXY=1 npm run test:e2e
+```
+
+Set `E2E_PROXY_URL` for a private worker. Restricted runners that cannot bind a Vite port can add `E2E_SKIP_WEBSERVER=1`; the fixtures still inject the built userscript directly. The current unit baseline is 136 files / 1,522 tests.
 
 ## Architecture
 

@@ -11,6 +11,56 @@ import { test, expect, helpers, TEST_WORKS } from './fixtures';
 test.describe('Work Metadata Panel', () => {
 
     test.beforeEach(async ({ injectedPage, isScriptLoaded }) => {
+        await injectedPage.route('https://wild-sun-1a84.henry-85d.workers.dev/**', async (route) => {
+            const url = new URL(route.request().url());
+            if (url.pathname.includes('/api/=/product.json')) {
+                await route.fulfill({
+                    status: 200,
+                    contentType: 'application/json',
+                    body: JSON.stringify([{
+                        workno: 'RJ01052162',
+                        work_name: 'テスト作品',
+                        maker_name: 'テストサークル',
+                        age_category: 3,
+                        regist_date: '2025-01-01',
+                        genres: [{ id: 1, name: '耳かき' }],
+                        price: 770,
+                    }]),
+                });
+                return;
+            }
+            if (url.pathname.includes('/maniax-touch/product/info/ajax')) {
+                await route.fulfill({
+                    status: 200,
+                    contentType: 'application/json',
+                    body: JSON.stringify({ RJ01052162: { rate_average_2dp: 4.8, dl_count: 1234 } }),
+                });
+                return;
+            }
+            if (url.pathname.endsWith('.jpg')) {
+                await route.fulfill({
+                    status: 200,
+                    contentType: 'image/png',
+                    body: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMB/6XGD2sAAAAASUVORK5CYII=', 'base64'),
+                });
+                return;
+            }
+            if (url.pathname.includes('/work/=/product_id/')) {
+                await route.fulfill({
+                    status: 200,
+                    contentType: 'text/html; charset=utf-8',
+                    body: `<!doctype html><html><body>
+                        <div class="work_parts_container">
+                            <div class="work_parts_multitype_item type_text"><p>これは展開後に読める完全なDLsite作品説明です。音声作品の詳細を確認できます。</p></div>
+                            <img src="https://img.dlsite.jp/modpub/images2/parts/RJ01052000/RJ01052162/sample.jpg">
+                        </div>
+                        <div class="work_buy_container"></div>
+                    </body></html>`,
+                });
+                return;
+            }
+            await route.fulfill({ status: 404, body: '' });
+        });
         await helpers.gotoWork(injectedPage, TEST_WORKS.STANDARD);
         await isScriptLoaded();
         await injectedPage.waitForTimeout(2000);
@@ -58,11 +108,13 @@ test.describe('Work Metadata Panel', () => {
         console.log(`Refresh button count: ${count}`);
     });
 
-    test('details toggle button exists', async ({ injectedPage }) => {
+    test('details toggle expands real body and gallery content', async ({ injectedPage }) => {
         const toggle = injectedPage.locator('.asmr-meta-toggle');
-        await injectedPage.waitForTimeout(3000);
-        const count = await toggle.count();
-        console.log(`Details toggle count: ${count}`);
+        await expect(toggle).toBeVisible({ timeout: 15000 });
+        await toggle.click();
+        const details = injectedPage.locator('.asmr-meta-details');
+        await expect(details).toContainText('これは展開後に読める完全なDLsite作品説明です', { timeout: 15000 });
+        await expect(details.locator('.asmr-meta-gallery-item')).toHaveCount(1);
     });
 
     test('HVDB link is injected on work page', async ({ injectedPage }) => {

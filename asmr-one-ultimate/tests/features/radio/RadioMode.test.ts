@@ -7,6 +7,8 @@ import { KikoeruBridge } from '../../../src/infrastructure/KikoeruBridge';
 import { FolderDiver } from '../../../src/features/FolderDiver';
 import { WorkSelector } from '../../../src/features/radio/WorkSelector';
 import { PlaybackController } from '../../../src/features/radio/PlaybackController';
+import { WorkService } from '../../../src/services/WorkService';
+import { registerExclusivePlaybackMode } from '../../../src/features/playbackModeCoordinator';
 
 // Mocks
 vi.mock('../../../src/core/Logger', () => ({
@@ -178,6 +180,71 @@ describe('RadioMode', () => {
         expect(AppStore.setRadioState).toHaveBeenCalledWith(
             expect.objectContaining({ isActive: false })
         );
+    });
+
+    it('recreates host and event listeners after disable then enable', () => {
+        const unwatch = vi.fn();
+        mockBridge.store.watch.mockImplementation(() => unwatch);
+        mockBridge.app.$watch.mockImplementation(() => unwatch);
+        mockBridge.player.currentTrack = { hash: 'existing' };
+
+        radioMode.initialize();
+        radioMode.enable();
+        radioMode.disable();
+        radioMode.enable();
+
+        expect(mockBridge.store.watch).toHaveBeenCalledTimes(6);
+        expect(mockBridge.app.$watch).toHaveBeenCalledTimes(2);
+        expect(unwatch).toHaveBeenCalledTimes(4);
+        expect((radioMode as any).isInitialized).toBe(true);
+    });
+
+    it('deactivates playlist ownership when radio is enabled', () => {
+        const deactivatePlaylist = vi.fn();
+        registerExclusivePlaybackMode('playlist', deactivatePlaylist);
+        mockBridge.player.currentTrack = { hash: 'existing' };
+
+        radioMode.initialize();
+        radioMode.enable();
+
+        expect(deactivatePlaylist).toHaveBeenCalledTimes(1);
+    });
+
+    it('ignores a stale work selection after disable and re-enable', async () => {
+        let resolveSelection!: (work: { id: string; title: string }) => void;
+        mockWorkSelector.selectRandomWork.mockImplementation(() => new Promise(resolve => {
+            resolveSelection = resolve;
+        }));
+        mockBridge.player.currentTrack = { hash: 'existing' };
+        radioMode.initialize();
+        radioMode.enable();
+
+        const staleSkip = radioMode.skipToNext();
+        await Promise.resolve();
+        radioMode.disable();
+        radioMode.enable();
+        resolveSelection({ id: 'RJ999999', title: 'Stale' });
+        await staleSkip;
+
+        expect(mockBridge.navigateToWork).not.toHaveBeenCalledWith('RJ999999');
+        expect(radioMode.isActive).toBe(true);
+    });
+
+    it('cancels a work-load retry from an earlier activation', async () => {
+        mockBridge.player.currentTrack = { hash: 'existing' };
+        radioMode.initialize();
+        radioMode.enable();
+        (radioMode as any).currentWorkId = 'RJ111111';
+        (WorkService.getWork as any).mockResolvedValueOnce(null);
+
+        await (radioMode as any).loadWorkAndStartPlayback('RJ111111');
+        expect(WorkService.getWork).toHaveBeenCalledTimes(1);
+
+        radioMode.disable();
+        radioMode.enable();
+        await vi.advanceTimersByTimeAsync(2000);
+
+        expect(WorkService.getWork).toHaveBeenCalledTimes(1);
     });
 
     it('should not double-enable or double-disable', () => {

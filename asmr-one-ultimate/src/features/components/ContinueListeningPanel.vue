@@ -139,7 +139,7 @@ onUnmounted(() => {
 <template>
     <div v-if="!loading && works.length > 0" class="q-pt-lg q-px-md">
         <a href="/favourites/progress/listening" style="color: inherit; text-decoration: none;">
-            <h2 class="text-h5 q-mb-sm text-white" style="font-weight: normal; display: flex; align-items: center; gap: 8px;">
+            <h2 class="text-h5 q-mb-sm asmr-continue-title" style="font-weight: normal; display: flex; align-items: center; gap: 8px;">
                 <i class="q-icon material-icons" style="font-size: 24px; color: #42a5f5;">headset</i>
                 {{ t('continueListeningTitle') }} &gt;
             </h2>
@@ -158,7 +158,7 @@ onUnmounted(() => {
                         class="col-xl-2 col-lg-2 col-md-3 col-xs-6 col-sm-4"
                         style="min-width: 280px; max-width: 418px;"
                     >
-                        <div class="fit q-card q-card--dark q-dark">
+                        <div class="fit q-card asmr-continue-card">
                             <!-- Cover -->
                             <a :href="`/work/${getRjCode(work.id)}`" @click.prevent="navigateToWork(work.id)">
                                 <div role="img" :aria-label="`Cover of ${work.title}`" class="q-img overflow-hidden q-img--menu" style="max-width: 560px;">
@@ -172,7 +172,7 @@ onUnmounted(() => {
                                     <div class="q-img__content absolute-full">
                                         <!-- RJ code chip (top-left) -->
                                         <div class="absolute-top-left transparent" style="padding: 0;">
-                                            <div class="q-chip row inline no-wrap items-center q-ma-sm bg-brown text-white q-chip--colored q-chip--dense q-chip--square q-chip--dark q-dark">
+                                            <div class="q-chip row inline no-wrap items-center q-ma-sm bg-brown q-chip--colored q-chip--dense q-chip--square asmr-continue-colored-chip">
                                                 <div class="q-chip__content col row no-wrap items-center q-anchor--skip">{{ getRjCode(work.id) }}</div>
                                             </div>
                                         </div>
@@ -181,9 +181,9 @@ onUnmounted(() => {
                                         <!-- Playlist add button (top-right) -->
                                         <div class="absolute-top-right transparent" style="padding: 0px !important;">
                                             <div class="absolute-top-right transparent like-btn" style="padding: 4px;">
-                                                <div class="q-chip row inline no-wrap items-center bg-brown q-chip--dense q-chip--square q-chip--dark q-dark">
+                                                <div class="q-chip row inline no-wrap items-center bg-brown q-chip--dense q-chip--square asmr-continue-colored-chip">
                                                     <div class="q-chip__content col row no-wrap items-center q-anchor--skip">
-                                                        <i class="q-icon text-white material-icons" style="font-size: 24px;">playlist_add</i>
+                                                        <i class="q-icon material-icons" style="font-size: 24px;">playlist_add</i>
                                                     </div>
                                                 </div>
                                             </div>
@@ -192,7 +192,7 @@ onUnmounted(() => {
                                 </div>
                             </a>
 
-                            <hr class="q-separator q-separator--horizontal q-separator--dark">
+                            <hr class="q-separator q-separator--horizontal asmr-continue-separator">
 
                             <div>
                                 <!-- Title -->
@@ -216,7 +216,7 @@ onUnmounted(() => {
                                         style="display: inline-block; cursor: pointer;"
                                         @click="navigateToTag(tag.id, $event)"
                                     >
-                                        <div class="q-chip row inline no-wrap items-center chip shadow-0 text-weight-medium q-chip--dark q-dark bg-grey-9" style="font-size: 10px;">
+                                        <div class="q-chip row inline no-wrap items-center chip shadow-0 text-weight-medium asmr-continue-neutral-chip" style="font-size: 10px;">
                                             <div class="q-chip__content col row no-wrap items-center q-anchor--skip">
                                                 <span class="chip-content">{{ getTagName(tag) }}</span>
                                             </div>
@@ -229,7 +229,7 @@ onUnmounted(() => {
                                         style="display: inline; cursor: pointer;"
                                         @click="navigateToCircle(work.circle.id, $event)"
                                     >
-                                        <div class="q-chip row inline no-wrap items-center chip shadow-0 text-weight-medium bg-orange text-white q-chip--dark q-dark" style="font-size: 10px;">
+                                        <div class="q-chip row inline no-wrap items-center chip shadow-0 text-weight-medium bg-orange asmr-continue-colored-chip" style="font-size: 10px;">
                                             <div class="q-chip__content col row no-wrap items-center q-anchor--skip">
                                                 <span class="chip-content ellipsis">{{ work.circle.name }}</span>
                                             </div>
@@ -243,13 +243,13 @@ onUnmounted(() => {
                                         style="display: inline-block; cursor: pointer;"
                                         @click="navigateToVa(va.id, $event)"
                                     >
-                                        <div class="q-chip row inline no-wrap items-center chip shadow-0 text-weight-medium bg-green text-white q-chip--colored q-chip--dark q-dark" style="font-size: 10px;" :data-asmrtag="va.name" data-asmrtag-state="pending">
+                                        <div class="q-chip row inline no-wrap items-center chip shadow-0 text-weight-medium bg-green q-chip--colored asmr-continue-colored-chip" style="font-size: 10px;" :data-asmrtag="va.name" data-asmrtag-state="pending">
                                             <div class="q-chip__content col row no-wrap items-center q-anchor--skip">{{ va.name }}</div>
                                         </div>
                                     </div>
 
                                     <!-- Duration (grey chip) -->
-                                    <div v-if="work.duration" class="q-chip row inline no-wrap items-center chip shadow-0 text-weight-medium bg-grey-7 text-white q-chip--colored q-chip--dark q-dark" style="font-size: 10px;">
+                                    <div v-if="work.duration" class="q-chip row inline no-wrap items-center chip shadow-0 text-weight-medium asmr-continue-neutral-chip" style="font-size: 10px;">
                                         <i class="q-chip__icon q-chip__icon--left q-icon material-icons">schedule</i>
                                         <div class="q-chip__content col row no-wrap items-center q-anchor--skip">
                                             <span class="chip-content">{{ formatDuration(work.duration) }}</span>
@@ -276,5 +276,28 @@ onUnmounted(() => {
 }
 .asmr-continue-listening-scroll::-webkit-scrollbar {
     display: none;                 /* Chrome/Safari */
+}
+
+.asmr-continue-title,
+.asmr-continue-card {
+    color: var(--asmr-text-primary);
+}
+
+.asmr-continue-card {
+    background: var(--asmr-bg-primary);
+    border-color: var(--asmr-border-color);
+}
+
+.asmr-continue-separator {
+    background: var(--asmr-border-color);
+}
+
+.asmr-continue-neutral-chip {
+    color: var(--asmr-text-secondary);
+    background: var(--asmr-bg-tertiary);
+}
+
+.asmr-continue-colored-chip {
+    color: #fff;
 }
 </style>

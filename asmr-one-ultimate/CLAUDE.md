@@ -66,7 +66,10 @@ Recently refactored:
 - `src/features/media/mediaViewerWorkTreePatchUtils.ts` now centralizes WorkTree click-handler patch/restore logic; `MediaViewerController` now performs deterministic cleanup of WorkTree patches and folder-path watchers during disable/route cleanup to avoid stale hooks.
 - `src/features/WorkTreeCopy.ts` now upserts existing copy buttons (update/remove/rebind), removes injected copy controls on disable, and uses shared helpers in `src/features/workTreeCopyUtils.ts`, eliminating stale copied-title metadata on reused rows and stale controls after feature toggles.
 - `src/features/media/mediaViewerDomUtils.ts` now resolves candidate media types via title-first + explicit-type fallback, preventing over-inclusive DOM-scan matches while still supporting typed media rows lacking standard extensions.
-- Infinite-scroll API URL construction is now centralized in `src/features/infiniteScrollApiUtils.ts` and shared by `src/features/components/InfiniteScrollGrid.vue` and `src/features/InfiniteScrollManager.ts`, fixing dropped `'0'` query filters and inconsistent array-query handling.
+- Infinite-scroll API URL construction is now centralized in `src/features/infiniteScrollApiUtils.ts` and shared by `src/features/components/InfiniteScrollGrid.vue` and `src/features/InfiniteScrollController.ts`, fixing dropped `'0'` query filters and inconsistent array-query handling.
+- Host queue replacement for Flat View and Media Viewer is centralized in `src/features/audioPlayerQueueUtils.ts`; it advances the track/index before queue replacement and refreshes legacy compatibility state to prevent synchronous stale-index watcher crashes.
+- Whisper fetches and workers use identity/generation guards, while same-worker model initialization is deduplicated across warmup and transcription start so stale async work cannot stop or dispose a replacement run.
+- `src/core/RegionGateRecovery.ts` runs before bridge initialization on the exact English-language gate response, validates/fetches same-host bootstrap and Webpack lazy-route assets with Chinese-first privileged requests, and restores the SPA without changing browser language or page origin.
 
 Features not refactored yet (still mostly imperative DOM code):
 

@@ -14,9 +14,21 @@ interface RawTag extends TagEntry {
     i18n?: TagI18n;
 }
 
+type ContentSourceHint = 'ja' | 'zh' | 'auto';
+
+interface PendingTranslationItem {
+    el: HTMLElement;
+    originalText: string;
+    translateKey: string;
+    scopeKey?: string;
+    format: 'pair' | 'raw' | 'worktree';
+    fileExt?: string;
+    apply: (value: string) => void;
+}
+
 declare const unsafeWindow: Window & typeof globalThis;
 
-const TRANSLATED_TAGS_VERSION = '2026-02-03.6';
+const TRANSLATED_TAGS_VERSION = '2026-07-11.1';
 const TAG_TRANSLATION_PRIORITY = Priority.NORMAL;
 const globalWindow = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window) as Window & {
     __ASMR_TRANSLATED_TAGS__?: TranslatedTags;
@@ -48,7 +60,11 @@ export class TranslatedTags {
     private jpdbGuardCleanup?: () => void;
     private workChangeCleanup?: () => void;
     private trackChangeCleanup?: () => void;
+    private langChangeCleanup?: () => void;
     private activeQueueKey = '';
+    private translationGeneration = 0;
+    private lifecycleGeneration = 0;
+    private augmentFrame: number | null = null;
 
     private constructor() {
         this.bridge = KikoeruBridge.getInstance();
@@ -99,6 +115,8 @@ export class TranslatedTags {
             Logger.log('[TranslatedTags] Already enabled, skipping');
             return;
         }
+        this.isEnabled = true;
+        const generation = ++this.lifecycleGeneration;
 
         // Initialize tags cache
         try {
@@ -107,6 +125,7 @@ export class TranslatedTags {
         } catch (e) {
             Logger.warn('[TranslatedTags] Failed to load tags cache', e);
         }
+        if (!this.isEnabled || generation !== this.lifecycleGeneration) return;
 
         // Add global styles for translated elements
         this.injectStyles();
@@ -117,21 +136,23 @@ export class TranslatedTags {
 
         // Register with CentralObserver for reactive updates
         CentralObserver.register('TranslatedTags', () => {
-            if (!this.isModifyingDOM) {
+            if (this.isEnabled && !this.isModifyingDOM) {
                 this.augmentTags();
             }
         }, 300); // 300ms debounce for responsiveness
 
         this.configCleanup = EventBus.on('config:change', ({ key, value, oldValue }) => {
             if ((key === 'translateMode' || key === 'translateCnToJp') && value !== oldValue) {
-                this.resetWorkTreeTranslationState();
-                this.augmentTags();
+                this.cancelActiveTranslationQueue();
+                this.resetAllTranslationState();
+                this.scheduleAugment();
             }
         });
 
         // Listen for explicit path change events from WorkTreeManager
         // This ensures translation state is reset BEFORE Vue updates DOM elements
         this.pathChangeCleanup = EventBus.on('worktree:path-change', () => {
+            if (!this.isEnabled) return;
             this.cancelActiveTranslationQueue();
             this.resetWorkTreeTranslationState();
         });
@@ -139,19 +160,29 @@ export class TranslatedTags {
         // Work/track transitions can reuse DOM nodes across pages and player surfaces.
         // Proactively clear stale translation attributes to avoid sticky labels.
         this.workChangeCleanup = EventBus.on('work:change', () => {
+            if (!this.isEnabled) return;
             this.cancelActiveTranslationQueue();
             this.resetWorkTreeTranslationState();
             this.resetPlayerTranslationState();
         });
         this.trackChangeCleanup = EventBus.on('track:change', () => {
+            if (!this.isEnabled) return;
             // Track switches can reuse player DOM while prior translation batches are
             // still in flight. Cancel the active queue first to avoid stale apply().
             this.cancelActiveTranslationQueue();
             this.resetPlayerTranslationState();
+            this.scheduleAugment();
+        });
+        this.langChangeCleanup = EventBus.on('lang:change', () => {
+            if (!this.isEnabled) return;
+            this.cancelActiveTranslationQueue();
+            this.resetAllTranslationState();
+            this.scheduleAugment();
         });
 
         // Reset per-element state on folder changes so cached DOM doesn't leak across levels
         const unwatch = this.bridge.$watch?.(() => this.getCurrentWorkTreeKey(), (next: string, prev: string) => {
+            if (!this.isEnabled) return;
             if (next !== prev) {
                 this.cancelTranslationQueueForRouteKey(prev);
                 this.cancelTranslationQueueForRouteKey(next);
@@ -169,18 +200,23 @@ export class TranslatedTags {
         const router = this.bridge.router;
         if (router?.beforeEach) {
             this.jpdbGuardCleanup = router.beforeEach((_to: unknown, _from: unknown, next: () => void) => {
-                this.stripJpdbFromChipContainers();
+                if (this.isEnabled) this.stripJpdbFromChipContainers();
                 next();
             });
         }
 
         this.augmentTags();
-        this.isEnabled = true;
         Logger.info('[TranslatedTags] Enabled with CentralObserver');
     }
 
     public disable(): void {
+        this.lifecycleGeneration++;
         this.isEnabled = false;
+        if (this.augmentFrame !== null) {
+            cancelAnimationFrame(this.augmentFrame);
+            this.augmentFrame = null;
+        }
+        this.modifyingDOMCount = 0;
         document.removeEventListener('input', this.boundInputHandler, true);
         document.removeEventListener('keydown', this.boundKeyHandler, true);
         CentralObserver.unregister('TranslatedTags');
@@ -208,7 +244,12 @@ export class TranslatedTags {
             this.trackChangeCleanup();
             this.trackChangeCleanup = undefined;
         }
+        if (this.langChangeCleanup) {
+            this.langChangeCleanup();
+            this.langChangeCleanup = undefined;
+        }
         this.cancelActiveTranslationQueue();
+        this.resetAllTranslationState();
         if (globalWindow.__ASMR_TRANSLATED_TAGS__ === this) {
             delete globalWindow.__ASMR_TRANSLATED_TAGS__;
             delete globalWindow.__ASMR_TRANSLATED_TAGS_VERSION__;
@@ -225,6 +266,16 @@ export class TranslatedTags {
 
     private endDOMModification(): void {
         this.modifyingDOMCount = Math.max(0, this.modifyingDOMCount - 1);
+    }
+
+    private scheduleAugment(): void {
+        if (!this.isEnabled || this.augmentFrame !== null) return;
+        const generation = this.lifecycleGeneration;
+        this.augmentFrame = requestAnimationFrame(() => {
+            this.augmentFrame = null;
+            if (!this.isEnabled || generation !== this.lifecycleGeneration) return;
+            this.augmentTags();
+        });
     }
 
     private markTranslationPending(el: HTMLElement, original: string, scopeKey?: string): void {
@@ -246,8 +297,9 @@ export class TranslatedTags {
         // This helps when Vue hasn't re-rendered and we need to show correct content
         if (restoreOriginal && original && el.classList.contains('asmr-translated')) {
             const currentText = (el.textContent || '').trim();
+            const applied = el.dataset.asmrtagTranslation?.trim();
             // Only restore if current text is different from original (was modified by translation)
-            if (currentText !== original && currentText.includes(original)) {
+            if (currentText !== original && (currentText.includes(original) || (!!applied && currentText === applied))) {
                 el.textContent = original;
             }
         }
@@ -268,6 +320,34 @@ export class TranslatedTags {
                 sub.remove();
             }
         }
+    }
+
+    private setExpandableCardTranslation(sub: HTMLElement, value: string): void {
+        const expanded = sub.classList.contains('asmr-card-translation--expanded');
+        const text = document.createElement('span');
+        text.className = 'asmr-card-translation-text';
+        text.textContent = value;
+        const icon = document.createElement('span');
+        icon.className = 'material-icons asmr-card-translation-toggle';
+        icon.setAttribute('aria-hidden', 'true');
+        icon.textContent = expanded ? 'expand_less' : 'expand_more';
+
+        sub.replaceChildren(text, icon);
+        sub.title = value;
+        sub.setAttribute('aria-expanded', String(expanded));
+        sub.setAttribute('aria-label', I18n.t(expanded ? 'collapseFullTranslation' : 'expandFullTranslation'));
+
+        if (sub.dataset.asmrExpansionBound === 'true') return;
+        sub.dataset.asmrExpansionBound = 'true';
+        sub.addEventListener('click', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            const isExpanded = sub.classList.toggle('asmr-card-translation--expanded');
+            sub.setAttribute('aria-expanded', String(isExpanded));
+            sub.setAttribute('aria-label', I18n.t(isExpanded ? 'collapseFullTranslation' : 'expandFullTranslation'));
+            const toggle = sub.querySelector<HTMLElement>('.asmr-card-translation-toggle');
+            if (toggle) toggle.textContent = isExpanded ? 'expand_less' : 'expand_more';
+        });
     }
 
     private shouldSkipTranslation(el: HTMLElement, currentText: string, scopeKey?: string): boolean {
@@ -333,6 +413,7 @@ export class TranslatedTags {
      * Uses a two-pass approach: collect all pending translations, then batch-translate.
      */
     public augmentTags(): void {
+        if (!this.isEnabled) return;
         const translateMode = !!Config.get('translateMode');
         const cnToJp = !!Config.get('translateCnToJp');
         if (!translateMode && !cnToJp) return;
@@ -341,16 +422,7 @@ export class TranslatedTags {
         const cnOnlyMode = !translateMode && cnToJp;
         const targetLang = cnOnlyMode ? 'ja' : this.targetLang;
         // 'pair' = formatPair(original, translated), 'raw' = translated only, 'worktree' = cleaned + ext
-        type PendingItem = {
-            el: HTMLElement;
-            originalText: string;
-            translateKey: string;
-            scopeKey?: string;
-            format: 'pair' | 'raw' | 'worktree';
-            fileExt?: string;
-            apply: (value: string) => void;
-        };
-        const pending: PendingItem[] = [];
+        const pending: PendingTranslationItem[] = [];
 
         this.beginDOMModification();
         try {
@@ -378,7 +450,7 @@ export class TranslatedTags {
                     ? this.tags.find(tag => String(tag.id) === String(dataId))
                     : this.tags.find(tag => tag.ja === text || tag.en === text);
 
-                if (!cnOnlyMode && match?.en && match.ja !== match.en) {
+                if (!cnOnlyMode && targetLang === 'en' && match?.en && match.ja !== match.en) {
                     const original = match.ja || match.name || text;
                     const translated = match.en;
                     const formatted = TranslationService.formatPair(original, translated);
@@ -510,12 +582,12 @@ export class TranslatedTags {
                         if (container && container.parentElement) {
                             let sub = container.nextElementSibling as HTMLElement;
                             if (!sub || !sub.classList.contains('asmr-card-translation')) {
-                                sub = document.createElement('div');
+                                sub = document.createElement('button');
+                                (sub as HTMLButtonElement).type = 'button';
                                 sub.className = 'asmr-card-translation';
                                 container.after(sub);
                             }
-                            sub.textContent = v;
-                            sub.title = v;
+                            this.setExpandableCardTranslation(sub, v);
                         }
                         el.title = v;
                     } });
@@ -545,12 +617,12 @@ export class TranslatedTags {
                     pending.push({ el, originalText: text, translateKey: text, format: 'raw', apply: (v) => {
                         let sub = el.nextElementSibling as HTMLElement;
                         if (!sub || !sub.classList.contains('asmr-card-translation')) {
-                            sub = document.createElement('div');
+                            sub = document.createElement('button');
+                            (sub as HTMLButtonElement).type = 'button';
                             sub.className = 'asmr-card-translation';
                             el.after(sub);
                         }
-                        sub.textContent = v;
-                        sub.title = v;
+                        this.setExpandableCardTranslation(sub, v);
                         el.title = v;
                     } });
                 }
@@ -563,8 +635,15 @@ export class TranslatedTags {
         // Pass 2: batch-translate all collected texts in one call
         if (pending.length > 0) {
             const queueKey = this.buildTranslationQueueKey();
+            const generation = ++this.translationGeneration;
             this.activeQueueKey = queueKey;
-            this.batchTranslatePending(pending, targetLang, queueKey);
+            this.batchTranslatePending(
+                pending,
+                targetLang,
+                queueKey,
+                generation,
+                cnOnlyMode ? 'zh' : 'auto',
+            );
         }
     }
 
@@ -572,7 +651,16 @@ export class TranslatedTags {
      * Returns true if autoTranslate would return the text unchanged (user's own language).
      */
     private shouldSkipAutoTranslate(text: string, targetLang: string): boolean {
-        return TranslationService.isUserLang(text) && targetLang === 'en';
+        // Han-only Japanese titles/tags are ambiguous to a generic language
+        // detector. On ASMR.one these content surfaces are Japanese-first, so
+        // still send them through JP→ZH instead of silently treating them as
+        // already-Chinese and leaving them untranslated.
+        if (targetLang.toLowerCase().startsWith('zh')
+            && /[\u4e00-\u9fff]/.test(text)
+            && !/[\u3040-\u30ff]/.test(text)) {
+            return false;
+        }
+        return TranslationService.isTargetLanguage(text, targetLang);
     }
 
     /**
@@ -580,63 +668,154 @@ export class TranslatedTags {
      * then apply results back to their elements with the appropriate formatting.
      */
     private batchTranslatePending(
-        pending: Array<{ el: HTMLElement; originalText: string; translateKey: string; scopeKey?: string; format: 'pair' | 'raw' | 'worktree'; fileExt?: string; apply: (value: string) => void }>,
+        pending: PendingTranslationItem[],
         targetLang: string,
         queueKey: string,
+        generation: number,
+        sourceLanguageHint: ContentSourceHint,
     ): void {
-        // Deduplicate translation keys
-        const uniqueKeys: string[] = [];
-        const keySet = new Set<string>();
+        const grouped = new Map<Exclude<ContentSourceHint, 'auto'>, PendingTranslationItem[]>();
         for (const item of pending) {
-            if (!keySet.has(item.translateKey)) {
-                keySet.add(item.translateKey);
-                uniqueKeys.push(item.translateKey);
-            }
+            const hint = this.resolveContentSourceHint(item, sourceLanguageHint);
+            const items = grouped.get(hint) || [];
+            items.push(item);
+            grouped.set(hint, items);
         }
 
         TranslationService.cancelPending({ cancellableKey: queueKey });
-        TranslationService.translateBatch(uniqueKeys, targetLang, {
-            priority: TAG_TRANSLATION_PRIORITY,
-            cancellable: true,
-            cancellableKey: queueKey,
-        }).then(results => {
-            const translationMap = new Map<string, string>();
-            for (let i = 0; i < uniqueKeys.length; i++) {
-                if (results[i]) translationMap.set(uniqueKeys[i], results[i]);
+        for (const [hint, sourceItems] of grouped) {
+            const uniqueKeys: string[] = [];
+            const keySet = new Set<string>();
+            for (const item of sourceItems) {
+                if (!keySet.has(item.translateKey)) {
+                    keySet.add(item.translateKey);
+                    uniqueKeys.push(item.translateKey);
+                }
             }
 
-            for (const item of pending) {
-                const translated = translationMap.get(item.translateKey);
-                if (!translated) {
-                    this.finalizeTranslation(item.el, item.originalText, null, item.apply, item.scopeKey);
-                    continue;
+            TranslationService.translateBatch(uniqueKeys, targetLang, {
+                priority: TAG_TRANSLATION_PRIORITY,
+                cancellable: true,
+                cancellableKey: queueKey,
+                sourceLanguageHint: hint,
+            }).then(results => {
+                if (!this.isEnabled || generation !== this.translationGeneration || this.activeQueueKey !== queueKey) {
+                    return;
+                }
+                const translationMap = new Map<string, string>();
+                for (let i = 0; i < uniqueKeys.length; i++) {
+                    if (results[i]) translationMap.set(uniqueKeys[i], results[i]);
                 }
 
-                let formatted: string;
-                switch (item.format) {
-                    case 'pair':
-                        formatted = TranslationService.formatPair(item.translateKey, translated);
-                        break;
-                    case 'worktree': {
-                        const cleaned = TranslationService.cleanQuotes(translated);
-                        formatted = cleaned + (item.fileExt || '');
-                        break;
+                for (const item of sourceItems) {
+                    const translated = translationMap.get(item.translateKey);
+                    if (!translated) {
+                        this.finalizeTranslation(item.el, item.originalText, null, item.apply, item.scopeKey);
+                        continue;
                     }
-                    case 'raw':
-                        formatted = translated;
-                        break;
-                }
 
-                this.finalizeTranslation(item.el, item.originalText, formatted, item.apply, item.scopeKey);
-            }
-        }).catch(err => {
-            Logger.debug('[TranslatedTags] Batch translation failed:', err);
-            for (const item of pending) {
-                if (item.el.dataset.asmrtagState === 'pending') {
-                    this.clearTranslationPending(item.el);
+                    let formatted: string;
+                    switch (item.format) {
+                        case 'pair':
+                            formatted = TranslationService.formatPair(item.translateKey, translated);
+                            break;
+                        case 'worktree': {
+                            const cleaned = TranslationService.cleanQuotes(translated);
+                            formatted = cleaned + (item.fileExt || '');
+                            break;
+                        }
+                        case 'raw':
+                            formatted = translated;
+                            break;
+                    }
+
+                    this.finalizeTranslation(item.el, item.originalText, formatted, item.apply, item.scopeKey);
                 }
+            }).catch(err => {
+                if (!this.isEnabled || generation !== this.translationGeneration || this.activeQueueKey !== queueKey) {
+                    return;
+                }
+                Logger.debug('[TranslatedTags] Batch translation failed:', err);
+                for (const item of sourceItems) {
+                    if (item.el.dataset.asmrtagState === 'pending') {
+                        this.clearTranslationPending(item.el);
+                    }
+                }
+            });
+        }
+    }
+
+    /**
+     * ASMR.one content is Japanese-first, so an unannotated Han-only title is
+     * Japanese rather than Chinese by default. Respect explicit edition/DOM
+     * metadata so known Chinese editions still take the CN -> JP path.
+     */
+    private resolveContentSourceHint(
+        item: PendingTranslationItem,
+        fallback: ContentSourceHint,
+    ): Exclude<ContentSourceHint, 'auto'> {
+        if (fallback !== 'auto') return fallback;
+
+        const metadataBoundary = item.el.closest<HTMLElement>(
+            '.q-card, .q-item, #work-tree, .work-tree',
+        ) || item.el;
+        let annotated: HTMLElement | null = item.el;
+        while (annotated) {
+            const annotatedHint = this.normalizeContentLanguage(
+                annotated.getAttribute('lang')
+                || annotated.dataset.sourceLanguage
+                || annotated.dataset.language
+                || annotated.dataset.lang,
+            );
+            if (annotatedHint !== 'auto') return annotatedHint;
+            if (annotated === metadataBoundary) break;
+            annotated = annotated.parentElement;
+        }
+
+        const host = item.el.closest<HTMLElement>('.q-card, .q-item');
+        const vm = (host as (HTMLElement & { __vue__?: Record<string, unknown> }) | null)?.__vue__;
+        if (vm) {
+            const candidates = [vm.work, vm.item, vm.$props, vm.$attrs, vm.$data];
+            for (const candidate of candidates) {
+                const hint = this.readWorkLanguageHint(candidate);
+                if (hint !== 'auto') return hint;
             }
-        });
+        }
+
+        if (location.pathname.includes('/work/')) {
+            const hint = this.readWorkLanguageHint(this.bridge.currentWork);
+            if (hint !== 'auto') return hint;
+        }
+
+        return 'ja';
+    }
+
+    private readWorkLanguageHint(value: unknown): ContentSourceHint {
+        if (!value || typeof value !== 'object') return 'auto';
+        const record = value as Record<string, unknown>;
+        const nestedWork = record.work;
+        if (nestedWork && nestedWork !== value) {
+            const nestedHint = this.readWorkLanguageHint(nestedWork);
+            if (nestedHint !== 'auto') return nestedHint;
+        }
+        const translationInfo = record.translation_info;
+        if (translationInfo && typeof translationInfo === 'object') {
+            const info = translationInfo as Record<string, unknown>;
+            const hint = this.normalizeContentLanguage(info.lang);
+            if (hint !== 'auto') return hint;
+            if (info.is_original === true) return 'ja';
+        }
+        return this.normalizeContentLanguage(
+            record.source_language || record.sourceLanguage || record.language || record.lang,
+        );
+    }
+
+    private normalizeContentLanguage(value: unknown): ContentSourceHint {
+        const normalized = String(value || '').trim().toUpperCase();
+        if (!normalized) return 'auto';
+        if (normalized.includes('CHI') || normalized.includes('ZH') || normalized === 'CN') return 'zh';
+        if (normalized.includes('JPN') || normalized.includes('JA') || normalized === 'JP') return 'ja';
+        return 'auto';
     }
 
     private finalizeTranslation(
@@ -679,6 +858,7 @@ export class TranslatedTags {
         try {
             apply(translated);
             el.dataset.asmrtag = original;
+            el.dataset.asmrtagTranslation = translated;
             el.dataset.asmrtagState = 'done';
             delete el.dataset.asmrtagUntil;
             if (scopeKey) {
@@ -693,6 +873,7 @@ export class TranslatedTags {
     }
 
     private handleInput(e: Event): void {
+        if (!this.isEnabled) return;
         const target = e.target as HTMLInputElement;
         if (this.isSearchInput(target)) {
             target.classList.add('asmr-ignore');
@@ -700,6 +881,7 @@ export class TranslatedTags {
     }
 
     private handleKeydown(e: KeyboardEvent): void {
+        if (!this.isEnabled) return;
         // Prevent translation while typing
         const target = e.target as HTMLInputElement;
         if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.contentEditable === 'true') {
@@ -824,6 +1006,14 @@ export class TranslatedTags {
         return I18n.lang === 'zh' ? 'zh-CN' : I18n.lang;
     }
 
+    private resetAllTranslationState(): void {
+        const translated = document.querySelectorAll<HTMLElement>(
+            '[data-asmrtag], [data-asmrtag-state], [data-asmrtag-scope], [data-asmrtag-translation], .asmr-translated, .asmr-worktree-translation',
+        );
+        for (const el of translated) this.clearTranslationPending(el, true);
+        document.querySelectorAll('.asmr-card-translation').forEach((el) => el.remove());
+    }
+
     private resetWorkTreeTranslationState(): void {
         this.processedElements = new WeakSet<HTMLElement>();
         // Reset all translated elements - restore original text since Vue may not re-render
@@ -831,24 +1021,7 @@ export class TranslatedTags {
         const roots = document.querySelectorAll('#work-tree, .work-tree, .q-page, .q-layout');
         roots.forEach(root => {
             root.querySelectorAll<HTMLElement>('[data-asmrtag], [data-asmrtag-state], [data-asmrtag-scope], [data-asmrtag-translation], .asmr-translated, .asmr-worktree-translation')
-                .forEach(el => {
-                    const original = el.dataset.asmrtag;
-                    // Restore original text if element was translated
-                    // This ensures correct content is shown even if Vue doesn't re-render
-                    if (original && el.classList.contains('asmr-translated')) {
-                        const currentText = (el.textContent || '').trim();
-                        if (currentText !== original && currentText.includes(original)) {
-                            el.textContent = original;
-                        }
-                    }
-                    delete el.dataset.asmrtag;
-                    delete el.dataset.asmrtagState;
-                    delete el.dataset.asmrtagUntil;
-                    delete el.dataset.asmrtagScope;
-                    delete el.dataset.asmrtagTranslation;
-                    el.classList.remove('asmr-translated');
-                    el.classList.remove('asmr-worktree-translation');
-                });
+                .forEach(el => this.clearTranslationPending(el, true));
         });
         Logger.debug('[TranslatedTags] Reset work-tree translation state (restored originals)');
     }
@@ -857,22 +1030,7 @@ export class TranslatedTags {
         const roots = document.querySelectorAll('.audio-player, .player-bar, .player-bar-container, .current-play-list');
         roots.forEach(root => {
             root.querySelectorAll<HTMLElement>('[data-asmrtag], [data-asmrtag-state], [data-asmrtag-scope], [data-asmrtag-translation], .asmr-translated, .asmr-worktree-translation')
-                .forEach(el => {
-                    const original = el.dataset.asmrtag;
-                    if (original && el.classList.contains('asmr-translated')) {
-                        const currentText = (el.textContent || '').trim();
-                        if (currentText !== original && currentText.includes(original)) {
-                            el.textContent = original;
-                        }
-                    }
-                    delete el.dataset.asmrtag;
-                    delete el.dataset.asmrtagState;
-                    delete el.dataset.asmrtagUntil;
-                    delete el.dataset.asmrtagScope;
-                    delete el.dataset.asmrtagTranslation;
-                    el.classList.remove('asmr-translated');
-                    el.classList.remove('asmr-worktree-translation');
-                });
+                .forEach(el => this.clearTranslationPending(el, true));
         });
     }
 
@@ -901,6 +1059,7 @@ export class TranslatedTags {
     }
 
     private cancelActiveTranslationQueue(): void {
+        this.translationGeneration++;
         if (!this.activeQueueKey) return;
         TranslationService.cancelPending({ cancellableKey: this.activeQueueKey });
         this.activeQueueKey = '';

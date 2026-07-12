@@ -17,6 +17,8 @@ export class VisitCounter {
     private bridge: KikoeruBridge;
     private counts: Record<string, number> = {};
     private routeUnwatch: (() => void) | undefined;
+    private enabled = false;
+    private lastVisitedWorkId: string | null = null;
 
     constructor() {
         this.bridge = KikoeruBridge.getInstance();
@@ -24,9 +26,11 @@ export class VisitCounter {
     }
 
     public enable(): void {
+        if (this.enabled) return;
+        this.enabled = true;
         // Watch route changes to track visits
         this.routeUnwatch = this.bridge.$watch?.('$route', (to: { path?: string }) => {
-            this.onRouteChange(to);
+            if (this.enabled) this.onRouteChange(to);
         });
 
         // Check current route on enable
@@ -36,15 +40,20 @@ export class VisitCounter {
         }
 
         // Register with CentralObserver to inject badges on DOM changes
-        CentralObserver.register('visit-counter', () => this.injectBadges(), TIMING.OBSERVER_REGISTER_DEBOUNCE_MS);
+        CentralObserver.register('visit-counter', () => {
+            if (this.enabled) this.injectBadges();
+        }, TIMING.OBSERVER_REGISTER_DEBOUNCE_MS);
 
         // Initial injection
         this.injectBadges();
     }
 
     public disable(): void {
+        this.enabled = false;
         this.routeUnwatch?.();
+        this.routeUnwatch = undefined;
         CentralObserver.unregister('visit-counter');
+        document.querySelectorAll('.asmr-visit-badge').forEach((badge) => badge.remove());
     }
 
     private loadCounts(): void {
@@ -61,15 +70,21 @@ export class VisitCounter {
     }
 
     private onRouteChange(to: { path?: string }): void {
+        if (!this.enabled) return;
         const path = to?.path || '';
         if (path.startsWith('/work/')) {
             this.recordVisit(path);
+        } else {
+            this.lastVisitedWorkId = null;
         }
     }
 
     private recordVisit(path: string): void {
+        if (!this.enabled) return;
         const workId = this.extractWorkId(path);
         if (!workId) return;
+        if (this.lastVisitedWorkId === workId) return;
+        this.lastVisitedWorkId = workId;
 
         this.counts[workId] = (this.counts[workId] || 0) + 1;
         this.saveCounts();
@@ -82,6 +97,7 @@ export class VisitCounter {
     }
 
     private injectBadges(): void {
+        if (!this.enabled) return;
         // Find all work card cover links
         const links = document.querySelectorAll<HTMLAnchorElement>(
             '.q-card a[href*="/work/"], a[href*="/work/"] .q-img'
@@ -124,7 +140,7 @@ export class VisitCounter {
                 badge.className = 'absolute-top-right asmr-visit-badge';
 
                 const chip = document.createElement('div');
-                chip.className = 'q-chip row inline no-wrap items-center q-ma-sm bg-deep-purple text-white q-chip--colored q-chip--dense q-chip--square q-chip--dark q-dark';
+                chip.className = 'q-chip row inline no-wrap items-center q-ma-sm bg-deep-purple q-chip--colored q-chip--dense q-chip--square asmr-visit-chip';
 
                 chip.innerHTML =
                     '<div class="q-chip__content col row no-wrap items-center q-anchor--skip">' +

@@ -163,6 +163,36 @@
   width: 100%;
   padding: 8px 16px;
   box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.whisper-status--inline {
+  height: 72px;
+  min-height: 72px;
+}
+
+/* Normal expanded-player path: status floats over the cover and never changes
+   document flow, avoiding both initial and repeated layout shifts. */
+.albumart.asmr-whisper-status-host {
+  position: relative;
+}
+
+.whisper-status--overlay {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 12px;
+  z-index: 3;
+  width: auto;
+  min-height: 44px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.68);
+  backdrop-filter: blur(4px);
+  pointer-events: none;
 }
 
 .whisper-loading-indicator {
@@ -172,7 +202,12 @@
   opacity: 0.9;
   text-align: center;
   padding: 8px 12px;
-  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
   animation: none;
 }
 
@@ -329,6 +364,22 @@
 /* ========================================
    Header & Navigation Icons
    ======================================== */
+/* Material Icons normally supplies these layout rules. Keep the fallback
+   text to one glyph box when the font/CDN is blocked, and never let it steal
+   pointer events from a neighbouring control. */
+.material-icons {
+  display: inline-block;
+  max-width: 1.5em;
+  overflow: hidden;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+button .material-icons,
+a.q-btn .material-icons {
+  pointer-events: none;
+}
+
 .asmr-header-actions .q-icon,
 .asmr-header-actions .material-icons {
   color: var(--asmr-header-icon-color, var(--asmr-text-inverted)) !important;
@@ -383,6 +434,9 @@
   min-width: 32px !important;
   min-height: 32px !important;
   padding: 0 !important;
+  /* If the Material Icons font is blocked, its fallback text must not spill
+     over adjacent controls and intercept their clicks. */
+  overflow: hidden !important;
 }
 
 .asmr-header-actions :is(.asmr-playlist-btn, .asmr-vector-btn, .asmr-support-btn) .q-btn__content {
@@ -399,6 +453,9 @@
   width: auto !important;
   height: auto !important;
   line-height: 1 !important;
+  max-width: 24px !important;
+  overflow: hidden !important;
+  white-space: nowrap !important;
 }
 
 @media (min-width: 601px) {
@@ -1068,37 +1125,44 @@
 }
 
 /* ========================================
-   BUG-003: Marquee broken after translation
-   Kikoeru calculates scroll distance at render
-   time for the original text. After translation,
-   Vue's inline styles become stale. We override
-   with our own smooth marquee animation.
+   Stable translated mini-player titles
+   The host marquee is measured before our translation exists, so it can
+   hard-clip or shift adjacent controls. Keep the translated track/work title
+   on one stable line with a real ellipsis; `title` exposes the full pair.
    ======================================== */
-@keyframes asmr-marquee {
-  0% {
-    transform: translateX(0);
-  }
-
-  100% {
-    transform: translateX(var(--asmr-scroll-distance));
-  }
+:is(.player-bar-container, .player-bar, .q-footer) .asmr-mini-title-ellipsis-container {
+  min-width: 0 !important;
+  max-width: 100% !important;
+  overflow: hidden !important;
 }
 
-.asmr-marquee-fix .scrolling {
+:is(.player-bar-container, .player-bar, .q-footer) .asmr-mini-title-ellipsis-content {
+  display: block !important;
+  min-width: 0 !important;
+  max-width: 100% !important;
+  overflow: hidden !important;
+  white-space: nowrap !important;
+  text-overflow: ellipsis !important;
   animation: none !important;
+  transform: none !important;
+  will-change: auto !important;
 }
 
-.asmr-marquee-fix .one-line-expand {
-  animation: asmr-marquee var(--asmr-scroll-duration) linear infinite alternate !important;
-  will-change: transform;
+:is(.player-bar-container, .player-bar, .q-footer) .asmr-mini-title-ellipsis {
+  display: block !important;
+  min-width: 0 !important;
+  max-width: 100% !important;
+  overflow: hidden !important;
+  white-space: nowrap !important;
+  text-overflow: ellipsis !important;
+  animation: none !important;
+  transform: none !important;
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .asmr-marquee-fix .one-line-expand {
-    animation: none !important;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
+:is(.player-bar-container, .player-bar, .q-footer)
+  .asmr-mini-title-ellipsis-container .scrolling {
+  animation: none !important;
+  transform: none !important;
 }
 
 /* ========================================
@@ -1261,13 +1325,41 @@
   opacity: 0.72;
   padding: 0 8px 4px;
   color: #90caf9;
+  width: 100%;
+  border: 0;
+  background: none;
+  display: flex;
+  align-items: flex-start;
+  gap: 2px;
+  text-align: left;
+  word-break: break-word;
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.asmr-card-translation-text {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   display: -webkit-box;
   -webkit-line-clamp: 2;
+  line-clamp: 2;
   -webkit-box-orient: vertical;
-  word-break: break-word;
-  pointer-events: none; /* Don't block swiper touch/click */
+}
+
+.asmr-card-translation-toggle {
+  flex: none;
+  font-size: 16px !important;
+  line-height: 1 !important;
+  opacity: 0.8;
+}
+
+.asmr-card-translation--expanded .asmr-card-translation-text {
+  display: block !important;
+  overflow: visible !important;
+  -webkit-line-clamp: unset !important;
+  line-clamp: unset !important;
 }
 
 /* Light mode card translation */
@@ -1297,8 +1389,12 @@ body:not(.body--dark) .asmr-card-translation {
 
   .asmr-card-translation {
     font-size: 11px;
-    -webkit-line-clamp: 1;
     padding: 0 6px 2px;
+  }
+
+  .asmr-card-translation:not(.asmr-card-translation--expanded) .asmr-card-translation-text {
+    -webkit-line-clamp: 1;
+    line-clamp: 1;
   }
 }
 
@@ -1423,4 +1519,29 @@ body:has(.q-dialog[aria-hidden="false"]) .q-menu,
    the last few work-tree items are hidden behind the stacked bars. */
 .q-page-container > .q-page {
   padding-bottom: var(--asmr-stacked-bottom-height, 0px);
+}
+
+/* Infinite-scroll DOM fallback cards must follow the live host theme. These
+   nodes are created outside Vue's scoped-style boundary, so use global
+   semantic variables instead of fixed Quasar dark utility classes. */
+.asmr-infinite-fallback-card {
+  background: var(--asmr-bg-primary) !important;
+  color: var(--asmr-text-primary) !important;
+  border-color: var(--asmr-border-color) !important;
+}
+
+.asmr-infinite-fallback-separator {
+  background: var(--asmr-border-color) !important;
+}
+
+.asmr-infinite-duration {
+  color: var(--asmr-text-secondary) !important;
+}
+
+.asmr-infinite-rj-chip {
+  color: #fff !important;
+}
+
+.asmr-visit-chip {
+  color: #fff !important;
 }

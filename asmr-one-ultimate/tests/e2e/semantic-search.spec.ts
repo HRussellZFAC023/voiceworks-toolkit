@@ -26,7 +26,7 @@ test.describe('Semantic Search Button', () => {
     console.log(`Button title: ${title}`);
   });
 
-  test('button icon is psychology', async ({ injectedPage, isScriptLoaded }) => {
+  test('button icon is saved search', async ({ injectedPage, isScriptLoaded }) => {
     await helpers.gotoHome(injectedPage);
     await isScriptLoaded();
 
@@ -34,7 +34,7 @@ test.describe('Semantic Search Button', () => {
     const icon = btn.locator('.q-icon, .material-icons');
     const text = await icon.textContent();
 
-    expect(text).toContain('psychology');
+    expect(text).toContain('saved_search');
   });
 });
 
@@ -100,14 +100,14 @@ test.describe('Semantic Search Dialog', () => {
 });
 
 test.describe('Semantic Search Results', () => {
-  test('results container exists in dialog', async ({ injectedPage, isScriptLoaded }) => {
+  test('empty dialog shows index metadata without a phantom result list', async ({ injectedPage, isScriptLoaded }) => {
     await helpers.gotoHome(injectedPage);
     await isScriptLoaded();
 
     await helpers.openSemanticSearch(injectedPage);
 
-    const resultList = injectedPage.locator('.asmr-vector-result-list');
-    await expect(resultList).toHaveCount(1);
+    await expect(injectedPage.locator('.asmr-vector-meta')).toBeVisible();
+    await expect(injectedPage.locator('.asmr-vector-result-list')).toHaveCount(0);
   });
 
   test('empty state shows correctly', async ({ injectedPage, isScriptLoaded }) => {

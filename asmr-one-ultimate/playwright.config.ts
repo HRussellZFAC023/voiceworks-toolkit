@@ -12,7 +12,7 @@ import { defineConfig, devices } from '@playwright/test';
  *   npm run test:e2e:ui  # Run with Playwright UI
  *
  * Environment variables:
- *   PW_WORKERS=N         # Override worker count (default: 2)
+ *   PW_WORKERS=N         # Override worker count (default: 1)
  *   PW_SLOWMO=N          # Override slowMo in ms (default: 200)
  */
 
@@ -20,6 +20,7 @@ import { defineConfig, devices } from '@playwright/test';
 const workers = process.env.PW_WORKERS ? parseInt(process.env.PW_WORKERS, 10) : undefined;
 const slowMo = parseInt(process.env.PW_SLOWMO || '', 10) || 0;
 const isRealE2E = process.env.E2E_REAL === '1' || process.env.E2E_NO_MOCKS === '1';
+const skipWebServer = process.env.E2E_SKIP_WEBSERVER === '1';
 const baseURL = process.env.E2E_BASE_URL || 'https://www.asmr.one';
 
 export default defineConfig({
@@ -27,7 +28,7 @@ export default defineConfig({
     fullyParallel: false,
     forbidOnly: !!process.env.CI,
     retries: process.env.CI ? 2 : 0,
-    workers: 1,
+    workers: workers ?? 1,
     reporter: [['html', { open: 'never' }], ['list']],
     timeout: 60000,
     expect: {
@@ -74,7 +75,7 @@ export default defineConfig({
         },
     ],
     // Start dev server automatically if not running (not needed for real-site E2E).
-    webServer: isRealE2E ? undefined : {
+    webServer: isRealE2E || skipWebServer ? undefined : {
         command: 'npm run dev',
         url: 'http://localhost:5173',
         reuseExistingServer: true,

@@ -19,3 +19,15 @@ Then paste the printed `https://asmr-api-proxy.<you>.workers.dev` URL into **Set
 - `GET /__trace` — diagnostic: shows the colo/country the asmr API sees (should print `loc=JP`)
 
 `Authorization` headers are forwarded, so logged-in endpoints (your own playlists) work through the proxy. Only GET/HEAD are relayed; authorized responses are never cached.
+
+## E2E from a blocked network
+
+```bash
+cd ..
+npm run build
+E2E_PROXY=1 npm run test:e2e
+```
+
+`E2E_PROXY_URL` selects a private worker. The fixture passes `__host` for frontend assets as well as API calls. `E2E_SKIP_WEBSERVER=1` avoids starting Vite on runners where local port binding is unavailable.
+
+The production script does not turn the worker into a general browsing VPN: it is an automatic last-resort fallback for supported GET API reads. The support banner is shown only after this maintained worker actually served a request.

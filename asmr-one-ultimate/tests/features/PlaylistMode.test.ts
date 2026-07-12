@@ -4,6 +4,8 @@ import { EventBus } from '../../src/core/EventBus';
 import { Config } from '../../src/core/Utils';
 import { KikoeruBridge } from '../../src/infrastructure/KikoeruBridge';
 import { WorkService } from '../../src/services/WorkService';
+import { PlaylistApi } from '../../src/api/Playlist';
+import { registerExclusivePlaybackMode } from '../../src/features/playbackModeCoordinator';
 
 vi.mock('../../src/core/Utils', () => ({
     Logger: { log: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn() },
@@ -38,6 +40,19 @@ vi.mock('../../src/services/WorkService', () => ({
         getTracks: vi.fn(),
     },
 }));
+
+vi.mock('../../src/api/Playlist', () => ({
+    PlaylistApi: {
+        getPlaylistMetadata: vi.fn(),
+        getPlaylistWorks: vi.fn(),
+    },
+}));
+
+function deferred<T>() {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((done) => { resolve = done; });
+    return { promise, resolve };
+}
 
 describe('PlaylistMode', () => {
     let playlistMode: PlaylistMode;
@@ -184,5 +199,180 @@ describe('PlaylistMode', () => {
         expect(mockPlaybackController.setQueueAndPlay).toHaveBeenCalledTimes(1);
         expect((mockPlaybackController.setQueueAndPlay as any).mock.calls[0][0]).toHaveLength(1);
         expect((mockPlaybackController.setQueueAndPlay as any).mock.calls[0][0][0]?.hash).toBe('track-1');
+    });
+
+    it('keeps the route watcher alive after deactivation so a later playlist URL loads', () => {
+        const unwatch = vi.fn();
+        mockBridge.app.$watch.mockReturnValue(unwatch);
+        playlistMode.initialize();
+        playlistMode.activate(['RJ00000001'], 'A', 'A', false);
+        const routeCallback = mockBridge.app.$watch.mock.calls[0][1];
+        const loadSpy = vi.spyOn(playlistMode, 'loadFromUrl').mockResolvedValue(undefined);
+
+        playlistMode.deactivate();
+        mockBridge.route = { path: '/playlist', fullPath: '/playlist?id=B', query: { id: 'B' } };
+        routeCallback('/playlist?id=B');
+
+        expect(unwatch).not.toHaveBeenCalled();
+        expect(loadSpy).toHaveBeenCalledWith('B');
+    });
+
+    it('lets a newer URL playlist B supersede an in-flight playlist A load', async () => {
+        const metadataA = deferred<{ name: string }>();
+        const metadataB = deferred<{ name: string }>();
+        const worksA = deferred<any>();
+        const worksB = deferred<any>();
+        (PlaylistApi.getPlaylistMetadata as any).mockImplementation((id: string) => (
+            id === 'A' ? metadataA.promise : metadataB.promise
+        ));
+        (PlaylistApi.getPlaylistWorks as any).mockImplementation((id: string) => (
+            id === 'A' ? worksA.promise : worksB.promise
+        ));
+
+        const loadA = playlistMode.loadFromUrl('A');
+        const loadB = playlistMode.loadFromUrl('B');
+        metadataB.resolve({ name: 'Playlist B' });
+        worksB.resolve({
+            works: [{ source_id: 'RJB' }],
+            pagination: { totalCount: 1 },
+        });
+        await loadB;
+        metadataA.resolve({ name: 'Playlist A' });
+        worksA.resolve({
+            works: [{ source_id: 'RJA' }],
+            pagination: { totalCount: 1 },
+        });
+        await loadA;
+
+        expect(playlistMode.getState()).toEqual(expect.objectContaining({
+            playlistId: 'B',
+            workIds: ['RJB'],
+        }));
+    });
+
+    it('invalidates an in-flight URL load when the route leaves playlist context', async () => {
+        const metadata = deferred<{ name: string }>();
+        const works = deferred<any>();
+        (PlaylistApi.getPlaylistMetadata as any).mockReturnValue(metadata.promise);
+        (PlaylistApi.getPlaylistWorks as any).mockReturnValue(works.promise);
+        playlistMode.initialize();
+        const routeCallback = mockBridge.app.$watch.mock.calls[0][1];
+
+        const loading = playlistMode.loadFromUrl('A');
+        routeCallback('/');
+        metadata.resolve({ name: 'Stale playlist' });
+        works.resolve({
+            works: [{ source_id: 'RJA' }],
+            pagination: { totalCount: 1 },
+        });
+        await loading;
+
+        expect(playlistMode.isActive).toBe(false);
+        expect(playlistMode.getState().playlistId).toBeNull();
+    });
+
+    it('deactivates radio ownership when a playlist activates', () => {
+        const deactivateRadio = vi.fn();
+        registerExclusivePlaybackMode('radio', deactivateRadio);
+
+        playlistMode.activate(['RJ00000001'], 'playlist', 'Playlist', false);
+
+        expect(deactivateRadio).toHaveBeenCalledTimes(1);
+    });
+
+    it('ignores an old activation that completes after getWork', async () => {
+        const oldWork = deferred<any>();
+        (WorkService.getWork as any).mockReturnValueOnce(oldWork.promise);
+        playlistMode.activate(['RJ00000001'], 'A', 'A', false);
+
+        const staleLoad = (playlistMode as any).loadWorkAndStartPlayback('RJ00000001');
+        playlistMode.activate(['RJ00000002'], 'B', 'B', false);
+        oldWork.resolve({ id: 'RJ00000001', title: 'Old' });
+        await staleLoad;
+
+        expect(WorkService.getTracks).not.toHaveBeenCalled();
+        expect(mockPlaybackController.setQueueAndPlay).not.toHaveBeenCalled();
+    });
+
+    it('lets newer navigation supersede a getWork still in flight', async () => {
+        const workA = deferred<any>();
+        const workB = deferred<any>();
+        (WorkService.getWork as any).mockImplementation((id: string) => (
+            id === 'RJ00000001' ? workA.promise : workB.promise
+        ));
+        (WorkService.getTracks as any).mockResolvedValue([]);
+        mockPlaybackController.getPlayableTracksFromWork.mockImplementation((work: any) => ([{
+            type: 'audio',
+            hash: work.id,
+            title: work.title,
+            mediaStreamUrl: `/${work.id}`,
+        }]));
+        playlistMode.activate(['RJ00000001', 'RJ00000002'], 'P', 'P', false);
+
+        const navigationA = (playlistMode as any).navigateToWork(0);
+        const navigationB = (playlistMode as any).navigateToWork(1);
+        workB.resolve({ id: 'RJ00000002', title: 'New' });
+        await navigationB;
+        workA.resolve({ id: 'RJ00000001', title: 'Old' });
+        await navigationA;
+
+        expect(mockPlaybackController.setQueueAndPlay).toHaveBeenCalledTimes(1);
+        expect(mockPlaybackController.setQueueAndPlay).toHaveBeenCalledWith(
+            [expect.objectContaining({ hash: 'RJ00000002' })],
+            0,
+        );
+    });
+
+    it('does not resume stale navigation after getTracks resolves', async () => {
+        const tracksA = deferred<any>();
+        (WorkService.getWork as any).mockImplementation(async (id: string) => ({ id, title: id }));
+        (WorkService.getTracks as any).mockImplementation((id: string) => (
+            id === 'RJ00000001' ? tracksA.promise : Promise.resolve([])
+        ));
+        mockPlaybackController.getPlayableTracksFromWork.mockImplementation((work: any) => ([{
+            type: 'audio', hash: work.id, title: work.id, mediaStreamUrl: `/${work.id}`,
+        }]));
+        playlistMode.activate(['RJ00000001', 'RJ00000002'], 'P', 'P', false);
+
+        const navigationA = (playlistMode as any).navigateToWork(0);
+        await Promise.resolve();
+        const navigationB = (playlistMode as any).navigateToWork(1);
+        await navigationB;
+        tracksA.resolve([]);
+        await navigationA;
+
+        expect(mockPlaybackController.setQueueAndPlay).toHaveBeenCalledTimes(1);
+        expect(mockPlaybackController.setQueueAndPlay).toHaveBeenCalledWith(
+            [expect.objectContaining({ hash: 'RJ00000002' })],
+            0,
+        );
+    });
+
+    it('does not resume stale navigation after a folder dive resolves', async () => {
+        const diveA = deferred<any>();
+        (WorkService.getWork as any).mockImplementation(async (id: string) => ({ id, title: id }));
+        (WorkService.getTracks as any).mockResolvedValue([{ type: 'folder', title: 'Main', children: [] }]);
+        mockFolderDiver.needsDiveFromPath.mockReturnValue(true);
+        mockFolderDiver.diveFromPath
+            .mockImplementationOnce(() => diveA.promise)
+            .mockResolvedValueOnce({ success: true, reason: 'ok', path: [], depth: 0 });
+        mockPlaybackController.getPlayableTracksFromWork.mockImplementation((work: any) => ([{
+            type: 'audio', hash: work.id, title: work.id, mediaStreamUrl: `/${work.id}`,
+        }]));
+        playlistMode.activate(['RJ00000001', 'RJ00000002'], 'P', 'P', false);
+
+        const navigationA = (playlistMode as any).navigateToWork(0);
+        await Promise.resolve();
+        await Promise.resolve();
+        const navigationB = (playlistMode as any).navigateToWork(1);
+        await navigationB;
+        diveA.resolve({ success: true, reason: 'ok', path: [], depth: 0 });
+        await navigationA;
+
+        expect(mockPlaybackController.setQueueAndPlay).toHaveBeenCalledTimes(1);
+        expect(mockPlaybackController.setQueueAndPlay).toHaveBeenCalledWith(
+            [expect.objectContaining({ hash: 'RJ00000002' })],
+            0,
+        );
     });
 });

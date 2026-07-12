@@ -106,8 +106,8 @@ test.describe('Advanced Search UI', () => {
         await injectedPage.locator('.asmr-close-btn').click();
         await injectedPage.waitForTimeout(500);
 
-        const overlay = injectedPage.locator('.q-dialog.fullscreen');
-        await expect(overlay).toHaveCSS('display', 'none');
+        const overlay = injectedPage.locator('.asmr-dialog-overlay');
+        await expect(overlay).not.toBeVisible();
     });
 
     test('Dialog closes on overlay click', async ({ injectedPage, isScriptLoaded }) => {
@@ -124,7 +124,7 @@ test.describe('Advanced Search UI', () => {
         await overlay.click({ position: { x: 5, y: 5 } });
         await injectedPage.waitForTimeout(500);
 
-        await expect(overlay).toHaveCSS('display', 'none');
+        await expect(overlay).not.toBeVisible();
     });
 
     test('Dialog closes on Escape key', async ({ injectedPage, isScriptLoaded }) => {
@@ -139,7 +139,7 @@ test.describe('Advanced Search UI', () => {
         await injectedPage.keyboard.press('Escape');
         await injectedPage.waitForTimeout(500);
 
-        await expect(overlay).toHaveCSS('display', 'none');
+        await expect(overlay).not.toBeVisible();
     });
 });
 
@@ -514,6 +514,52 @@ test.describe('VA and Circle Selection', () => {
         expect(filteredCount).toBeLessThanOrEqual(initialCount);
     });
 
+    test('favorite VA is persisted and sorted first after reopening', async ({ injectedPage, isScriptLoaded }) => {
+        await helpers.gotoHome(injectedPage);
+        await isScriptLoaded();
+        await openDialog(injectedPage);
+
+        const vaSelect = injectedPage.locator('.asmr-va-select');
+        const selectedVA = injectedPage.locator('.asmr-selected-va');
+        const secondOption = vaSelect.locator('option').nth(1);
+        const favoriteId = await secondOption.getAttribute('value');
+        test.skip(!favoriteId, 'VA fixture did not provide a selectable item');
+
+        await vaSelect.selectOption(favoriteId!);
+        const favoriteButton = selectedVA.locator('.chip-favorite');
+        await favoriteButton.click();
+        await expect(favoriteButton).toHaveAttribute('aria-pressed', 'true');
+
+        await injectedPage.locator('.asmr-close-btn').click();
+        await openDialog(injectedPage);
+        const firstOption = injectedPage.locator('.asmr-va-select option').first();
+        expect(await firstOption.getAttribute('value')).toBe(favoriteId);
+        await expect(firstOption).toContainText('★');
+    });
+
+    test('favorite circle is persisted and sorted first after reopening', async ({ injectedPage, isScriptLoaded }) => {
+        await helpers.gotoHome(injectedPage);
+        await isScriptLoaded();
+        await openDialog(injectedPage);
+
+        const circleSelect = injectedPage.locator('.asmr-circle-select');
+        const selectedCircle = injectedPage.locator('.asmr-selected-circle');
+        const secondOption = circleSelect.locator('option').nth(1);
+        const favoriteId = await secondOption.getAttribute('value');
+        test.skip(!favoriteId, 'Circle fixture did not provide a selectable item');
+
+        await circleSelect.selectOption(favoriteId!);
+        const favoriteButton = selectedCircle.locator('.chip-favorite');
+        await favoriteButton.click();
+        await expect(favoriteButton).toHaveAttribute('aria-pressed', 'true');
+
+        await injectedPage.locator('.asmr-close-btn').click();
+        await openDialog(injectedPage);
+        const firstOption = injectedPage.locator('.asmr-circle-select option').first();
+        expect(await firstOption.getAttribute('value')).toBe(favoriteId);
+        await expect(firstOption).toContainText('★');
+    });
+
     test('Selecting a VA creates a selected chip', async ({ injectedPage, isScriptLoaded }) => {
         await helpers.gotoHome(injectedPage);
         await isScriptLoaded();
@@ -523,8 +569,7 @@ test.describe('VA and Circle Selection', () => {
         const selectedVA = injectedPage.locator('.asmr-selected-va');
 
         // Initially no selection
-        const initialContent = await selectedVA.innerHTML();
-        expect(initialContent.trim()).toBe('');
+        await expect(selectedVA.locator('.asmr-selected-chip')).toHaveCount(0);
 
         // Select the first VA
         const firstOption = vaSelect.locator('option').first();
@@ -558,8 +603,7 @@ test.describe('VA and Circle Selection', () => {
             await selectedVA.locator('.chip-remove').click();
             await injectedPage.waitForTimeout(300);
 
-            const content = await selectedVA.innerHTML();
-            expect(content.trim()).toBe('');
+            await expect(selectedVA.locator('.asmr-selected-chip')).toHaveCount(0);
         }
     });
 

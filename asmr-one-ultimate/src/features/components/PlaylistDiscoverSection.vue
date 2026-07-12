@@ -14,7 +14,7 @@
  *  - Manual playlist URL addition
  */
 
-import { ref, reactive, computed, onMounted, watch } from 'vue';
+import { ref, reactive, computed, onMounted, onUnmounted } from 'vue';
 import { useI18n } from '../../composables/useI18n';
 import { useBridge } from '../../composables/useBridge';
 import { Logger } from '../../core/Utils';
@@ -49,14 +49,34 @@ const isSearching = ref(false);
 const addUrl = ref('');
 const addFeedback = ref<{ type: 'ok' | 'err'; text: string } | null>(null);
 const searchFeedback = ref<{ type: 'ok' | 'err'; text: string } | null>(null);
+let componentMounted = false;
+let lifecycleGeneration = 0;
+const feedbackTimers = new Set<number>();
+const isDark = ref(false);
+let themeObserver: MutationObserver | null = null;
+
+function syncTheme(): void {
+    isDark.value = document.body.classList.contains('body--dark')
+        || document.body.classList.contains('q-dark');
+}
+
+function isLifecycleCurrent(generation: number): boolean {
+    return componentMounted && generation === lifecycleGeneration;
+}
+
+function scheduleFeedbackCleanup(callback: () => void, delayMs: number, generation: number): void {
+    if (!isLifecycleCurrent(generation)) return;
+    const timer = window.setTimeout(() => {
+        feedbackTimers.delete(timer);
+        if (isLifecycleCurrent(generation)) callback();
+    }, delayMs);
+    feedbackTimers.add(timer);
+}
 
 /** IDs that have been queued for fetching (to avoid re-fetching) */
 const fetchedIds = reactive(new Set<string>());
 /** All discovered IDs snapshot (refreshed on expand / after Google search) */
 const allIds = ref<string[]>([]);
-/** Cancel token for background filter warmup runs */
-let filterWarmupToken = 0;
-
 // ---------------------------------------------------------------------------
 // Computed
 // ---------------------------------------------------------------------------
@@ -103,10 +123,6 @@ const statusText = computed(() => {
     });
 });
 
-const isDark = computed(() =>
-    document.body.classList.contains('body--dark') || document.body.classList.contains('q-dark'),
-);
-
 const fallbackGradient = computed(() =>
     isDark.value
         ? 'linear-gradient(135deg, #3a3a52 0%, #2a2a3e 50%, #1a1a2e 100%)'
@@ -148,12 +164,11 @@ function refreshAndLoad() {
         void loadNextBatch();
     }
 
-    if (textFilter.value.trim()) {
-        void warmFilterCoverage();
-    }
 }
 
 async function loadNextBatch() {
+    const generation = lifecycleGeneration;
+    if (!isLifecycleCurrent(generation)) return;
     if (isLoading.value) return;
     if (service.isRateLimitedNow()) return;
 
@@ -165,12 +180,14 @@ async function loadNextBatch() {
 
     try {
         for await (const meta of service.fetchMetadataBatch(batch, 2, 700)) {
+            if (!isLifecycleCurrent(generation)) break;
             fetchedIds.add(meta.id.toLowerCase());
             // Only add if not already in the list (cache pre-populated it)
             if (!loadedPlaylists.value.some(p => p.id.toLowerCase() === meta.id.toLowerCase())) {
                 loadedPlaylists.value.push(meta);
             }
         }
+        if (!isLifecycleCurrent(generation)) return;
         // Mark IDs as fetched only if we actually have metadata or a permanent failure.
         for (const id of batch) {
             const normalized = id.toLowerCase();
@@ -179,9 +196,9 @@ async function loadNextBatch() {
             }
         }
     } catch (e) {
-        Logger.warn('[PlaylistDiscoverSection] Batch load error:', e);
+        if (isLifecycleCurrent(generation)) Logger.warn('[PlaylistDiscoverSection] Batch load error:', e);
     } finally {
-        isLoading.value = false;
+        if (isLifecycleCurrent(generation)) isLoading.value = false;
     }
 }
 
@@ -193,86 +210,63 @@ function isFetchableMetadataId(id: string): boolean {
     return true;
 }
 
-function hasRemainingMetadata(includeTransientCooldown = true): boolean {
-    return allIds.value.some((id) => {
-        const normalized = id.toLowerCase();
-        if (fetchedIds.has(normalized)) return false;
-        if (service.isFailed(normalized)) return false;
-        if (!includeTransientCooldown && service.isTransientFailed(normalized)) return false;
-        return true;
-    });
-}
-
-function sleep(ms: number): Promise<void> {
-    return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-async function warmFilterCoverage() {
-    const token = ++filterWarmupToken;
-    while (token === filterWarmupToken && !collapsed.value && textFilter.value.trim()) {
-        if (!hasRemainingMetadata()) return;
-        if (service.isRateLimitedNow()) {
-            await sleep(1200);
-            continue;
-        }
-        if (!hasRemainingMetadata(false)) {
-            // Remaining IDs are all under transient cooldown; wait for retry window.
-            await sleep(1200);
-            continue;
-        }
-        if (isLoading.value) {
-            await sleep(200);
-            continue;
-        }
-        await loadNextBatch();
-    }
-}
-
 async function onGoogleSearch() {
+    const generation = lifecycleGeneration;
+    if (!isLifecycleCurrent(generation)) return;
     if (isSearching.value || service.isGoogleRateLimited) return;
     isSearching.value = true;
     searchFeedback.value = null;
 
     try {
         const ids = await service.triggerGoogleSearch((page, found) => {
-            searchFeedback.value = { type: 'ok', text: `Searching... page ${page}, ${found} found` };
+            if (isLifecycleCurrent(generation)) {
+                searchFeedback.value = { type: 'ok', text: format('playlistSearchingPage', { page, found }) };
+            }
         });
+        if (!isLifecycleCurrent(generation)) return;
         if (ids.length > 0) {
-            searchFeedback.value = { type: 'ok', text: `Found ${ids.length} playlists` };
+            searchFeedback.value = { type: 'ok', text: format('playlistSearchFound', { count: ids.length }) };
             // Refresh the ID list and load new ones
             allIds.value = service.getDiscoveredIds().filter(id => !service.isFailed(id));
             void loadNextBatch();
-            if (textFilter.value.trim()) {
-                void warmFilterCoverage();
-            }
         } else {
-            searchFeedback.value = { type: 'err', text: 'No new playlists found' };
+            searchFeedback.value = {
+                type: 'err',
+                text: format('playlistDiscoverHint', { action: t('playlistFindMore') }),
+            };
         }
     } catch (e) {
-        searchFeedback.value = { type: 'err', text: 'Search failed — rate limit?' };
+        if (isLifecycleCurrent(generation)) {
+            searchFeedback.value = { type: 'err', text: t('playlistSearchFailed') };
+        }
     } finally {
-        isSearching.value = false;
-        setTimeout(() => { searchFeedback.value = null; }, 5000);
+        if (isLifecycleCurrent(generation)) {
+            isSearching.value = false;
+            scheduleFeedbackCleanup(() => { searchFeedback.value = null; }, 5000, generation);
+        }
     }
 }
 
 function onAddPlaylist() {
+    const generation = lifecycleGeneration;
+    if (!isLifecycleCurrent(generation)) return;
     if (!addUrl.value.trim()) return;
     const id = service.addManualPlaylist(addUrl.value);
     if (id) {
-        addFeedback.value = { type: 'ok', text: 'Added!' };
+        addFeedback.value = { type: 'ok', text: t('playlistAddedBadge') };
         addUrl.value = '';
         allIds.value = service.getDiscoveredIds().filter(id2 => !service.isFailed(id2));
         // Immediately fetch metadata for the new one
         service.fetchMetadata(id).then(meta => {
+            if (!isLifecycleCurrent(generation)) return;
             if (meta && !loadedPlaylists.value.some(p => p.id === meta.id)) {
                 loadedPlaylists.value.unshift(meta);
             }
         });
     } else {
-        addFeedback.value = { type: 'err', text: 'Invalid playlist URL/ID' };
+        addFeedback.value = { type: 'err', text: t('playlistAddInvalid') };
     }
-    setTimeout(() => { addFeedback.value = null; }, 3000);
+    scheduleFeedbackCleanup(() => { addFeedback.value = null; }, 3000, generation);
 }
 
 function randomize() {
@@ -297,6 +291,10 @@ function navigateToPlaylist(id: string) {
 // ---------------------------------------------------------------------------
 
 onMounted(() => {
+    componentMounted = true;
+    syncTheme();
+    themeObserver = new MutationObserver(syncTheme);
+    themeObserver.observe(document.body, { attributes: true, attributeFilter: ['class'] });
     // Restore collapse state
     const stored = GooglePlaylistScraper.safeGetValue(COLLAPSE_KEY, true);
     collapsed.value = stored !== false; // default collapsed
@@ -306,21 +304,30 @@ onMounted(() => {
     }
 });
 
-watch([collapsed, textFilter], ([isCollapsed, query]) => {
-    if (isCollapsed || !query.trim()) {
-        filterWarmupToken += 1;
-        return;
-    }
-    void warmFilterCoverage();
+onUnmounted(() => {
+    componentMounted = false;
+    lifecycleGeneration++;
+    themeObserver?.disconnect();
+    themeObserver = null;
+    for (const timer of feedbackTimers) window.clearTimeout(timer);
+    feedbackTimers.clear();
+    isLoading.value = false;
+    isSearching.value = false;
 });
 </script>
 
 <template>
-    <div class="asmr-discover-section q-mt-lg">
+    <section id="asmr-ultimate-public-playlists" class="asmr-discover-section q-mt-lg">
         <!-- Collapsible Header -->
         <div
             class="asmr-discover-header row items-center q-px-sm q-py-xs cursor-pointer"
+            data-testid="playlist-discover-toggle"
+            role="button"
+            tabindex="0"
+            :aria-expanded="!collapsed"
             @click="toggleCollapsed"
+            @keydown.enter.prevent="toggleCollapsed"
+            @keydown.space.prevent="toggleCollapsed"
         >
             <span class="material-icons" style="font-size: 20px; opacity: 0.7; margin-right: 8px;">
                 {{ collapsed ? 'expand_more' : 'expand_less' }}
@@ -328,13 +335,13 @@ watch([collapsed, textFilter], ([isCollapsed, query]) => {
             <span class="text-subtitle1 text-weight-medium">
                 {{ t('playlistPublicTitle') }}
             </span>
-            <span class="text-caption q-ml-sm" style="opacity: 0.6;">
+            <span id="public-playlist-count" class="text-caption q-ml-sm" style="opacity: 0.6;">
                 ({{ service.discoveredCount }})
             </span>
         </div>
 
         <!-- Expanded Content -->
-        <div v-if="!collapsed" class="q-mt-sm">
+        <div v-if="!collapsed" class="q-mt-sm" data-testid="playlist-discover-content">
             <!-- Controls Row -->
             <div class="row items-center q-gutter-sm q-px-sm q-mb-md" style="flex-wrap: wrap;">
                 <!-- Text Search -->
@@ -343,17 +350,19 @@ watch([collapsed, textFilter], ([isCollapsed, query]) => {
                     type="text"
                     :placeholder="t('playlistFilterPlaceholder')"
                     class="asmr-discover-search"
+                    data-testid="playlist-discover-filter"
                     style="max-width: 220px;"
                 />
 
                 <!-- Status -->
-                <span class="text-caption" style="opacity: 0.6;">{{ statusText }}</span>
+                <span id="public-playlist-status" class="text-caption" style="opacity: 0.6;">{{ statusText }}</span>
 
                 <div style="flex: 1 1 auto;" />
 
                 <!-- Randomize Button -->
                 <button
                     class="asmr-discover-btn"
+                    id="playlists-randomize-btn"
                     :disabled="loadedPlaylists.length < 2"
                     @click="randomize"
                 >
@@ -364,11 +373,12 @@ watch([collapsed, textFilter], ([isCollapsed, query]) => {
                 <!-- Google Search Button -->
                 <button
                     class="asmr-discover-btn"
+                    id="search-google-btn"
                     :disabled="isSearching || service.isGoogleRateLimited"
                     @click="onGoogleSearch"
                 >
                     <span class="material-icons" style="font-size: 16px;">search</span>
-                    {{ isSearching ? 'Searching...' : 'Search Google' }}
+                    {{ isSearching ? t('playlistSearchingButton') : t('playlistFindMore') }}
                 </button>
 
                 <!-- Add URL -->
@@ -376,12 +386,12 @@ watch([collapsed, textFilter], ([isCollapsed, query]) => {
                     <input
                         v-model="addUrl"
                         type="text"
-                        placeholder="Playlist URL or ID..."
+                        :placeholder="t('playlistAddPlaceholder')"
                         class="asmr-discover-search"
                         style="max-width: 200px;"
                         @keyup.enter="onAddPlaylist"
                     />
-                    <button class="asmr-discover-btn" @click="onAddPlaylist">Add</button>
+                    <button class="asmr-discover-btn" @click="onAddPlaylist">{{ t('playlistAddButton') }}</button>
                 </div>
             </div>
 
@@ -394,7 +404,7 @@ watch([collapsed, textFilter], ([isCollapsed, query]) => {
             </div>
 
             <!-- Playlist Grid -->
-            <div class="row q-col-gutter-x-md q-col-gutter-y-md q-px-sm">
+            <div id="public-playlists-grid" class="row q-col-gutter-x-md q-col-gutter-y-md q-px-sm">
                 <div
                     v-for="playlist in filteredPlaylists"
                     :key="playlist.id"
@@ -416,7 +426,7 @@ watch([collapsed, textFilter], ([isCollapsed, query]) => {
                             }"
                         >
                             <div class="asmr-discover-cover-badge">
-                                {{ playlist.worksCount }} works
+                                {{ format('playlistWorksCount', { count: playlist.worksCount }) }}
                             </div>
                         </div>
                         <!-- Info -->
@@ -432,7 +442,9 @@ watch([collapsed, textFilter], ([isCollapsed, query]) => {
 
             <!-- Empty State -->
             <div v-if="filteredPlaylists.length === 0 && !isLoading" class="text-center text-caption q-pa-lg" style="opacity: 0.5;">
-                {{ textFilter ? 'No playlists match your filter.' : 'No public playlists loaded yet.' }}
+                {{ textFilter
+                    ? t('playlistNoFilterMatches')
+                    : format('playlistDiscoverHint', { action: t('playlistFindMore') }) }}
             </div>
 
             <!-- Load More -->
@@ -443,11 +455,11 @@ watch([collapsed, textFilter], ([isCollapsed, query]) => {
                     :disabled="isLoading"
                     @click="loadNextBatch"
                 >
-                    {{ isLoading ? t('playlistLoadingMore') : 'Load more' }}
+                    {{ isLoading ? t('playlistLoadingMore') : t('playlistLoadMore') }}
                 </button>
             </div>
         </div>
-    </div>
+    </section>
 </template>
 
 <style scoped>

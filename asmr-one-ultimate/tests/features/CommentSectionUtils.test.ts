@@ -7,6 +7,7 @@ import {
     getReviewParagraphs,
     htmlToPlainText,
     sanitizeReviewText,
+    sanitizeReviewHtml,
     type CommentSectionWorkLike,
 } from '../../src/features/commentSectionUtils';
 
@@ -33,9 +34,24 @@ describe('commentSectionUtils', () => {
         it('converts markdown links and emphasis into safe HTML', () => {
             const input = '[site](https://example.com)\n\n**bold** __text__';
             const output = sanitizeReviewText(input);
-            expect(output).toContain('<a href="https://example.com"');
+            expect(output).toContain('<a href="https://example.com/"');
             expect(output).toContain('<strong>bold</strong>');
             expect(output).toContain('<strong>text</strong>');
+        });
+
+        it('removes executable review markup while preserving safe formatting', () => {
+            const output = sanitizeReviewHtml(
+                '<img src=x onerror="alert(1)"><svg onload="alert(2)"><text>kept</text></svg>'
+                + '<a href="javascript:alert(3)" onclick="alert(4)">unsafe link</a>'
+                + '<a href="https://example.com/path" onclick="alert(5)">safe link</a>'
+                + '<strong style="color:red" onclick="alert(6)">bold</strong>',
+            );
+
+            expect(output).not.toMatch(/img|svg|onerror|onload|onclick|javascript:|style=/i);
+            expect(output).toContain('kept');
+            expect(output).toContain('unsafe link');
+            expect(output).toContain('href="https://example.com/path"');
+            expect(output).toContain('<strong>bold</strong>');
         });
 
         it('drops very short strings and URL-only noise', () => {
