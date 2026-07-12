@@ -851,7 +851,11 @@ export const helpers = {
     },
 
     async getWorkTreeItems(page: Page) {
-        return page.locator('#work-tree .q-item, .work-tree .q-item').all();
+        // The host now renders tree rows as direct list children without the
+        // legacy `.q-item` class on some routes.
+        return page.locator(
+            '#work-tree .q-item, .work-tree .q-item, #work-tree .q-list > *, .work-tree .q-list > *'
+        ).all();
     },
 
     // Flat view helpers
