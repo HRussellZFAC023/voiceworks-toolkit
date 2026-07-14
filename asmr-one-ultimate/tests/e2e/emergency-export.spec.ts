@@ -180,9 +180,13 @@ test.describe('Emergency Playlist Export', () => {
         await helpers.gotoSettings(injectedPage);
         await isScriptLoaded();
         await openEmergencySection(injectedPage);
+        const publicPlaylists = Array.from({ length: 80 }, (_, index) => ({
+            id: `community-${index}`, name: `Community ${index}`, description: '', worksCount: 1,
+            works: [{ rjCode: `RJ9${String(index).padStart(5, '0')}`, title: `Community work ${index}` }],
+        }));
         const backup = {
             format: 'asmr-one-ultimate-playlist-backup', version: 1,
-            exportedAt: new Date().toISOString(), source: 'https://asmr.one', errors: [], publicPlaylists: [],
+            exportedAt: new Date().toISOString(), source: 'https://asmr.one', errors: [], publicPlaylists,
             ownPlaylists: [{
                 id: 'playlist-a', name: 'Large collection', description: '', worksCount: 3,
                 works: [
@@ -198,6 +202,19 @@ test.describe('Emergency Playlist Export', () => {
 
         const dialog = injectedPage.getByTestId('backup-downloader');
         await expect(dialog).toBeVisible();
+        await expect(injectedPage.getByTestId('source-all').locator('xpath=../span')).toContainText('(81)');
+        await expect(injectedPage.getByTestId('source-own').locator('xpath=../span')).toContainText('(1)');
+        await expect(injectedPage.getByTestId('source-public').locator('xpath=../span')).toContainText('(80)');
+        const playlistList = injectedPage.getByTestId('playlist-list');
+        await expect.poll(() => playlistList.evaluate(element => element.scrollHeight > element.clientHeight)).toBe(true);
+        await injectedPage.getByTestId('source-public').locator('xpath=../span').click();
+        await expect(injectedPage.getByTestId('playlist-community-79')).toBeAttached();
+        await playlistList.evaluate(element => { element.scrollTop = element.scrollHeight; });
+        await expect(injectedPage.getByTestId('playlist-community-79')).toBeVisible();
+        await expect(injectedPage.getByTestId('playlist-playlist-a')).toBeHidden();
+        await injectedPage.getByTestId('source-own').locator('xpath=../span').click();
+        await expect(injectedPage.getByTestId('playlist-playlist-a')).toBeVisible();
+        await expect(injectedPage.getByTestId('playlist-community-0')).toBeHidden();
         await expect(injectedPage.getByTestId('start')).toBeDisabled();
         await injectedPage.getByTestId('playlist-check-playlist-a').check();
         await expect(injectedPage.getByTestId('selection-summary')).toContainText('3');

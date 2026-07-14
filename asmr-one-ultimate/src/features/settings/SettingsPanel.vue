@@ -6,6 +6,7 @@ import SettingsSelect from './SettingsSelect.vue';
 import SettingsHotkeyInput from './SettingsHotkeyInput.vue';
 import BackupWorkDownloader from '../components/BackupWorkDownloader.vue';
 import type { BackupDownloadProfile, BackupDownloadState, BackupPlaylistDownloadItem, BackupWorkDownloadItem } from '../backupWorkDownloaderTypes';
+import { mapBackupPlaylistSources } from '../backupWorkDownloaderUtils';
 import { useI18n } from '../../composables/useI18n';
 import { useConfig } from '../../composables/useConfig';
 import { useEventBus } from '../../composables/useEventBus';
@@ -312,6 +313,8 @@ const downloadJobRepository = new DownloadJobRepository();
 const downloaderLabels = computed(() => ({
     dialogTitle: t('backupDownloaderTitle'), close: t('backupDownloaderClose'), search: t('backupDownloaderSearch'),
     searchPlaceholder: t('backupDownloaderSearchPlaceholder'), expandPlaylist: t('backupDownloaderExpand'), collapsePlaylist: t('backupDownloaderCollapse'),
+    playlistSource: t('backupDownloaderSource'), sourceAll: t('backupDownloaderSourceAll'),
+    sourceOwn: t('backupDownloaderSourceOwn'), sourcePublic: t('backupDownloaderSourcePublic'),
     selectedSummary: t('backupDownloaderSelected'), unknownSize: t('backupDownloaderUnknownSize'), noResults: t('backupDownloaderNoResults'),
     fileTypes: t('backupDownloaderFileTypes'), audio: t('backupDownloaderAudio'), video: t('backupDownloaderVideo'),
     images: t('backupDownloaderImages'), text: t('backupDownloaderText'), other: t('backupDownloaderOther'),
@@ -343,19 +346,9 @@ async function loadBackupForDownload(event: Event): Promise<void> {
     try {
         const doc = JSON.parse(await file.text()) as EmergencyExportDocument;
         if (doc.format !== 'asmr-one-ultimate-playlist-backup') throw new Error(t('backupDownloaderInvalid'));
-        const playlists = [...(doc.ownPlaylists || []), ...(doc.publicPlaylists || [])];
-        const workMap = new Map<string, BackupWorkDownloadItem>();
-        backupDownloadPlaylists.value = playlists.map(playlist => {
-            const workIds = [...new Set(playlist.works.map(work => work.rjCode).filter(Boolean))];
-            for (const work of playlist.works) {
-                if (!work.rjCode) continue;
-                const existing = workMap.get(work.rjCode);
-                if (existing) existing.playlistIds = [...(existing.playlistIds || []), playlist.id];
-                else workMap.set(work.rjCode, { id: work.rjCode, title: work.title || work.rjCode, playlistIds: [playlist.id] });
-            }
-            return { id: playlist.id, title: playlist.name, workIds };
-        });
-        backupDownloadWorks.value = [...workMap.values()];
+        const mapped = mapBackupPlaylistSources(doc);
+        backupDownloadPlaylists.value = mapped.playlists;
+        backupDownloadWorks.value = mapped.works;
         backupDownloadProfile.value = { ...backupDownloadProfile.value, selectedWorkIds: [] };
         backupDownloaderOpen.value = true;
         const target = TranslationService.getUiTargetLang();

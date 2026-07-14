@@ -8,6 +8,7 @@ import type {
 
 const labels: BackupDownloaderLabels = {
     dialogTitle: 'Download collection', close: 'Close', search: 'Find works', searchPlaceholder: 'Search',
+    playlistSource: 'Playlist source', sourceAll: 'All', sourceOwn: 'My playlists', sourcePublic: 'Community playlists',
     expandPlaylist: 'Expand', collapsePlaylist: 'Collapse', selectedSummary: '{count} selected · {bytes}',
     unknownSize: 'unknown size', noResults: 'No results', fileTypes: 'Files', audio: 'Audio', video: 'Video',
     images: 'Images', text: 'Text', other: 'Other', filenameTitle: 'Titles', titleOriginal: 'Original',
@@ -31,7 +32,7 @@ function profile(overrides: Partial<BackupDownloadProfile> = {}): BackupDownload
     };
 }
 
-const playlists = [{ id: 'p1', title: 'Favorites', workIds: [1, 2] }];
+const playlists = [{ id: 'p1', title: 'Favorites', source: 'own' as const, workIds: [1, 2] }];
 const works = [
     { id: 1, title: '作品一', translatedTitle: 'Work One', sizeBytes: 1024 },
     { id: 2, title: '作品二', translatedTitle: 'Work Two', sizeBytes: 2048 },
@@ -63,7 +64,7 @@ describe('BackupWorkDownloader', () => {
         expect(wrapper.find('[data-testid="work-1"]').exists()).toBe(false);
         expect(wrapper.find('[data-testid="work-2"]').exists()).toBe(true);
         expect(wrapper.find('[data-testid="expand-p1"]').exists()).toBe(false);
-        expect(wrapper.find('#backup-playlist-p1').exists()).toBe(true);
+        expect(wrapper.find('#backup-playlist-own-p1').exists()).toBe(true);
 
         await wrapper.get('[data-testid="search"]').setValue('Favorites');
         expect(wrapper.find('[data-testid="work-1"]').exists()).toBe(true);
@@ -77,11 +78,46 @@ describe('BackupWorkDownloader', () => {
     it('does not mount collapsed work rows for very large backups', () => {
         const manyWorks = Array.from({ length: 1_000 }, (_, index) => ({ id: index, title: `Work ${index}` }));
         const manyPlaylists = Array.from({ length: 100 }, (_, index) => ({
-            id: `p${index}`, title: `Playlist ${index}`, workIds: manyWorks.slice(index * 10, index * 10 + 10).map(work => work.id),
+            id: `p${index}`, title: `Playlist ${index}`, source: index % 2 ? 'public' as const : 'own' as const, workIds: manyWorks.slice(index * 10, index * 10 + 10).map(work => work.id),
         }));
         const wrapper = mount(BackupWorkDownloader, { props: { playlists: manyPlaylists, works: manyWorks, profile: profile() } });
         expect(wrapper.findAll('.playlist-group')).toHaveLength(100);
         expect(wrapper.findAll('.work-row')).toHaveLength(0);
+    });
+
+    it('filters playlist sources with counts and composes with search', async () => {
+        const sourcePlaylists = [
+            ...playlists,
+            { id: 'p2', title: 'Community gems', source: 'public' as const, workIds: [2] },
+        ];
+        const wrapper = mount(BackupWorkDownloader, { props: { playlists: sourcePlaylists, works, profile: profile() } });
+
+        expect(wrapper.get('[data-testid="source-all"] + span').text()).toBe('All (2)');
+        expect(wrapper.get('[data-testid="source-own"] + span').text()).toBe('My playlists (1)');
+        expect(wrapper.get('[data-testid="source-public"] + span').text()).toBe('Community playlists (1)');
+
+        await wrapper.get('[data-testid="source-public"]').setValue(true);
+        expect(wrapper.find('[data-testid="playlist-p1"]').exists()).toBe(false);
+        expect(wrapper.find('[data-testid="playlist-p2"]').exists()).toBe(true);
+        await wrapper.get('[data-testid="search"]').setValue('Favorites');
+        expect(wrapper.find('[data-testid="playlist-p1"]').exists()).toBe(false);
+        expect(wrapper.find('[data-testid="playlist-p2"]').exists()).toBe(false);
+        expect(wrapper.find('[data-testid="no-results"]').exists()).toBe(true);
+    });
+
+    it('keeps expansion state and controlled regions distinct when sources reuse an id', async () => {
+        const duplicateIdPlaylists = [
+            { id: 'shared', title: 'Mine', source: 'own' as const, workIds: [1] },
+            { id: 'shared', title: 'Community', source: 'public' as const, workIds: [2] },
+        ];
+        const wrapper = mount(BackupWorkDownloader, { props: { playlists: duplicateIdPlaylists, works, profile: profile() } });
+        const expandButtons = wrapper.findAll('[data-testid="expand-shared"]');
+
+        await expandButtons[0].trigger('click');
+        expect(expandButtons[0].attributes('aria-expanded')).toBe('true');
+        expect(expandButtons[1].attributes('aria-expanded')).toBe('false');
+        expect(expandButtons[0].attributes('aria-controls')).toBe('backup-playlist-own-shared');
+        expect(expandButtons[1].attributes('aria-controls')).toBe('backup-playlist-public-shared');
     });
 
     it('focuses the search field and closes with Escape', async () => {

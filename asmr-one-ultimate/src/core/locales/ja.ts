@@ -139,6 +139,7 @@ export const jaLocale: Record<string, string> = {
         emergencyDriveFailed: 'Google Drive バックアップに失敗しました',
         backupDownloaderOpen: 'バックアップから作品をダウンロード', backupDownloaderTitle: '作品フォルダーをダウンロード', backupDownloaderClose: '閉じる', backupDownloaderExpand: 'プレイリストを展開', backupDownloaderCollapse: 'プレイリストを折りたたむ', backupDownloaderNoResults: '一致するプレイリストまたは作品がありません', backupDownloaderCancel: 'キャンセル',
         backupDownloaderSearch: 'プレイリスト・作品を検索', backupDownloaderSearchPlaceholder: 'タイトルまたはRJコード…',
+        backupDownloaderSource: 'プレイリストの種類', backupDownloaderSourceAll: 'すべて', backupDownloaderSourceOwn: '自分のプレイリスト', backupDownloaderSourcePublic: 'コミュニティのプレイリスト',
         backupDownloaderSelected: '{count}作品を選択 · 既知 {bytes}', backupDownloaderUnknownSize: 'サイズ不明',
         backupDownloaderFileTypes: '含めるファイル', backupDownloaderAudio: '音声', backupDownloaderVideo: '動画', backupDownloaderImages: '画像', backupDownloaderText: 'テキスト・字幕', backupDownloaderOther: 'その他',
         backupDownloaderFilename: '作品フォルダー名', backupDownloaderTitleOriginal: '原文', backupDownloaderTitleTranslated: '翻訳', backupDownloaderTitleBoth: '原文 [翻訳]', backupDownloaderTitleNone: 'RJコードのみ',

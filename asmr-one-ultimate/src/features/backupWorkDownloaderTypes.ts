@@ -3,6 +3,8 @@ import type { WorkTitleMode } from './downloads/DownloadDomain';
 export type BackupTitleMode = WorkTitleMode;
 export type BackupMetadataMode = 'additive' | 'overwrite';
 export type BackupFileFilter = 'audio' | 'video' | 'image' | 'text' | 'other';
+export type BackupPlaylistSource = 'own' | 'public';
+export type BackupPlaylistSourceFilter = 'all' | BackupPlaylistSource;
 
 export interface BackupWorkDownloadItem {
     id: string | number;
@@ -15,6 +17,7 @@ export interface BackupWorkDownloadItem {
 export interface BackupPlaylistDownloadItem {
     id: string | number;
     title: string;
+    source: BackupPlaylistSource;
     translatedTitle?: string;
     workIds?: Array<string | number>;
 }
@@ -24,6 +27,10 @@ export interface BackupDownloaderLabels {
     close: string;
     search: string;
     searchPlaceholder: string;
+    playlistSource: string;
+    sourceAll: string;
+    sourceOwn: string;
+    sourcePublic: string;
     expandPlaylist: string;
     collapsePlaylist: string;
     selectedSummary: string;

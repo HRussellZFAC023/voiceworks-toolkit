@@ -4,6 +4,7 @@ import type {
     BackupDownloadProfile,
     BackupDownloadState,
     BackupPlaylistDownloadItem,
+    BackupPlaylistSourceFilter,
     BackupWorkDownloadItem,
 } from '../backupWorkDownloaderTypes';
 
@@ -20,6 +21,7 @@ const emit = defineEmits<{
 }>();
 
 const searchQuery = ref('');
+const sourceFilter = ref<BackupPlaylistSourceFilter>('all');
 const dialog = ref<HTMLElement | null>(null);
 const searchInput = ref<HTMLInputElement | null>(null);
 const returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -70,12 +72,19 @@ function visiblePlaylistWorks(playlist: BackupPlaylistDownloadItem): BackupWorkD
 const visiblePlaylists = computed(() => {
     const query = normalized(searchQuery.value.trim());
     return props.playlists.filter(playlist => {
-        return !query
+        const sourceMatches = sourceFilter.value === 'all' || playlist.source === sourceFilter.value;
+        return sourceMatches && (!query
             || normalized(playlist.title).includes(query)
             || normalized(playlist.translatedTitle).includes(query)
-            || visiblePlaylistWorks(playlist).length > 0;
+            || visiblePlaylistWorks(playlist).length > 0);
     });
 });
+
+const sourceCounts = computed(() => ({
+    all: props.playlists.length,
+    own: props.playlists.filter(playlist => playlist.source === 'own').length,
+    public: props.playlists.filter(playlist => playlist.source === 'public').length,
+}));
 
 const assignedWorkIds = computed(() => {
     const ids = new Set<string>();
@@ -97,8 +106,16 @@ function displayTitle(item: { title: string; translatedTitle?: string }): string
     return item.title;
 }
 
+function playlistKey(playlist: BackupPlaylistDownloadItem): string {
+    return `${playlist.source}:${String(playlist.id)}`;
+}
+
+function playlistElementId(playlist: BackupPlaylistDownloadItem): string {
+    return `backup-playlist-${playlist.source}-${String(playlist.id)}`;
+}
+
 function isExpanded(playlist: BackupPlaylistDownloadItem): boolean {
-    return expandedIds.value.has(String(playlist.id));
+    return expandedIds.value.has(playlistKey(playlist));
 }
 
 function isRenderedExpanded(playlist: BackupPlaylistDownloadItem): boolean {
@@ -107,7 +124,7 @@ function isRenderedExpanded(playlist: BackupPlaylistDownloadItem): boolean {
 
 function toggleExpanded(playlist: BackupPlaylistDownloadItem): void {
     const next = new Set(expandedIds.value);
-    const id = String(playlist.id);
+    const id = playlistKey(playlist);
     next.has(id) ? next.delete(id) : next.add(id);
     expandedIds.value = next;
 }
@@ -225,8 +242,24 @@ watch(
                     <label id="work-picker-label" for="backup-work-search" class="section-label">{{ profile.labels.search }}</label>
                     <input id="backup-work-search" ref="searchInput" v-model="searchQuery" type="search" data-testid="search" :placeholder="profile.labels.searchPlaceholder" />
 
+                    <fieldset class="source-filter" data-testid="source-filter">
+                        <legend>{{ profile.labels.playlistSource }}</legend>
+                        <label>
+                            <input v-model="sourceFilter" type="radio" name="backup-playlist-source" value="all" data-testid="source-all" />
+                            <span>{{ profile.labels.sourceAll }} ({{ sourceCounts.all.toLocaleString() }})</span>
+                        </label>
+                        <label>
+                            <input v-model="sourceFilter" type="radio" name="backup-playlist-source" value="own" data-testid="source-own" />
+                            <span>{{ profile.labels.sourceOwn }} ({{ sourceCounts.own.toLocaleString() }})</span>
+                        </label>
+                        <label>
+                            <input v-model="sourceFilter" type="radio" name="backup-playlist-source" value="public" data-testid="source-public" />
+                            <span>{{ profile.labels.sourcePublic }} ({{ sourceCounts.public.toLocaleString() }})</span>
+                        </label>
+                    </fieldset>
+
                     <div class="playlist-list" data-testid="playlist-list">
-                        <article v-for="playlist in visiblePlaylists" :key="playlist.id" class="playlist-group" :data-testid="`playlist-${playlist.id}`">
+                        <article v-for="playlist in visiblePlaylists" :key="playlistKey(playlist)" class="playlist-group" :data-testid="`playlist-${playlist.id}`">
                             <div class="playlist-heading">
                                 <button
                                     v-if="!searchQuery.trim()"
@@ -234,7 +267,7 @@ watch(
                                     class="expand-button"
                                     :aria-expanded="isRenderedExpanded(playlist)"
                                     :aria-label="isRenderedExpanded(playlist) ? profile.labels.collapsePlaylist : profile.labels.expandPlaylist"
-                                    :aria-controls="`backup-playlist-${playlist.id}`"
+                                    :aria-controls="playlistElementId(playlist)"
                                     :data-testid="`expand-${playlist.id}`"
                                     @click="toggleExpanded(playlist)"
                                 >{{ isExpanded(playlist) ? '▾' : '▸' }}</button>
@@ -252,7 +285,7 @@ watch(
                                     <span class="muted">{{ selectedInPlaylist(playlist) }}/{{ playlistWorks(playlist).length }}</span>
                                 </label>
                             </div>
-                            <div v-if="isRenderedExpanded(playlist)" :id="`backup-playlist-${playlist.id}`" class="work-list">
+                            <div v-if="isRenderedExpanded(playlist)" :id="playlistElementId(playlist)" class="work-list">
                                 <label v-for="work in visiblePlaylistWorks(playlist)" :key="work.id" class="work-row" :data-testid="`work-${work.id}`">
                                     <input type="checkbox" :checked="selectedIds.has(String(work.id))" @change="toggleWork(work)" />
                                     <span>{{ displayTitle(work) }}</span>
@@ -346,7 +379,7 @@ watch(
 .work-picker { display: flex; flex-direction: column; border-right: 1px solid #444; }
 .section-label, legend, .stacked-option > span { font-weight: 650; }
 input[type='search'], select { box-sizing: border-box; width: 100%; min-height: 38px; margin-top: 7px; padding: 7px 9px; color: inherit; background: #303030; border: 1px solid #666; border-radius: 5px; }
-.playlist-list { margin-top: 12px; overflow: auto; }
+.playlist-list { flex: 1; min-height: 160px; margin-top: 12px; overflow: auto; }
 .playlist-group { border-bottom: 1px solid #404040; }
 .playlist-heading { display: flex; align-items: center; min-height: 42px; }
 .playlist-heading > label { display: flex; flex: 1; align-items: center; gap: 8px; min-width: 0; }
@@ -361,6 +394,13 @@ input[type='search'], select { box-sizing: border-box; width: 100%; min-height: 
 .empty-state { padding: 24px 8px; text-align: center; color: #bbb; }
 .download-options { display: flex; flex-direction: column; gap: 14px; }
 fieldset { display: flex; flex-direction: column; gap: 7px; margin: 0; padding: 10px 12px; border: 1px solid #555; border-radius: 6px; }
+.source-filter { flex-direction: row; flex-wrap: wrap; gap: 6px; margin-top: 12px; padding: 7px; }
+.source-filter legend { padding: 0 4px; }
+.source-filter label { position: relative; }
+.source-filter input { position: absolute; opacity: 0; pointer-events: none; }
+.source-filter span { display: block; min-height: 34px; padding: 7px 10px; border: 1px solid #666; border-radius: 999px; cursor: pointer; }
+.source-filter input:checked + span { color: #111; background: #ffca28; border-color: #ffca28; font-weight: 700; }
+.source-filter input:focus-visible + span { outline: 3px solid #6cb6ff; outline-offset: 2px; }
 fieldset .hint { margin: -4px 0 3px 23px; }
 .stacked-option { display: block; }
 .hint { margin: -9px 0 0 23px; line-height: 1.35; }

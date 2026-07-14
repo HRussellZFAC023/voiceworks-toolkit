@@ -139,6 +139,7 @@ export const zhLocale: Record<string, string> = {
         emergencyDriveFailed: 'Google Drive 备份失败',
         backupDownloaderOpen: '从备份下载作品', backupDownloaderTitle: '下载完整作品文件夹', backupDownloaderClose: '关闭', backupDownloaderExpand: '展开播放列表', backupDownloaderCollapse: '折叠播放列表', backupDownloaderNoResults: '没有匹配的播放列表或作品', backupDownloaderCancel: '取消',
         backupDownloaderSearch: '搜索播放列表或作品', backupDownloaderSearchPlaceholder: '按标题或RJ编号搜索…',
+        backupDownloaderSource: '播放列表来源', backupDownloaderSourceAll: '全部', backupDownloaderSourceOwn: '我的播放列表', backupDownloaderSourcePublic: '社区播放列表',
         backupDownloaderSelected: '已选择 {count} 个作品 · 已知 {bytes}', backupDownloaderUnknownSize: '大小未知',
         backupDownloaderFileTypes: '包含文件类型', backupDownloaderAudio: '音频', backupDownloaderVideo: '视频', backupDownloaderImages: '图片', backupDownloaderText: '文本和字幕', backupDownloaderOther: '其他文件',
         backupDownloaderFilename: '作品文件夹标题', backupDownloaderTitleOriginal: '原文', backupDownloaderTitleTranslated: '翻译', backupDownloaderTitleBoth: '原文 [翻译]', backupDownloaderTitleNone: '仅RJ编号',

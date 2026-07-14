@@ -143,6 +143,8 @@ export const enLocale: Record<string, string> = {
         backupDownloaderNoResults: 'No matching playlists or works', backupDownloaderCancel: 'Cancel',
         backupDownloaderSearch: 'Find playlists or works',
         backupDownloaderSearchPlaceholder: 'Search by title or RJ code…',
+        backupDownloaderSource: 'Playlist source', backupDownloaderSourceAll: 'All',
+        backupDownloaderSourceOwn: 'My playlists', backupDownloaderSourcePublic: 'Community playlists',
         backupDownloaderSelected: '{count} works selected · {bytes} known',
         backupDownloaderUnknownSize: 'unknown size',
         backupDownloaderFileTypes: 'Include file types',
