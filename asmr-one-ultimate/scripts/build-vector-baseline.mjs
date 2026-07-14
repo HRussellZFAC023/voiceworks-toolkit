@@ -78,6 +78,10 @@ export function buildVectorBaseline(entries, options) {
         const decoded = encodeSemanticBinaryShard(pending, BASELINE_BUILD_CONFIG.dimension);
         if (decoded.byteLength > shardMaxBytes) throw new Error('Decoded shard exceeds size limit');
         const body = gzipSync(decoded, { level: 9, mtime: 0 });
+        // zlib writes the host OS identifier into byte 9 of the gzip header
+        // (3 on Linux, 19 on macOS). Canonicalize it so content-addressed
+        // shards have identical bytes and hashes on every build platform.
+        body[9] = 255;
         const sha256 = createHash('sha256').update(body).digest('hex');
         const key = `/semantic-index/objects/${sha256}.bin.gz`;
         objects.set(key, body);

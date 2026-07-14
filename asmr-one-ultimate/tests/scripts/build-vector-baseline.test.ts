@@ -48,7 +48,7 @@ describe('vector baseline builder', () => {
             datasetId: 'gold', generatedAt: '2026-07-14T00:00:00.000Z',
         });
         const [key, body] = [...built.objects][0];
-        expect(key).toBe('/semantic-index/objects/634204c8c8e4ef7cebe8b947011fa4a81595fe159f4d184b8e2649517d4d6fd3.bin.gz');
+        expect(key).toBe('/semantic-index/objects/68cc1518990a9ba37509cf86fd88d9cba491814db295c946520a81f2fd6535ee.bin.gz');
         expect(Buffer.from(gunzipSync(body).subarray(0, 24)).toString('hex')).toBe(
             '41534d52564543000100000080010000010000004a000000',
         );

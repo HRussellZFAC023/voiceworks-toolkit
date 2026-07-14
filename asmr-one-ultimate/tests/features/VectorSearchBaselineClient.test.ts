@@ -1,5 +1,6 @@
 import 'fake-indexeddb/auto';
 import { createHash } from 'node:crypto';
+import { runInNewContext } from 'node:vm';
 import { gzipSync } from 'node:zlib';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { deleteDB } from 'idb';
@@ -100,6 +101,28 @@ describe('VectorSearchBaselineClient', () => {
         expect((await repo.getState()).expectedBaselineCount).toBe(1);
         expect((await repo.getState()).activeManifestSha256).toMatch(/^[a-f0-9]{64}$/);
         expect((await repo.getMergedEntries()).map((entry) => entry.id)).toEqual(['RJ1']);
+    });
+
+    it('hashes response bytes originating in another JavaScript realm', async () => {
+        const repo = repository();
+        const { bytes, manifest } = fixture('cross-realm');
+        const foreignBytes = runInNewContext(
+            'Uint8Array.from(input).buffer',
+            { input: [...bytes] },
+        ) as ArrayBuffer;
+        const shardResponse = {
+            ok: true,
+            status: 200,
+            headers: new Headers({ 'content-length': String(bytes.byteLength) }),
+            arrayBuffer: async () => foreignBytes,
+        } as Response;
+        const fetchMock = vi.fn()
+            .mockResolvedValueOnce(new Response(JSON.stringify(manifest), { status: 200 }))
+            .mockResolvedValueOnce(shardResponse);
+
+        await expect(new VectorSearchBaselineClient(
+            repo, 'https://baseline.test/semantic-index/manifest.json', fetchMock,
+        ).synchronize()).resolves.toEqual({ status: 'activated', datasetId: 'cross-realm', entries: 1 });
     });
 
     it('keeps the previous dataset active when shard integrity fails', async () => {

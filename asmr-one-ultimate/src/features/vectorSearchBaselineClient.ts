@@ -161,7 +161,12 @@ export function parseSemanticVectorEntry(value: unknown): SemanticVectorEntry {
 }
 
 async function sha256Hex(bytes: ArrayBuffer): Promise<string> {
-    const digest = await crypto.subtle.digest('SHA-256', bytes);
+    // Response.arrayBuffer() may originate in a different JavaScript realm
+    // (notably jsdom/extension bridges). Older Web Crypto implementations
+    // reject cross-realm BufferSource objects, so copy into this realm first.
+    const localBytes = new Uint8Array(bytes.byteLength);
+    localBytes.set(new Uint8Array(bytes));
+    const digest = await crypto.subtle.digest('SHA-256', localBytes);
     return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
