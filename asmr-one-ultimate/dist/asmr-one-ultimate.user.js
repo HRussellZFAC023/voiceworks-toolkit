@@ -5,7 +5,7 @@
 // @name:ja            ASMR.one Ultimate - AI文字起こし・翻訳・30以上の機能
 // @name:ko            ASMR.one Ultimate - AI 음성인식・번역・30+ 기능
 // @namespace          http://tampermonkey.net/
-// @version            159
+// @version            160
 // @author             Henry
 // @description        Upgrade asmr.one with on-device Whisper, cached or custom translation, semantic search, radio and learner modes, JPDB, separate playlist backups, and automatic recovery from the English-language gate.
 // @description:zh-CN  asmr.one 全能增强：本地 Whisper、缓存或自定义翻译 API、语义搜索、电台与学习模式、JPDB、播放列表分离备份及英文优先语言封锁自动恢复。
