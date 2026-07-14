@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue';
-import { openDB, deleteDB, type DBSchema } from 'idb';
+import { openDB, type DBSchema } from 'idb';
 import { useBridge, useI18n, useEventBus } from '../../composables';
 import { SharedCache } from '../../core/Cache';
 import { TranslationService } from '../../services/TranslationService';
@@ -13,29 +13,28 @@ import { GpuScheduler, Priority } from '../../core/GpuScheduler';
 import { DeviceCapabilities } from '../../core/DeviceCapabilities';
 import { DEFAULT_API_SERVER } from '../../core/Constants';
 import { shouldAutoIndexVectors } from '../vectorSearchPolicy';
-import type { TagEntry, WorkTag, WorkSummary, WorkDetail, WorkOrder } from '../../types/api';
+import { VectorSearchBaselineClient } from '../vectorSearchBaselineClient';
+import { isPostBaselineRelease, pageIsAtOrBeforeBaselineCutoff, postBaselineWorks } from '../vectorSearchDeltaPolicy';
+import { VectorSearchRepository } from '../vectorSearchRepository';
+import {
+    containsCjkForResultTranslation,
+    detectSearchQueryScript,
+    extractSearchTokens,
+} from '../vectorSearchQueryUtils';
+import { canonicalSemanticDocumentPayload, prepareSemanticWorkEntry, semanticDotProduct } from '../vectorSearchEntryUtils';
+import {
+    SEMANTIC_EMBEDDING_MODEL,
+    SEMANTIC_COMPATIBILITY_FINGERPRINT,
+    SEMANTIC_INDEX_APP_VERSION,
+    type SemanticVectorEntry,
+} from '../vectorSearchIndexTypes';
+import type { TagEntry, WorkSummary, WorkDetail, WorkOrder } from '../../types/api';
 
 // ============================================================================
 // Types
 // ============================================================================
 
-export interface VectorEntry {
-    id: string;
-    title: string;
-    description: string;
-    tags: string[];
-    searchTags?: string[];
-    circle?: string;
-    vas?: string[];
-    series?: string;
-    searchText?: string;
-    cover?: string;
-    vector: number[];
-    dlCount?: number;
-    rating?: number;
-    nsfw?: boolean;
-    hasSubtitle?: boolean;
-}
+export interface VectorEntry extends SemanticVectorEntry {}
 
 interface VectorDB extends DBSchema {
     vectors: {
@@ -62,16 +61,15 @@ interface ScoredResult {
 
 const EMBED_CONCURRENCY = 3;
 const RESULT_LIMIT = 40;
-const VECTOR_INDEX_VERSION = 4; // Force re-index: enriched metadata (dl_count, rating, age_category)
-const EMBEDDING_MODEL = 'Xenova/multilingual-e5-small';
+const VECTOR_INDEX_VERSION = SEMANTIC_INDEX_APP_VERSION;
+const EMBEDDING_MODEL = SEMANTIC_EMBEDDING_MODEL;
 const EMBEDDING_TASK_QUERY = 'query';
 const EMBEDDING_TASK_DOC = 'passage';
-const MAX_DESCRIPTION_CHARS = 1500;
-const MAX_PAYLOAD_CHARS = 5000;
 const MIN_SCORE_THRESHOLD = 0.25;
 const SEARCH_TIMEOUT_MS = 90_000;
 const TRANSLATION_TIMEOUT_MS = 5_000;
 const VECTOR_INDEX_TASK_KEY = 'vector-search-index';
+const DELTA_SCAN_WINDOW_PAGES = 200;
 
 // ============================================================================
 // Composables & Reactive State
@@ -108,6 +106,10 @@ const inputRef = ref<HTMLInputElement | null>(null);
 // ============================================================================
 
 let dbPromise = openVectorDb();
+const semanticRepository = new VectorSearchRepository();
+const baselineClient = new VectorSearchBaselineClient(semanticRepository);
+let baselineReadyPromise: Promise<void> | null = null;
+let baselineAbort: AbortController | null = null;
 let autoIndexRequested = false;
 let autoIndexRunning = false;
 let autoSeedTimer: number | null = null;
@@ -176,7 +178,20 @@ function ensureIndexReady(): Promise<void> {
         const storedVersion = Number(Config.get('vectorIndexVersion') || 0);
         const storedModel = String(Config.get('vectorSearchModel') || '');
         if (storedVersion !== VECTOR_INDEX_VERSION || storedModel !== EMBEDDING_MODEL) {
-            await resetVectorIndex('model-change', { storedVersion, storedModel });
+            Logger.warn('[VectorSearch] Semantic index compatibility changed; clearing only the local delta.', {
+                storedVersion, storedModel,
+            });
+            await semanticRepository.clearDelta();
+        }
+        const semanticState = await semanticRepository.getState();
+        if (semanticState.activeDatasetId
+            && semanticState.compatibilityFingerprint !== SEMANTIC_COMPATIBILITY_FINGERPRINT) {
+            await semanticRepository.updateState({
+                activeDatasetId: undefined,
+                expectedBaselineCount: undefined,
+                activeManifestSha256: undefined,
+                manifestEtag: undefined,
+            });
         }
         Config.set('vectorIndexVersion', VECTOR_INDEX_VERSION);
         Config.set('vectorSearchModel', EMBEDDING_MODEL);
@@ -189,36 +204,12 @@ async function ensureModelSynced(): Promise<void> {
     // No additional sync needed — model/version checking is done in ensureIndexReady()
 }
 
-async function resetVectorIndex(reason: string, details?: Record<string, unknown>): Promise<void> {
-    Logger.warn('[VectorSearch] Resetting vector index.', { reason, ...details });
-    autoIndexRunning = false;
-    autoIndexRequested = false;
-    autoIndexExhausted = false;
-    if (autoBatchTimer) {
-        window.clearTimeout(autoBatchTimer);
-        autoBatchTimer = null;
-    }
-    try {
-        const db = await dbPromise;
-        db.close();
-    } catch (e) {
-        Logger.warn('[VectorSearch] Failed to close vector DB before reset:', e);
-    }
-    await deleteDB('asmr-one-vectors');
-    dbPromise = openVectorDb();
-    bulkIndexCursor = 1;
-    Config.set('vectorIndexCursor', 1);
-    Config.set('vectorIndexLatestWorkId', '');
-    Config.set('vectorIndexVersion', VECTOR_INDEX_VERSION);
-    Config.set('vectorSearchModel', EMBEDDING_MODEL);
-    indexReady = true;
-    void refreshIndexCount();
-}
-
 async function countIndex(): Promise<number> {
     await ensureIndexReady();
-    const db = await dbPromise;
-    return db.count('vectors');
+    const legacy = await semanticRepository.hasUsableActiveBaseline()
+        ? []
+        : await (await dbPromise).getAll('vectors');
+    return semanticRepository.countMerged(legacy);
 }
 
 async function refreshIndexCount(): Promise<void> {
@@ -260,8 +251,7 @@ async function ensureTagIndex(): Promise<void> {
     if (tagIndexReady) return tagIndexReady;
     tagIndexReady = (async () => {
         try {
-            const res = await bridge.api.getTags<TagEntry>();
-            const tags = res?.data || [];
+            const tags = await bridge.api.getTags<TagEntry>();
             for (const tag of tags) {
                 tagById.set(tag.id, tag);
                 indexTagName(tag.name, tag);
@@ -290,6 +280,7 @@ async function getEmbedding(text: string, task: string): Promise<number[] | null
             priority: isSearch ? Priority.REALTIME : Priority.LOW,
             cancellable: !isSearch,
             cancellableKey: isSearch ? undefined : VECTOR_INDEX_TASK_KEY,
+            semanticBaselineCompatible: true,
         });
     } catch (err) {
         Logger.warn('[VectorSearch] getEmbedding failed:', err);
@@ -301,36 +292,6 @@ async function getEmbedding(text: string, task: string): Promise<number[] | null
 // Work preparation & indexing
 // ============================================================================
 
-function truncateText(text: string, maxChars: number): string {
-    if (!text) return '';
-    if (text.length <= maxChars) return text;
-    return `${text.slice(0, maxChars)}...`;
-}
-
-function extractTagInfo(tags: WorkTag[]): { displayTags: string[]; searchTags: string[] } {
-    const displayTags = uniqueStrings(tags.map((t: WorkTag) => t?.name || '').filter(Boolean));
-    const searchTags: string[] = [];
-
-    for (const tag of tags) {
-        const raw = tag?.name || '';
-        const i18nEn = tag?.i18n?.['en-us']?.name || '';
-        const i18nJa = tag?.i18n?.['ja-jp']?.name || '';
-
-        const tagId = Number(tag?.id || 0) || 0;
-        const tagEntry = tagId ? tagById.get(tagId) : undefined;
-
-        if (tagEntry?.name) searchTags.push(tagEntry.name);
-        if (tagEntry?.ja) searchTags.push(tagEntry.ja);
-        if (tagEntry?.en) searchTags.push(tagEntry.en);
-        searchTags.push(raw, i18nEn || '', i18nJa || '');
-    }
-
-    return {
-        displayTags,
-        searchTags: uniqueStrings(searchTags),
-    };
-}
-
 function resolveCoverUrl(work: WorkSummary | WorkDetail, id: string): string | null {
     if (work.mainCoverUrl) return work.mainCoverUrl;
     if (work.main_cover_url) return work.main_cover_url;
@@ -338,65 +299,12 @@ function resolveCoverUrl(work: WorkSummary | WorkDetail, id: string): string | n
 }
 
 async function prepareWorkEntry(work: (WorkSummary | WorkDetail) & Record<string, unknown>): Promise<{ entry: VectorEntry; payload: string } | null> {
-    if (!work?.id) return null;
-    const id = String(work.id);
-    const title = work.title || '';
-    const descriptionRaw = ('description' in work ? (work as WorkDetail).description : '') || ('summary' in work ? (work as WorkDetail).summary : '') || '';
-    const description = truncateText(descriptionRaw, MAX_DESCRIPTION_CHARS);
-
-    const circle = work.circle?.name || '';
-    const seriesObj = work.series as { name?: string } | undefined;
-    const series = seriesObj?.name || '';
-    const vas = (work.vas || []).map((v) => v?.name || '').filter(Boolean);
-
-    const tagInfo = extractTagInfo(work.tags || []);
-    const searchTags = tagInfo.searchTags;
-    const displayTags = tagInfo.displayTags;
-
-    // Extract metadata for storage and embedding enrichment
-    const dlCount = typeof work.dl_count === 'number' ? work.dl_count : undefined;
-    const rating = typeof work.rate_average_2dp === 'number' ? work.rate_average_2dp : undefined;
-    const nsfw = typeof work.nsfw === 'boolean' ? work.nsfw : undefined;
-    const hasSubtitle = typeof work.has_subtitle === 'boolean' ? work.has_subtitle : undefined;
-    const ageCategory = ('age_category_string' in work ? String(work.age_category_string || '') : '');
-    const langEditions: string[] = Array.isArray(work.language_editions)
-        ? (work.language_editions as Array<{ lang?: string; label?: string }>).map((e) => e?.lang || e?.label || '').filter(Boolean)
-        : [];
-
-    const payloadParts: string[] = [];
-    if (title) payloadParts.push(`Title: ${title}`);
-    if (circle) payloadParts.push(`Circle: ${circle}`);
-    if (series) payloadParts.push(`Series: ${series}`);
-    if (vas.length) payloadParts.push(`VAs: ${vas.join(', ')}`);
-    if (searchTags.length) payloadParts.push(`Tags: ${searchTags.join(', ')}`);
-    if (ageCategory) payloadParts.push(`Category: ${ageCategory}`);
-    if (langEditions.length) payloadParts.push(`Languages: ${langEditions.join(', ')}`);
-    if (description) payloadParts.push(`Description: ${description}`);
-
-    const payload = truncateText(payloadParts.join('\n'), MAX_PAYLOAD_CHARS);
-    if (!payload.trim()) return null;
-
-    const searchText = normalizeText([
-        title, description, circle, series,
-        vas.join(' '), searchTags.join(' ')
-    ].filter(Boolean).join(' '));
-
-    const entry: VectorEntry = {
-        id, title, description,
-        tags: displayTags,
-        searchTags,
-        circle: circle || undefined,
-        series: series || undefined,
-        vas: vas.length ? vas : undefined,
-        searchText,
-        vector: [],
-        dlCount,
-        rating,
-        nsfw,
-        hasSubtitle,
-    };
-
-    return { entry, payload };
+    return prepareSemanticWorkEntry(work, {
+        resolveTagAliases(tag) {
+            const tagEntry = tagById.get(Number(tag?.id || 0));
+            return tagEntry ? [tagEntry.name, tagEntry.ja, tagEntry.en].filter((value): value is string => !!value) : [];
+        },
+    });
 }
 
 async function indexWork(
@@ -404,6 +312,8 @@ async function indexWork(
     generation = lifecycleGeneration
 ): Promise<boolean> {
     if (!isLifecycleCurrent(generation) || !work?.id) return false;
+    const baselineActive = await semanticRepository.hasUsableActiveBaseline();
+    if (!isLifecycleCurrent(generation) || (baselineActive && !isPostBaselineRelease(work.release))) return false;
     // Fully pause indexing while search is active to keep the GPU scheduler queue clear
     if (searchPriority) {
         const pauseStart = Date.now();
@@ -419,19 +329,17 @@ async function indexWork(
     if (!isLifecycleCurrent(generation)) return false;
     await ensureTagIndex();
     if (!isLifecycleCurrent(generation)) return false;
-    const db = await dbPromise;
-    if (!isLifecycleCurrent(generation)) return false;
-    const existing = await db.get('vectors', id);
+    const existing = await semanticRepository.getDelta(id);
     if (!isLifecycleCurrent(generation) || existing) return false;
 
     const prepared = await prepareWorkEntry(work);
     if (!isLifecycleCurrent(generation) || !prepared) return false;
 
-    const vector = await getEmbedding(prepared.payload, EMBEDDING_TASK_DOC);
+    const vector = await getEmbedding(canonicalSemanticDocumentPayload(prepared.payload), EMBEDDING_TASK_DOC);
     if (isLifecycleCurrent(generation) && vector) {
         const cover = resolveCoverUrl(work, id) || undefined;
-        await db.put('vectors', { ...prepared.entry, cover, vector });
-        return isLifecycleCurrent(generation);
+        const inserted = await semanticRepository.putDelta({ ...prepared.entry, cover, vector });
+        return inserted && isLifecycleCurrent(generation);
     }
     return false;
 }
@@ -473,9 +381,7 @@ async function indexWorks(
                     // Only count as failure if it's a new work that failed
                     const id = String(work?.id);
                     if (id) {
-                        const db = await dbPromise;
-                        if (!isLifecycleCurrent(generation)) break;
-                        const existing = await db.get('vectors', id);
+                        const existing = await semanticRepository.getDelta(id);
                         if (!isLifecycleCurrent(generation)) break;
                         if (!existing) {
                             consecutiveFails++;
@@ -515,6 +421,8 @@ async function indexCurrentWork(generation = lifecycleGeneration): Promise<void>
     if (whisperActive || EmbeddingService.isSuspended()) return;
     const work = bridge.store.state.AudioPlayer?.work as (WorkDetail & Record<string, unknown>) | undefined;
     if (!work?.id) return;
+    const baselineActive = await semanticRepository.hasUsableActiveBaseline();
+    if (!isLifecycleCurrent(generation) || (baselineActive && !isPostBaselineRelease(work.release))) return;
     const id = String(work.id);
 
     await ensureIndexReady();
@@ -523,9 +431,7 @@ async function indexCurrentWork(generation = lifecycleGeneration): Promise<void>
     if (!isLifecycleCurrent(generation)) return;
     await ensureTagIndex();
     if (!isLifecycleCurrent(generation)) return;
-    const db = await dbPromise;
-    if (!isLifecycleCurrent(generation)) return;
-    const existing = await db.get('vectors', id);
+    const existing = await semanticRepository.getDelta(id);
     if (!isLifecycleCurrent(generation)) return;
 
     // Enrich existing entries when richer data (e.g. description) is now available
@@ -538,12 +444,12 @@ async function indexCurrentWork(generation = lifecycleGeneration): Promise<void>
     const prepared = await prepareWorkEntry(work);
     if (!isLifecycleCurrent(generation) || !prepared) return;
 
-    const vector = await getEmbedding(prepared.payload, EMBEDDING_TASK_DOC);
+    const vector = await getEmbedding(canonicalSemanticDocumentPayload(prepared.payload), EMBEDDING_TASK_DOC);
     if (!isLifecycleCurrent(generation) || !vector) return;
 
     const cover = resolveCoverUrl(work, id) || undefined;
-    await db.put('vectors', { ...prepared.entry, cover, vector });
-    if (!isLifecycleCurrent(generation)) return;
+    const inserted = await semanticRepository.putDelta({ ...prepared.entry, cover, vector });
+    if (!isLifecycleCurrent(generation) || !inserted) return;
     Logger.debug(`[VectorSearch] ${existing ? 'Enriched' : 'Indexed'} work:`, id, prepared.entry.title);
 }
 
@@ -568,24 +474,36 @@ async function bulkIndex(opts?: { maxPages?: number; maxWorks?: number; order?: 
     autoIndexRunning = true;
     setStatus(t('magicSearchFetchingLatest'), true);
     try {
-        const maxPages = opts?.maxPages ?? 5;
-        const maxWorks = opts?.maxWorks ?? 200;
+        const baselineActive = await semanticRepository.hasUsableActiveBaseline();
+        if (!isLifecycleCurrent(generation)) return;
+        const maxPages = baselineActive ? DELTA_SCAN_WINDOW_PAGES : (opts?.maxPages ?? 5);
+        const maxWorks = baselineActive ? Number.POSITIVE_INFINITY : (opts?.maxWorks ?? 200);
         const order = opts?.order ?? 'release';
         const sort = opts?.sort ?? 'desc';
-        const startPage = Math.max(1, opts?.startPage ?? bulkIndexCursor);
+        // Baseline deltas advance in bounded windows, while page one is also
+        // checked every batch. If the head changes during a deep scan, finish
+        // the current cycle and schedule a complete follow-up cycle so shifted
+        // page boundaries cannot permanently skip newly inserted works.
+        const startPage = Math.max(1, baselineActive ? bulkIndexCursor : (opts?.startPage ?? bulkIndexCursor));
         const endPage = startPage + maxPages - 1;
+        const pages = baselineActive && startPage > 1
+            ? [1, ...Array.from({ length: maxPages }, (_, index) => startPage + index)]
+            : Array.from({ length: maxPages }, (_, index) => startPage + index);
         let indexed = 0;
         let lastPage = startPage - 1;
         let exhausted = false;
         let firstWorkId: string | null = null;
-        for (let page = startPage; page <= endPage; page++) {
+        let deltaScanHeadId = baselineActive ? String(Config.get('vectorDeltaScanHeadId') || '') : '';
+        let deltaRescanNeeded = baselineActive && Boolean(Config.get('vectorDeltaRescanNeeded'));
+        for (let pageIndex = 0; pageIndex < pages.length; pageIndex++) {
+            const page = pages[pageIndex];
             if (!isLifecycleCurrent(generation)) return;
             if (whisperActive || EmbeddingService.isSuspended()) {
                 setStatus(t('magicSearchReady'), false);
                 scheduleNextBatch(15_000);
                 return;
             }
-            if (page > startPage) {
+            if (pageIndex > 0) {
                 await new Promise(resolve => setTimeout(resolve, 2000));
                 if (!isLifecycleCurrent(generation)) return;
             }
@@ -617,16 +535,49 @@ async function bulkIndex(opts?: { maxPages?: number; maxWorks?: number; order?: 
             }
             if (page === 1 && works[0]?.id) {
                 firstWorkId = String(works[0].id);
+                if (baselineActive) {
+                    if (startPage === 1) {
+                        deltaScanHeadId = firstWorkId;
+                        deltaRescanNeeded = false;
+                    } else if (!deltaScanHeadId) {
+                        // A scan resumed from an older build without a head
+                        // checkpoint. Complete it, then conservatively rescan.
+                        deltaScanHeadId = firstWorkId;
+                        deltaRescanNeeded = true;
+                    } else if (firstWorkId !== deltaScanHeadId) {
+                        deltaRescanNeeded = true;
+                    }
+                    Config.set('vectorDeltaScanHeadId', deltaScanHeadId);
+                    Config.set('vectorDeltaRescanNeeded', deltaRescanNeeded);
+                }
             }
-            lastPage = page;
+            if (baselineActive && pageIsAtOrBeforeBaselineCutoff(works)) {
+                exhausted = true;
+                lastPage = page;
+                break;
+            }
+            if (!baselineActive || page >= startPage) lastPage = page;
             const remaining = maxWorks - indexed;
-            const pageWorks = works.slice(0, remaining);
+            const pageWorks = baselineActive
+                ? postBaselineWorks(works)
+                : works.slice(0, remaining);
             setStatus(format('magicSearchIndexingPage', { page, count: pageWorks.length }), true);
             indexed += await indexWorks(pageWorks, generation);
             if (!isLifecycleCurrent(generation)) return;
-            if (indexed >= maxWorks) break;
+            if (!baselineActive && indexed >= maxWorks) break;
         }
-        if (exhausted) {
+        if (baselineActive) {
+            if (exhausted) {
+                bulkIndexCursor = 1;
+                autoIndexExhausted = !deltaRescanNeeded;
+                Config.set('vectorDeltaScanHeadId', '');
+                Config.set('vectorDeltaRescanNeeded', false);
+                if (!deltaRescanNeeded && firstWorkId) Config.set('vectorIndexLatestWorkId', firstWorkId);
+            } else if (lastPage >= startPage) {
+                bulkIndexCursor = lastPage + 1;
+                autoIndexExhausted = false;
+            }
+        } else if (exhausted) {
             bulkIndexCursor = 1;
             autoIndexExhausted = true;
         } else if (lastPage >= startPage) {
@@ -634,7 +585,7 @@ async function bulkIndex(opts?: { maxPages?: number; maxWorks?: number; order?: 
             autoIndexExhausted = false;
         }
         Config.set('vectorIndexCursor', bulkIndexCursor);
-        if (firstWorkId) Config.set('vectorIndexLatestWorkId', firstWorkId);
+        if (!baselineActive && firstWorkId) Config.set('vectorIndexLatestWorkId', firstWorkId);
         await refreshIndexCount();
         if (!isLifecycleCurrent(generation)) return;
         const total = indexCount.value;
@@ -721,16 +672,8 @@ async function ensureAutoIndexOnOpen(): Promise<void> {
 // Search logic
 // ============================================================================
 
-function containsJapanese(text: string): boolean {
-    return /[\u3040-\u30ff\u4e00-\u9fff]/.test(text);
-}
-
 function extractTokens(text: string): string[] {
-    const normalized = normalizeText(text);
-    return normalized
-        .split(/[^a-z0-9\u3040-\u30ff\u4e00-\u9fff]+/g)
-        .map(token => token.trim())
-        .filter(token => token.length >= 2);
+    return extractSearchTokens(text);
 }
 
 function findTagHints(normalizedQuery: string, tokens: string[]): string[] {
@@ -765,10 +708,13 @@ async function buildSearchContext(queryText: string): Promise<SearchContext> {
     if (tagHints.length) expansions.push(...tagHints);
 
     let usedTranslation = false;
-    if (!containsJapanese(trimmed)) {
+    const queryScript = detectSearchQueryScript(trimmed);
+    if (queryScript !== 'japanese') {
         try {
             const translated = await Promise.race([
-                TranslationService.translate(trimmed, 'ja'),
+                TranslationService.translate(trimmed, 'ja', {
+                    sourceLanguageHint: queryScript === 'chinese' ? 'zh' : 'en',
+                }),
                 new Promise<null>((_, reject) => setTimeout(() => reject(new Error('Translation timeout')), TRANSLATION_TIMEOUT_MS)),
             ]);
             const normalized = translated?.trim() || '';
@@ -799,15 +745,6 @@ async function buildSearchContext(queryText: string): Promise<SearchContext> {
         tokens: Array.from(tokenSet),
         tagHints,
     };
-}
-
-function dotProduct(vecA: number[], vecB: number[]): number {
-    if (vecA.length !== vecB.length) return 0;
-    let dot = 0.0;
-    for (let i = 0; i < vecA.length; i++) {
-        dot += vecA[i] * vecB[i];
-    }
-    return dot;
 }
 
 function isLatinToken(token: string): boolean {
@@ -871,7 +808,7 @@ function calculatePopularityBoost(entry: VectorEntry): number {
 }
 
 function scoreEntry(entry: VectorEntry, vector: number[], searchMeta: SearchContext): number {
-    const similarity = dotProduct(vector, entry.vector);
+    const similarity = semanticDotProduct(vector, entry.vector);
     const keywordBoost = calculateKeywordBoost(entry, searchMeta);
     const popularityBoost = calculatePopularityBoost(entry);
     return similarity + keywordBoost + popularityBoost;
@@ -922,8 +859,12 @@ async function doSearch(): Promise<void> {
             return;
         }
 
-        const db = await dbPromise;
-        const entries = await db.getAll('vectors');
+        // Until the first verified shared baseline is active, preserve the old
+        // v1 local index as a read-only fallback. Delta entries always win.
+        const legacy = await semanticRepository.hasUsableActiveBaseline()
+            ? []
+            : await (await dbPromise).getAll('vectors');
+        const entries = await semanticRepository.getMergedEntries(legacy);
         if (entries.length === 0) {
             Logger.warn('[VectorSearch] Index empty. Starting auto-index.');
             setStatus(t('magicSearchIndexEmpty'), false);
@@ -995,7 +936,7 @@ async function doSearch(): Promise<void> {
 
 async function translateResultTitle(title: string, id: string): Promise<void> {
     if (!title) return;
-    if (!containsJapanese(title)) return;
+    if (!containsCjkForResultTranslation(title)) return;
     const generation = titleTranslationGeneration;
     const targetLang = TranslationService.getUiTargetLang();
     const queueKey = `vector-title:${targetLang}`;
@@ -1105,12 +1046,36 @@ function onKeydown(e: KeyboardEvent): void {
 
 void ensureIndexReady();
 
+function ensureBaselineReady(generation = lifecycleGeneration): Promise<void> {
+    if (baselineReadyPromise) return baselineReadyPromise;
+    baselineAbort = new AbortController();
+    const signal = baselineAbort.signal;
+    baselineReadyPromise = baselineClient.synchronize(signal).then(async (result) => {
+        if (result.status === 'unavailable') {
+            if (signal.aborted) {
+                baselineReadyPromise = null;
+                return;
+            }
+            Logger.warn('[VectorSearch] Shared baseline unavailable; using cached/local entries.', result.error);
+            baselineReadyPromise = null;
+            return;
+        }
+        Logger.log(`[VectorSearch] Shared baseline ${result.status}: ${result.entries} works (${result.datasetId}).`);
+        if (isLifecycleCurrent(generation)) await refreshIndexCount();
+    }).catch((error) => {
+        if (!signal.aborted) Logger.warn('[VectorSearch] Shared baseline synchronization failed.', error);
+        baselineReadyPromise = null;
+    });
+    return baselineReadyPromise;
+}
+
 // Watch for route changes to index current work
 let routeUnwatch: (() => void) | undefined;
 
 onMounted(() => {
     componentMounted = true;
     const generation = ++lifecycleGeneration;
+    void ensureBaselineReady(generation);
     if (backgroundIndexingEnabled) {
         routeUnwatch = bridge.$watch?.('$route', () => void indexCurrentWork(generation));
         void indexCurrentWork(generation);
@@ -1120,6 +1085,8 @@ onMounted(() => {
     if (backgroundIndexingEnabled && !autoSeedTimer) {
         autoSeedTimer = window.setTimeout(async () => {
             autoSeedTimer = null;
+            if (!isLifecycleCurrent(generation)) return;
+            await ensureBaselineReady(generation);
             if (!isLifecycleCurrent(generation)) return;
             Logger.log('[VectorSearch] Auto-indexing in background...');
             await scheduleAutoIndex();
@@ -1138,6 +1105,8 @@ onMounted(() => {
 onUnmounted(() => {
     componentMounted = false;
     lifecycleGeneration++;
+    baselineAbort?.abort();
+    baselineAbort = null;
     autoIndexRequested = false;
     autoIndexRunning = false;
     titleTranslationGeneration++;

@@ -1,8 +1,11 @@
 import type {
+    BackupTitleMode,
     BackupPlaylistDownloadItem,
     BackupPlaylistSource,
     BackupWorkDownloadItem,
 } from './backupWorkDownloaderTypes';
+
+type TranslateBatch = (texts: string[]) => Promise<string[]>;
 
 interface BackupSourceWork {
     rjCode: string;
@@ -53,4 +56,18 @@ export function mapBackupPlaylistSources(doc: BackupPlaylistSourceDocument): Map
     append(doc.ownPlaylists || [], 'own');
     append(doc.publicPlaylists || [], 'public');
     return { playlists, works: [...workMap.values()] };
+}
+
+/** Resolve only the works a persisted download needs before naming folders/tags. */
+export async function resolveDownloadWorkTranslations(
+    works: readonly BackupWorkDownloadItem[],
+    titleMode: BackupTitleMode,
+    translateBatch: TranslateBatch,
+): Promise<BackupWorkDownloadItem[]> {
+    if (titleMode !== 'translated' && titleMode !== 'original-bracketed-translation') return works.map(work => ({ ...work }));
+    const translated = await translateBatch(works.map(work => work.title));
+    return works.map((work, index) => ({
+        ...work,
+        translatedTitle: translated[index] || work.translatedTitle,
+    }));
 }

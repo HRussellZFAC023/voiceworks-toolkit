@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { KikoeruBridge } from '../../src/infrastructure/KikoeruBridge';
-import { Config } from '../../src/core/Utils';
+import { Config, I18n } from '../../src/core/Utils';
 
 const { mockWorksApi } = vi.hoisted(() => ({
     mockWorksApi: {
@@ -31,6 +31,7 @@ vi.mock('../../src/api', () => ({
 }));
 
 import { VectorSearch } from '../../src/features/VectorSearch';
+import { TranslationService } from '../../src/services/TranslationService';
 
 describe('VectorSearch bulk indexing', () => {
     let bridge: KikoeruBridge;
@@ -185,6 +186,48 @@ describe('VectorSearch bulk indexing', () => {
             usedTranslation: true,
             tokens: ['ear', 'cleaning', 'translated'],
         });
+    });
+
+    it('expands pure Chinese queries into Japanese and adds Han bigrams', async () => {
+        await bridge.initialize();
+        const vectorSearch = new VectorSearch();
+
+        const payload = await (vectorSearch as any).buildSearchContext('温柔耳语');
+
+        expect(payload.payload).toBe('温柔耳语\n温柔耳语-translated');
+        expect(payload.usedTranslation).toBe(true);
+        expect(payload.tokens).toEqual(['温柔耳语', 'translated', '温柔', '柔耳', '耳语']);
+        expect(TranslationService.translate).toHaveBeenLastCalledWith('温柔耳语', 'ja', {
+            sourceLanguageHint: 'zh',
+        });
+    });
+
+    it('preserves mixed kana Japanese and English without translation expansion', async () => {
+        await bridge.initialize();
+        const vectorSearch = new VectorSearch();
+
+        await expect((vectorSearch as any).buildSearchContext('ASMR 耳かき relaxing')).resolves.toEqual({
+            payload: 'ASMR 耳かき relaxing',
+            usedTranslation: false,
+            tokens: ['asmr', '耳かき', 'relaxing'],
+        });
+    });
+
+    it('translates a Han-only result title in the legacy renderer', async () => {
+        await bridge.initialize();
+        const previousLang = I18n.lang;
+        I18n.lang = 'en';
+        try {
+            const vectorSearch = new VectorSearch();
+            const target = document.createElement('div');
+
+            await (vectorSearch as any).translateResultTitle('催眠音声', target);
+
+            expect(target.textContent).toBe('催眠音声-translated');
+            expect(target.classList.contains('hidden')).toBe(false);
+        } finally {
+            I18n.lang = previousLang;
+        }
     });
 });
 

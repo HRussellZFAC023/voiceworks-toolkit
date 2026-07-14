@@ -46,6 +46,10 @@ let workerReady = false;
 let initPromise: Promise<void> | null = null;
 let webgpuFailed = false;
 let rememberedDtype = SharedCache.get<string>(CacheKeys.embeddingPreferredDtype()) || '';
+let activeDtype = '';
+// This service backs the semantic index. Keep every warmup/query/delta vector
+// on the exact artifact used by the published baseline.
+let semanticQ8Pinned = true;
 const pending = new Map<number, PendingRequest>();
 let nextId = 0;
 
@@ -95,6 +99,7 @@ function terminateWorker(): void {
         pending.clear();
         worker = null;
         workerReady = false;
+        activeDtype = '';
         initPromise = null;
     }
 }
@@ -153,6 +158,7 @@ function handleMessage(e: MessageEvent): void {
 
     if (msg.status === 'ready') {
         workerReady = true;
+        activeDtype = String(msg.dtype || '');
         if (msg.dtype) {
             rememberedDtype = msg.dtype;
             SharedCache.set(CacheKeys.embeddingPreferredDtype(), msg.dtype, CACHE_TTL_MS);
@@ -266,8 +272,11 @@ function initWorker(): Promise<void> {
 
                 worker = createEmbeddingWorker();
 
-                if (webgpuFailed) {
+                if (webgpuFailed || semanticQ8Pinned) {
                     worker.postMessage({ type: 'skip-webgpu' });
+                }
+                if (semanticQ8Pinned) {
+                    worker.postMessage({ type: 'required-dtype', dtype: 'q8' });
                 }
                 // Avoid pinning WebGPU dtype from stale cache across different adapters
                 // (e.g. Intel fp32 cache forcing AMD off fp16). Let worker select dtype
@@ -435,9 +444,13 @@ export const EmbeddingService = {
     async embed(
         text: string,
         task: 'query' | 'passage' = 'query',
-        options?: { priority?: Priority; cancellable?: boolean; cancellableKey?: string }
+        options?: { priority?: Priority; cancellable?: boolean; cancellableKey?: string; semanticBaselineCompatible?: boolean }
     ): Promise<number[]> {
         if (serviceDead || !DeviceCapabilities.budget.embeddingEnabled) throw new Error('Embedding service unavailable');
+        if (options?.semanticBaselineCompatible && (!semanticQ8Pinned || (workerReady && activeDtype !== 'q8'))) {
+            semanticQ8Pinned = true;
+            terminateWorker();
+        }
         resetIdleTimer();
         const normalized = normalizeEmbedInput(text);
         const prefixed = task === 'query' ? `query: ${normalized}` : `passage: ${normalized}`;

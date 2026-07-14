@@ -62,6 +62,26 @@ describe('EmbeddingService model loading', () => {
         vi.clearAllMocks();
     });
 
+    it('pins semantic embeddings to the required WASM q8 artifact before initialization', async () => {
+        const { GpuScheduler } = await import('../../src/core/GpuScheduler');
+        vi.mocked(GpuScheduler.enqueue).mockResolvedValue([1, 0]);
+        const { EmbeddingService } = await import('../../src/services/EmbeddingService');
+        const embedding = EmbeddingService.embed('needle', 'query', { semanticBaselineCompatible: true });
+
+        await vi.waitFor(() => expect(mocks.worker.onmessage).toBeTypeOf('function'));
+        const messagesBeforeInit = mocks.worker.postMessage.mock.calls.map(([message]) => message);
+        expect(messagesBeforeInit).toEqual(expect.arrayContaining([
+            { type: 'skip-webgpu' },
+            { type: 'required-dtype', dtype: 'q8' },
+        ]));
+        const initIndex = messagesBeforeInit.findIndex((message) => message.type === 'init');
+        expect(messagesBeforeInit.findIndex((message) => message.type === 'required-dtype')).toBeLessThan(initIndex);
+
+        mocks.worker.onmessage?.({ data: { status: 'ready', backend: 'wasm', dtype: 'q8' } } as MessageEvent);
+        await expect(embedding).resolves.toEqual([1, 0]);
+        EmbeddingService.terminate();
+    });
+
     it('releases the global load lease and terminates a hung worker', async () => {
         vi.useFakeTimers();
         const { EmbeddingService } = await import('../../src/services/EmbeddingService');

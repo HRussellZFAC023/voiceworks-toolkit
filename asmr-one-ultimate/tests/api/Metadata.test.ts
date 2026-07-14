@@ -21,7 +21,7 @@ describe('MetadataApi', () => {
         it('should fetch tags from API', async () => {
             mockAxios.get.mockResolvedValue({ data: [{ id: 1, name: 'ASMR' }] });
             const tags = await MetadataApi.getTagList();
-            expect(mockAxios.get).toHaveBeenCalledWith('/api/tags');
+            expect(mockAxios.get).toHaveBeenCalledWith('/api/tags/');
             expect(tags).toEqual([{ id: 1, name: 'ASMR' }]);
         });
 
@@ -29,7 +29,8 @@ describe('MetadataApi', () => {
             mockAxios.get.mockResolvedValue({ data: [{ id: 1, name: 'ASMR' }] });
             await MetadataApi.getTagList();
             await MetadataApi.getTagList();
-            expect(mockAxios.get).toHaveBeenCalledTimes(1);
+            expect(mockAxios.get).toHaveBeenCalledOnce();
+            expect(mockAxios.get).toHaveBeenCalledWith('/api/tags/');
         });
 
         it('should return empty array when API returns non-array', async () => {
@@ -66,7 +67,7 @@ describe('MetadataApi', () => {
         it('should fetch VAs', async () => {
             mockAxios.get.mockResolvedValueOnce({ data: [{ id: 1, name: 'VA1' }] });
             const vas = await MetadataApi.getVAList();
-            expect(mockAxios.get).toHaveBeenCalledWith('/api/vas');
+            expect(mockAxios.get).toHaveBeenCalledWith('/api/vas/');
             expect(vas).toHaveLength(1);
         });
     });
@@ -75,7 +76,7 @@ describe('MetadataApi', () => {
         it('should fetch circles', async () => {
             mockAxios.get.mockResolvedValue({ data: [{ id: 1, name: 'Circle1' }] });
             const circles = await MetadataApi.getCircleList();
-            expect(mockAxios.get).toHaveBeenCalledWith('/api/circles');
+            expect(mockAxios.get).toHaveBeenCalledWith('/api/circles/');
             expect(circles).toHaveLength(1);
         });
     });

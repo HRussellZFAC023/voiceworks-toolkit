@@ -1771,6 +1771,35 @@ describe('Whisper', () => {
             expect((whisper as any).lastTranslatedSegmentCount).toBe(1);
         });
 
+        it('routes Japanese live transcription to Chinese in the explicit JP+ZH mode', async () => {
+            vi.spyOn(Config, 'get').mockImplementation((key) => {
+                if (key === 'learnerSubtitleMode') return 'jp-zh';
+                if (key === 'subtitleLang') return 'en';
+                if (key === 'translateMode') return true;
+                return false;
+            });
+            const whisper = new Whisper();
+            vi.spyOn(whisper as any, 'getWhisperSettings').mockReturnValue({ language: 'japanese' });
+            (whisper as any).segments = [{ start: 0, end: 2, text: 'お帰りなさい' }];
+            (whisper as any).currentCacheKey = 'cache-jp-zh';
+            (whisper as any).currentCacheIdentity = 'track-jp-zh';
+            const translateBatch = vi.spyOn(TranslationService, 'translateBatch')
+                .mockResolvedValue(['欢迎回来']);
+
+            await (whisper as any).translateAhead();
+
+            expect(translateBatch).toHaveBeenCalledOnce();
+            expect(translateBatch).toHaveBeenCalledWith(
+                ['お帰りなさい'],
+                'zh-cn',
+                expect.objectContaining({
+                    sourceLanguageHint: 'ja',
+                    preserveRequestedTarget: true,
+                    priority: Priority.HIGH,
+                }),
+            );
+        });
+
         it('keeps Chinese Whisper secondary translation in English while separately warming Japanese', async () => {
             vi.spyOn(Config, 'get').mockImplementation((key) => {
                 if (key === 'subtitleLang') return 'en';

@@ -1,20 +1,41 @@
 import { describe, expect, it, vi } from 'vitest';
 
-const mocks = vi.hoisted(() => ({ apiRequest: vi.fn() }));
+const mocks = vi.hoisted(() => ({ apiRequest: vi.fn(), discoveredIds: [] as string[] }));
 
 vi.mock('$', () => ({ GM_setValue: vi.fn() }));
 vi.mock('../../src/features/playlist/PlaylistService', () => ({ apiRequest: mocks.apiRequest }));
 vi.mock('../../src/features/playlist/PlaylistDiscoveryService', () => ({
-    PlaylistDiscoveryService: { getInstance: () => ({ getDiscoveredIds: () => [] }) },
+    PlaylistDiscoveryService: { getInstance: () => ({
+        getDiscoveredIds: () => mocks.discoveredIds,
+        getCachedMetadata: () => null,
+    }) },
+}));
+vi.mock('../../src/core/PacedBatch', () => ({
+    runRollingPool: async <T, R>(items: readonly T[], worker: (item: T, index: number) => Promise<R>) =>
+        Promise.allSettled(items.map(worker)),
 }));
 vi.mock('../../src/core/Utils', () => ({
     I18n: { t: (key: string) => key, format: (key: string) => key },
     Logger: { info: vi.fn(), warn: vi.fn() },
 }));
 
-import { fetchPlaylistAsExported } from '../../src/features/EmergencyExport';
+import { buildEmergencyExport, fetchPlaylistAsExported } from '../../src/features/EmergencyExport';
 
 describe('EmergencyExport performance', () => {
+    it('includes every discovered public playlist beyond the former 200-item boundary', async () => {
+        mocks.discoveredIds = Array.from({ length: 205 }, (_, index) => `public-${index}`);
+        mocks.apiRequest.mockReset().mockImplementation(async (url: string, params: { id?: string }) => {
+            if (url.endsWith('get-playlists')) return { playlists: [], pagination: { currentPage: 1, pageSize: 100, totalCount: 0 } };
+            if (url.endsWith('get-playlist-metadata')) return { id: params.id, name: params.id, works_count: 0 };
+            return { works: [], pagination: { currentPage: 1, pageSize: 100, totalCount: 0 } };
+        });
+
+        const result = await buildEmergencyExport();
+
+        expect(result.publicPlaylists).toHaveLength(205);
+        expect(result.publicPlaylists.at(-1)?.id).toBe('public-204');
+        mocks.discoveredIds = [];
+    });
     it('starts playlist metadata and first works page concurrently', async () => {
         mocks.apiRequest.mockReset();
         const resolvers: Array<(value: unknown) => void> = [];
@@ -60,6 +81,21 @@ describe('EmergencyExport performance', () => {
         });
     });
 
+    it.each([429, 503])('does not amplify HTTP %s failures with a compatibility retry', async (status) => {
+        mocks.apiRequest.mockReset();
+        mocks.apiRequest.mockImplementation(async (url: string) => {
+            if (url.includes('metadata')) return { id: 'unavailable', name: 'Unavailable', works_count: 0 };
+            throw Object.assign(new Error(`HTTP ${status}: Error`), { status });
+        });
+
+        const result = await fetchPlaylistAsExported('unavailable');
+        const worksCalls = mocks.apiRequest.mock.calls.filter(([url]) => String(url).includes('get-playlist-works'));
+
+        expect(worksCalls).toHaveLength(1);
+        expect(worksCalls[0][1]).toMatchObject({ pageSize: 100 });
+        expect(result.error).toContain(`HTTP ${status}`);
+    });
+
     it('uses work IDs embedded in the playlist listing when detail endpoints fail', async () => {
         mocks.apiRequest.mockReset();
         mocks.apiRequest.mockRejectedValue(new Error('HTTP 404: Error'));
@@ -78,6 +114,20 @@ describe('EmergencyExport performance', () => {
             { rjCode: 'RJ222222', title: '' },
         ]);
         expect(result.error).toBeUndefined();
+        expect(mocks.apiRequest.mock.calls.some(([url]) => String(url).includes('metadata'))).toBe(true);
+    });
+
+    it('prefers authoritative metadata over an incomplete listing seed', async () => {
+        mocks.apiRequest.mockReset();
+        mocks.apiRequest.mockImplementation(async (url: string) => url.includes('metadata')
+            ? { id: 'public-id', name: 'Current', description: 'Preserved', privacy: 2, works_count: 0 }
+            : { works: [], pagination: { currentPage: 1, pageSize: 100, totalCount: 0 } });
+
+        await expect(fetchPlaylistAsExported('public-id', {
+            id: 'public-id', name: 'Stale', privacy: 0, works: [],
+        })).resolves.toMatchObject({
+            name: 'Current', description: 'Preserved', privacy: 2,
+        });
     });
 
     it('continues compatibility pagination without totalCount until a short page', async () => {

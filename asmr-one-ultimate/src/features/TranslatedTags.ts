@@ -120,8 +120,7 @@ export class TranslatedTags {
 
         // Initialize tags cache
         try {
-            const res = await this.bridge.api.getTags();
-            this.tags = (res.data || []) as RawTag[];
+            this.tags = await this.bridge.api.getTags<RawTag>();
         } catch (e) {
             Logger.warn('[TranslatedTags] Failed to load tags cache', e);
         }

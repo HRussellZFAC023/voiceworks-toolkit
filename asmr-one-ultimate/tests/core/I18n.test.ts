@@ -277,19 +277,21 @@ describe('I18n', () => {
             expect(I18n.data).toHaveProperty('ja');
         });
 
-        it('should have matching keys between en and zh', () => {
-            const enKeys = Object.keys(I18n.data.en);
-            const zhKeys = Object.keys(I18n.data.zh);
-            const missingInZh = enKeys.filter(k => !zhKeys.includes(k));
-            // Allow some keys to be missing (falls back to en), but flag if many are missing
-            expect(missingInZh.length).toBeLessThan(enKeys.length * 0.1); // less than 10% missing
+        it.each(['zh', 'ja'] as const)('has exact bidirectional key parity between en and %s', (locale) => {
+            const enKeys = Object.keys(I18n.data.en).sort();
+            const localizedKeys = Object.keys(I18n.data[locale]).sort();
+
+            expect(localizedKeys, `${locale} must neither omit English keys nor add orphan keys`).toEqual(enKeys);
         });
 
-        it('should have matching keys between en and ja', () => {
-            const enKeys = Object.keys(I18n.data.en);
-            const jaKeys = Object.keys(I18n.data.ja);
-            const missingInJa = enKeys.filter(k => !jaKeys.includes(k));
-            expect(missingInJa.length).toBeLessThan(enKeys.length * 0.1);
+        it('has complete Chinese and Japanese catalogs for backup downloads and localized UI additions', () => {
+            const requiredKeys = Object.keys(I18n.data.en).filter(key => key.startsWith('backupDownloader'));
+            requiredKeys.push('commentsOpenSettings', 'infScrollCoverOf', 'infScrollAllAges', 'primaryLangPlaceholder', 'targetLangPlaceholder');
+
+            for (const locale of ['zh', 'ja'] as const) {
+                const missing = requiredKeys.filter(key => !I18n.data[locale][key]);
+                expect(missing, `${locale} is missing feature translations`).toEqual([]);
+            }
         });
     });
 });

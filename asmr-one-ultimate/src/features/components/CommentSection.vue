@@ -737,8 +737,8 @@ const saveStatusClass = computed(() => {
                     <!-- Fetch error -->
                     <button v-else-if="isExpanded && dlsiteLoaded && validDlsiteReviews.length === 0 && dlsiteFetchFailed"
                             class="asmr-comments-fetch-error cursor-pointer"
-                            title="Click to open settings"
-                            aria-label="Click to open settings"
+                            :title="t('commentsOpenSettings')"
+                            :aria-label="t('commentsOpenSettings')"
                             @click.stop="onFetchErrorClick">
                         <i class="material-icons">cloud_off</i>
                         <span>{{ t('commentsFetchFailed') }}</span>

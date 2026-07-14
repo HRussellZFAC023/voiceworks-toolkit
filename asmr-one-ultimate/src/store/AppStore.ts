@@ -58,6 +58,7 @@ const CONFIG_DEFAULTS: PluginConfig = {
     // Learner Mode
     showJP: true,
     subtitleLang: defaultSecondarySubtitleLanguage(),
+    learnerSubtitleMode: 'auto',
     primarySubtitleLang: 'ja',
     karaokeMode: true,
     segmentMode: true,
@@ -80,6 +81,8 @@ const CONFIG_DEFAULTS: PluginConfig = {
     vectorSearchApiKey: '',
     vectorIndexCursor: 1,
     vectorIndexLatestWorkId: '',
+    vectorDeltaScanHeadId: '',
+    vectorDeltaRescanNeeded: false,
     vectorIndexVersion: 0,
     vectorSearchModel: '',
     vectorSearchApiKeyHash: '',
@@ -268,6 +271,7 @@ class AppStoreImpl {
     constructor() {
         this.migrateSplitModeSettings();
         this.migrateWhisperDefaults();
+        this.migrateLearnerSubtitleMode();
     }
 
     // =========================================================================
@@ -356,6 +360,31 @@ class AppStoreImpl {
             const storedModel = GM_getValue('whisperModel', undefined as unknown as string);
             if (storedModel === 'onnx-community/kotoba-whisper-v2.2-ONNX') {
                 GM_setValue('whisperModel', CONFIG_DEFAULTS.whisperModel);
+            }
+            GM_setValue(migrationKey, true);
+        } catch {
+            // Storage is optional during early userscript bootstrap/tests.
+        }
+    }
+
+    /** Preserve explicit legacy secondary-language choices in the new named layout selector. */
+    private migrateLearnerSubtitleMode(): void {
+        if (typeof GM_getValue !== 'function' || typeof GM_setValue !== 'function') return;
+        const migrationKey = '__asmr_learner_subtitle_mode_v1__';
+        try {
+            if (GM_getValue(migrationKey, false)) return;
+            const existingMode = GM_getValue('learnerSubtitleMode', undefined as unknown as string);
+            if (typeof existingMode === 'undefined') {
+                const legacyLanguage = GM_getValue('subtitleLang', undefined as unknown as string);
+                if (typeof legacyLanguage === 'string' && legacyLanguage.trim()) {
+                    const language = legacyLanguage.trim().toLowerCase();
+                    const mode = language === 'en' || language.startsWith('en-')
+                        ? 'jp-en'
+                        : language === 'zh' || language === 'cn' || language.startsWith('zh-')
+                            ? 'jp-zh'
+                            : 'custom';
+                    GM_setValue('learnerSubtitleMode', mode);
+                }
             }
             GM_setValue(migrationKey, true);
         } catch {

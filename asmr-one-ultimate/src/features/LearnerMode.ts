@@ -4,6 +4,7 @@ import { TranslationService } from '../services/TranslationService';
 import { EventBus } from '../core/EventBus';
 import type { WhisperUpdatePayload, VueRoute, PlayerTrack, AudioPlayerState, TranslationSourceHint } from '../types';
 import { splitSubtitleSegments } from './subtitleSegmentSplitter';
+import { resolveLearnerSecondaryLanguage, subtitleLanguageAttribute } from './learnerSubtitleMode';
 import {
     findLyricsSource as findLyricsSourceUtil,
     normalizeLyricLines,
@@ -175,6 +176,9 @@ export class LearnerMode {
                     for (const el of this.getEnEls()) {
                         el.style.display = value ? '' : 'none';
                     }
+                } else if (key === 'subtitleLang' || key === 'learnerSubtitleMode') {
+                    this.lastText = '';
+                    this.updateLyrics();
                 } else if (key === 'enableWhisper' || key === 'enableJoiTool' || key === 'enableVisualizer') {
                     this.syncOverflowItemVisibility(key, !!value);
                 }
@@ -972,7 +976,7 @@ export class LearnerMode {
         const div = document.createElement('div');
         div.className = className;
         div.setAttribute('aria-live', 'polite');
-        div.innerHTML = `<div class="learner-jp" role="status"></div><button class="learner-en"></button>`;
+        div.innerHTML = `<div class="learner-jp" lang="ja" role="status"></div><button class="learner-en"></button>`;
         const en = div.querySelector('.learner-en') as HTMLButtonElement;
         if (this.isBlurEnabled) en.classList.add('blurred');
         if (!Config.get('enablePlayerTranslator')) en.style.display = 'none';
@@ -1094,7 +1098,7 @@ export class LearnerMode {
         const useWhisper = this.whisperActive;
 
         if (useWhisper) {
-            const targetLang = (Config.get('subtitleLang') || 'en').toLowerCase();
+            const targetLang = resolveLearnerSecondaryLanguage(Config.get('learnerSubtitleMode'), Config.get('subtitleLang')).toLowerCase();
             const sourceLanguageHint = this.whisperSourceLanguageHint;
             if (this.whisperLines.length) {
                 this.currentLyrics = this.whisperLines;
@@ -1323,18 +1327,25 @@ export class LearnerMode {
             return;
         }
 
-        const targetLang = (Config.get('subtitleLang') || 'en').toLowerCase();
+        const targetLang = resolveLearnerSecondaryLanguage(Config.get('learnerSubtitleMode'), Config.get('subtitleLang')).toLowerCase();
         const isCN = isChinese(fullText);
 
         // For Chinese subtitles, show JP translation as primary (never raw CN)
         let primaryText: string;
+        let hasUsableCachedJa = false;
         let splitIdx = -1;
         let hlStart = -1;
         const karaokeEnabled = !!Config.get('karaokeMode');
         const segmentEnabled = !!Config.get('segmentMode');
         if (isCN) {
-            const jaTranslation = TranslationService.peekCached(fullText, 'ja');
-            primaryText = jaTranslation || fullText || '';
+            const jaTranslation = TranslationService.peekCached(fullText, 'ja', 'zh');
+            // The primary element represents Japanese. Keep it empty until a
+            // genuine CN -> JA result exists; JP+ZH keeps the Chinese source in
+            // the secondary lane during the transition.
+            primaryText = jaTranslation?.trim() && jaTranslation.trim() !== fullText.trim()
+                ? jaTranslation
+                : '';
+            hasUsableCachedJa = !!primaryText;
         } else if (karaokeEnabled) {
             // Karaoke ON: always show full text, control visibility via CSS
             primaryText = fullText;
@@ -1352,7 +1363,7 @@ export class LearnerMode {
         }
 
         // Update JP line
-        if (primaryText && primaryText !== this.lastWhisperDisplayText) {
+        if ((isCN || primaryText) && primaryText !== this.lastWhisperDisplayText) {
             this.updatePrimaryLine(primaryText, splitIdx, hlStart);
             this.lastWhisperDisplayText = primaryText;
         } else if (karaokeEnabled && (splitIdx >= 0 || hlStart >= 0)) {
@@ -1379,13 +1390,14 @@ export class LearnerMode {
             }
 
             // For CN text, fire async CN→JA translation for primary line
-            if (isCN && !TranslationService.peekCached(fullText, 'ja')) {
-                TranslationService.translate(fullText, 'ja').then(translated => {
-                    if (translated && this.lastText === fullText && token === this.translationToken) {
+            if (isCN && !hasUsableCachedJa) {
+                TranslationService.translate(fullText, 'ja', { sourceLanguageHint: 'zh' }).then(translated => {
+                    if (translated?.trim() && translated.trim() !== fullText.trim()
+                        && this.lastText === fullText && token === this.translationToken) {
                         this.updatePrimaryLine(translated);
                         this.lastWhisperDisplayText = translated;
                     }
-                }).catch(() => { /* fire-and-forget: CN fallback already shown */ });
+                }).catch(() => { /* Primary intentionally stays blank on failure. */ });
             }
             // Look-ahead in non-whisper path too
             this.translateLookahead(fullText, targetLang);
@@ -1440,8 +1452,13 @@ export class LearnerMode {
      * Update the secondary (EN) line directly.
      */
     private updateSecondaryLine(text: string, isFallback: boolean): void {
+        const secondaryLang = resolveLearnerSecondaryLanguage(
+            Config.get('learnerSubtitleMode'),
+            Config.get('subtitleLang'),
+        );
         for (const e of this.getEnEls()) {
             e.textContent = text;
+            e.lang = subtitleLanguageAttribute(secondaryLang);
             e.classList.toggle('blurred', this.isBlurEnabled && !!text);
             e.classList.toggle('translation-fallback', isFallback);
         }
@@ -1746,7 +1763,7 @@ export class LearnerMode {
     private preTranslateAll(lyrics: { time: number; text: string }[]): void {
         if (lyrics.length === 0) return;
 
-        const targetLang = (Config.get('subtitleLang') || 'en').toLowerCase();
+        const targetLang = resolveLearnerSecondaryLanguage(Config.get('learnerSubtitleMode'), Config.get('subtitleLang')).toLowerCase();
         const texts = lyrics.map(l => l.text?.trim()).filter(Boolean);
         if (texts.length === 0) return;
         if (!TranslationService.canPrefetch(texts.length)) return;

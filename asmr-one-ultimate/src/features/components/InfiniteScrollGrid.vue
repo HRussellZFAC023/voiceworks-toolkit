@@ -296,7 +296,7 @@ function appendWorksToHostGrid(newWorks: WorkItem[]): string[] {
                 <div>
                     <div class="fit q-card asmr-infinite-fallback-card">
                         <a href="/work/${rjCode}">
-                            <div role="img" aria-label="Cover of ${escapeHtml(title)}" class="q-img overflow-hidden q-img--menu" style="max-width: 560px;">
+                            <div role="img" aria-label="${escapeHtml(format('infScrollCoverOf', { title }))}" class="q-img overflow-hidden q-img--menu" style="max-width: 560px;">
                                 <div style="padding-bottom: 75%;"></div>
                                 <div class="q-img__image absolute-full asmr-infinite-cover" style="background-size: cover; background-position: 50% 50%;">
                                     <img aria-hidden="true" class="absolute-full fit asmr-infinite-cover-img">
@@ -338,8 +338,8 @@ function appendWorksToHostGrid(newWorks: WorkItem[]): string[] {
                             </div>
                             <div>
                                 <span class="q-mx-sm text-weight-medium text-h6 text-red">${price} JPY </span>
-                                <span>Sales: ${sales}</span>
-                                ${allAges ? '<div class="q-chip row inline no-wrap items-center q-py-sm q-chip--dense q-chip--outline q-chip--square text-green" style="font-size: 10px; margin-top: 0px;"><div class="q-chip__content col row no-wrap items-center q-anchor--skip">All-ages</div></div>' : ''}
+                                <span>${escapeHtml(format('infScrollSales', { count: sales }))}</span>
+                                ${allAges ? `<div class="q-chip row inline no-wrap items-center q-py-sm q-chip--dense q-chip--outline q-chip--square text-green" style="font-size: 10px; margin-top: 0px;"><div class="q-chip__content col row no-wrap items-center q-anchor--skip">${escapeHtml(t('infScrollAllAges'))}</div></div>` : ''}
                             </div>
                         </div>
                     </div>

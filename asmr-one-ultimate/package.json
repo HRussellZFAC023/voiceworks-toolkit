@@ -16,7 +16,8 @@
     "test:e2e:headed": "playwright test --headed",
     "test:coverage": "vitest run --coverage",
     "version:bump": "node -e \"const p=require('./package.json');const fs=require('fs');p.version=String(Number(p.version)+1);fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\\n');console.log(p.version)\"",
-    "release": "node scripts/release.mjs"
+    "release": "node scripts/release.mjs",
+    "semantic:publish": "node scripts/publish-vector-baseline.mjs"
   },
   "lint-staged": {
     "src/**/*.{ts,tsx,vue}": [
@@ -29,6 +30,7 @@
     "vue": "^3.5.0"
   },
   "devDependencies": {
+    "@huggingface/transformers": "4.0.0-next.4",
     "@playwright/test": "^1.50.0",
     "@types/jsdom": "^27.0.0",
     "@types/node": "^25.1.0",

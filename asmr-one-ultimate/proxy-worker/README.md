@@ -17,8 +17,13 @@ Then paste the printed `https://asmr-api-proxy.<you>.workers.dev` URL into **Set
 
 - `GET /<api-path>` — proxied to `https://api.asmr-200.com/<api-path>` (override the mirror with `?__host=api.asmr-300.com`; only `api.asmr*.one|com` hosts are allowed)
 - `GET /__trace` — diagnostic: shows the colo/country the asmr API sees (should print `loc=JP`)
+- `GET|HEAD /semantic-index/manifest.json` — the revalidated semantic-search baseline manifest from the `SEMANTIC_INDEX` R2 binding
+- `GET|HEAD /semantic-index/objects/<sha256>.bin.gz` — immutable, content-addressed gzip binary baseline shards (served without `Content-Encoding`)
+
+Semantic-index routes are exact and public. They never forward authorization headers or map arbitrary paths to R2 keys. Publish every referenced shard first, verify its SHA-256 and byte length, and update `semantic-index/manifest.json` last. This avoids a manifest pointing at missing objects and protects clients from cached partial releases.
 
 `Authorization` headers are forwarded, so logged-in endpoints (your own playlists) work through the proxy. Only GET/HEAD are relayed; authorized responses are never cached.
+The caller's validated `Accept-Language` preference is forwarded so Chinese clients receive the same API locale through the fallback; absent or malformed values fall back to Japanese. Other request headers are not forwarded.
 
 ## E2E from a blocked network
 

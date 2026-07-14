@@ -6,12 +6,14 @@
  * Usage:
  *   npm run release          # from asmr-one-ultimate/
  *
- * The GitHub Release triggers the CI workflow which builds the userscript
- * and attaches it as a release asset. Greasy Fork's webhook then picks it up.
+ * The release is created as a draft, receives its verified asset, and is only
+ * then published. This ordering ensures storefront webhooks never observe a
+ * published release before its installable asset exists.
  */
 
 import { readFileSync, writeFileSync } from 'fs';
 import { execFileSync } from 'child_process';
+import { createHash } from 'crypto';
 import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
 
@@ -39,6 +41,35 @@ const commandSucceeds = (command, args, cwd = repoRoot) => {
         return true;
     } catch {
         return false;
+    }
+};
+
+const releaseNotFound = (error) => {
+    const stderr = String(error?.stderr || '').trim().toLowerCase();
+    return error?.status === 1 && stderr === 'release not found';
+};
+
+const findRelease = (tag) => {
+    try {
+        return JSON.parse(capture('gh', ['release', 'view', tag, '--json', 'tagName,isDraft']));
+    } catch (error) {
+        if (releaseNotFound(error)) return null;
+        const detail = String(error?.stderr || error?.message || error).trim();
+        throw new Error(`Could not inspect GitHub release ${tag}: ${detail}`);
+    }
+};
+
+const sha256File = (path) => createHash('sha256').update(readFileSync(path)).digest('hex');
+
+const requireAnnotatedTagAtHead = (tag) => {
+    const objectType = capture('git', ['cat-file', '-t', `refs/tags/${tag}`]);
+    if (objectType !== 'tag') {
+        throw new Error(`${tag} must be an annotated tag before its release can be resumed.`);
+    }
+    const taggedCommit = capture('git', ['rev-list', '-n', '1', tag]);
+    const headCommit = capture('git', ['rev-parse', 'HEAD']);
+    if (taggedCommit !== headCommit) {
+        throw new Error(`${tag} does not point at HEAD.`);
     }
 };
 
@@ -90,21 +121,33 @@ const currentVersion = String(pkg.version);
 if (!/^\d+$/.test(currentVersion)) {
     throw new Error(`Expected a numeric userscript version, got: ${currentVersion}`);
 }
+const preparedLock = JSON.parse(readFileSync(packageLockPath, 'utf8'));
+const lockVersion = String(preparedLock.version);
+const lockRootVersion = String(preparedLock.packages?.['']?.version);
+if (lockVersion !== currentVersion || lockRootVersion !== currentVersion) {
+    throw new Error(
+        `Prepared version metadata is inconsistent: package.json=${currentVersion}, `
+        + `package-lock.json=${lockVersion}, package-lock root=${lockRootVersion}.`,
+    );
+}
 
 const currentTag = `v${currentVersion}`;
 const tagExistsLocally = commandSucceeds('git', ['rev-parse', '--verify', '--quiet', `refs/tags/${currentTag}`]);
-const releaseExists = commandSucceeds('gh', ['release', 'view', currentTag, '--json', 'tagName']);
+const existingRelease = findRelease(currentTag);
+const releaseExists = existingRelease !== null;
 
 let releaseVersion = currentVersion;
 let tagAlreadyPrepared = false;
+let draftAlreadyPrepared = false;
 if (tagExistsLocally && !releaseExists) {
-    const taggedCommit = capture('git', ['rev-list', '-n', '1', currentTag]);
-    const headCommit = capture('git', ['rev-parse', 'HEAD']);
-    if (taggedCommit !== headCommit) {
-        throw new Error(`${currentTag} exists without a release but does not point at HEAD.`);
-    }
+    requireAnnotatedTagAtHead(currentTag);
     tagAlreadyPrepared = true;
     console.log(`Resuming incomplete release for ${currentTag}.`);
+} else if (tagExistsLocally && existingRelease?.isDraft) {
+    requireAnnotatedTagAtHead(currentTag);
+    tagAlreadyPrepared = true;
+    draftAlreadyPrepared = true;
+    console.log(`Resuming draft release for ${currentTag}.`);
 } else if (tagExistsLocally && releaseExists) {
     const taggedCommit = capture('git', ['rev-list', '-n', '1', currentTag]);
     const headCommit = capture('git', ['rev-parse', 'HEAD']);
@@ -138,22 +181,34 @@ run('npm', ['run', 'build'], packageDir);
 if (capture('git', ['status', '--porcelain'])) {
     throw new Error('The verified build differs from the committed release candidate. Commit the rebuilt artifact and rerun release.');
 }
+const verifiedAssetHash = sha256File(userscriptPath);
 run('npm', ['run', 'test:e2e'], packageDir, {
     ...process.env,
     E2E_PROXY: process.env.E2E_PROXY ?? '1',
 });
+if (capture('git', ['status', '--porcelain'])) {
+    throw new Error('Browser integration tests changed the committed release candidate. Restore or commit those changes and rerun release.');
+}
+const postE2eAssetHash = sha256File(userscriptPath);
+if (postE2eAssetHash !== verifiedAssetHash) {
+    throw new Error('Browser integration tests changed the verified userscript asset. Rebuild and rerun release.');
+}
 
-if (!tagAlreadyPrepared) run('git', ['tag', releaseTag]);
+if (!tagAlreadyPrepared) run('git', ['tag', '-m', releaseTag, releaseTag]);
 
 run('git', ['push', 'origin', 'HEAD']);
 run('git', ['push', 'origin', releaseTag]);
 
-run('gh', [
-    'release', 'create', releaseTag,
-    userscriptPath,
-    '--title', releaseTag,
-    '--generate-notes',
-]);
+if (!draftAlreadyPrepared) {
+    run('gh', [
+        'release', 'create', releaseTag,
+        '--draft',
+        '--title', releaseTag,
+        '--generate-notes',
+    ]);
+}
+run('gh', ['release', 'upload', releaseTag, userscriptPath, '--clobber']);
+run('gh', ['release', 'edit', releaseTag, '--draft=false']);
 
 console.log(`\nDone! ${releaseTag} release created.`);
 console.log(`The verified userscript is attached. CI will independently rebuild it; Greasy Fork will sync automatically.`);

@@ -61,6 +61,33 @@ describe('AppStore', () => {
             expect(AppStore.getConfig('segmentMode')).toBe(true);
         });
 
+        it('keeps the learner subtitle mode backward-compatible by default', () => {
+            expect(AppStore.getConfig('learnerSubtitleMode')).toBe('auto');
+        });
+
+        it('migrates an explicitly saved Chinese secondary language to the named Chinese layout', async () => {
+            mockStorage.subtitleLang = 'zh-CN';
+            delete mockStorage.__asmr_learner_subtitle_mode_v1__;
+            vi.resetModules();
+            const g = (typeof global !== 'undefined' ? global : window) as any;
+            delete g.__ASMR_APP_STORE__;
+            const freshModule = await import('../../src/store/AppStore');
+
+            expect(freshModule.AppStore.getConfig('learnerSubtitleMode')).toBe('jp-zh');
+            expect(mockStorage.__asmr_learner_subtitle_mode_v1__).toBe(true);
+        });
+
+        it('persists an explicit Chinese learner subtitle mode', () => {
+            AppStore.setConfig('learnerSubtitleMode', 'jp-zh');
+
+            expect(mockStorage.learnerSubtitleMode).toBe('jp-zh');
+            expect(AppStore.getConfig('learnerSubtitleMode')).toBe('jp-zh');
+            expect(emitMock).toHaveBeenCalledWith('config:change', expect.objectContaining({
+                key: 'learnerSubtitleMode',
+                value: 'jp-zh',
+            }));
+        });
+
         it('keeps full-track background audio caching opt-in', () => {
             expect(AppStore.getConfig('autoCacheAudio')).toBe(false);
             expect(AppStore.getConfigDefault('autoCacheAudio')).toBe(false);

@@ -25,6 +25,22 @@ afterEach(async () => {
 });
 
 describe('DownloadJobRepository', () => {
+    it('atomically persists discovery progress with each newly discovered file', async () => {
+        const name = `download-jobs-${crypto.randomUUID()}`;
+        const first = repository(name);
+        await first.createJob({
+            id: 'discovering', title: 'Many works', options: { discovery: { nextIndex: 0 }, selected: ['RJ1', 'RJ2'] },
+        }, []);
+        await first.appendFilesAndUpdateOptions('discovering', {
+            discovery: { nextIndex: 1 }, selected: ['RJ1', 'RJ2'],
+        }, [{ id: 'found-1', path: 'One/track.wav', url: '/one' }]);
+        await first.close();
+
+        const snapshot = await repository(name).loadJob<{ discovery: { nextIndex: number }; selected: string[] }>('discovering');
+        expect(snapshot?.job.options).toEqual({ discovery: { nextIndex: 1 }, selected: ['RJ1', 'RJ2'] });
+        expect(snapshot?.files).toEqual([expect.objectContaining({ id: 'found-1', status: 'pending' })]);
+    });
+
     it('persists the job profile, files, and checkpoints across instances', async () => {
         const name = `download-jobs-${crypto.randomUUID()}`;
         const first = repository(name);
@@ -121,5 +137,16 @@ describe('DownloadJobRepository', () => {
         expect(await repo.getFile('file-1')).toMatchObject({
             status: 'completed', path: 'Work/one.opus', downloadedBytes: 37, totalBytes: 37,
         });
+    });
+
+    it('atomically deletes an empty discovery job so it cannot become a resumable zombie', async () => {
+        const repo = repository();
+        await repo.createJob({ id: 'empty', title: 'Empty', options: { discovery: { complete: true } } }, []);
+
+        await repo.deleteJob('empty');
+
+        expect(await repo.loadJob('empty')).toBeUndefined();
+        expect(await repo.listJobs()).toEqual([]);
+        await expect(repo.deleteJob('empty')).rejects.toBeInstanceOf(DownloadRecordNotFoundError);
     });
 });

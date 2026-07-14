@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createEmbeddingWorker } from '../../src/features/EmbeddingWorkerLoader';
+import { createEmbeddingWorker, normalizeEmbeddingText } from '../../src/features/EmbeddingWorkerLoader';
 
 describe('EmbeddingWorkerLoader', () => {
     let workerCtor: any;
@@ -29,5 +29,9 @@ describe('EmbeddingWorkerLoader', () => {
         expect(worker).toBeDefined();
         expect(workerCtor).toHaveBeenCalledWith('blob:test-embedding-worker', { type: 'module' });
         expect((URL as any).revokeObjectURL).toHaveBeenCalledWith('blob:test-embedding-worker');
+    });
+
+    it('normalizes real whitespace before embedding', () => {
+        expect(normalizeEmbeddingText('  title\n\twith   spaces  ')).toBe('title with spaces');
     });
 });

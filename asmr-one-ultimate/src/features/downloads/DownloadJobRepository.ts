@@ -140,6 +140,30 @@ export class DownloadJobRepository {
         return (await this.getDatabase()).getAllFromIndex('files', 'by-job', jobId);
     }
 
+    /** Atomically checkpoint discovery progress together with newly discovered files. */
+    async appendFilesAndUpdateOptions<TOptions>(
+        jobId: string,
+        options: TOptions,
+        fileInputs: CreateDownloadFile[],
+    ): Promise<void> {
+        const database = await this.getDatabase();
+        const transaction = database.transaction(['jobs', 'files'], 'readwrite');
+        const jobStore = transaction.objectStore('jobs');
+        const job = await jobStore.get(jobId);
+        if (!job) throw new DownloadRecordNotFoundError('job', jobId);
+        const now = Date.now();
+        await Promise.all(fileInputs.map(file => transaction.objectStore('files').add({
+            ...file,
+            jobId,
+            status: file.status ?? 'pending',
+            downloadedBytes: 0,
+            createdAt: now,
+            updatedAt: now,
+        })));
+        await jobStore.put({ ...job, options, updatedAt: now });
+        await transaction.done;
+    }
+
     async getFile(fileId: string): Promise<DownloadFile | undefined> {
         return (await this.getDatabase()).get('files', fileId);
     }
@@ -277,6 +301,25 @@ export class DownloadJobRepository {
             updatedAt: now,
         })));
         await Promise.all(checkpoints.map((key) => transaction.objectStore('checkpoints').delete(key)));
+        await transaction.done;
+    }
+
+    /** Atomically remove a job and all of its resumable state. */
+    async deleteJob(jobId: string): Promise<void> {
+        const database = await this.getDatabase();
+        const transaction = database.transaction(['jobs', 'files', 'checkpoints'], 'readwrite');
+        const jobStore = transaction.objectStore('jobs');
+        const job = await jobStore.get(jobId);
+        if (!job) throw new DownloadRecordNotFoundError('job', jobId);
+        const [fileKeys, checkpointKeys] = await Promise.all([
+            transaction.objectStore('files').index('by-job').getAllKeys(jobId),
+            transaction.objectStore('checkpoints').index('by-job').getAllKeys(jobId),
+        ]);
+        await Promise.all([
+            jobStore.delete(jobId),
+            ...fileKeys.map(key => transaction.objectStore('files').delete(key)),
+            ...checkpointKeys.map(key => transaction.objectStore('checkpoints').delete(key)),
+        ]);
         await transaction.done;
     }
 

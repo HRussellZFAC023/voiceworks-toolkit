@@ -33,6 +33,49 @@ test.describe('Advanced Search Dialog', () => {
         await expect(dialog).toBeVisible({ timeout: 5000 });
     });
 
+    test('loads metadata on open and retries an empty transient response on reopen', async ({ injectedPage, isScriptLoaded, waitForBridge }) => {
+        const attempts: Record<'tags' | 'vas' | 'circles', number> = { tags: 0, vas: 0, circles: 0 };
+        let armed = false;
+        await injectedPage.route(/\/api\/(tags|vas|circles)\/?(?:\?|$)/, async route => {
+            // The host app independently loads some of these endpoints during
+            // bootstrap. Start measuring only after the bridge is ready so the
+            // assertion specifically covers the hidden userscript dialog.
+            if (!armed) {
+                await route.fallback();
+                return;
+            }
+            const match = new URL(route.request().url()).pathname.match(/\/api\/(tags|vas|circles)\/?$/);
+            const kind = match?.[1] as keyof typeof attempts;
+            attempts[kind] += 1;
+            if (attempts[kind] === 1) {
+                await route.fulfill({ status: 503, contentType: 'application/json', body: '{"error":"starting"}' });
+                return;
+            }
+            await route.fallback();
+        });
+
+        await helpers.gotoHome(injectedPage);
+        await isScriptLoaded();
+        await waitForBridge();
+        armed = true;
+        // The always-mounted hidden dialog must not consume its one transient
+        // attempt before the user asks to use Advanced Search.
+        await injectedPage.waitForTimeout(1500);
+        expect(attempts).toEqual({ tags: 0, vas: 0, circles: 0 });
+
+        await helpers.openAdvancedSearch(injectedPage);
+        const dialog = helpers.getAdvancedSearchDialog(injectedPage);
+        await expect(dialog.getByText('No results found')).toHaveCount(4, { timeout: 5000 });
+        expect(attempts).toEqual({ tags: 1, vas: 1, circles: 1 });
+
+        await dialog.locator('.asmr-close-btn').click();
+        await helpers.openAdvancedSearch(injectedPage);
+        await expect(dialog.getByRole('listbox', { name: /include tags/i }).getByRole('option', { name: /Whisper/ })).toBeVisible();
+        await expect(dialog.getByRole('listbox', { name: /voice actor/i }).getByRole('option', { name: /Test VA/ })).toBeVisible();
+        await expect(dialog.getByRole('listbox', { name: /circle/i }).getByRole('option', { name: /Test Circle/ })).toBeVisible();
+        expect(attempts).toEqual({ tags: 2, vas: 2, circles: 2 });
+    });
+
     test('advanced search dialog has include and exclude tag fields', async ({ injectedPage, isScriptLoaded, waitForBridge }) => {
         await helpers.gotoHome(injectedPage);
         await isScriptLoaded();

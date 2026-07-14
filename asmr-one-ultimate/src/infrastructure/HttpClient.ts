@@ -531,8 +531,8 @@ export class KikoeruApiClient {
         return this.get<T>(`/api/work/${id}`);
     }
 
-    async getTags<T = unknown>(): Promise<{ data: T[] }> {
-        return this.get<{ data: T[] }>('/api/tags');
+    async getTags<T = unknown>(): Promise<T[]> {
+        return this.get<T[]>('/api/tags/');
     }
 
     async get<T = unknown>(path: string, params?: Record<string, unknown>): Promise<T> {

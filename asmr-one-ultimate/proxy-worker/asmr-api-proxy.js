@@ -21,15 +21,22 @@ const ASMR_HOST_PATTERN = /^(?:[a-z0-9-]+\.)*asmr(-\d+)?\.(one|com)$/i;
 const DEFAULT_HOST = 'api.asmr-200.com';
 
 export default {
-    async fetch(request) {
+    async fetch(request, env) {
+        const url = new URL(request.url);
         if (request.method === 'OPTIONS') {
-            return new Response(null, { status: 204, headers: corsHeaders(request) });
+            return new Response(null, {
+                status: 204,
+                headers: url.pathname.startsWith('/semantic-index/') ? semanticCorsHeaders() : corsHeaders(request),
+            });
         }
         if (request.method !== 'GET' && request.method !== 'HEAD') {
             return json({ error: 'Only GET is supported' }, 405, request);
         }
 
-        const url = new URL(request.url);
+        if (url.pathname.startsWith('/semantic-index/')) {
+            return serveSemanticIndex(request, url, env);
+        }
+
         const query = new URLSearchParams(url.search);
         const hostOverride = query.get('__host');
         if (hostOverride) query.delete('__host');
@@ -54,7 +61,7 @@ export default {
         const headers = {
             'Accept': request.headers.get('Accept') || 'application/json',
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Accept-Language': 'ja',
+            'Accept-Language': normalizeAcceptLanguage(request.headers.get('Accept-Language')),
             'Referer': 'https://www.asmr.one/',
         };
         const auth = request.headers.get('Authorization');
@@ -81,10 +88,56 @@ export default {
     },
 };
 
+const SEMANTIC_MANIFEST_PATH = '/semantic-index/manifest.json';
+const SEMANTIC_OBJECT_PATTERN = /^\/semantic-index\/objects\/([a-f0-9]{64})\.bin\.gz$/;
+
+async function serveSemanticIndex(request, url, env) {
+    if (!env?.SEMANTIC_INDEX) {
+        return semanticJson({ error: 'Semantic index is unavailable' }, 503);
+    }
+    let key;
+    let immutable = false;
+    if (url.pathname === SEMANTIC_MANIFEST_PATH) {
+        key = 'semantic-index/manifest.json';
+    } else {
+        const match = SEMANTIC_OBJECT_PATTERN.exec(url.pathname);
+        if (!match) return semanticJson({ error: 'Semantic index object not found' }, 404);
+        key = `semantic-index/objects/${match[1]}.bin.gz`;
+        immutable = true;
+    }
+
+    const object = request.method === 'HEAD'
+        ? await env.SEMANTIC_INDEX.head(key)
+        : await env.SEMANTIC_INDEX.get(key);
+    if (!object) return semanticJson({ error: 'Semantic index object not found' }, 404);
+
+    const etag = object.httpEtag || (object.etag ? `"${object.etag}"` : undefined);
+    const headers = {
+        'Content-Type': immutable ? 'application/octet-stream' : (object.httpMetadata?.contentType || 'application/json'),
+        'Content-Length': String(object.size),
+        'Cache-Control': immutable
+            ? 'public, max-age=31536000, immutable'
+            : 'public, max-age=300, must-revalidate',
+        ...(etag ? { ETag: etag } : {}),
+        ...semanticCorsHeaders(),
+    };
+    if (etag && request.headers.get('If-None-Match') === etag) {
+        return new Response(null, { status: 304, headers });
+    }
+    return new Response(request.method === 'HEAD' ? null : object.body, { status: 200, headers });
+}
+
 function json(obj, status, request) {
     return new Response(JSON.stringify(obj), {
         status,
         headers: { 'Content-Type': 'application/json', ...corsHeaders(request) },
+    });
+}
+
+function semanticJson(obj, status) {
+    return new Response(JSON.stringify(obj), {
+        status,
+        headers: { 'Content-Type': 'application/json', ...semanticCorsHeaders() },
     });
 }
 
@@ -93,7 +146,25 @@ function corsHeaders(request) {
     return {
         'Access-Control-Allow-Origin': ALLOWED_ORIGIN_PATTERN.test(origin) ? origin : '*',
         'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type, Accept, Authorization',
+        'Access-Control-Allow-Headers': 'Content-Type, Accept, Accept-Language, Authorization, If-None-Match',
+        'Access-Control-Expose-Headers': 'ETag, Content-Length',
         'Access-Control-Max-Age': '86400',
     };
+}
+
+function semanticCorsHeaders() {
+    return {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type, Accept, If-None-Match',
+        'Access-Control-Expose-Headers': 'ETag, Content-Length',
+        'Access-Control-Max-Age': '86400',
+    };
+}
+
+function normalizeAcceptLanguage(value) {
+    if (!value || value.length > 256) return 'ja';
+    const ranges = value.split(',').slice(0, 10).map((part) => part.trim()).filter(Boolean);
+    const valid = ranges.filter((range) => /^(?:\*|[a-z]{1,8}(?:-[a-z0-9]{1,8})*)(?:\s*;\s*q=(?:0(?:\.\d{0,3})?|1(?:\.0{0,3})?))?$/i.test(range));
+    return valid.length ? valid.join(', ') : 'ja';
 }

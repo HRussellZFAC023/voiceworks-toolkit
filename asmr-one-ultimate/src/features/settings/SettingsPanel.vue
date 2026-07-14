@@ -6,7 +6,7 @@ import SettingsSelect from './SettingsSelect.vue';
 import SettingsHotkeyInput from './SettingsHotkeyInput.vue';
 import BackupWorkDownloader from '../components/BackupWorkDownloader.vue';
 import type { BackupDownloadProfile, BackupDownloadState, BackupPlaylistDownloadItem, BackupWorkDownloadItem } from '../backupWorkDownloaderTypes';
-import { mapBackupPlaylistSources } from '../backupWorkDownloaderUtils';
+import { mapBackupPlaylistSources, resolveDownloadWorkTranslations } from '../backupWorkDownloaderUtils';
 import { useI18n } from '../../composables/useI18n';
 import { useConfig } from '../../composables/useConfig';
 import { useEventBus } from '../../composables/useEventBus';
@@ -145,6 +145,13 @@ const whisperPresetHint = computed(() =>
 const whisperVadOptions = computed(() => [
     { value: 'off', label: t('whisperVadOff') },
     { value: 'conservative', label: t('whisperVadConservative') },
+]);
+
+const learnerSubtitleModeOptions = computed(() => [
+    { value: 'auto', label: t('learnerSubtitleModeAuto') },
+    { value: 'jp-en', label: t('learnerSubtitleModeJpEn') },
+    { value: 'jp-zh', label: t('learnerSubtitleModeJpZh') },
+    { value: 'custom', label: t('learnerSubtitleModeCustom') },
 ]);
 
 const whisperDownloadStatus = ref({
@@ -302,11 +309,27 @@ const backupDownloadPlaylists = ref<BackupPlaylistDownloadItem[]>([]);
 const backupDownloadWorks = ref<BackupWorkDownloadItem[]>([]);
 let backupChooserPopulationGeneration = 0;
 interface DownloadEnrichment { tags: AudioTags; artworkUrl?: string }
+interface PersistedDownloadDiscovery {
+    works: BackupWorkDownloadItem[];
+    nextIndex: number;
+    skippedWorkIds: string[];
+    titlesReady: boolean;
+    complete: boolean;
+}
 interface PersistedBackupDownloadOptions {
     state: BackupDownloadState;
     directory: FileSystemDirectoryHandle;
     enrichment: Record<string, DownloadEnrichment>;
     opusOutputPaths?: Record<string, string>;
+    discovery?: PersistedDownloadDiscovery;
+}
+
+function clonePersistedDownloadOptions(options: PersistedBackupDownloadOptions): PersistedBackupDownloadOptions {
+    const { directory, ...serializable } = options;
+    return {
+        ...(JSON.parse(JSON.stringify(serializable)) as Omit<PersistedBackupDownloadOptions, 'directory'>),
+        directory,
+    };
 }
 const resumableDownloadJobs = ref<Array<DownloadJob<PersistedBackupDownloadOptions>>>([]);
 const downloadJobRepository = new DownloadJobRepository();
@@ -322,7 +345,7 @@ const downloaderLabels = computed(() => ({
     filenameTitle: t('backupDownloaderFilename'), titleOriginal: t('backupDownloaderTitleOriginal'),
     titleTranslated: t('backupDownloaderTitleTranslated'), titleOriginalTranslated: t('backupDownloaderTitleBoth'),
     titleNone: t('backupDownloaderTitleNone'), convertToOpus: t('backupDownloaderOpus'), opusBitrate: t('backupDownloaderBitrate'),
-    metadata: t('backupDownloaderMetadata'), metadataAdditive: t('backupDownloaderAdditive'),
+    metadata: t('backupDownloaderMetadata'), metadataAdditive: t('backupDownloaderMetadataAdditive'),
     metadataOverwrite: t('backupDownloaderOverwrite'), metadataAdditiveHint: t('backupDownloaderAdditiveHint'),
     metadataOverwriteHint: t('backupDownloaderOverwriteHint'), includeArtwork: t('backupDownloaderArtwork'),
     includeArtworkHint: t('backupDownloaderArtworkHint'), cancel: t('backupDownloaderCancel'), start: t('backupDownloaderStart'),
@@ -414,6 +437,84 @@ function resolvedWorkFolder(work: BackupWorkDownloadItem, state: BackupDownloadS
     return original;
 }
 
+function titleModeNeedsTranslation(state: BackupDownloadState): boolean {
+    return state.titleMode === 'translated' || state.titleMode === 'original-bracketed-translation';
+}
+
+async function ensureDiscoveryTitles(
+    jobId: string,
+    options: PersistedBackupDownloadOptions,
+): Promise<PersistedBackupDownloadOptions> {
+    const discovery = options.discovery;
+    if (!discovery || discovery.titlesReady || !titleModeNeedsTranslation(options.state)) return options;
+    emergencyExportStatus.value = t('backupDownloaderTranslatingTitles');
+    const target = TranslationService.getUiTargetLang();
+    const works = await resolveDownloadWorkTranslations(discovery.works, options.state.titleMode, texts =>
+        TranslationService.translateBatch(texts, target, { preserveRequestedTarget: true }));
+    const next = clonePersistedDownloadOptions({
+        ...options,
+        discovery: { ...discovery, works, titlesReady: true },
+    });
+    await downloadJobRepository.appendFilesAndUpdateOptions(jobId, next, []);
+    return next;
+}
+
+async function continueDownloadDiscovery(
+    jobId: string,
+    initialOptions: PersistedBackupDownloadOptions,
+): Promise<PersistedBackupDownloadOptions> {
+    let options = initialOptions;
+    let discovery = options.discovery;
+    if (!discovery || discovery.complete) return options;
+    const existingFiles = await downloadJobRepository.listFiles(jobId);
+    const occupiedWorkFolders = new Set(existingFiles.map(file => file.path.split('/')[0]).filter(Boolean));
+    for (let index = discovery.nextIndex; index < discovery.works.length; index += 1) {
+        const work = discovery.works[index];
+        emergencyExportStatus.value = format('backupDownloaderDiscoverProgress', { done: index + 1, total: discovery.works.length });
+        const newFiles: Array<{ id: string; path: string; url: string; totalBytes?: number }> = [];
+        const enrichment = { ...options.enrichment };
+        const skippedWorkIds = [...discovery.skippedWorkIds];
+        try {
+            const [tracks, info] = await Promise.all([WorkService.getTracks(work.id), WorkService.getWorkInfo(work.id)]);
+            const manifest = discoverDownloadManifest(tracks as unknown as DownloadTreeNode[]);
+            const folder = reserveCollisionFreePath([resolvedWorkFolder(work, options.state)], occupiedWorkFolders)[0];
+            for (const entry of manifest.entries) {
+                const category = entry.category === 'unknown' ? 'other' : entry.category;
+                if (!options.state.filters[category] || !entry.primaryUrl) continue;
+                const id = `${jobId}:${work.id}:${entry.id}`;
+                const path = [folder, ...entry.relativePath].join('/');
+                newFiles.push({ id, path, url: entry.primaryUrl, totalBytes: entry.size });
+                const filename = entry.relativePath.at(-1) || entry.sourceTitle;
+                enrichment[id] = {
+                    tags: {
+                        title: filename.replace(/\.[^.]+$/, ''), album: folder,
+                        artist: info.vas?.map(va => va.name).filter(Boolean) || [],
+                        albumartist: info.circle?.name || info.name || '',
+                        genre: info.tags?.map(tag => tag.name).filter(Boolean) || [],
+                        date: info.release || '', website: info.source_url || `https://www.dlsite.com/maniax/work/=/product_id/${info.source_id}.html`,
+                        circle_id: String(info.circle_id || ''), age_rating: info.age_category_string || '',
+                    },
+                    artworkUrl: info.mainCoverUrl || info.thumbnailCoverUrl || info.samCoverUrl,
+                };
+            }
+        } catch (error) {
+            skippedWorkIds.push(String(work.id));
+            Logger.warn('[BackupDownloader] Skipping unavailable work', String(work.id), error);
+        }
+        discovery = { ...discovery, nextIndex: index + 1, skippedWorkIds };
+        options = clonePersistedDownloadOptions({ ...options, enrichment, discovery });
+        await downloadJobRepository.appendFilesAndUpdateOptions(jobId, options, newFiles);
+    }
+    const allFiles = await downloadJobRepository.listFiles(jobId);
+    options = clonePersistedDownloadOptions({
+        ...options,
+        opusOutputPaths: options.state.convertToOpus ? planOpusOutputPaths(allFiles) : {},
+        discovery: { ...discovery, complete: true },
+    });
+    await downloadJobRepository.appendFilesAndUpdateOptions(jobId, options, []);
+    return options;
+}
+
 async function startBackupWorkDownload(state: BackupDownloadState): Promise<void> {
     backupDownloaderOpen.value = false;
     emergencyExportBusy.value = true;
@@ -424,51 +525,35 @@ async function startBackupWorkDownload(state: BackupDownloadState): Promise<void
         }
         const directory = await chooseDownloadDirectory();
         const jobId = crypto.randomUUID();
-        const selected = backupDownloadWorks.value.filter(work => state.selectedWorkIds.map(String).includes(String(work.id)));
-        const files: Array<{ id: string; path: string; url: string; totalBytes?: number }> = [];
-        const enrichment: Record<string, DownloadEnrichment> = {};
-        const occupiedWorkFolders = new Set<string>();
-        const skippedWorks: string[] = [];
-        for (let index = 0; index < selected.length; index += 1) {
-            const work = selected[index];
-            emergencyExportStatus.value = format('backupDownloaderDiscoverProgress', { done: index + 1, total: selected.length });
-            try {
-                const [tracks, info] = await Promise.all([WorkService.getTracks(work.id), WorkService.getWorkInfo(work.id)]);
-                const manifest = discoverDownloadManifest(tracks as unknown as DownloadTreeNode[]);
-                const folder = reserveCollisionFreePath([resolvedWorkFolder(work, state)], occupiedWorkFolders)[0];
-                for (const entry of manifest.entries) {
-                    const category = entry.category === 'unknown' ? 'other' : entry.category;
-                    if (!state.filters[category] || !entry.primaryUrl) continue;
-                    const id = `${jobId}:${work.id}:${entry.id}`;
-                    const path = [folder, ...entry.relativePath].join('/');
-                    files.push({ id, path, url: entry.primaryUrl, totalBytes: entry.size });
-                    const filename = entry.relativePath.at(-1) || entry.sourceTitle;
-                    enrichment[id] = {
-                        tags: {
-                            title: filename.replace(/\.[^.]+$/, ''), album: folder,
-                            artist: info.vas?.map(va => va.name).filter(Boolean) || [],
-                            albumartist: info.circle?.name || info.name || '',
-                            genre: info.tags?.map(tag => tag.name).filter(Boolean) || [],
-                            date: info.release || '', website: info.source_url || `https://www.dlsite.com/maniax/work/=/product_id/${info.source_id}.html`,
-                            circle_id: String(info.circle_id || ''), age_rating: info.age_category_string || '',
-                        },
-                        artworkUrl: info.mainCoverUrl || info.thumbnailCoverUrl || info.samCoverUrl,
-                    };
-                }
-            } catch (error) {
-                skippedWorks.push(String(work.id));
-                Logger.warn('[BackupDownloader] Skipping unavailable work', String(work.id), error);
-            }
-        }
-        if (!files.length) throw new Error(t('backupDownloaderNoFiles'));
+        const selected = backupDownloadWorks.value
+            .filter(work => state.selectedWorkIds.map(String).includes(String(work.id)))
+            // Vue wraps the chooser collection in reactive proxies, which are
+            // not structured-cloneable into IndexedDB. Persist plain snapshots.
+            .map(work => ({
+                ...work,
+                playlistIds: work.playlistIds ? [...work.playlistIds] : undefined,
+            }));
         const repository = downloadJobRepository;
-        const options: PersistedBackupDownloadOptions = {
-            state, directory, enrichment,
-            opusOutputPaths: state.convertToOpus ? planOpusOutputPaths(files) : {},
-        };
+        let options = clonePersistedDownloadOptions({
+            state, directory, enrichment: {}, opusOutputPaths: {},
+            discovery: {
+                works: selected,
+                nextIndex: 0,
+                skippedWorkIds: [],
+                titlesReady: !titleModeNeedsTranslation(state),
+                complete: false,
+            },
+        });
         await repository.createJob({
             id: jobId, title: format('backupDownloaderJobTitle', { date: new Date().toLocaleString() }), options,
-        }, files);
+        }, []);
+        options = await ensureDiscoveryTitles(jobId, options);
+        options = await continueDownloadDiscovery(jobId, options);
+        const files = await repository.listFiles(jobId);
+        if (!files.length) {
+            await repository.deleteJob(jobId);
+            throw new Error(t('backupDownloaderNoFiles'));
+        }
         emergencyExportStatus.value = format('backupDownloaderRunning', { count: files.length });
         const fileLabels = new Map(files.map(file => [file.id, file.path]));
         const coordinator = new DownloadCoordinator(repository, new DownloadTransport(), new DirectoryDownloadSink(directory), 2, createOpusTransformer(options));
@@ -479,6 +564,7 @@ async function startBackupWorkDownload(state: BackupDownloadState): Promise<void
         if (completed?.job.status !== 'completed') {
             throw new Error(completed?.files.find(file => file.error)?.error || t('backupDownloaderFailed'));
         }
+        const skippedWorks = options.discovery?.skippedWorkIds || [];
         emergencyExportStatus.value = skippedWorks.length
             ? format('backupDownloaderDoneWithSkipped', { count: skippedWorks.length })
             : t('backupDownloaderDone');
@@ -529,8 +615,14 @@ async function resumeBackupDownload(job: DownloadJob<PersistedBackupDownloadOpti
         const sink = new DirectoryDownloadSink(job.options.directory);
         if (!await sink.ensurePermission(true)) throw new Error(t('backupDownloaderPermission'));
         emergencyExportStatus.value = t('backupDownloaderResuming');
+        let options = await ensureDiscoveryTitles(job.id, job.options);
+        options = await continueDownloadDiscovery(job.id, options);
         const fileLabels = new Map((await downloadJobRepository.listFiles(job.id)).map(file => [file.id, file.path]));
-        await new DownloadCoordinator(downloadJobRepository, new DownloadTransport(), sink, 2, createOpusTransformer(job.options)).run(job.id, progress => {
+        if (!fileLabels.size) {
+            await downloadJobRepository.deleteJob(job.id);
+            throw new Error(t('backupDownloaderNoFiles'));
+        }
+        await new DownloadCoordinator(downloadJobRepository, new DownloadTransport(), sink, 2, createOpusTransformer(options)).run(job.id, progress => {
             emergencyExportStatus.value = format('backupDownloaderFileProgress', { file: fileLabels.get(progress.fileId) || progress.fileId, bytes: progress.completedBytes });
         });
         const completed = await downloadJobRepository.loadJob(job.id);
@@ -865,9 +957,17 @@ const credits = [
         <!-- Subtitle Settings                                            -->
         <!-- ============================================================ -->
         <div id="asmr-subtitle-settings" class="asmr-settings-section rounded-borders q-list q-list--bordered">
-            <SettingsInput config-key="primarySubtitleLang" :label="t('primaryLang')" :sublabel="t('primaryLangSub')" placeholder="e.g. ja, zh" icon="translate" />
+            <SettingsSelect
+                config-key="learnerSubtitleMode"
+                :label="t('learnerSubtitleMode')"
+                :sublabel="t('learnerSubtitleModeSub')"
+                :options="learnerSubtitleModeOptions"
+                icon="subtitles"
+            />
             <hr class="q-separator q-separator--horizontal asmr-settings-separator">
-            <SettingsInput config-key="subtitleLang" :label="t('targetLang')" :sublabel="t('targetLangSub')" placeholder="e.g. en, es, fr" icon="language" />
+            <SettingsInput config-key="primarySubtitleLang" :label="t('primaryLang')" :sublabel="t('primaryLangSub')" :placeholder="t('primaryLangPlaceholder')" icon="translate" />
+            <hr class="q-separator q-separator--horizontal asmr-settings-separator">
+            <SettingsInput config-key="subtitleLang" :label="t('targetLang')" :sublabel="t('targetLangSub')" :placeholder="t('targetLangPlaceholder')" icon="language" />
         </div>
 
         <!-- ============================================================ -->

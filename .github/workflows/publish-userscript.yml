@@ -62,16 +62,40 @@ jobs:
           PACKAGE_VERSION: ${{ steps.version.outputs.version }}
         run: test "$RELEASE_TAG" = "v$PACKAGE_VERSION"
 
-      - name: Upload release asset
+      - name: Download published release asset
         if: github.event_name == 'release'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${{ github.event.release.tag_name }}" asmr-one-ultimate/dist/asmr-one-ultimate.user.js --clobber
+        run: |
+          mkdir -p "$RUNNER_TEMP/published-release"
+          gh release download "${{ github.event.release.tag_name }}" \
+            --pattern asmr-one-ultimate.user.js \
+            --dir "$RUNNER_TEMP/published-release"
+
+      - name: Verify published asset matches CI build
+        if: github.event_name == 'release'
+        run: |
+          test -f "$RUNNER_TEMP/published-release/asmr-one-ultimate.user.js"
+          test "$(sha256sum asmr-one-ultimate/dist/asmr-one-ultimate.user.js | cut -d' ' -f1)" = \
+            "$(sha256sum "$RUNNER_TEMP/published-release/asmr-one-ultimate.user.js" | cut -d' ' -f1)"
+
+      - name: Upload manual build artifact
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: asmr-one-ultimate-${{ steps.version.outputs.version }}
+          path: asmr-one-ultimate/dist/asmr-one-ultimate.user.js
+          if-no-files-found: error
 
       - name: Summary
         run: |
-          echo "### Userscript Published" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Userscript Build Verified" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "- **Version**: ${{ steps.version.outputs.version }}" >> "$GITHUB_STEP_SUMMARY"
           echo "- **Tag**: ${{ github.event.release.tag_name || 'manual' }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Download**: \`https://github.com/${{ github.repository }}/releases/latest/download/asmr-one-ultimate.user.js\`" >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ github.event_name }}" = "release" ]; then
+            echo "- **Result**: Published release asset matches the CI build byte-for-byte." >> "$GITHUB_STEP_SUMMARY"
+            echo "- **Download**: \`https://github.com/${{ github.repository }}/releases/latest/download/asmr-one-ultimate.user.js\`" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- **Result**: Manual build is available as a workflow artifact." >> "$GITHUB_STEP_SUMMARY"
+          fi

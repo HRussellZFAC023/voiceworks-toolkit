@@ -31,7 +31,7 @@ export const MetadataApi = {
         }
 
         try {
-            const res = await getAxios().get(`/api/${field}`);
+            const res = await getAxios().get(`/api/${field}/`);
             // Ensure we always return an array
             const data = Array.isArray(res.data) ? res.data as T[] : [];
             // eslint-disable-next-line @typescript-eslint/no-explicit-any -- generic T can't narrow indexed field

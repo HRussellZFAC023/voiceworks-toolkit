@@ -358,6 +358,65 @@ test.describe('Emergency Playlist Export', () => {
         expect(bytes).toEqual([1, 2, 3, 4]);
     });
 
+    test('persists selection and resumes work discovery after a refresh', async ({ injectedPage, isScriptLoaded }) => {
+        test.setTimeout(180000);
+        let trackRequests = 0;
+        let releaseCancelledRequest: (() => void) | undefined;
+        await injectedPage.route('**/api/tracks/888888*', async route => {
+            trackRequests += 1;
+            if (trackRequests === 1) {
+                // Keep the first discovery request in flight until navigation
+                // cancels it, reproducing a refresh during preparation.
+                await new Promise<void>(resolve => { releaseCancelledRequest = resolve; });
+                return;
+            }
+            await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify([{
+                type: 'folder', title: 'Audio', children: [{ type: 'audio', hash: 'resume-discovery', title: 'track.wav', mediaDownloadUrl: 'https://media.e2e/discovery.wav' }],
+            }]) });
+        });
+        await injectedPage.route('**/api/workInfo/888888*', route => route.fulfill({
+            status: 200, contentType: 'application/json', body: JSON.stringify({
+                id: 888888, source_id: 'RJ888888', title: 'Discovery work', name: 'Circle', circle: { name: 'Circle' }, vas: [], tags: [],
+                release: '2026-01-01', source_url: '', mainCoverUrl: '', thumbnailCoverUrl: '', samCoverUrl: '',
+            }),
+        }));
+        await injectedPage.route('https://media.e2e/discovery.wav', route => route.fulfill({ status: 200, body: Buffer.from([8, 8, 8]) }));
+        await helpers.gotoSettings(injectedPage); await isScriptLoaded();
+        await injectedPage.evaluate(() => { (window as any).showDirectoryPicker = () => navigator.storage.getDirectory(); });
+        const backup = { format: 'asmr-one-ultimate-playlist-backup', version: 1, exportedAt: '', source: '', errors: [], publicPlaylists: [], ownPlaylists: [{
+            id: 'discovery-p', name: 'Discovery', description: '', worksCount: 1, works: [{ rjCode: 'RJ888888', title: 'Discovery work' }],
+        }] };
+        await injectedPage.getByTestId('backup-download-input').setInputFiles({ name: 'backup.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(backup)) });
+        await injectedPage.getByTestId('playlist-check-discovery-p').check();
+        await injectedPage.getByTestId('title-mode').selectOption('original');
+        await injectedPage.getByTestId('start').click();
+        await expect.poll(() => trackRequests).toBe(1);
+        const jobId = await injectedPage.evaluate(async () => new Promise<string>((resolve, reject) => {
+            const request = indexedDB.open('asmr-one-downloads', 1);
+            request.onsuccess = () => {
+                const get = request.result.transaction('jobs').objectStore('jobs').getAll();
+                get.onsuccess = () => resolve(get.result[0]?.id || '');
+                get.onerror = () => reject(get.error);
+            };
+            request.onerror = () => reject(request.error);
+        }));
+        expect(jobId).not.toBe('');
+
+        await injectedPage.reload({ waitUntil: 'domcontentloaded' });
+        const resume = injectedPage.getByTestId(`backup-download-resume-${jobId}`);
+        await expect(resume).toBeVisible({ timeout: 15000 });
+        releaseCancelledRequest?.();
+        await resume.click();
+        await expect(injectedPage.getByTestId('emergency-export-status')).toContainText(/downloaded|保存|下载/i, { timeout: 170000 });
+        expect(trackRequests).toBeGreaterThanOrEqual(2);
+        const bytes = await injectedPage.evaluate(async () => {
+            const root = await navigator.storage.getDirectory();
+            const audio = await (await root.getDirectoryHandle('Discovery work')).getDirectoryHandle('Audio');
+            return [...new Uint8Array(await (await (await audio.getFileHandle('track.wav')).getFile()).arrayBuffer())];
+        });
+        expect(bytes).toEqual([8, 8, 8]);
+    });
+
     test('skips unavailable works and keeps same-title work folders collision-free', async ({ injectedPage, isScriptLoaded }) => {
         for (const id of ['555555', '777777']) {
             await injectedPage.route(`**/api/tracks/${id}*`, route => route.fulfill({

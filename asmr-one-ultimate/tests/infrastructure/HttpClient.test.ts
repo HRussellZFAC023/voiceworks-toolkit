@@ -260,9 +260,10 @@ describe('KikoeruApiClient', () => {
     });
 
     it('should fetch tags', async () => {
-        mockAxios.get.mockResolvedValue({ data: { data: [{ id: 1, name: 'ASMR' }] } });
+        mockAxios.get.mockResolvedValue({ data: [{ id: 1, name: 'ASMR' }] });
         const result = await client.getTags();
-        expect(result).toEqual({ data: [{ id: 1, name: 'ASMR' }] });
+        expect(mockAxios.get).toHaveBeenCalledWith('/api/tags/', { params: undefined });
+        expect(result).toEqual([{ id: 1, name: 'ASMR' }]);
     });
 
     it('should deduplicate concurrent requests for same path', async () => {

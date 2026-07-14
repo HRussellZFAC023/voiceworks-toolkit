@@ -121,6 +121,17 @@ const language = ref('');
 const tagList = shallowRef<TagEntry[]>([]);
 const vaList = shallowRef<VAEntry[]>([]);
 const circleList = shallowRef<CircleEntry[]>([]);
+const metadataLoadState = ref<'idle' | 'loading' | 'loaded'>('idle');
+
+const tagEmptyMessage = computed(() => metadataLoadState.value === 'loading'
+    ? t('advLoadingTags')
+    : t('advNoResults'));
+const vaEmptyMessage = computed(() => metadataLoadState.value === 'loading'
+    ? t('advLoadingVA')
+    : t('advNoResults'));
+const circleEmptyMessage = computed(() => metadataLoadState.value === 'loading'
+    ? t('advLoadingCircles')
+    : t('advNoResults'));
 
 // Translation cache for VA/Circle names (original -> current UI language)
 const translationCache = ref(new Map<string, string>());
@@ -510,6 +521,7 @@ async function loadMetadataLists(): Promise<void> {
     if (metadataLoadingPromise) return metadataLoadingPromise;
     const generation = ++metadataTranslationGeneration;
     const targetLang = TranslationService.getUiTargetLang();
+    metadataLoadState.value = 'loading';
 
     metadataLoadingPromise = (async () => {
         try {
@@ -583,7 +595,15 @@ async function loadMetadataLists(): Promise<void> {
             );
         } catch (e) {
             Logger.warn('[AdvancedSearch] Failed to load metadata lists:', e);
-            metadataLoadingPromise = null; // Allow retry on failure
+        } finally {
+            if (generation !== metadataTranslationGeneration) return;
+            metadataLoadState.value = 'loaded';
+            // MetadataApi deliberately degrades transient startup/auth failures
+            // to empty arrays. Permit one later user-driven retry on reopen,
+            // without creating an automatic retry loop while the dialog is open.
+            if (!tagList.value.length || !vaList.value.length || !circleList.value.length) {
+                metadataLoadingPromise = null;
+            }
         }
     })();
 
@@ -1014,19 +1034,19 @@ watch(isOpen, (open) => {
     if (open) {
         refreshSortUi();
         ensureHostSortWatcher();
+        void loadMetadataLists();
     }
-});
+}, { immediate: true });
 
 watch(lang, () => {
     metadataTranslationGeneration++;
     metadataLoadingPromise = null;
+    metadataLoadState.value = 'idle';
     translationCache.value = new Map();
-    void loadMetadataLists();
+    if (isOpen.value) void loadMetadataLists();
 });
 
-// When the dialog first mounts, start loading metadata in background
 onMounted(() => {
-    void loadMetadataLists();
     ensureHostSortWatcher();
     document.addEventListener('keydown', onKeydown);
 });
@@ -1073,7 +1093,7 @@ onUnmounted(() => {
                             :filter-placeholder="t('advFilterTags')"
                             :tags="tagList"
                             :selected="selectedIncludes"
-                            :empty-message="t('advLoadingTags')"
+                            :empty-message="tagEmptyMessage"
                             @select="onIncludeTagSelect"
                             @remove="onIncludeTagRemove"
                         />
@@ -1083,7 +1103,7 @@ onUnmounted(() => {
                             :filter-placeholder="t('advFilterTags')"
                             :tags="tagList"
                             :selected="selectedExcludes"
-                            :empty-message="t('advLoadingTags')"
+                            :empty-message="tagEmptyMessage"
                             @select="onExcludeTagSelect"
                             @remove="onExcludeTagRemove"
                         />
@@ -1100,7 +1120,7 @@ onUnmounted(() => {
                             :items="(vaList as EntityItem[])"
                             :selected="(selectedVA as EntityItem | null)"
                             :translation-cache="translationCache"
-                            :empty-message="t('advLoadingVA')"
+                            :empty-message="vaEmptyMessage"
                             :remove-aria-label="selectedVA ? format('advRemoveVA', { name: selectedVA.name }) : ''"
                             :favorite-ids="favoriteVAs.map(item => item.id)"
                             :favorite-aria-label="selectedVA ? format(favoriteVAs.some(item => String(item.id) === String(selectedVA?.id)) ? 'advUnfavoriteEntity' : 'advFavoriteEntity', { name: selectedVA.name }) : ''"
@@ -1115,7 +1135,7 @@ onUnmounted(() => {
                             :items="(circleList as EntityItem[])"
                             :selected="(selectedCircle as EntityItem | null)"
                             :translation-cache="translationCache"
-                            :empty-message="t('advLoadingCircles')"
+                            :empty-message="circleEmptyMessage"
                             :remove-aria-label="selectedCircle ? format('advRemoveCircle', { name: selectedCircle.name }) : ''"
                             :favorite-ids="favoriteCircles.map(item => item.id)"
                             :favorite-aria-label="selectedCircle ? format(favoriteCircles.some(item => String(item.id) === String(selectedCircle?.id)) ? 'advUnfavoriteEntity' : 'advFavoriteEntity', { name: selectedCircle.name }) : ''"

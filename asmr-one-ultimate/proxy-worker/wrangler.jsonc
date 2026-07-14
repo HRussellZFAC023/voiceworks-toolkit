@@ -5,5 +5,11 @@
     "compatibility_date": "2026-07-01",
     // Run in Japan so the asmr API's region gate sees an allowed country.
     "placement": { "mode": "targeted", "region": "azure:japaneast" },
+    "r2_buckets": [
+        {
+            "binding": "SEMANTIC_INDEX",
+            "bucket_name": "asmr-semantic-index"
+        }
+    ],
     "observability": { "enabled": true }
 }

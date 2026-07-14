@@ -40,6 +40,12 @@ import {
     type TranslationLaneResult,
 } from '../learnerTaskScheduler';
 import SubtitleContent from './SubtitleContent.vue';
+import LearnerSecondarySubtitle from './LearnerSecondarySubtitle.vue';
+import {
+    learnerSubtitleLayout,
+    resolveLearnerSecondaryLanguage,
+    subtitleLanguageAttribute,
+} from '../learnerSubtitleMode';
 
 // ---------------------------------------------------------------------------
 // Composables
@@ -49,6 +55,8 @@ const bridge = useBridge();
 const { on, emit } = useEventBus();
 const { t, format } = useI18n();
 const learnerBlur = useConfig('learnerBlur');
+const learnerSubtitleMode = useConfig('learnerSubtitleMode');
+const subtitleLang = useConfig('subtitleLang');
 const showJP = useConfig('showJP');
 const karaokeMode = useConfig('karaokeMode');
 const segmentMode = useConfig('segmentMode');
@@ -199,6 +207,12 @@ function scheduleUpdateLyrics() {
 
 const showExpanded = computed(() => !isPlayerMinimized.value && hasContent.value);
 const showCollapsed = computed(() => isPlayerMinimized.value && hasContent.value);
+const secondaryLanguage = computed(() => resolveLearnerSecondaryLanguage(
+    learnerSubtitleMode.value,
+    subtitleLang.value,
+));
+const subtitleLayout = computed(() => learnerSubtitleLayout(learnerSubtitleMode.value, secondaryLanguage.value));
+const secondaryLangAttribute = computed(() => subtitleLanguageAttribute(secondaryLanguage.value));
 const karaokeUpcoming = computed(() => {
     if (karaokeSplitIndex.value < 0 || !primaryText.value) return '';
     return Array.from(primaryText.value).slice(karaokeSplitIndex.value).join('');
@@ -449,6 +463,10 @@ function shouldTickerTranslate(text: string): boolean {
     return true;
 }
 
+function getSecondaryTargetLanguage(): string {
+    return resolveLearnerSecondaryLanguage(learnerSubtitleMode.value, subtitleLang.value).toLowerCase();
+}
+
 /** Look-ahead: fire translations for the next N lines after the current one. */
 let lastLookaheadText = '';
 function translateLookahead(
@@ -529,7 +547,7 @@ on('config:change', ({ key, value }) => {
         // showJP ref auto-syncs via useConfig
     } else if (key === 'enableWhisper' || key === 'enableJoiTool' || key === 'enableVisualizer') {
         syncOverflowItemVisibility(key, !!value);
-    } else if (key === 'subtitleLang' || key === 'translateMode' || key === 'translateCnToJp'
+    } else if (key === 'subtitleLang' || key === 'learnerSubtitleMode' || key === 'translateMode' || key === 'translateCnToJp'
         || key === 'translationApiEndpoint' || key === 'translationApiKey' || key === 'translationApiModel') {
         resetLearnerTranslationQueues();
         lastPreTranslatedKey = null;
@@ -998,7 +1016,7 @@ function preTranslateAll(
     sourceLanguageHint: TranslationSourceHint = 'auto',
 ): void {
     if (lyrics.length === 0) return;
-    const targetLang = (Config.get('subtitleLang') as string || 'en').toLowerCase();
+    const targetLang = getSecondaryTargetLanguage();
     const texts = lyrics.map(l => l.text?.trim()).filter(Boolean);
     if (texts.length === 0) return;
 
@@ -1174,14 +1192,19 @@ function updateLyrics() {
         return;
     }
 
-    const targetLang = (Config.get('subtitleLang') as string || 'en').toLowerCase();
+    const targetLang = getSecondaryTargetLanguage();
     const cn = isChinese(fullText);
     let primary: string;
+    let hasUsableCachedJa = false;
     let splitIdx = -1;
     let hlStart = -1;
     if (cn) {
         const ja = TranslationService.peekCached(fullText, 'ja', 'zh');
-        primary = ja || fullText;
+        // This container is always lang="ja". Never put the Chinese source (or
+        // an echo response) in it while CN -> JA is still pending. In JP+ZH the
+        // source remains available in the secondary zh-CN lane.
+        primary = ja?.trim() && ja.trim() !== fullText.trim() ? ja : '';
+        hasUsableCachedJa = !!primary;
     } else if (karaokeMode.value) {
         // Karaoke ON: always show full text, control visibility via CSS
         primary = fullText;
@@ -1198,7 +1221,7 @@ function updateLyrics() {
         primary = progressiveText;
     }
 
-    if (primary && primary !== lastWhisperDisplayText) {
+    if ((cn || primary) && primary !== lastWhisperDisplayText) {
         updatePrimaryLine(primary, splitIdx, hlStart);
         lastWhisperDisplayText = primary;
     } else if (karaokeMode.value && (splitIdx >= 0 || hlStart >= 0)) {
@@ -1232,7 +1255,7 @@ function updateLyrics() {
                 if (tr && lastText === fullText && token === translationToken) updateSecondaryLine(tr, false);
             }).catch(() => {});
         }
-        if (cn && !TranslationService.peekCached(fullText, 'ja', 'zh')) {
+        if (cn && !hasUsableCachedJa) {
             realtimeJaQueueKey = updateQueueKey(
                 realtimeJaQueueKey,
                 buildTranslationQueueKey('learner:realtime:ja', 'ja'),
@@ -1243,7 +1266,8 @@ function updateLyrics() {
                 cancellableKey: realtimeJaQueueKey,
                 sourceLanguageHint: 'zh',
             }).then(tr => {
-                if (tr && lastText === fullText && token === translationToken) {
+                if (tr?.trim() && tr.trim() !== fullText.trim()
+                    && lastText === fullText && token === translationToken) {
                     updatePrimaryLine(tr);
                     lastWhisperDisplayText = tr;
                 }
@@ -1261,7 +1285,7 @@ function updateLyrics() {
 // ---------------------------------------------------------------------------
 
 function _updateWhisperDisplay() {
-    const targetLang = (Config.get('subtitleLang') as string || 'en').toLowerCase();
+    const targetLang = getSecondaryTargetLanguage();
     const sourceLanguageHint = whisperSourceLanguageHint;
 
     if (whisperLines.length) {
@@ -1281,7 +1305,7 @@ function _updateWhisperDisplay() {
             generation: translationToken,
             trackKey: getTrackKey(),
             sourceLanguageHint: whisperSourceLanguageHint,
-            targetLanguage: (Config.get('subtitleLang') as string || 'en').toLowerCase(),
+            targetLanguage: getSecondaryTargetLanguage(),
         });
 
         let cachedSecondary: string | null = null;
@@ -1289,14 +1313,14 @@ function _updateWhisperDisplay() {
         if (translatable) {
             const alreadyTarget = isAlreadyTargetLanguage(fullText, targetLang, sourceLanguageHint);
             cachedSecondary = alreadyTarget
-                ? null
+                ? fullText
                 : TranslationService.peekCached(
                     fullText,
                     targetLang,
                     sourceLanguageHint,
                     LEARNER_SECONDARY_TARGET,
                 );
-            if (cachedSecondary?.trim() === fullText.trim()) cachedSecondary = null;
+            if (!alreadyTarget && cachedSecondary?.trim() === fullText.trim()) cachedSecondary = null;
             // If not cached, fire async translation so it's ready next tick.
             if (!alreadyTarget && !cachedSecondary && shouldTickerTranslate(fullText)) {
                 realtimeQueueKey = updateQueueKey(
@@ -1364,8 +1388,13 @@ function _updateWhisperDisplay() {
             let hlStart = -1;
             if (cn) {
                 const ja = TranslationService.peekCached(fullText, 'ja', 'zh');
-                prim = ja || display.displayText || fullText || '';
-                if (!ja) {
+                const usableJa = ja?.trim() && ja.trim() !== fullText.trim() ? ja : null;
+                // The primary container is explicitly Japanese. Keep it empty
+                // until CN->JA completes instead of temporarily labelling raw
+                // Chinese as lang="ja". The raw source remains visible in the
+                // Chinese secondary lane throughout this transition.
+                prim = usableJa || '';
+                if (!usableJa) {
                     realtimeJaQueueKey = updateQueueKey(
                         realtimeJaQueueKey,
                         buildTranslationQueueKey('learner:whisper-live:ja', 'ja'),
@@ -1386,7 +1415,7 @@ function _updateWhisperDisplay() {
                                 targetLanguage: 'ja',
                             },
                         );
-                        if (ja2 && jaRequestIsCurrent) {
+                        if (ja2 && ja2.trim() !== fullText.trim() && jaRequestIsCurrent) {
                             updatePrimaryLine(ja2);
                             lastWhisperDisplayText = ja2;
                         }
@@ -1450,21 +1479,23 @@ function _updateWhisperDisplay() {
             generation: whisperTextGeneration,
             trackKey: getTrackKey(),
             sourceLanguageHint: whisperSourceLanguageHint,
-            targetLanguage: (Config.get('subtitleLang') as string || 'en').toLowerCase(),
+            targetLanguage: getSecondaryTargetLanguage(),
         });
         if (requestedText !== lastText) lastText = requestedText;
         const wtTranslatable = isTranslatable(requestedText);
         const alreadyTarget = wtTranslatable
             && isAlreadyTargetLanguage(requestedText, targetLang, sourceLanguageHint);
         const cachedCandidate: string | null = wtTranslatable
-            ? alreadyTarget ? null : TranslationService.peekCached(
+            ? alreadyTarget ? requestedText : TranslationService.peekCached(
                 requestedText,
                 targetLang,
                 sourceLanguageHint,
                 LEARNER_SECONDARY_TARGET,
             )
             : null;
-        const cached = cachedCandidate?.trim() === requestedText.trim() ? null : cachedCandidate;
+        const cached = !alreadyTarget && cachedCandidate?.trim() === requestedText.trim()
+            ? null
+            : cachedCandidate;
         if (wtTranslatable && !alreadyTarget && !cached && shouldTickerTranslate(requestedText)) {
             realtimeQueueKey = updateQueueKey(
                 realtimeQueueKey,
@@ -1519,8 +1550,9 @@ function _updateWhisperDisplay() {
             let prim = requestedText;
             if (cn) {
                 const ja = TranslationService.peekCached(requestedText, 'ja', 'zh');
-                prim = ja || requestedText;
-                if (!ja) {
+                const usableJa = ja?.trim() && ja.trim() !== requestedText.trim() ? ja : null;
+                prim = usableJa || '';
+                if (!usableJa) {
                     realtimeJaQueueKey = updateQueueKey(
                         realtimeJaQueueKey,
                         buildTranslationQueueKey('learner:whisper-live:ja', 'ja'),
@@ -1531,7 +1563,8 @@ function _updateWhisperDisplay() {
                         cancellableKey: realtimeJaQueueKey,
                         sourceLanguageHint: 'zh',
                     }).then(ja2 => {
-                        if (ja2 && requestIsCurrent() && lastDisplayedText === requestedText) {
+                        if (ja2 && ja2.trim() !== requestedText.trim()
+                            && requestIsCurrent() && lastDisplayedText === requestedText) {
                             updatePrimaryLine(ja2);
                             lastWhisperDisplayText = ja2;
                         }
@@ -2395,7 +2428,8 @@ watch(primaryText, (val) => {
     <div
         ref="expandedRef"
         class="learner-subs-expanded"
-        :class="{ hidden: !showExpanded }"
+        :class="[{ hidden: !showExpanded }, `learner-layout-${subtitleLayout}`]"
+        :data-subtitle-layout="subtitleLayout"
         aria-live="polite"
     >
         <div v-show="showJP" class="learner-jp" :class="{ 'segment-fade': segmentFading }" @animationend="segmentFading = false" lang="ja" role="status">
@@ -2414,14 +2448,16 @@ watch(primaryText, (val) => {
                 :furigana-all="furiganaAll"
             />
         </div>
-        <button
+        <LearnerSecondarySubtitle
             v-show="enablePlayerTranslator"
-            class="learner-en"
-            :class="{ blurred: isBlurred && !!secondaryText, 'translation-fallback': isFallback }"
+            :text="secondaryText"
+            :blurred="isBlurred"
+            :fallback="isFallback"
+            :language="secondaryLangAttribute"
+            :chinese-layout="subtitleLayout === 'jp-zh'"
             :aria-label="isBlurred ? t('revealTranslation') : t('hideTranslation')"
-            :aria-pressed="!isBlurred"
-            @click.stop="toggleBlur"
-        >{{ secondaryText }}</button>
+            @toggle="toggleBlur"
+        />
     </div>
 
     <!-- Collapsed subtitle bar (teleported to body for fixed positioning) -->
@@ -2429,7 +2465,8 @@ watch(primaryText, (val) => {
         <div
             ref="collapsedRef"
             class="learner-subs-collapsed"
-            :class="{ hidden: !showCollapsed }"
+            :class="[{ hidden: !showCollapsed }, `learner-layout-${subtitleLayout}`]"
+            :data-subtitle-layout="subtitleLayout"
             :style="{ display: showCollapsed ? 'flex' : 'none !important' }"
             aria-live="polite"
         >
@@ -2449,14 +2486,16 @@ watch(primaryText, (val) => {
                     :furigana-all="furiganaAll"
                 />
             </div>
-            <button
+            <LearnerSecondarySubtitle
                 v-show="enablePlayerTranslator"
-                class="learner-en"
-                :class="{ blurred: isBlurred && !!secondaryText, 'translation-fallback': isFallback }"
+                :text="secondaryText"
+                :blurred="isBlurred"
+                :fallback="isFallback"
+                :language="secondaryLangAttribute"
+                :chinese-layout="subtitleLayout === 'jp-zh'"
                 :aria-label="isBlurred ? t('revealTranslation') : t('hideTranslation')"
-                :aria-pressed="!isBlurred"
-                @click.stop="toggleBlur"
-            >{{ secondaryText }}</button>
+                @toggle="toggleBlur"
+            />
         </div>
     </Teleport>
 </template>

@@ -12,6 +12,11 @@ import type { WorkOrder, SortOrder, WorkDetail } from '../types/api';
 
 import { HttpError, gmRequest, retryWithBackoff } from '../infrastructure/HttpClient';
 import { DEFAULT_API_SERVER, TIMING } from '../core/Constants';
+import {
+    containsCjkForResultTranslation,
+    detectSearchQueryScript,
+    extractSearchTokens,
+} from './vectorSearchQueryUtils';
 
 /**
  * Get the API base URL from the host app's axios baseURL
@@ -738,10 +743,13 @@ export class VectorSearch {
     private async buildSearchContext(query: string): Promise<{ payload: string; usedTranslation: boolean; tokens: string[] }> {
         const trimmed = query.trim();
         if (!trimmed) return { payload: trimmed, usedTranslation: false, tokens: [] };
-        if (this.containsJapanese(trimmed)) {
+        const queryScript = detectSearchQueryScript(trimmed);
+        if (queryScript === 'japanese') {
             return { payload: trimmed, usedTranslation: false, tokens: this.extractTokens(trimmed) };
         }
-        const translated = await TranslationService.translate(trimmed, 'ja');
+        const translated = await TranslationService.translate(trimmed, 'ja', {
+            sourceLanguageHint: queryScript === 'chinese' ? 'zh' : 'en',
+        });
         const normalized = translated?.trim() || '';
         if (normalized && normalized !== trimmed) {
             return {
@@ -753,16 +761,8 @@ export class VectorSearch {
         return { payload: trimmed, usedTranslation: false, tokens: this.extractTokens(trimmed) };
     }
 
-    private containsJapanese(text: string): boolean {
-        return /[\u3040-\u30ff\u4e00-\u9fff]/.test(text);
-    }
-
     private extractTokens(text: string): string[] {
-        return text
-            .toLowerCase()
-            .split(/[^a-z0-9\u3040-\u30ff\u4e00-\u9fff]+/g)
-            .map(token => token.trim())
-            .filter(token => token.length >= 2);
+        return extractSearchTokens(text);
     }
 
 
@@ -798,7 +798,7 @@ export class VectorSearch {
 
     private async translateResultTitle(title: string, target: HTMLElement): Promise<void> {
         if (!title || I18n.lang !== 'en') return;
-        if (!this.containsJapanese(title)) return;
+        if (!containsCjkForResultTranslation(title)) return;
         const translated = await TranslationService.translate(title, 'en');
         if (!translated || translated.trim() === title.trim()) return;
         target.textContent = translated;

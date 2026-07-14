@@ -28,6 +28,7 @@ import { CentralObserver } from '../core/CentralObserver';
 import { buildLrcFromSegments, buildVttFromSegments } from './transcriptFileUtils';
 import { correctWhisperText } from '../data/nsfw-glossary';
 import { connectAudioPcmTap, hasSharedSourceNode } from '../core/AudioAnalysis';
+import { resolveLearnerSecondaryLanguage } from './learnerSubtitleMode';
 
 // ============================================================================
 // Constants
@@ -531,7 +532,7 @@ export class Whisper {
         }));
 
         this.eventCleanups.push(EventBus.on('config:change', ({ key, value }) => {
-            if (key === 'subtitleLang' || key === 'translateMode' || key === 'translateCnToJp') {
+            if (key === 'subtitleLang' || key === 'learnerSubtitleMode' || key === 'translateMode' || key === 'translateCnToJp') {
                 this.resetTranslationAheadState();
                 if (this.segments.length > 0) void this.translateAhead();
                 return;
@@ -3189,7 +3190,10 @@ export class Whisper {
 
         const translateMode = Config.get('translateMode') !== false;
         const cnToJp = Config.get('translateCnToJp') === true;
-        const targetLang = (Config.get('subtitleLang') as string | undefined)?.toLowerCase() || 'en';
+        const targetLang = resolveLearnerSecondaryLanguage(
+            Config.get('learnerSubtitleMode'),
+            Config.get('subtitleLang'),
+        ).toLowerCase();
         const sourceLang = normalizeLanguageCode(settings.language);
         if ((!translateMode && !cnToJp) || !targetLang || targetLang === sourceLang) return;
 
@@ -3267,7 +3271,10 @@ export class Whisper {
     private async translateAhead(): Promise<void> {
         const translateMode = Config.get('translateMode') !== false;
         const cnToJp = Config.get('translateCnToJp') === true;
-        const targetLang = (Config.get('subtitleLang') as string | undefined)?.toLowerCase() || 'en';
+        const targetLang = resolveLearnerSecondaryLanguage(
+            Config.get('learnerSubtitleMode'),
+            Config.get('subtitleLang'),
+        ).toLowerCase();
         const settings = this.getWhisperSettings();
         const sourceLang = normalizeLanguageCode(settings.language);
         if ((!translateMode && !cnToJp) || !targetLang || targetLang === sourceLang) return;

@@ -30,3 +30,58 @@ export async function runPacedBatches<TInput, TOutput>(
 
     return settled;
 }
+
+/**
+ * Run a bounded number of workers without batch barriers.
+ *
+ * Unlike `runPacedBatches`, a free slot immediately takes the next input, so
+ * one slow request cannot stall otherwise-idle capacity. Results retain input
+ * order and one rejection never stops the remaining work.
+ */
+export async function runRollingPool<TInput, TOutput>(
+    inputs: readonly TInput[],
+    worker: (input: TInput) => Promise<TOutput>,
+    options: number | {
+        concurrency?: number;
+        minStartIntervalMs?: number;
+        delay?: (ms: number) => Promise<void>;
+    } = 3,
+): Promise<PromiseSettledResult<TOutput>[]> {
+    const results = new Array<PromiseSettledResult<TOutput>>(inputs.length);
+    const concurrency = typeof options === 'number' ? options : (options.concurrency ?? 3);
+    const requestedConcurrency = Number.isFinite(concurrency) ? Math.floor(concurrency) : 3;
+    const workerCount = Math.min(inputs.length, Math.max(1, requestedConcurrency));
+    const minStartIntervalMs = typeof options === 'number'
+        ? 0
+        : Math.max(0, Number.isFinite(options.minStartIntervalMs) ? options.minStartIntervalMs ?? 0 : 0);
+    const delay = typeof options === 'number'
+        ? (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
+        : options.delay ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+    let nextIndex = 0;
+    let nextStartAt = 0;
+
+    const waitForStartSlot = async (): Promise<void> => {
+        if (minStartIntervalMs <= 0) return;
+        const now = Date.now();
+        const scheduledAt = Math.max(now, nextStartAt);
+        nextStartAt = scheduledAt + minStartIntervalMs;
+        if (scheduledAt > now) await delay(scheduledAt - now);
+    };
+
+    const runners = Array.from({ length: workerCount }, async () => {
+        for (;;) {
+            const index = nextIndex;
+            if (index >= inputs.length) return;
+            nextIndex += 1;
+            await waitForStartSlot();
+            try {
+                results[index] = { status: 'fulfilled', value: await worker(inputs[index]) };
+            } catch (reason) {
+                results[index] = { status: 'rejected', reason };
+            }
+        }
+    });
+
+    await Promise.all(runners);
+    return results;
+}

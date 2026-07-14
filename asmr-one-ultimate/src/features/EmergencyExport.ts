@@ -22,19 +22,17 @@ import { I18n, Logger } from '../core/Utils';
 import { GM_setValue } from '$';
 import { apiRequest } from './playlist/PlaylistService';
 import { PlaylistDiscoveryService } from './playlist/PlaylistDiscoveryService';
-import { runPacedBatches } from '../core/PacedBatch';
+import { runRollingPool } from '../core/PacedBatch';
 import type { PlaylistEntry, PlaylistMetadata, PlaylistWorkItem, PlaylistWorksResponse } from '../api/Playlist';
 
 const EMERGENCY_EXPORT_STORAGE_KEY = 'asmr-ult:emergency-export';
 const WORKS_PAGE_SIZE = 100;
 const COMPAT_WORKS_PAGE_SIZE = 20;
-/** Soft cap so a huge discovery cache can't turn an export into an API hammer. */
-const MAX_PUBLIC_PLAYLISTS = 200;
 /** Small bounded batches reduce wall time without turning export into a request storm. */
 const OWN_FETCH_BATCH_SIZE = 3;
 const PUBLIC_FETCH_BATCH_SIZE = 3;
-const OWN_FETCH_PACING_MS = 75;
-const PUBLIC_FETCH_PACING_MS = 175;
+const OWN_FETCH_START_INTERVAL_MS = 25;
+const PUBLIC_FETCH_START_INTERVAL_MS = 75;
 
 // ---------------------------------------------------------------------------
 // Export document shape
@@ -130,6 +128,7 @@ async function fetchFirstWorks(id: string): Promise<{ response: PlaylistWorksRes
             pageSize: WORKS_PAGE_SIZE,
         };
     } catch (error) {
+        if (!isWorksPageSizeCompatibilityError(error)) throw error;
         Logger.warn('[EmergencyExport] Works page size 100 failed; retrying compatibility size 20', id, error);
         return {
             response: await apiRequest<PlaylistWorksResponse>('/api/playlist/get-playlist-works', {
@@ -140,9 +139,29 @@ async function fetchFirstWorks(id: string): Promise<{ response: PlaylistWorksRes
     }
 }
 
+function readHttpStatus(error: unknown): number | undefined {
+    if (!error || typeof error !== 'object') return undefined;
+    const candidate = error as { status?: unknown; response?: { status?: unknown }; message?: unknown };
+    if (typeof candidate.status === 'number') return candidate.status;
+    if (typeof candidate.response?.status === 'number') return candidate.response.status;
+    if (typeof candidate.message === 'string') {
+        const match = candidate.message.match(/\bHTTP\s+(\d{3})\b/i);
+        if (match) return Number(match[1]);
+    }
+    return undefined;
+}
+
+function isWorksPageSizeCompatibilityError(error: unknown): boolean {
+    const status = readHttpStatus(error);
+    return status === 400 || status === 404 || status === 422;
+}
+
 export async function fetchPlaylistAsExported(id: string, seed?: PlaylistEntry): Promise<ExportedPlaylist> {
     // Metadata and page one are independent. Starting them together removes a
     // full network round-trip from every playlist in Drive/local exports.
+    // Keep fetching authoritative metadata: listing/discovery seeds can be
+    // stale or omit description/privacy, and a backup must not silently lose
+    // those fields. The seed remains a fallback when that request fails.
     const worksRequest = fetchFirstWorks(id).then(value => ({ value, error: null as unknown }))
         .catch(error => ({ value: undefined, error }));
     const metadataRequest = apiRequest<PlaylistMetadata>('/api/playlist/get-playlist-metadata', { id })
@@ -238,7 +257,7 @@ export async function buildEmergencyExport(onProgress?: ProgressCallback): Promi
         doc.errors.push(I18n.t('emergencyOwnListUnavailable'));
     }
     let ownCompleted = 0;
-    const ownResults = await runPacedBatches(
+    const ownResults = await runRollingPool(
         ownEntries,
         async (entry) => {
             try {
@@ -248,7 +267,7 @@ export async function buildEmergencyExport(onProgress?: ProgressCallback): Promi
                 onProgress?.({ stage: 'own', done: ownCompleted, total: ownEntries.length, label: entry.name || entry.id });
             }
         },
-        { batchSize: OWN_FETCH_BATCH_SIZE, delayMs: OWN_FETCH_PACING_MS },
+        { concurrency: OWN_FETCH_BATCH_SIZE, minStartIntervalMs: OWN_FETCH_START_INTERVAL_MS },
     );
     ownResults.forEach((result, i) => {
         const entry = ownEntries[i];
@@ -275,15 +294,11 @@ export async function buildEmergencyExport(onProgress?: ProgressCallback): Promi
     const discovery = PlaylistDiscoveryService.getInstance();
     const allPublicIds = discovery.getDiscoveredIds()
         .filter((id) => !doc.ownPlaylists.some((p) => p.id.toLowerCase() === id.toLowerCase()));
-    const publicIds = allPublicIds.slice(0, MAX_PUBLIC_PLAYLISTS);
-    if (allPublicIds.length > publicIds.length) {
-        doc.errors.push(I18n.format('emergencyPublicCap', {
-            max: MAX_PUBLIC_PLAYLISTS,
-            total: allPublicIds.length,
-        }));
-    }
+    // The rolling pool bounds request pressure while allowing every discovered
+    // playlist to be represented; large collections must not be silently cut.
+    const publicIds = allPublicIds;
     let publicCompleted = 0;
-    const publicResults = await runPacedBatches(
+    const publicResults = await runRollingPool(
         publicIds,
         async (id) => {
             try {
@@ -293,7 +308,7 @@ export async function buildEmergencyExport(onProgress?: ProgressCallback): Promi
                 onProgress?.({ stage: 'public', done: publicCompleted, total: publicIds.length, label: id });
             }
         },
-        { batchSize: PUBLIC_FETCH_BATCH_SIZE, delayMs: PUBLIC_FETCH_PACING_MS },
+        { concurrency: PUBLIC_FETCH_BATCH_SIZE, minStartIntervalMs: PUBLIC_FETCH_START_INTERVAL_MS },
     );
     publicResults.forEach((result, i) => {
         const id = publicIds[i];

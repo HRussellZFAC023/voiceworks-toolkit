@@ -57,13 +57,14 @@ test.describe('Flat View', () => {
         // Activate flat view
         await helpers.toggleFlatView(injectedPage);
 
-        // Wait for items to render
-        await injectedPage.waitForTimeout(2000);
-
-        // Flat view should have items
-        const flatItems = await helpers.getFlatViewItems(injectedPage);
-        console.log(`Flat view items: ${flatItems.length}`);
-        expect(flatItems.length).toBeGreaterThan(0);
+        // Host auto-dive can re-render the work tree after the toggle. Wait for
+        // the panel's real data readiness instead of sampling after a fixed sleep.
+        let flatItemCount = 0;
+        await expect.poll(async () => {
+            flatItemCount = (await helpers.getFlatViewItems(injectedPage)).length;
+            return flatItemCount;
+        }, { timeout: 15_000 }).toBeGreaterThan(0);
+        console.log(`Flat view items: ${flatItemCount}`);
     });
 
     test('flat view items show folder path context', async ({ injectedPage, isScriptLoaded, waitForBridge }) => {

@@ -6,9 +6,16 @@
  */
 
 import { createInlineWorker } from './workerLoaderShared';
+import { SEMANTIC_MODEL_SOURCE_REVISION } from './vectorSearchIndexTypes';
+
+export function normalizeEmbeddingText(raw: unknown): string {
+    return String(raw || '').replace(/\s+/g, ' ').trim();
+}
 
 function getWorkerCode(): string {
     return `
+const SEMANTIC_MODEL_SOURCE_REVISION = ${JSON.stringify(SEMANTIC_MODEL_SOURCE_REVISION)};
+const normalizeEmbeddingText = ${normalizeEmbeddingText.toString()};
 let gpuDeviceLost = false;
 let gpuFallbackSent = false;
 
@@ -112,6 +119,7 @@ let currentVendor = '';
 let currentDtype = '';
 let skipWebgpu = false;
 let preferredDtype = '';
+let requiredDtype = '';
 let firefoxFp16ProbeState = 'pending';
 // GPU vendor hint from host (detected via WebGL on main thread).
 // Firefox hides adapter.info for fingerprinting; this fills the gap.
@@ -195,6 +203,7 @@ async function detectBackend() {
 }
 
 function getDtypeCandidates(device, vendor) {
+    if (requiredDtype) return device === 'wasm' && requiredDtype === 'q8' ? ['q8'] : [];
     if (device === 'webgpu') {
         const isIntel = /intel|xe|arc/i.test(vendor);
         const isQualcomm = /qualcomm|adreno/i.test(vendor);
@@ -336,6 +345,7 @@ async function _loadPipeline(modelName, _cascadeDepth) {
                         progress_callback: progressCb,
                         device: currentBackend,
                         dtype,
+                        revision: SEMANTIC_MODEL_SOURCE_REVISION,
                     }),
                     PIPELINE_TIMEOUT_MS,
                     'Pipeline creation (' + dtype + ')'
@@ -435,7 +445,7 @@ async function embed(texts) {
     await ensurePipeline(currentModelName);
 
     const prepared = texts.map((raw) => {
-        const normalized = String(raw || '').replace(/\\s+/g, ' ').trim();
+        const normalized = normalizeEmbeddingText(raw);
         const isFragileGpu = /intel|xe|arc|qualcomm|adreno/i.test(currentVendor || '');
         const maxChars = currentBackend === 'webgpu'
             ? (isFragileGpu ? 640 : 900)
@@ -542,6 +552,13 @@ self.addEventListener('message', async (event) => {
     if (msg.type === 'preferred-dtype') {
         preferredDtype = msg.dtype || '';
         console.log('[Embedding Worker] Preferred dtype:', preferredDtype);
+        return;
+    }
+
+    if (msg.type === 'required-dtype') {
+        requiredDtype = msg.dtype || '';
+        if (requiredDtype === 'q8') skipWebgpu = true;
+        console.log('[Embedding Worker] Required dtype:', requiredDtype);
         return;
     }
 

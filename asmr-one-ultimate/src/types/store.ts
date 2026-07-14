@@ -191,6 +191,7 @@ export interface PluginConfig {
     // Learner Mode
     showJP: boolean;
     subtitleLang: string;
+    learnerSubtitleMode: 'auto' | 'jp-en' | 'jp-zh' | 'custom';
     primarySubtitleLang: string;
     karaokeMode: boolean;
     segmentMode: boolean;
@@ -215,6 +216,8 @@ export interface PluginConfig {
     vectorSearchApiKey: string;
     vectorIndexCursor: number;
     vectorIndexLatestWorkId: string;
+    vectorDeltaScanHeadId: string;
+    vectorDeltaRescanNeeded: boolean;
     vectorIndexVersion: number;
     vectorSearchModel: string;
     vectorSearchApiKeyHash: string;
