@@ -139,6 +139,10 @@ test.describe('Work Metadata Panel', () => {
     });
 
     test('metadata panel does not duplicate on re-navigation', async ({ injectedPage }) => {
+        // Two live-host navigations can each consume most of the shared 30s
+        // navigation budget when the CDN is rate-limited. Keep the assertion
+        // strict while allowing both readiness attempts to finish.
+        test.setTimeout(90_000);
         await helpers.gotoHome(injectedPage);
         await helpers.gotoWork(injectedPage, TEST_WORKS.STANDARD);
         await injectedPage.waitForTimeout(3000);
