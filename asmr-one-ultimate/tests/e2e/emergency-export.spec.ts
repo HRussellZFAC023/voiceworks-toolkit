@@ -275,10 +275,6 @@ test.describe('Emergency Playlist Export', () => {
         await helpers.gotoSettings(injectedPage);
         await isScriptLoaded();
         await injectedPage.evaluate(async () => {
-            await new Promise<void>((resolve, reject) => {
-                const deletion = indexedDB.deleteDatabase('asmr-one-downloads');
-                deletion.onsuccess = () => resolve(); deletion.onerror = () => reject(deletion.error);
-            });
             const root = await navigator.storage.getDirectory();
             const folder = await root.getDirectoryHandle('Resume work', { create: true });
             const handle = await folder.getFileHandle('track.wav', { create: true });
@@ -295,6 +291,13 @@ test.describe('Emergency Playlist Export', () => {
                 request.onsuccess = () => {
                     const db = request.result; const tx = db.transaction(['jobs', 'files', 'checkpoints'], 'readwrite');
                     const now = Date.now();
+                    // The settings UI may already hold this database open while
+                    // rendering resumable jobs. Clearing its stores keeps test
+                    // setup deterministic without waiting indefinitely for a
+                    // deleteDatabase() blocked event on slower CI runners.
+                    tx.objectStore('jobs').clear();
+                    tx.objectStore('files').clear();
+                    tx.objectStore('checkpoints').clear();
                     tx.objectStore('jobs').put({ id: 'resume-job', title: 'Resume 2 of 4 bytes', status: 'paused', options: { state: { convertToOpus: false }, directory: root, enrichment: {} }, createdAt: now, updatedAt: now });
                     tx.objectStore('files').put({ id: 'resume-file', jobId: 'resume-job', path: 'Resume work/track.wav', url: 'https://media.e2e/resume.wav', status: 'paused', downloadedBytes: 2, totalBytes: 4, createdAt: now, updatedAt: now });
                     tx.objectStore('checkpoints').put({ fileId: 'resume-file', jobId: 'resume-job', offset: 2, etag: 'v1', updatedAt: now });
