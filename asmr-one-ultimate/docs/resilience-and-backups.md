@@ -13,6 +13,14 @@ Open **Settings → Emergency Backup** and choose:
 
 Individual playlist failures are recorded inside the export instead of aborting the whole backup. Reads are sequential or conservatively batched with pauses; public discovery is capped at 200 playlists per export.
 
+## Download works from a backup
+
+Choose **Download works from backup** and open a canonical JSON backup. The collection dialog supports playlist/work search, tri-state playlist selection, and individual work checkboxes without eagerly rendering every work in a large backup. Before choosing a destination folder, select which audio, video, image, text, and other files to include.
+
+Work folders can use the original title, the translation in the active UI language, `Original [Translation]`, or the RJ code only. Optional Opus conversion offers several bitrates. Its safe additive metadata mode preserves existing tags and cover art and fills missing work fields; overwrite replaces the managed fields and cover for a more consistent collection while retaining unknown custom tags. Conversion completes and writes the playable Opus file before the source audio is removed, so a conversion failure leaves the downloaded source intact.
+
+The downloader stores a per-file byte checkpoint, ETag/Last-Modified validators, job options, and the selected destination handle in IndexedDB. After a refresh, use the displayed resume action and grant the original folder again if prompted. Servers that honor byte ranges continue inside the partial file; otherwise that one file safely restarts, while completed files are never fetched again. Reliable writable-folder handles currently require a Chromium browser with the File System Access API; unsupported browsers show an explicit capability error rather than pretending resumability is available.
+
 ## Google Drive OAuth setup
 
 The script requests only `https://www.googleapis.com/auth/drive.file`. It may create and manage files it created, but cannot browse unrelated Drive files.

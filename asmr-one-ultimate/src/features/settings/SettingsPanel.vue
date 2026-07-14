@@ -4,6 +4,8 @@ import SettingsToggle from './SettingsToggle.vue';
 import SettingsInput from './SettingsInput.vue';
 import SettingsSelect from './SettingsSelect.vue';
 import SettingsHotkeyInput from './SettingsHotkeyInput.vue';
+import BackupWorkDownloader from '../components/BackupWorkDownloader.vue';
+import type { BackupDownloadProfile, BackupDownloadState, BackupPlaylistDownloadItem, BackupWorkDownloadItem } from '../backupWorkDownloaderTypes';
 import { useI18n } from '../../composables/useI18n';
 import { useConfig } from '../../composables/useConfig';
 import { useEventBus } from '../../composables/useEventBus';
@@ -14,7 +16,17 @@ import { CacheKeys, SharedCache } from '../../core/Cache';
 import { Logger } from '../../core/Utils';
 import { gmRequest } from '../../infrastructure/HttpClient';
 import { Whisper } from '../Whisper';
-import { buildEmergencyExport, runEmergencyExport, type ExportFormat } from '../EmergencyExport';
+import { buildEmergencyExport, runEmergencyExport, type EmergencyExportDocument, type ExportFormat } from '../EmergencyExport';
+import { WorkService } from '../../services/WorkService';
+import { chooseDownloadDirectory, DirectoryDownloadSink } from '../downloads/DirectoryDownloadSink';
+import { discoverDownloadManifest, type DownloadTreeNode } from '../downloads/DownloadManifest';
+import { reserveCollisionFreePath } from '../downloads';
+import { DownloadJobRepository, type DownloadJob } from '../downloads/DownloadJobRepository';
+import { DownloadTransport } from '../downloads/DownloadTransport';
+import { DownloadCoordinator } from '../downloads/DownloadCoordinator';
+import { FfmpegOpusTranscoder } from '../downloads/OpusTranscoder';
+import { OpusFileTransformer, planOpusOutputPaths } from '../downloads/OpusFileTransformer';
+import type { AudioTags, EmbeddedArtwork } from '../downloads/MetadataPolicy';
 import {
     DriveBackupUploadError,
     preloadGoogleDriveIdentity,
@@ -283,6 +295,223 @@ function backupSettings() {
 
 const emergencyExportBusy = ref(false);
 const emergencyExportStatus = ref('');
+const backupDownloadInput = ref<HTMLInputElement | null>(null);
+const backupDownloaderOpen = ref(false);
+const backupDownloadPlaylists = ref<BackupPlaylistDownloadItem[]>([]);
+const backupDownloadWorks = ref<BackupWorkDownloadItem[]>([]);
+interface DownloadEnrichment { tags: AudioTags; artworkUrl?: string }
+interface PersistedBackupDownloadOptions {
+    state: BackupDownloadState;
+    directory: FileSystemDirectoryHandle;
+    enrichment: Record<string, DownloadEnrichment>;
+    opusOutputPaths?: Record<string, string>;
+}
+const resumableDownloadJobs = ref<Array<DownloadJob<PersistedBackupDownloadOptions>>>([]);
+const downloadJobRepository = new DownloadJobRepository();
+
+const downloaderLabels = computed(() => ({
+    dialogTitle: t('backupDownloaderTitle'), close: t('backupDownloaderClose'), search: t('backupDownloaderSearch'),
+    searchPlaceholder: t('backupDownloaderSearchPlaceholder'), expandPlaylist: t('backupDownloaderExpand'), collapsePlaylist: t('backupDownloaderCollapse'),
+    selectedSummary: t('backupDownloaderSelected'), unknownSize: t('backupDownloaderUnknownSize'), noResults: t('backupDownloaderNoResults'),
+    fileTypes: t('backupDownloaderFileTypes'), audio: t('backupDownloaderAudio'), video: t('backupDownloaderVideo'),
+    images: t('backupDownloaderImages'), text: t('backupDownloaderText'), other: t('backupDownloaderOther'),
+    filenameTitle: t('backupDownloaderFilename'), titleOriginal: t('backupDownloaderTitleOriginal'),
+    titleTranslated: t('backupDownloaderTitleTranslated'), titleOriginalTranslated: t('backupDownloaderTitleBoth'),
+    titleNone: t('backupDownloaderTitleNone'), convertToOpus: t('backupDownloaderOpus'), opusBitrate: t('backupDownloaderBitrate'),
+    metadata: t('backupDownloaderMetadata'), metadataAdditive: t('backupDownloaderAdditive'),
+    metadataOverwrite: t('backupDownloaderOverwrite'), metadataAdditiveHint: t('backupDownloaderAdditiveHint'),
+    metadataOverwriteHint: t('backupDownloaderOverwriteHint'), includeArtwork: t('backupDownloaderArtwork'),
+    includeArtworkHint: t('backupDownloaderArtworkHint'), cancel: t('backupDownloaderCancel'), start: t('backupDownloaderStart'),
+}));
+
+const backupDownloadProfile = ref<BackupDownloadProfile>({
+    labels: downloaderLabels.value,
+    selectedWorkIds: [],
+    filters: { audio: true, video: true, image: true, text: true, other: true },
+    titleMode: 'original-bracketed-translation', convertToOpus: false, opusBitrate: 96,
+    metadataMode: 'additive', includeArtwork: true,
+});
+watch(downloaderLabels, labels => { backupDownloadProfile.value = { ...backupDownloadProfile.value, labels }; });
+
+function chooseBackupForDownload(): void { backupDownloadInput.value?.click(); }
+
+async function loadBackupForDownload(event: Event): Promise<void> {
+    const input = event.target as HTMLInputElement;
+    const file = input.files?.[0];
+    input.value = '';
+    if (!file) return;
+    try {
+        const doc = JSON.parse(await file.text()) as EmergencyExportDocument;
+        if (doc.format !== 'asmr-one-ultimate-playlist-backup') throw new Error(t('backupDownloaderInvalid'));
+        const playlists = [...(doc.ownPlaylists || []), ...(doc.publicPlaylists || [])];
+        const workMap = new Map<string, BackupWorkDownloadItem>();
+        backupDownloadPlaylists.value = playlists.map(playlist => {
+            const workIds = [...new Set(playlist.works.map(work => work.rjCode).filter(Boolean))];
+            for (const work of playlist.works) {
+                if (!work.rjCode) continue;
+                const existing = workMap.get(work.rjCode);
+                if (existing) existing.playlistIds = [...(existing.playlistIds || []), playlist.id];
+                else workMap.set(work.rjCode, { id: work.rjCode, title: work.title || work.rjCode, playlistIds: [playlist.id] });
+            }
+            return { id: playlist.id, title: playlist.name, workIds };
+        });
+        backupDownloadWorks.value = [...workMap.values()];
+        backupDownloadProfile.value = { ...backupDownloadProfile.value, selectedWorkIds: [] };
+        backupDownloaderOpen.value = true;
+        const target = TranslationService.getUiTargetLang();
+        const translated = await TranslationService.translateBatch(
+            backupDownloadWorks.value.map(work => work.title), target, { preserveRequestedTarget: true },
+        );
+        backupDownloadWorks.value = backupDownloadWorks.value.map((work, index) => ({ ...work, translatedTitle: translated[index] }));
+    } catch (error) {
+        emergencyExportStatus.value = error instanceof Error ? error.message : t('backupDownloaderInvalid');
+    }
+}
+
+function updateBackupDownloadProfile(state: BackupDownloadState): void {
+    backupDownloadProfile.value = { ...backupDownloadProfile.value, ...state };
+}
+
+function resolvedWorkFolder(work: BackupWorkDownloadItem, state: BackupDownloadState): string {
+    const original = work.title || String(work.id);
+    const translated = work.translatedTitle && work.translatedTitle !== original ? work.translatedTitle : '';
+    if (state.titleMode === 'translated') return translated || original;
+    if (state.titleMode === 'original-bracketed-translation') return translated ? `${original} [${translated}]` : original;
+    if (state.titleMode === 'none') return String(work.id);
+    return original;
+}
+
+async function startBackupWorkDownload(state: BackupDownloadState): Promise<void> {
+    backupDownloaderOpen.value = false;
+    emergencyExportBusy.value = true;
+    emergencyExportStatus.value = t('backupDownloaderDiscovering');
+    try {
+        if (typeof (window as typeof window & { showDirectoryPicker?: unknown }).showDirectoryPicker !== 'function') {
+            throw new Error(t('backupDownloaderUnsupported'));
+        }
+        const directory = await chooseDownloadDirectory();
+        const jobId = crypto.randomUUID();
+        const selected = backupDownloadWorks.value.filter(work => state.selectedWorkIds.map(String).includes(String(work.id)));
+        const files: Array<{ id: string; path: string; url: string; totalBytes?: number }> = [];
+        const enrichment: Record<string, DownloadEnrichment> = {};
+        const occupiedWorkFolders = new Set<string>();
+        const skippedWorks: string[] = [];
+        for (let index = 0; index < selected.length; index += 1) {
+            const work = selected[index];
+            emergencyExportStatus.value = format('backupDownloaderDiscoverProgress', { done: index + 1, total: selected.length });
+            try {
+                const [tracks, info] = await Promise.all([WorkService.getTracks(work.id), WorkService.getWorkInfo(work.id)]);
+                const manifest = discoverDownloadManifest(tracks as unknown as DownloadTreeNode[]);
+                const folder = reserveCollisionFreePath([resolvedWorkFolder(work, state)], occupiedWorkFolders)[0];
+                for (const entry of manifest.entries) {
+                    const category = entry.category === 'unknown' ? 'other' : entry.category;
+                    if (!state.filters[category] || !entry.primaryUrl) continue;
+                    const id = `${jobId}:${work.id}:${entry.id}`;
+                    const path = [folder, ...entry.relativePath].join('/');
+                    files.push({ id, path, url: entry.primaryUrl, totalBytes: entry.size });
+                    const filename = entry.relativePath.at(-1) || entry.sourceTitle;
+                    enrichment[id] = {
+                        tags: {
+                            title: filename.replace(/\.[^.]+$/, ''), album: folder,
+                            artist: info.vas?.map(va => va.name).filter(Boolean) || [],
+                            albumartist: info.circle?.name || info.name || '',
+                            genre: info.tags?.map(tag => tag.name).filter(Boolean) || [],
+                            date: info.release || '', website: info.source_url || `https://www.dlsite.com/maniax/work/=/product_id/${info.source_id}.html`,
+                            circle_id: String(info.circle_id || ''), age_rating: info.age_category_string || '',
+                        },
+                        artworkUrl: info.mainCoverUrl || info.thumbnailCoverUrl || info.samCoverUrl,
+                    };
+                }
+            } catch (error) {
+                skippedWorks.push(String(work.id));
+                Logger.warn('[BackupDownloader] Skipping unavailable work', String(work.id), error);
+            }
+        }
+        if (!files.length) throw new Error(t('backupDownloaderNoFiles'));
+        const repository = downloadJobRepository;
+        const options: PersistedBackupDownloadOptions = {
+            state, directory, enrichment,
+            opusOutputPaths: state.convertToOpus ? planOpusOutputPaths(files) : {},
+        };
+        await repository.createJob({
+            id: jobId, title: format('backupDownloaderJobTitle', { date: new Date().toLocaleString() }), options,
+        }, files);
+        emergencyExportStatus.value = format('backupDownloaderRunning', { count: files.length });
+        const fileLabels = new Map(files.map(file => [file.id, file.path]));
+        const coordinator = new DownloadCoordinator(repository, new DownloadTransport(), new DirectoryDownloadSink(directory), 2, createOpusTransformer(options));
+        await coordinator.run(jobId, progress => {
+            emergencyExportStatus.value = format('backupDownloaderFileProgress', { file: fileLabels.get(progress.fileId) || progress.fileId, bytes: progress.completedBytes });
+        });
+        const completed = await repository.loadJob(jobId);
+        if (completed?.job.status !== 'completed') {
+            throw new Error(completed?.files.find(file => file.error)?.error || t('backupDownloaderFailed'));
+        }
+        emergencyExportStatus.value = skippedWorks.length
+            ? format('backupDownloaderDoneWithSkipped', { count: skippedWorks.length })
+            : t('backupDownloaderDone');
+    } catch (error) {
+        emergencyExportStatus.value = error instanceof Error ? error.message : t('backupDownloaderFailed');
+    } finally {
+        emergencyExportBusy.value = false;
+        await refreshResumableDownloads();
+    }
+}
+
+function createOpusTransformer(options: PersistedBackupDownloadOptions): OpusFileTransformer | undefined {
+    if (!options.state.convertToOpus) return undefined;
+    const artworkCache = new Map<string, Promise<EmbeddedArtwork | undefined>>();
+    const loadArtwork = (url: string): Promise<EmbeddedArtwork | undefined> => {
+        const existing = artworkCache.get(url);
+        if (existing) return existing;
+        const request = fetch(url, { credentials: 'include' }).then(async response => {
+            if (!response.ok) return undefined;
+            return { mimeType: response.headers.get('content-type') || 'image/jpeg', data: new Uint8Array(await response.arrayBuffer()) };
+        }).catch(() => undefined);
+        artworkCache.set(url, request);
+        return request;
+    };
+    return new OpusFileTransformer(new FfmpegOpusTranscoder(), {
+        enabled: true,
+        bitrateKbps: options.state.opusBitrate,
+        metadataPolicy: options.state.metadataMode,
+        tagsForFile: file => options.enrichment[file.id]?.tags || {},
+        outputPathForFile: file => options.opusOutputPaths?.[file.id],
+        artworkForFile: async (file): Promise<EmbeddedArtwork | undefined> => {
+            if (!options.state.includeArtwork) return undefined;
+            const url = options.enrichment[file.id]?.artworkUrl;
+            if (!url) return undefined;
+            return loadArtwork(url);
+        },
+    });
+}
+
+async function refreshResumableDownloads(): Promise<void> {
+    resumableDownloadJobs.value = (await downloadJobRepository.listJobs<PersistedBackupDownloadOptions>())
+        .filter(job => job.status !== 'completed' && job.status !== 'cancelled');
+}
+
+async function resumeBackupDownload(job: DownloadJob<PersistedBackupDownloadOptions>): Promise<void> {
+    emergencyExportBusy.value = true;
+    try {
+        const sink = new DirectoryDownloadSink(job.options.directory);
+        if (!await sink.ensurePermission(true)) throw new Error(t('backupDownloaderPermission'));
+        emergencyExportStatus.value = t('backupDownloaderResuming');
+        const fileLabels = new Map((await downloadJobRepository.listFiles(job.id)).map(file => [file.id, file.path]));
+        await new DownloadCoordinator(downloadJobRepository, new DownloadTransport(), sink, 2, createOpusTransformer(job.options)).run(job.id, progress => {
+            emergencyExportStatus.value = format('backupDownloaderFileProgress', { file: fileLabels.get(progress.fileId) || progress.fileId, bytes: progress.completedBytes });
+        });
+        const completed = await downloadJobRepository.loadJob(job.id);
+        if (completed?.job.status !== 'completed') {
+            throw new Error(completed?.files.find(file => file.error)?.error || t('backupDownloaderFailed'));
+        }
+        emergencyExportStatus.value = t('backupDownloaderDone');
+    } catch (error) {
+        emergencyExportStatus.value = error instanceof Error ? error.message : t('backupDownloaderFailed');
+    } finally {
+        emergencyExportBusy.value = false;
+        await refreshResumableDownloads();
+    }
+}
 const googleDriveClientId = useConfig('googleDriveClientId');
 const googleDriveIdentityReady = ref(false);
 let googleDriveIdentityLoading: Promise<void> | null = null;
@@ -458,6 +687,7 @@ onMounted(() => {
         whisperDownloadStatus.value = { isLoading: false, progress: 100, message: '' };
     }
     updateWhisperModelStatus();
+    void refreshResumableDownloads();
 
 });
 
@@ -988,9 +1218,33 @@ const credits = [
                         {{ t('emergencyDriveUpload') }}
                     </span>
                 </button>
+                <button type="button" data-testid="backup-download-open" class="q-btn q-btn-item non-selectable no-outline q-btn--standard q-btn--rectangle q-btn--actionable q-focusable q-hoverable q-btn--dense" :disabled="emergencyExportBusy" @click="chooseBackupForDownload">
+                    <span class="q-btn__content text-center col items-center q-anchor--skip justify-center row">
+                        <i class="q-icon notranslate material-icons q-mr-xs" aria-hidden="true" role="presentation" style="font-size: 16px">folder_copy</i>
+                        {{ t('backupDownloaderOpen') }}
+                    </span>
+                </button>
+                <input ref="backupDownloadInput" data-testid="backup-download-input" type="file" accept="application/json,.json" hidden @change="loadBackupForDownload">
             </div>
             <div v-if="emergencyExportStatus" class="q-px-md q-pb-md text-caption" data-testid="emergency-export-status">{{ emergencyExportStatus }}</div>
+            <div v-if="resumableDownloadJobs.length" class="q-px-md q-pb-md" data-testid="backup-download-resume-list">
+                <div class="text-caption q-mb-sm">{{ t('backupDownloaderResumeAvailable') }}</div>
+                <button v-for="job in resumableDownloadJobs" :key="job.id" type="button" class="q-btn q-btn-item q-btn--dense q-mr-sm q-mb-sm" :disabled="emergencyExportBusy" :data-testid="`backup-download-resume-${job.id}`" @click="resumeBackupDownload(job)">
+                    <i class="q-icon notranslate material-icons q-mr-xs" aria-hidden="true">resume</i>
+                    {{ job.title }}
+                </button>
+            </div>
         </div>
+
+        <BackupWorkDownloader
+            v-if="backupDownloaderOpen"
+            :playlists="backupDownloadPlaylists"
+            :works="backupDownloadWorks"
+            :profile="backupDownloadProfile"
+            @close="backupDownloaderOpen = false"
+            @update="updateBackupDownloadProfile"
+            @start="startBackupWorkDownload"
+        />
 
         <!-- ============================================================ -->
         <!-- Proxy Settings                                               -->
