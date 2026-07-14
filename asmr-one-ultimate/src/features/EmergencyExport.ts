@@ -27,6 +27,7 @@ import type { PlaylistEntry, PlaylistMetadata, PlaylistWorkItem, PlaylistWorksRe
 
 const EMERGENCY_EXPORT_STORAGE_KEY = 'asmr-ult:emergency-export';
 const WORKS_PAGE_SIZE = 100;
+const COMPAT_WORKS_PAGE_SIZE = 20;
 /** Soft cap so a huge discovery cache can't turn an export into an API hammer. */
 const MAX_PUBLIC_PLAYLISTS = 200;
 /** Small bounded batches reduce wall time without turning export into a request storm. */
@@ -98,6 +99,7 @@ function workItemToExported(item: PlaylistWorkItem | Record<string, unknown>): E
 async function fetchAllWorks(
     playlistId: string,
     firstPage?: PlaylistWorksResponse,
+    pageSize = WORKS_PAGE_SIZE,
 ): Promise<ExportedWork[]> {
     const works: ExportedWork[] = [];
     let page = 1;
@@ -107,51 +109,81 @@ async function fetchAllWorks(
             : await apiRequest<PlaylistWorksResponse>('/api/playlist/get-playlist-works', {
                 id: playlistId,
                 page,
-                pageSize: WORKS_PAGE_SIZE,
+                pageSize,
             });
         const items = Array.isArray(res?.works) ? res.works : [];
         works.push(...items.map(workItemToExported));
-        const total = res?.pagination?.totalCount ?? works.length;
-        if (!items.length || works.length >= total) break;
+        const total = res?.pagination?.totalCount;
+        if (!items.length) break;
+        if (typeof total === 'number' ? works.length >= total : items.length < pageSize) break;
         page += 1;
     }
     return works;
 }
 
-export async function fetchPlaylistAsExported(id: string): Promise<ExportedPlaylist> {
+async function fetchFirstWorks(id: string): Promise<{ response: PlaylistWorksResponse; pageSize: number }> {
+    try {
+        return {
+            response: await apiRequest<PlaylistWorksResponse>('/api/playlist/get-playlist-works', {
+                id, page: 1, pageSize: WORKS_PAGE_SIZE,
+            }),
+            pageSize: WORKS_PAGE_SIZE,
+        };
+    } catch (error) {
+        Logger.warn('[EmergencyExport] Works page size 100 failed; retrying compatibility size 20', id, error);
+        return {
+            response: await apiRequest<PlaylistWorksResponse>('/api/playlist/get-playlist-works', {
+                id, page: 1, pageSize: COMPAT_WORKS_PAGE_SIZE,
+            }),
+            pageSize: COMPAT_WORKS_PAGE_SIZE,
+        };
+    }
+}
+
+export async function fetchPlaylistAsExported(id: string, seed?: PlaylistEntry): Promise<ExportedPlaylist> {
     // Metadata and page one are independent. Starting them together removes a
     // full network round-trip from every playlist in Drive/local exports.
-    const worksRequest = apiRequest<PlaylistWorksResponse>('/api/playlist/get-playlist-works', {
-        id,
-        page: 1,
-        pageSize: WORKS_PAGE_SIZE,
-    }).then(value => ({ value, error: null as unknown }))
+    const worksRequest = fetchFirstWorks(id).then(value => ({ value, error: null as unknown }))
         .catch(error => ({ value: undefined, error }));
-    const [meta, firstWorks] = await Promise.all([
-        apiRequest<PlaylistMetadata>('/api/playlist/get-playlist-metadata', { id }),
+    const metadataRequest = apiRequest<PlaylistMetadata>('/api/playlist/get-playlist-metadata', { id })
+        .then(value => ({ value, error: null as unknown }))
+        .catch(error => ({ value: undefined, error }));
+    const [metadata, firstWorks] = await Promise.all([
+        metadataRequest,
         worksRequest,
     ]);
+    const meta = metadata.value;
     const base: ExportedPlaylist = {
         id,
-        name: meta?.name || I18n.t('emergencyUnknownPlaylist'),
-        description: meta?.description || '',
-        privacy: meta?.privacy,
-        userName: meta?.user_name,
-        worksCount: meta?.works_count ?? (Array.isArray(meta?.works) ? meta.works.length : 0),
+        name: meta?.name || seed?.name || I18n.t('emergencyUnknownPlaylist'),
+        description: meta?.description || seed?.description || '',
+        privacy: meta?.privacy ?? seed?.privacy,
+        userName: meta?.user_name || seed?.user_name,
+        worksCount: meta?.works_count ?? seed?.works_count ?? seed?.worksCount
+            ?? (Array.isArray(meta?.works) ? meta.works.length : 0),
         works: [],
     };
     try {
         if (firstWorks.error) throw firstWorks.error;
-        base.works = await fetchAllWorks(id, firstWorks.value);
-        if (!base.works.length && Array.isArray(meta?.works)) {
+        base.works = await fetchAllWorks(id, firstWorks.value?.response, firstWorks.value?.pageSize);
+        if (!base.works.length && (Array.isArray(meta?.works) || Array.isArray(seed?.works))) {
             // Fallback: metadata sometimes embeds the work list directly.
-            base.works = meta.works.map((w) => typeof w === 'string'
+            const embeddedWorks = meta?.works?.length ? meta.works : (seed?.works || []);
+            base.works = embeddedWorks.map((w) => typeof w === 'string'
                 ? { rjCode: toRjCode(w), title: '' }
                 : workItemToExported(w));
         }
-        base.worksCount = base.works.length || base.worksCount;
+        base.worksCount = Math.max(base.works.length, base.worksCount);
     } catch (error) {
-        base.error = (error as Error)?.message || String(error);
+        const embeddedWorks = meta?.works?.length ? meta.works : (seed?.works || []);
+        base.works = embeddedWorks.map((w) => typeof w === 'string'
+            ? { rjCode: toRjCode(w), title: '' }
+            : workItemToExported(w));
+        base.worksCount = Math.max(base.works.length, base.worksCount);
+        if (!base.works.length) base.error = (error as Error)?.message || String(error);
+    }
+    if (metadata.error && !seed && !base.error) {
+        base.error = (metadata.error as Error)?.message || String(metadata.error);
     }
     return base;
 }
@@ -210,7 +242,7 @@ export async function buildEmergencyExport(onProgress?: ProgressCallback): Promi
         ownEntries,
         async (entry) => {
             try {
-                return await fetchPlaylistAsExported(entry.id);
+                return await fetchPlaylistAsExported(entry.id, entry);
             } finally {
                 ownCompleted += 1;
                 onProgress?.({ stage: 'own', done: ownCompleted, total: ownEntries.length, label: entry.name || entry.id });
