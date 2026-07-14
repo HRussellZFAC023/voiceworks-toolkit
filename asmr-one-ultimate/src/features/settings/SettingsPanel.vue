@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
+import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue';
 import SettingsToggle from './SettingsToggle.vue';
 import SettingsInput from './SettingsInput.vue';
 import SettingsSelect from './SettingsSelect.vue';
@@ -300,6 +300,7 @@ const backupDownloadInput = ref<HTMLInputElement | null>(null);
 const backupDownloaderOpen = ref(false);
 const backupDownloadPlaylists = ref<BackupPlaylistDownloadItem[]>([]);
 const backupDownloadWorks = ref<BackupWorkDownloadItem[]>([]);
+let backupChooserPopulationGeneration = 0;
 interface DownloadEnrichment { tags: AudioTags; artworkUrl?: string }
 interface PersistedBackupDownloadOptions {
     state: BackupDownloadState;
@@ -338,26 +339,65 @@ watch(downloaderLabels, labels => { backupDownloadProfile.value = { ...backupDow
 
 function chooseBackupForDownload(): void { backupDownloadInput.value?.click(); }
 
+function populateBackupDownloadChooser(doc: EmergencyExportDocument): { own: number; public: number } {
+    const generation = ++backupChooserPopulationGeneration;
+    const mapped = mapBackupPlaylistSources(doc);
+    backupDownloadPlaylists.value = mapped.playlists;
+    backupDownloadWorks.value = mapped.works;
+    backupDownloadProfile.value = { ...backupDownloadProfile.value, selectedWorkIds: [] };
+    backupDownloaderOpen.value = true;
+    const worksToTranslate = mapped.works;
+    // Rendering and controls must not wait for translation, particularly for
+    // backups containing tens of thousands of works. Ignore stale completions
+    // when the user opens or imports a newer playlist document.
+    void nextTick().then(async () => {
+        try {
+            const target = TranslationService.getUiTargetLang();
+            const translated = await TranslationService.translateBatch(
+                worksToTranslate.map(work => work.title), target, { preserveRequestedTarget: true },
+            );
+            if (generation !== backupChooserPopulationGeneration) return;
+            backupDownloadWorks.value = worksToTranslate.map((work, index) => ({ ...work, translatedTitle: translated[index] }));
+        } catch (error) {
+            Logger.warn('[BackupDownloader] Title translation unavailable; using original titles', error);
+        }
+    });
+    return { own: doc.ownPlaylists?.length || 0, public: doc.publicPlaylists?.length || 0 };
+}
+
+async function openLiveBackupDownloader(): Promise<void> {
+    if (emergencyExportBusy.value) return;
+    emergencyExportBusy.value = true;
+    emergencyExportStatus.value = t('backupDownloaderLiveLoading');
+    try {
+        const doc = await buildEmergencyExport(updateEmergencyProgress);
+        const counts = populateBackupDownloadChooser(doc);
+        emergencyExportStatus.value = format('backupDownloaderLiveReady', counts);
+    } catch (error) {
+        emergencyExportStatus.value = t('backupDownloaderLiveFailed');
+        Logger.warn('[BackupDownloader] Failed to load live playlists', error);
+    } finally {
+        emergencyExportBusy.value = false;
+    }
+}
+
 async function loadBackupForDownload(event: Event): Promise<void> {
     const input = event.target as HTMLInputElement;
     const file = input.files?.[0];
     input.value = '';
     if (!file) return;
+    if (emergencyExportBusy.value) return;
+    emergencyExportBusy.value = true;
+    emergencyExportStatus.value = t('backupDownloaderImportLoading');
     try {
         const doc = JSON.parse(await file.text()) as EmergencyExportDocument;
         if (doc.format !== 'asmr-one-ultimate-playlist-backup') throw new Error(t('backupDownloaderInvalid'));
-        const mapped = mapBackupPlaylistSources(doc);
-        backupDownloadPlaylists.value = mapped.playlists;
-        backupDownloadWorks.value = mapped.works;
-        backupDownloadProfile.value = { ...backupDownloadProfile.value, selectedWorkIds: [] };
-        backupDownloaderOpen.value = true;
-        const target = TranslationService.getUiTargetLang();
-        const translated = await TranslationService.translateBatch(
-            backupDownloadWorks.value.map(work => work.title), target, { preserveRequestedTarget: true },
-        );
-        backupDownloadWorks.value = backupDownloadWorks.value.map((work, index) => ({ ...work, translatedTitle: translated[index] }));
+        const counts = populateBackupDownloadChooser(doc);
+        emergencyExportStatus.value = format('backupDownloaderImportReady', counts);
     } catch (error) {
         emergencyExportStatus.value = error instanceof Error ? error.message : t('backupDownloaderInvalid');
+    } finally {
+        emergencyExportBusy.value = false;
     }
 }
 
@@ -1211,10 +1251,16 @@ const credits = [
                         {{ t('emergencyDriveUpload') }}
                     </span>
                 </button>
-                <button type="button" data-testid="backup-download-open" class="q-btn q-btn-item non-selectable no-outline q-btn--standard q-btn--rectangle q-btn--actionable q-focusable q-hoverable q-btn--dense" :disabled="emergencyExportBusy" @click="chooseBackupForDownload">
+                <button type="button" data-testid="backup-download-live" class="q-btn q-btn-item non-selectable no-outline q-btn--standard q-btn--rectangle q-btn--actionable q-focusable q-hoverable q-btn--dense" :disabled="emergencyExportBusy" @click="openLiveBackupDownloader">
                     <span class="q-btn__content text-center col items-center q-anchor--skip justify-center row">
-                        <i class="q-icon notranslate material-icons q-mr-xs" aria-hidden="true" role="presentation" style="font-size: 16px">folder_copy</i>
-                        {{ t('backupDownloaderOpen') }}
+                        <i class="q-icon notranslate material-icons q-mr-xs" aria-hidden="true" role="presentation" style="font-size: 16px">playlist_play</i>
+                        {{ t('backupDownloaderOpenLive') }}
+                    </span>
+                </button>
+                <button type="button" data-testid="backup-download-import" class="q-btn q-btn-item non-selectable no-outline q-btn--standard q-btn--rectangle q-btn--actionable q-focusable q-hoverable q-btn--dense" :disabled="emergencyExportBusy" @click="chooseBackupForDownload">
+                    <span class="q-btn__content text-center col items-center q-anchor--skip justify-center row">
+                        <i class="q-icon notranslate material-icons q-mr-xs" aria-hidden="true" role="presentation" style="font-size: 16px">upload_file</i>
+                        {{ t('backupDownloaderImport') }}
                     </span>
                 </button>
                 <input ref="backupDownloadInput" data-testid="backup-download-input" type="file" accept="application/json,.json" hidden @change="loadBackupForDownload">

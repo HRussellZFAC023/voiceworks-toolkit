@@ -175,6 +175,28 @@ test.describe('Emergency Playlist Export', () => {
         expect(ownTxt).toContain('RJ111111\tOwn Work One');
     });
 
+    test('opens the bulk downloader from live personal and community playlists', async ({ injectedPage, isScriptLoaded }) => {
+        test.setTimeout(180000);
+        await helpers.gotoSettings(injectedPage);
+        await isScriptLoaded();
+        await openEmergencySection(injectedPage);
+
+        await injectedPage.getByTestId('backup-download-live').click();
+        const dialog = injectedPage.getByTestId('backup-downloader');
+        await expect(dialog).toBeVisible({ timeout: 120000 });
+        await expect(injectedPage.getByTestId('emergency-export-status')).toContainText(/Loaded|読み込みました|已加载/i);
+        await expect(injectedPage.getByTestId('source-own').locator('xpath=../span')).toContainText('(1)');
+        await expect(injectedPage.getByTestId('source-public').locator('xpath=../span')).not.toContainText('(0)');
+
+        await injectedPage.getByTestId('source-own').locator('xpath=../span').click();
+        await expect(injectedPage.getByTestId(`playlist-${OWN_ID}`)).toBeVisible();
+        await expect(injectedPage.getByText('My Precious Playlist', { exact: true })).toBeVisible();
+
+        await injectedPage.getByTestId('source-public').locator('xpath=../span').click();
+        await expect(injectedPage.getByTestId(`playlist-${OWN_ID}`)).toBeHidden();
+        await expect(dialog.locator('.playlist-group').first()).toBeVisible();
+    });
+
     test('backup work chooser supports searchable tri-state selection and download profiles', async ({ injectedPage, isScriptLoaded }) => {
         await injectedPage.setViewportSize({ width: 390, height: 844 });
         await helpers.gotoSettings(injectedPage);
