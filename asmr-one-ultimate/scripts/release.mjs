@@ -23,6 +23,8 @@ const packageLockPath = resolve(__dirname, '..', 'package-lock.json');
 const packageDir = resolve(__dirname, '..');
 const userscriptPath = resolve(packageDir, 'dist', 'asmr-one-ultimate.user.js');
 const repoRoot = resolve(__dirname, '..', '..');
+const storefrontArtifactPath = resolve(repoRoot, 'asmr-one-ultimate.user.js');
+const storefrontArtifactGitPath = 'asmr-one-ultimate.user.js';
 
 const run = (command, args, cwd = repoRoot, env = process.env) => {
     console.log(`$ ${[command, ...args].join(' ')}`);
@@ -181,7 +183,16 @@ run('npm', ['run', 'build'], packageDir);
 if (capture('git', ['status', '--porcelain'])) {
     throw new Error('The verified build differs from the committed release candidate. Commit the rebuilt artifact and rerun release.');
 }
+if (!commandSucceeds('git', ['ls-files', '--error-unmatch', storefrontArtifactGitPath])) {
+    throw new Error(
+        `${storefrontArtifactGitPath} must be tracked at the repository root so storefront release webhooks can read it from the tag.`,
+    );
+}
 const verifiedAssetHash = sha256File(userscriptPath);
+const verifiedStorefrontHash = sha256File(storefrontArtifactPath);
+if (verifiedStorefrontHash !== verifiedAssetHash) {
+    throw new Error('The repo-root storefront artifact differs from the verified userscript build.');
+}
 run('npm', ['run', 'test:e2e'], packageDir, {
     ...process.env,
     E2E_PROXY: process.env.E2E_PROXY ?? '1',
@@ -193,8 +204,15 @@ const postE2eAssetHash = sha256File(userscriptPath);
 if (postE2eAssetHash !== verifiedAssetHash) {
     throw new Error('Browser integration tests changed the verified userscript asset. Rebuild and rerun release.');
 }
+const postE2eStorefrontHash = sha256File(storefrontArtifactPath);
+if (postE2eStorefrontHash !== verifiedAssetHash) {
+    throw new Error('Browser integration tests changed the repo-root storefront artifact. Rebuild and rerun release.');
+}
 
 if (!tagAlreadyPrepared) run('git', ['tag', '-m', releaseTag, releaseTag]);
+if (!commandSucceeds('git', ['cat-file', '-e', `${releaseTag}:${storefrontArtifactGitPath}`])) {
+    throw new Error(`${releaseTag} does not contain ${storefrontArtifactGitPath}; refusing to publish a broken storefront tag.`);
+}
 
 run('git', ['push', 'origin', 'HEAD']);
 run('git', ['push', 'origin', releaseTag]);
@@ -207,7 +225,7 @@ if (!draftAlreadyPrepared) {
         '--generate-notes',
     ]);
 }
-run('gh', ['release', 'upload', releaseTag, userscriptPath, '--clobber']);
+run('gh', ['release', 'upload', releaseTag, storefrontArtifactPath, '--clobber']);
 run('gh', ['release', 'edit', releaseTag, '--draft=false']);
 
 console.log(`\nDone! ${releaseTag} release created.`);

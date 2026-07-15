@@ -5,6 +5,7 @@ import {
     mkdtempSync,
     mkdirSync,
     readFileSync,
+    realpathSync,
     rmSync,
     writeFileSync,
 } from 'node:fs';
@@ -24,6 +25,11 @@ type HarnessState = {
     failCreateAfterMutation?: boolean;
     dirtyAfterE2e?: boolean;
     mutateAssetAfterE2e?: boolean;
+    mutateStorefrontAfterE2e?: boolean;
+    omitStorefrontMirrorAfterBuild?: boolean;
+    mismatchStorefrontMirrorAfterBuild?: boolean;
+    storefrontMirrorTracked?: boolean;
+    storefrontArtifactInTag?: boolean;
 };
 
 const temporaryRoots: string[] = [];
@@ -52,10 +58,19 @@ if (command === 'npm') {
         state.phase = 'built';
         fs.mkdirSync(path.join(process.cwd(), 'dist'), { recursive: true });
         fs.writeFileSync(path.join(process.cwd(), 'dist', 'asmr-one-ultimate.user.js'), 'verified asset');
+        const storefrontPath = path.join(process.cwd(), '..', 'asmr-one-ultimate.user.js');
+        if (state.omitStorefrontMirrorAfterBuild) {
+            fs.rmSync(storefrontPath, { force: true });
+        } else {
+            fs.writeFileSync(storefrontPath, state.mismatchStorefrontMirrorAfterBuild ? 'different asset' : 'verified asset');
+        }
     } else if (task === 'test:e2e') {
         state.phase = 'e2e';
         if (state.mutateAssetAfterE2e) {
             fs.writeFileSync(path.join(process.cwd(), 'dist', 'asmr-one-ultimate.user.js'), 'mutated asset');
+        }
+        if (state.mutateStorefrontAfterE2e) {
+            fs.writeFileSync(path.join(process.cwd(), '..', 'asmr-one-ultimate.user.js'), 'mutated storefront asset');
         }
     }
     save();
@@ -96,6 +111,9 @@ if (command === 'git') {
         process.exit(0);
     }
     if (args[0] === 'branch') { out('main'); process.exit(0); }
+    if (args[0] === 'ls-files') {
+        process.exit(state.storefrontMirrorTracked !== false && fs.existsSync(path.join(process.cwd(), args.at(-1))) ? 0 : 1);
+    }
     if (args[0] === 'fetch' || args[0] === 'add' || args[0] === 'push') process.exit(0);
     if (args[0] === 'merge-base') {
         if (args[2] === 'origin/main') process.exit(0);
@@ -113,6 +131,16 @@ if (command === 'git') {
         process.exit(0);
     }
     if (args[0] === 'cat-file') {
+        if (args[1] === '-e') {
+            const [tag] = args.at(-1).split(':');
+            process.exit(
+                state.tags[tag]
+                && state.storefrontArtifactInTag !== false
+                && fs.existsSync(path.join(process.cwd(), 'asmr-one-ultimate.user.js'))
+                    ? 0
+                    : 1
+            );
+        }
         const tag = args.at(-1).replace('refs/tags/', '');
         if (!state.tags[tag]) fail('unknown tag');
         out(state.tags[tag].type);
@@ -153,6 +181,7 @@ function createHarness(
         name: 'fixture', version: versions.lock, packages: { '': { name: 'fixture', version: versions.root } },
     }));
     writeFileSync(join(packageDir, 'dist', 'asmr-one-ultimate.user.js'), 'committed asset');
+    writeFileSync(join(root, 'asmr-one-ultimate.user.js'), 'committed asset');
     for (const command of ['git', 'gh', 'npm']) {
         const executable = join(binDir, command);
         writeFileSync(executable, fakeCli);
@@ -204,8 +233,14 @@ describe('release state machine', () => {
         const create = commandIndex(commands, 'gh', 'release', 'create');
         const upload = commandIndex(commands, 'gh', 'release', 'upload');
         const publish = commandIndex(commands, 'gh', 'release', 'edit');
+        const tagArtifactCheck = commandIndex(commands, 'git', 'cat-file', '-e');
         expect([tag, create, upload, publish]).toEqual([...[tag, create, upload, publish]].sort((a, b) => a - b));
+        expect(tagArtifactCheck).toBeGreaterThan(tag);
+        expect(tagArtifactCheck).toBeLessThan(commandIndex(commands, 'git', 'push'));
         expect(commands[tag]).toEqual(['git', 'tag', '-m', 'v159', 'v159']);
+        expect(commands[upload]).toEqual([
+            'gh', 'release', 'upload', 'v159', realpathSync(join(harness.root, 'asmr-one-ultimate.user.js')), '--clobber',
+        ]);
         expect(harness.readState().releases.v159).toEqual({ isDraft: false });
     });
 
@@ -318,5 +353,49 @@ describe('release state machine', () => {
         expect(result.status).not.toBe(0);
         expect(result.stderr).toContain('Browser integration tests changed the committed release candidate');
         expect(commandIndex(harness.commands(), 'git', 'tag')).toBe(-1);
+    });
+
+    it('rejects a release tag that would not contain the repo-root storefront artifact', () => {
+        const harness = createHarness({ omitStorefrontMirrorAfterBuild: true });
+        const result = harness.run();
+        expect(result.status).not.toBe(0);
+        expect(result.stderr).toContain('must be tracked at the repository root');
+        expect(commandIndex(harness.commands(), 'git', 'tag')).toBe(-1);
+    });
+
+    it('rejects a repo-root storefront artifact whose bytes differ from the verified build', () => {
+        const harness = createHarness({ mismatchStorefrontMirrorAfterBuild: true });
+        const result = harness.run();
+        expect(result.status).not.toBe(0);
+        expect(result.stderr).toContain('storefront artifact differs');
+        expect(commandIndex(harness.commands(), 'git', 'tag')).toBe(-1);
+    });
+
+    it('rejects an untracked repo-root storefront artifact', () => {
+        const harness = createHarness({ storefrontMirrorTracked: false });
+        const result = harness.run();
+        expect(result.status).not.toBe(0);
+        expect(result.stderr).toContain('must be tracked at the repository root');
+        expect(commandIndex(harness.commands(), 'git', 'tag')).toBe(-1);
+    });
+
+    it('rejects a repo-root storefront artifact changed by browser integration tests', () => {
+        const harness = createHarness({ mutateStorefrontAfterE2e: true });
+        const result = harness.run();
+        expect(result.status).not.toBe(0);
+        expect(result.stderr).toContain('changed the repo-root storefront artifact');
+        expect(commandIndex(harness.commands(), 'git', 'tag')).toBe(-1);
+    });
+
+    it('rejects a resumed tag that does not contain the repo-root storefront artifact', () => {
+        const harness = createHarness({
+            tags: { v159: { commit: 'head', type: 'tag' } },
+            storefrontArtifactInTag: false,
+        });
+        const result = harness.run();
+        expect(result.status).not.toBe(0);
+        expect(result.stderr).toContain('does not contain asmr-one-ultimate.user.js');
+        expect(commandIndex(harness.commands(), 'git', 'push')).toBe(-1);
+        expect(commandIndex(harness.commands(), 'gh', 'release', 'create')).toBe(-1);
     });
 });

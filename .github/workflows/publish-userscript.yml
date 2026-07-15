@@ -40,6 +40,14 @@ jobs:
         working-directory: asmr-one-ultimate
         run: npm run build
 
+      - name: Verify tagged storefront artifact
+        run: |
+          git ls-files --error-unmatch asmr-one-ultimate.user.js
+          cmp -s asmr-one-ultimate.user.js asmr-one-ultimate/dist/asmr-one-ultimate.user.js
+          git diff --exit-code -- \
+            asmr-one-ultimate.user.js \
+            asmr-one-ultimate/dist/asmr-one-ultimate.user.js
+
       - name: Install Playwright Chromium
         working-directory: asmr-one-ultimate
         run: npx playwright install --with-deps chromium
@@ -49,6 +57,13 @@ jobs:
         env:
           E2E_PROXY: 1
         run: npm run test:e2e
+
+      - name: Re-verify storefront artifact after browser tests
+        run: |
+          cmp -s asmr-one-ultimate.user.js asmr-one-ultimate/dist/asmr-one-ultimate.user.js
+          git diff --exit-code -- \
+            asmr-one-ultimate.user.js \
+            asmr-one-ultimate/dist/asmr-one-ultimate.user.js
 
       - name: Read version
         id: version
@@ -76,15 +91,19 @@ jobs:
         if: github.event_name == 'release'
         run: |
           test -f "$RUNNER_TEMP/published-release/asmr-one-ultimate.user.js"
-          test "$(sha256sum asmr-one-ultimate/dist/asmr-one-ultimate.user.js | cut -d' ' -f1)" = \
-            "$(sha256sum "$RUNNER_TEMP/published-release/asmr-one-ultimate.user.js" | cut -d' ' -f1)"
+          cmp -s \
+            asmr-one-ultimate.user.js \
+            "$RUNNER_TEMP/published-release/asmr-one-ultimate.user.js"
+          cmp -s \
+            asmr-one-ultimate/dist/asmr-one-ultimate.user.js \
+            "$RUNNER_TEMP/published-release/asmr-one-ultimate.user.js"
 
       - name: Upload manual build artifact
         if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
         with:
           name: asmr-one-ultimate-${{ steps.version.outputs.version }}
-          path: asmr-one-ultimate/dist/asmr-one-ultimate.user.js
+          path: asmr-one-ultimate.user.js
           if-no-files-found: error
 
       - name: Summary

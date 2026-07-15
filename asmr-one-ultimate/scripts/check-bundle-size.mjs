@@ -3,8 +3,11 @@ import { resolve } from 'node:path';
 
 const MAX_USERSCRIPT_BYTES = 2 * 1024 * 1024;
 const file = resolve('dist/asmr-one-ultimate.user.js');
+const storefrontFile = resolve('..', 'asmr-one-ultimate.user.js');
 const bytes = statSync(file).size;
-const source = readFileSync(file, 'utf8');
+const builtBytes = readFileSync(file);
+const storefrontBytes = readFileSync(storefrontFile);
+const source = builtBytes.toString('utf8');
 const pkg = JSON.parse(readFileSync(resolve('package.json'), 'utf8'));
 
 if (bytes > MAX_USERSCRIPT_BYTES) {
@@ -21,5 +24,10 @@ if (!/^\/\/ @run-at\s+document-start\s*$/m.test(source)) {
     throw new Error('Userscript must run at document-start for region-gate recovery');
 }
 
+if (!builtBytes.equals(storefrontBytes)) {
+    throw new Error('Repo-root storefront artifact must match the built userscript byte-for-byte');
+}
+
 console.log(`Userscript size: ${bytes} / ${MAX_USERSCRIPT_BYTES} bytes`);
 console.log(`Userscript metadata: v${metadataVersion}, document-start`);
+console.log('Repo-root storefront artifact matches the build');

@@ -124,6 +124,8 @@ npx tsc --noEmit
 npm run test:run
 ```
 
+Release builds also maintain a tracked repository-root `asmr-one-ultimate.user.js` mirror. `npm run build` must keep it byte-identical to `dist/asmr-one-ultimate.user.js`; the release webhook reads the root path from the published tag.
+
 Also run targeted tests for touched areas, e.g.:
 
 ```bash
