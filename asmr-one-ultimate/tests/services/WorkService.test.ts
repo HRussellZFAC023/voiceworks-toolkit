@@ -105,6 +105,17 @@ describe('WorkService', () => {
         it('should throw for empty ID', async () => {
             await expect(svc.getTracks('')).rejects.toThrow('Invalid work ID');
         });
+
+        it('can bypass a lower-priority in-flight request for a user-started download', async () => {
+            const stalled = new Promise<never>(() => {});
+            (svc as any).inflightTracks.set(123456, stalled);
+            const fresh = [{ type: 'audio', title: 'track.wav' }];
+            const fetchTracks = vi.spyOn(svc as any, 'fetchTracks').mockResolvedValue(fresh);
+
+            await expect(svc.getTracks('RJ123456', false, true)).resolves.toEqual(fresh);
+
+            expect(fetchTracks).toHaveBeenCalledWith(123456);
+        });
     });
 
     // ==========================================================================

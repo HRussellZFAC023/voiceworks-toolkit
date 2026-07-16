@@ -1,5 +1,11 @@
 # Changelog
 
+## 166 — 2026-07-16
+
+- Made Site the default Download Center view, with whole-catalog semantic and live search kept separate from lazy-loaded Yours and Community playlist tabs.
+- Added work cover thumbnails and background track-manifest size discovery, including category-aware partial totals that update when file-type or Opus options change.
+- Prevented repeated or cancelled preview enrichment from corrupting size state, continuing after unmount, or stalling a user-started download.
+
 ## 154 — 2026-07-11
 
 - Added automatic recovery from ASMR.one's English-language frontend gate: the userscript restores the trusted SPA in place with Chinese-first direct privileged requests while preserving the real origin, login, and storage. Bootstrap and lazy-route JS/CSS are preloaded only after exact final-URL, MIME/file-type, Webpack registration, and byte-budget checks, so later routes do not fall back to blocked English-first browser requests. Proxy use remains limited to non-executable CSS dependencies and supported API reads.

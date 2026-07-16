@@ -4,15 +4,20 @@ export type BackupTitleMode = WorkTitleMode;
 export type BackupMetadataMode = 'additive' | 'overwrite';
 export type BackupFileFilter = 'audio' | 'video' | 'image' | 'text' | 'other';
 export type BackupPlaylistSource = 'own' | 'public';
-export type BackupPlaylistSourceFilter = BackupPlaylistSource;
+export type BackupPlaylistSourceFilter = 'site' | BackupPlaylistSource;
 
 export interface BackupWorkDownloadItem {
     id: string | number;
     title: string;
     translatedTitle?: string;
+    coverUrl?: string;
     sizeBytes?: number;
+    sizeBytesByType?: Partial<Record<BackupFileFilter, number>>;
+    unknownSizeCountByType?: Partial<Record<BackupFileFilter, number>>;
+    sizeState?: 'loading' | 'resolved' | 'partial' | 'unavailable';
     /** Total playable duration when the upstream response omits byte size. */
     durationSeconds?: number;
+    tags?: string[];
     playlistIds?: Array<string | number>;
     /** Render in the direct-search section even when also present in a playlist. */
     directSearchResult?: boolean;
@@ -73,6 +78,7 @@ export interface BackupDownloaderLabels {
     collapsePlaylist: string;
     selectedSummary: string;
     unknownSize: string;
+    partialSize: string;
     estimatedOpusSize: string;
     noResults: string;
     fileTypes: string;

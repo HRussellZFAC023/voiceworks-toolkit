@@ -4,6 +4,7 @@ import type {
     BackupDownloadProfile,
     BackupDownloadProgress,
     BackupDownloadState,
+    BackupFileFilter,
     BackupPlaylistDownloadItem,
     BackupPlaylistSourceFilter,
     BackupWorkDownloadItem,
@@ -50,7 +51,7 @@ const emit = defineEmits<{
 }>();
 
 const searchQuery = ref('');
-const sourceFilter = ref<BackupPlaylistSourceFilter>(props.showOwn ? 'own' : 'public');
+const sourceFilter = ref<BackupPlaylistSourceFilter>('site');
 const tagFilter = ref('');
 const dialog = ref<HTMLElement | null>(null);
 const searchInput = ref<HTMLInputElement | null>(null);
@@ -100,9 +101,19 @@ function visiblePlaylistWorks(playlist: BackupPlaylistDownloadItem): BackupWorkD
     return playlistMatches ? playlistWorks(playlist) : playlistWorks(playlist).filter(matchesSearch);
 }
 
-const activePlaylists = computed(() => props.playlists.filter(playlist => playlist.source === sourceFilter.value));
+const activePlaylists = computed(() => sourceFilter.value === 'site'
+    ? []
+    : props.playlists.filter(playlist => playlist.source === sourceFilter.value));
 const availableTags = computed(() => {
     const tags = new Map<string, string>();
+    if (sourceFilter.value === 'site') {
+        for (const work of props.works.filter(work => work.directSearchResult)) {
+            for (const tag of work.tags ?? []) {
+                const key = normalized(tag);
+                if (key && !tags.has(key)) tags.set(key, tag);
+            }
+        }
+    }
     for (const playlist of activePlaylists.value) {
         for (const tag of playlist.tags ?? []) {
             const key = normalized(tag);
@@ -127,25 +138,35 @@ const visiblePlaylists = computed(() => {
 });
 
 const sourceCounts = computed(() => ({
+    site: props.works.filter(work => work.directSearchResult).length,
     own: props.playlists.filter(playlist => playlist.source === 'own').length,
     public: props.playlists.filter(playlist => playlist.source === 'public').length,
 }));
 const selectedWorks = computed(() => props.works.filter(work => selectedIds.value.has(String(work.id))));
 const standaloneWorks = computed(() => {
+    if (sourceFilter.value !== 'site') return [];
     if (!completedSearchQuery.value || normalized(searchQuery.value.trim()) !== completedSearchQuery.value) return [];
-    return props.works.filter(work => work.directSearchResult);
+    const tag = normalized(tagFilter.value);
+    return props.works.filter(work => work.directSearchResult
+        && (!tag || (work.tags ?? []).some(value => normalized(value) === tag)));
 });
 const selectedMeasuredBytes = computed(() => selectedWorks.value.reduce((sum, work) => sum + Math.max(0, displayedSizeBytes(work) ?? 0), 0));
-const hasUnknownSelectedBytes = computed(() => selectedWorks.value.some(work => displayedSizeBytes(work) == null));
-const hasEstimatedSelectedBytes = computed(() => convertToOpus.value && selectedWorks.value.some(work => estimatedOpusBytes(work) != null));
+const hasUnknownSelectedBytes = computed(() => selectedWorks.value.some(work => sizeCompleteness(work) === 'unavailable' || sizeCompleteness(work) === 'loading'));
+const hasPartialSelectedBytes = computed(() => selectedWorks.value.some(work => sizeCompleteness(work) === 'partial'));
+const hasEstimatedSelectedBytes = computed(() => convertToOpus.value && filters.value.audio && selectedWorks.value.some(work => estimatedOpusBytes(work) != null));
 const selectedSizeLabel = computed(() => {
     const formatted = formatBytes(selectedMeasuredBytes.value);
+    if (hasPartialSelectedBytes.value) return props.profile.labels.partialSize.replace('{size}', formatted);
     return hasEstimatedSelectedBytes.value
         ? props.profile.labels.estimatedOpusSize.replace('{size}', formatted)
         : formatted;
 });
-const isLoadingCurrentSource = computed(() => sourceFilter.value === 'own' ? props.loadingOwn : props.loadingPublic);
-const currentSourceLoadFailed = computed(() => sourceFilter.value === 'own' ? props.ownLoadFailed : props.publicLoadFailed);
+const isLoadingCurrentSource = computed(() => sourceFilter.value === 'site'
+    ? searchingAll.value
+    : sourceFilter.value === 'own' ? props.loadingOwn : props.loadingPublic);
+const currentSourceLoadFailed = computed(() => sourceFilter.value === 'site'
+    ? false
+    : sourceFilter.value === 'own' ? props.ownLoadFailed : props.publicLoadFailed);
 const canPause = computed(() => props.busy && !!props.progress && [
     'recovering', 'discovering', 'translating', 'downloading', 'converting',
 ].includes(props.progress.phase));
@@ -289,14 +310,47 @@ function estimatedOpusBytes(work: BackupWorkDownloadItem): number | undefined {
 }
 
 function displayedSizeBytes(work: BackupWorkDownloadItem): number | undefined {
-    return convertToOpus.value ? estimatedOpusBytes(work) : work.sizeBytes;
+    if (convertToOpus.value) {
+        let total = filters.value.audio ? estimatedOpusBytes(work) : 0;
+        if (total == null) return undefined;
+        for (const category of ['video', 'image', 'text', 'other'] as const) {
+            if (filters.value[category]) total += work.sizeBytesByType?.[category] ?? 0;
+        }
+        return total;
+    }
+    if (work.sizeBytesByType) {
+        return (Object.keys(filters.value) as Array<keyof typeof filters.value>)
+            .reduce((sum, category) => sum + (filters.value[category] ? work.sizeBytesByType?.[category] ?? 0 : 0), 0);
+    }
+    return work.sizeBytes;
+}
+
+function selectedUnknownSizeCount(work: BackupWorkDownloadItem): number {
+    if (!work.unknownSizeCountByType) return work.sizeState === 'partial' ? 1 : 0;
+    return (Object.keys(filters.value) as BackupFileFilter[]).reduce((sum, category) => {
+        if (!filters.value[category]) return sum;
+        if (category === 'audio' && convertToOpus.value && estimatedOpusBytes(work) != null) return sum;
+        return sum + (work.unknownSizeCountByType?.[category] ?? 0);
+    }, 0);
+}
+
+function sizeCompleteness(work: BackupWorkDownloadItem): 'loading' | 'complete' | 'partial' | 'unavailable' {
+    const bytes = displayedSizeBytes(work);
+    const unknownCount = selectedUnknownSizeCount(work);
+    if (unknownCount > 0) return bytes != null && bytes > 0 ? 'partial' : 'unavailable';
+    if (work.sizeState === 'loading' && bytes == null) return 'loading';
+    if (work.sizeState === 'unavailable' && bytes == null) return 'unavailable';
+    return bytes == null ? 'unavailable' : 'complete';
 }
 
 function workMeasure(work: BackupWorkDownloadItem): string {
     const bytes = displayedSizeBytes(work);
-    if (bytes == null) return props.profile.labels.unknownSize;
+    const completeness = sizeCompleteness(work);
+    if (completeness === 'loading') return props.profile.labels.loading;
+    if (completeness === 'unavailable' || bytes == null) return props.profile.labels.unknownSize;
     const formatted = formatBytes(bytes);
-    return estimatedOpusBytes(work) != null
+    if (completeness === 'partial') return props.profile.labels.partialSize.replace('{size}', formatted);
+    return filters.value.audio && estimatedOpusBytes(work) != null
         ? props.profile.labels.estimatedOpusSize.replace('{size}', formatted)
         : formatted;
 }
@@ -333,9 +387,15 @@ function handleDialogKeydown(event: KeyboardEvent): void {
 onMounted(() => { void nextTick(() => searchInput.value?.focus()); });
 onUnmounted(() => { if (returnFocus?.isConnected) returnFocus.focus(); });
 
-watch(sourceFilter, source => { tagFilter.value = ''; emit('sourceChange', source); });
+watch(sourceFilter, source => {
+    tagFilter.value = '';
+    searchQuery.value = '';
+    completedSearchQuery.value = '';
+    searchError.value = false;
+    emit('sourceChange', source);
+});
 watch(() => props.showOwn, showOwn => {
-    if (!showOwn && sourceFilter.value === 'own') sourceFilter.value = 'public';
+    if (!showOwn && sourceFilter.value === 'own') sourceFilter.value = 'site';
 });
 watch(searchQuery, () => { searchError.value = false; });
 watch(() => props.profile, profile => {
@@ -358,6 +418,7 @@ watch(() => props.profile, profile => {
             </header>
 
             <div class="source-tabs" role="tablist" :aria-label="profile.labels.playlistSource">
+                <button type="button" role="tab" data-testid="source-site" :aria-selected="sourceFilter === 'site'" :class="{ active: sourceFilter === 'site' }" @click="sourceFilter = 'site'">{{ profile.labels.sourceAll }} <span v-if="sourceCounts.site">{{ sourceCounts.site.toLocaleString() }}</span></button>
                 <button v-if="showOwn" type="button" role="tab" data-testid="source-own" :aria-selected="sourceFilter === 'own'" :class="{ active: sourceFilter === 'own' }" @click="sourceFilter = 'own'">{{ profile.labels.sourceOwn }} <span>{{ sourceCounts.own.toLocaleString() }}</span></button>
                 <button type="button" role="tab" data-testid="source-public" :aria-selected="sourceFilter === 'public'" :class="{ active: sourceFilter === 'public' }" @click="sourceFilter = 'public'">{{ profile.labels.sourcePublic }} <span>{{ sourceCounts.public.toLocaleString() }}</span></button>
             </div>
@@ -365,7 +426,7 @@ watch(() => props.profile, profile => {
             <div class="dialog-body">
                 <section class="work-picker" aria-labelledby="work-picker-label">
                     <label id="work-picker-label" for="backup-work-search" class="section-label">{{ profile.labels.search }}</label>
-                    <div class="search-row"><input id="backup-work-search" ref="searchInput" v-model="searchQuery" type="search" data-testid="search" :placeholder="profile.labels.searchPlaceholder" @keydown.enter="runAllWorksSearch" /><button type="button" data-testid="search-all-works" :disabled="!searchQuery.trim() || searchingAll || busy" @click="runAllWorksSearch"><span v-if="searchingAll" class="spinner small" />{{ searchingAll ? profile.labels.searchAllLoading : profile.labels.searchAll }}</button></div>
+                    <div class="search-row"><input id="backup-work-search" ref="searchInput" v-model="searchQuery" type="search" data-testid="search" :placeholder="profile.labels.searchPlaceholder" @keydown.enter="sourceFilter === 'site' && runAllWorksSearch()" /><button v-if="sourceFilter === 'site'" type="button" data-testid="search-all-works" :disabled="!searchQuery.trim() || searchingAll || busy" @click="runAllWorksSearch"><span v-if="searchingAll" class="spinner small" />{{ searchingAll ? profile.labels.searchAllLoading : profile.labels.searchAll }}</button></div>
                     <div class="picker-toolbar">
                         <label class="tag-filter"><span class="sr-only">{{ profile.labels.filterTags }}</span><select v-model="tagFilter" data-testid="tag-filter"><option value="">{{ profile.labels.allTags }}</option><option v-for="tag in availableTags" :key="tag" :value="tag">{{ tag }}</option></select></label>
                         <button type="button" data-testid="select-all" :disabled="busy || isLoadingCurrentSource || (!visiblePlaylists.length && !standaloneWorks.length)" @click="selectAllVisible">{{ profile.labels.selectAll }}</button>
@@ -375,7 +436,7 @@ watch(() => props.profile, profile => {
                     <div class="playlist-list" data-testid="playlist-list">
                         <p v-if="searchError" class="inline-error search-error" data-testid="all-work-search-error">{{ profile.labels.searchFailed }}</p>
                         <p v-if="currentSourceLoadFailed" class="inline-error source-error" data-testid="source-load-error" role="alert">{{ profile.labels.loadFailed }}</p>
-                        <section v-if="standaloneWorks.length" class="standalone-results" data-testid="all-work-results"><strong>{{ profile.labels.searchResults }}</strong><label v-for="work in standaloneWorks" :key="work.id" class="work-row" :data-testid="`search-work-${work.id}`"><input type="checkbox" :checked="selectedIds.has(String(work.id))" :disabled="busy" @change="toggleWork(work)" /><span>{{ displayTitle(work) }}</span><span class="work-size">{{ workMeasure(work) }}</span></label></section>
+                        <section v-if="standaloneWorks.length" class="standalone-results" data-testid="all-work-results"><strong>{{ profile.labels.searchResults }}</strong><label v-for="work in standaloneWorks" :key="work.id" class="work-row work-result-row" :data-testid="`search-work-${work.id}`"><input type="checkbox" :checked="selectedIds.has(String(work.id))" :disabled="busy" @change="toggleWork(work)" /><span class="work-cover" aria-hidden="true"><img v-if="work.coverUrl" :src="work.coverUrl" alt="" loading="lazy" @error="onImageError" /><i class="material-icons">album</i></span><span class="work-copy"><strong>{{ displayTitle(work) }}</strong><small>{{ work.id }}</small></span><span class="work-size">{{ workMeasure(work) }}</span></label></section>
                         <div v-if="isLoadingCurrentSource && !activePlaylists.length" class="loading-state" data-testid="playlist-loading"><span class="spinner" />{{ profile.labels.loading }}</div>
                         <article v-for="playlist in visiblePlaylists" :key="playlistKey(playlist)" class="playlist-group" :data-testid="`playlist-${playlist.id}`">
                             <div class="playlist-heading">
@@ -395,7 +456,7 @@ watch(() => props.profile, profile => {
                             </div>
                             <p v-if="playlist.error" class="inline-error">{{ profile.labels.loadFailed }}</p>
                             <div v-if="isRenderedExpanded(playlist)" :id="playlistElementId(playlist)" class="work-list">
-                                <label v-for="work in visiblePlaylistWorks(playlist)" :key="work.id" class="work-row" :data-testid="`work-${work.id}`"><input type="checkbox" :checked="selectedIds.has(String(work.id))" :disabled="busy" @change="toggleWork(work)" /><span>{{ displayTitle(work) }}</span><span class="work-size">{{ workMeasure(work) }}</span></label>
+                                <label v-for="work in visiblePlaylistWorks(playlist)" :key="work.id" class="work-row work-result-row" :data-testid="`work-${work.id}`"><input type="checkbox" :checked="selectedIds.has(String(work.id))" :disabled="busy" @change="toggleWork(work)" /><span class="work-cover" aria-hidden="true"><img v-if="work.coverUrl" :src="work.coverUrl" alt="" loading="lazy" @error="onImageError" /><i class="material-icons">album</i></span><span class="work-copy"><strong>{{ displayTitle(work) }}</strong><small>{{ work.id }}</small></span><span class="work-size">{{ workMeasure(work) }}</span></label>
                                 <p v-if="!playlistWorks(playlist).length && !playlist.error" class="loading-state">{{ profile.labels.loading }}</p>
                             </div>
                         </article>
@@ -407,7 +468,7 @@ watch(() => props.profile, profile => {
                     <details class="download-options" data-testid="download-options" open>
                         <summary>{{ profile.labels.options }}</summary>
                         <div class="download-options-content">
-                            <fieldset><legend>{{ profile.labels.fileTypes }}</legend><label class="option-row"><input v-model="filters.audio" type="checkbox" @change="emitUpdate" /> <span>{{ profile.labels.audio }}</span></label><label class="option-row"><input v-model="filters.video" type="checkbox" @change="emitUpdate" /> <span>{{ profile.labels.video }}</span></label><label class="option-row"><input v-model="filters.image" type="checkbox" @change="emitUpdate" /> <span>{{ profile.labels.images }}</span></label><label class="option-row"><input v-model="filters.text" type="checkbox" @change="emitUpdate" /> <span>{{ profile.labels.text }}</span></label><label class="option-row"><input v-model="filters.other" type="checkbox" @change="emitUpdate" /> <span>{{ profile.labels.other }}</span></label></fieldset>
+                            <fieldset><legend>{{ profile.labels.fileTypes }}</legend><label class="option-row"><input v-model="filters.audio" type="checkbox" data-testid="file-filter-audio" @change="emitUpdate" /> <span>{{ profile.labels.audio }}</span></label><label class="option-row"><input v-model="filters.video" type="checkbox" data-testid="file-filter-video" @change="emitUpdate" /> <span>{{ profile.labels.video }}</span></label><label class="option-row"><input v-model="filters.image" type="checkbox" data-testid="file-filter-image" @change="emitUpdate" /> <span>{{ profile.labels.images }}</span></label><label class="option-row"><input v-model="filters.text" type="checkbox" data-testid="file-filter-text" @change="emitUpdate" /> <span>{{ profile.labels.text }}</span></label><label class="option-row"><input v-model="filters.other" type="checkbox" data-testid="file-filter-other" @change="emitUpdate" /> <span>{{ profile.labels.other }}</span></label></fieldset>
                             <label class="stacked-option"><span>{{ profile.labels.filenameTitle }}</span><select v-model="titleMode" data-testid="title-mode" @change="emitUpdate"><option value="original">{{ profile.labels.titleOriginal }}</option><option value="translated">{{ profile.labels.titleTranslated }}</option><option value="original-bracketed-translation">{{ profile.labels.titleOriginalTranslated }}</option><option value="none">{{ profile.labels.titleNone }}</option></select></label>
                             <label class="option-row" data-testid="opus-option"><input v-model="convertToOpus" type="checkbox" data-testid="opus-toggle" @change="emitUpdate" /> <span>{{ profile.labels.convertToOpus }}</span></label>
                             <label v-if="convertToOpus" class="stacked-option" data-testid="opus-bitrate-option"><span>{{ profile.labels.opusBitrate }}</span><select v-model.number="opusBitrate" data-testid="opus-bitrate" @change="emitUpdate"><option :value="64">64 kbps</option><option :value="96">96 kbps</option><option :value="128">128 kbps</option><option :value="160">160 kbps</option><option :value="192">192 kbps</option></select></label>
@@ -435,7 +496,7 @@ watch(() => props.profile, profile => {
 .dialog-header,.dialog-footer { display:flex;align-items:center;justify-content:space-between;gap:16px;padding:14px 18px }.dialog-header{border-bottom:1px solid var(--asmr-border-color)}.dialog-header h2{margin:0;font-size:1.25rem}.icon-button{display:grid;place-items:center;width:38px;height:38px;padding:0;border:0;border-radius:50%;background:transparent;color:var(--asmr-text-primary)}
 .source-tabs{display:flex;padding:0 18px;border-bottom:1px solid var(--asmr-border-color)}.source-tabs button{border:0;border-bottom:3px solid transparent;border-radius:0;background:transparent}.source-tabs button.active{color:var(--asmr-accent);border-color:var(--asmr-accent);font-weight:700}.source-tabs span{margin-left:5px;color:var(--asmr-text-tertiary)}
 .dialog-body{display:grid;grid-template-columns:minmax(0,1.65fr) minmax(270px,.8fr);min-height:0;overflow:hidden}.work-picker,.download-sidebar{min-height:0;padding:14px 18px;overflow:auto}.work-picker{display:flex;flex-direction:column;border-right:1px solid var(--asmr-border-color)}.section-label,legend,.stacked-option>span,summary{font-weight:650}input[type='search'],select{box-sizing:border-box;width:100%;min-height:38px;padding:7px 9px;color:inherit;background:var(--asmr-input-bg);border:1px solid var(--asmr-border-color);border-radius:7px}.search-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;margin-top:7px}.search-row button{display:flex;align-items:center;gap:6px;white-space:nowrap}.picker-toolbar{display:grid;grid-template-columns:minmax(120px,1fr) auto auto;gap:8px;margin-top:9px}.tag-filter{min-width:0}
-.playlist-list{flex:1;min-height:180px;margin-top:10px;overflow:auto}.standalone-results{padding:10px;margin-bottom:8px;border:1px solid var(--asmr-accent);border-radius:8px;background:var(--asmr-bg-tertiary)}.standalone-results>strong{display:block;margin-bottom:5px}.playlist-group{border-bottom:1px solid var(--asmr-border-color)}.playlist-heading{display:flex;align-items:center;min-height:64px;padding:5px 2px}.playlist-cover{position:relative;flex:0 0 48px;height:48px;overflow:hidden;border-radius:7px;background:var(--asmr-bg-tertiary);display:grid;place-items:center;color:var(--asmr-text-tertiary)}.playlist-cover img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}.expand-button{flex:0 0 34px;width:34px;height:38px;padding:0;border:0;background:transparent}.playlist-select{display:flex;align-items:center;gap:9px;min-width:0;flex:1}.playlist-copy{display:flex;flex-direction:column;min-width:0}.playlist-copy strong,.playlist-copy small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.playlist-copy small,.selected-count,.work-size,.hint{color:var(--asmr-text-tertiary);font-size:.82rem}.selected-count{margin-left:auto;white-space:nowrap}.work-list{padding:0 0 8px 86px}.work-row{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:start;gap:8px;padding:6px 4px}.empty-state,.loading-state{padding:22px 8px;text-align:center;color:var(--asmr-text-tertiary)}.loading-state{display:flex;align-items:center;justify-content:center;gap:8px}.inline-error{margin:0 0 8px 86px;color:var(--asmr-state-stop);font-size:.85rem}
+.playlist-list{flex:1;min-height:180px;margin-top:10px;overflow:auto}.standalone-results{padding:10px;margin-bottom:8px;border:1px solid var(--asmr-accent);border-radius:8px;background:var(--asmr-bg-tertiary)}.standalone-results>strong{display:block;margin-bottom:5px}.playlist-group{border-bottom:1px solid var(--asmr-border-color)}.playlist-heading{display:flex;align-items:center;min-height:64px;padding:5px 2px}.playlist-cover,.work-cover{position:relative;overflow:hidden;border-radius:7px;background:var(--asmr-bg-tertiary);display:grid;place-items:center;color:var(--asmr-text-tertiary)}.playlist-cover{flex:0 0 48px;height:48px}.work-cover{width:44px;height:44px}.playlist-cover img,.work-cover img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}.expand-button{flex:0 0 34px;width:34px;height:38px;padding:0;border:0;background:transparent}.playlist-select{display:flex;align-items:center;gap:9px;min-width:0;flex:1}.playlist-copy,.work-copy{display:flex;flex-direction:column;min-width:0}.playlist-copy strong,.playlist-copy small,.work-copy strong,.work-copy small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.playlist-copy small,.work-copy small,.selected-count,.work-size,.hint{color:var(--asmr-text-tertiary);font-size:.82rem}.selected-count{margin-left:auto;white-space:nowrap}.work-list{padding:0 0 8px 86px}.work-row{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:start;gap:8px;padding:6px 4px}.work-result-row{grid-template-columns:auto 44px minmax(0,1fr) auto;align-items:center}.work-size{white-space:nowrap}.empty-state,.loading-state{padding:22px 8px;text-align:center;color:var(--asmr-text-tertiary)}.loading-state{display:flex;align-items:center;justify-content:center;gap:8px}.inline-error{margin:0 0 8px 86px;color:var(--asmr-state-stop);font-size:.85rem}
 .download-sidebar{display:flex;flex-direction:column;gap:14px}.download-options{display:block}.download-options>summary{cursor:pointer;margin-bottom:12px}.download-options-content{display:flex;flex-direction:column;gap:13px}.download-options fieldset{display:flex;flex-direction:column;gap:9px;margin:0;padding:10px 12px;border:1px solid var(--asmr-border-color);border-radius:8px}.option-row{display:flex;align-items:flex-start;gap:7px;min-height:22px}.option-row input{flex:0 0 auto;margin-top:3px}.stacked-option{display:block;margin:0}.stacked-option select{margin-top:6px}.hinted-option{display:flex;flex-direction:column;gap:4px}.hint{margin:0 0 0 23px;line-height:1.35}.progress-panel,.resume-panel,.error-panel{padding:12px;border:1px solid var(--asmr-border-color);border-radius:9px;background:var(--asmr-bg-secondary)}.error-panel{display:flex;align-items:flex-start;gap:8px;color:var(--asmr-state-stop);border-color:color-mix(in srgb,var(--asmr-state-stop) 45%,var(--asmr-border-color))}.error-panel p{margin:0;line-height:1.4}.progress-panel p{margin:7px 0}.progress-track{height:8px;overflow:hidden;border-radius:99px;background:var(--asmr-input-bg)}.progress-track>div{height:100%;background:var(--asmr-accent);transition:width .2s}.progress-track.indeterminate>div{width:35%!important;animation:indeterminate 1.3s ease-in-out infinite}.progress-panel small{display:block;margin:6px 0}.resume-panel{display:flex;flex-direction:column;gap:7px}.resume-panel button{display:flex;align-items:center;gap:6px;text-align:left}
 .dialog-footer{flex-wrap:wrap;border-top:1px solid var(--asmr-border-color)}.selection-summary{margin:0}.footer-actions{display:flex;gap:10px;margin-left:auto}button{min-height:38px;padding:7px 12px;cursor:pointer;color:inherit;background:var(--asmr-bg-secondary);border:1px solid var(--asmr-border-color);border-radius:7px}button.primary{color:var(--asmr-text-inverted);background:var(--asmr-accent);border-color:var(--asmr-accent);font-weight:700}button:disabled{cursor:not-allowed;opacity:.5}button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible{outline:3px solid var(--asmr-accent);outline-offset:2px}.spinner{width:18px;height:18px;border:2px solid var(--asmr-border-color);border-top-color:var(--asmr-accent);border-radius:50%;animation:spin .8s linear infinite}.spinner.small{display:inline-block;width:14px;height:14px}.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}@keyframes spin{to{transform:rotate(360deg)}}@keyframes indeterminate{0%{transform:translateX(-110%)}100%{transform:translateX(300%)}}
 @media(max-width:720px){.backup-downloader-backdrop{align-items:stretch;padding:0}.backup-downloader{max-height:100vh;border-radius:0}.dialog-body{display:block;overflow:auto}.work-picker,.download-sidebar{overflow:visible}.work-picker{border-right:0;border-bottom:1px solid var(--asmr-border-color)}.playlist-list{max-height:42vh}.dialog-footer{align-items:stretch}.footer-actions{width:100%;margin-left:0}.footer-actions button{flex:1}.picker-toolbar{grid-template-columns:1fr 1fr}.tag-filter{grid-column:1/-1}.work-list{padding-left:42px}}

@@ -9,6 +9,8 @@ const mocks = vi.hoisted(() => ({
     cachedDetails: vi.fn(),
     semanticSearch: vi.fn(),
     searchWorks: vi.fn(),
+    getTracks: vi.fn(),
+    getWorkInfo: vi.fn(),
     recover: vi.fn(),
     runnerStart: vi.fn(),
     runnerResume: vi.fn(),
@@ -28,9 +30,15 @@ vi.mock('../../src/features/playlist/PlaylistDiscoveryService', () => ({
 vi.mock('../../src/features/playlist/CommunityPlaylistDetailsService', () => ({
     fetchCachedCommunityPlaylist: mocks.cachedDetails,
 }));
-vi.mock('../../src/features/playlist/PlaylistService', () => ({ getAuthHeader: mocks.getAuthHeader }));
+vi.mock('../../src/features/playlist/PlaylistService', () => ({
+    getAuthHeader: mocks.getAuthHeader,
+    getApiBaseUrl: () => 'https://api.example.test',
+}));
 vi.mock('../../src/features/SemanticWorkSearchService', () => ({ semanticWorkSearch: mocks.semanticSearch }));
 vi.mock('../../src/api', () => ({ WorksApi: { searchWorks: mocks.searchWorks } }));
+vi.mock('../../src/services/WorkService', () => ({
+    WorkService: { getTracks: mocks.getTracks, getWorkInfo: mocks.getWorkInfo },
+}));
 vi.mock('../../src/features/downloads/DirectoryDownloadSink', () => ({ chooseDownloadDirectory: mocks.chooseDirectory }));
 vi.mock('../../src/features/downloads/DownloadCenterRunner', () => ({
     DownloadCenterRunError: class DownloadCenterRunError extends Error { constructor(public code: string) { super(code); } },
@@ -74,6 +82,8 @@ describe('DownloadCenter', () => {
         mocks.chooseDirectory.mockResolvedValue({});
         mocks.getAuthHeader.mockReturnValue({ Authorization: 'Bearer unit-test' });
         mocks.searchWorks.mockResolvedValue({ works: [], pagination: { currentPage: 1, pageSize: 20, totalCount: 0 } });
+        mocks.getTracks.mockResolvedValue([]);
+        mocks.getWorkInfo.mockResolvedValue({ title: '', duration: 0, tags: [] });
     });
 
     afterEach(() => {
@@ -81,14 +91,18 @@ describe('DownloadCenter', () => {
         delete (window as Window & { showDirectoryPicker?: unknown }).showDirectoryPicker;
     });
 
-    it('opens synchronously on Yours while its network request is still pending', async () => {
+    it('opens synchronously on Site and loads Yours only when selected', async () => {
         const own = deferred<any[]>();
         mocks.fetchOwn.mockReturnValue(own.promise);
         const wrapper = mount(DownloadCenter, { attachTo: document.body });
 
         await wrapper.get('[data-testid="download-center-open"]').trigger('click');
         expect(document.querySelector('[data-testid="backup-downloader"]')).not.toBeNull();
-        expect(document.querySelector('[data-testid="source-own"]')?.getAttribute('aria-selected')).toBe('true');
+        expect(document.querySelector('[data-testid="source-site"]')?.getAttribute('aria-selected')).toBe('true');
+        expect(mocks.fetchOwn).not.toHaveBeenCalled();
+        expect(mocks.loadCatalog).not.toHaveBeenCalled();
+        (document.querySelector('[data-testid="source-own"]') as HTMLButtonElement).click();
+        await flushPromises();
         expect(document.querySelector('[data-testid="playlist-loading"]')).not.toBeNull();
         expect(mocks.loadCatalog).not.toHaveBeenCalled();
 
@@ -99,7 +113,7 @@ describe('DownloadCenter', () => {
         wrapper.unmount();
     });
 
-    it('opens on Community without a Yours tab or personal-playlist error when signed out', async () => {
+    it('opens signed-out users on Site and loads Community only when selected', async () => {
         mocks.getAuthHeader.mockReturnValue({});
         mocks.fetchOwn.mockRejectedValue(new Error('should not be requested'));
         const wrapper = mount(DownloadCenter, { attachTo: document.body });
@@ -108,10 +122,13 @@ describe('DownloadCenter', () => {
         await flushPromises();
 
         expect(mocks.fetchOwn).not.toHaveBeenCalled();
-        expect(mocks.loadCatalog).toHaveBeenCalledTimes(1);
+        expect(mocks.loadCatalog).not.toHaveBeenCalled();
         expect(document.querySelector('[data-testid="source-own"]')).toBeNull();
-        expect(document.querySelector('[data-testid="source-public"]')?.getAttribute('aria-selected')).toBe('true');
+        expect(document.querySelector('[data-testid="source-site"]')?.getAttribute('aria-selected')).toBe('true');
         expect(document.querySelector('[data-testid="source-load-error"]')).toBeNull();
+        (document.querySelector('[data-testid="source-public"]') as HTMLButtonElement).click();
+        await flushPromises();
+        expect(mocks.loadCatalog).toHaveBeenCalledTimes(1);
         expect(document.querySelector('[data-testid="playlist-11111111-1111-4111-8111-111111111111"]')).not.toBeNull();
         wrapper.unmount();
     });
@@ -121,16 +138,17 @@ describe('DownloadCenter', () => {
         const wrapper = mount(DownloadCenter, { attachTo: document.body });
 
         await wrapper.get('[data-testid="download-center-open"]').trigger('click');
+        (document.querySelector('[data-testid="source-own"]') as HTMLButtonElement).click();
         await flushPromises();
 
         expect(document.querySelector('[data-testid="source-own"]')).toBeNull();
-        expect(document.querySelector('[data-testid="source-public"]')?.getAttribute('aria-selected')).toBe('true');
+        expect(document.querySelector('[data-testid="source-site"]')?.getAttribute('aria-selected')).toBe('true');
         expect(document.querySelector('[data-testid="source-load-error"]')).toBeNull();
         expect(mocks.loadCatalog).toHaveBeenCalledTimes(1);
         wrapper.unmount();
     });
 
-    it('uses two tabs, refreshes community only on demand, and resolves works only on expand', async () => {
+    it('uses Site, Yours, and Community tabs and resolves playlist works only on expand', async () => {
         mocks.fetchOwn.mockResolvedValue([]);
         mocks.fetchPlaylist.mockResolvedValue({
             id: '11111111-1111-4111-8111-111111111111', name: 'Cached public', description: '', worksCount: 1,
@@ -139,7 +157,11 @@ describe('DownloadCenter', () => {
         const wrapper = mount(DownloadCenter, { attachTo: document.body });
         await wrapper.get('[data-testid="download-center-open"]').trigger('click');
         await flushPromises();
-        expect(document.querySelector('[data-testid="source-all"]')).toBeNull();
+        expect(document.querySelector('[data-testid="source-site"]')?.getAttribute('aria-selected')).toBe('true');
+        expect(mocks.fetchOwn).not.toHaveBeenCalled();
+        (document.querySelector('[data-testid="source-own"]') as HTMLButtonElement).click();
+        await flushPromises();
+        expect(mocks.fetchOwn).toHaveBeenCalledTimes(1);
 
         (document.querySelector('[data-testid="source-public"]') as HTMLButtonElement).click();
         await flushPromises();
@@ -219,11 +241,124 @@ describe('DownloadCenter', () => {
         await flushPromises();
         (document.querySelector('[data-testid="search-all-works"]') as HTMLButtonElement).click();
         await flushPromises();
-        expect(mocks.semanticSearch).toHaveBeenCalledWith('Direct');
+        expect(mocks.semanticSearch).toHaveBeenCalledWith('Direct', 20);
         expect(mocks.searchWorks).toHaveBeenCalledWith('Direct', { page: 1 });
         expect(document.querySelector('[data-testid="search-work-RJ000042"]')?.textContent).toContain('添い寝音声');
         expect(document.querySelector('[data-testid="search-work-RJ000043"]')?.textContent).toContain('Newest live result');
         wrapper.unmount();
+    });
+
+    it('renders site-result covers and replaces loading size with the track-manifest total', async () => {
+        mocks.fetchOwn.mockResolvedValue([]);
+        mocks.searchWorks.mockResolvedValue({
+            works: [{
+                id: 46, title: 'Covered result', thumbnailCoverUrl: 'https://images.example.test/46.jpg',
+                duration: 600, tags: [{ name: 'Relaxing' }],
+            }],
+            pagination: { currentPage: 1, pageSize: 20, totalCount: 1 },
+        });
+        mocks.getTracks.mockResolvedValue([
+            { type: 'audio', title: 'track.wav', size: 1024 * 1024, mediaDownloadUrl: 'https://media.example.test/track.wav' },
+            { type: 'image', title: 'cover.jpg', size: 512 * 1024, mediaDownloadUrl: 'https://media.example.test/cover.jpg' },
+        ]);
+        const wrapper = mount(DownloadCenter, { attachTo: document.body });
+        await wrapper.get('[data-testid="download-center-open"]').trigger('click');
+        const input = document.querySelector('[data-testid="search"]') as HTMLInputElement;
+        input.value = 'covered';
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        await flushPromises();
+        (document.querySelector('[data-testid="search-all-works"]') as HTMLButtonElement).click();
+
+        await vi.waitFor(() => expect(document.querySelector('[data-testid="search-work-RJ000046"]')?.textContent).toContain('1.5 MB'));
+        const image = document.querySelector('[data-testid="search-work-RJ000046"] .work-cover img') as HTMLImageElement;
+        expect(image.src).toBe('https://images.example.test/46.jpg');
+        expect(mocks.getTracks).toHaveBeenCalledWith('RJ000046');
+        expect(mocks.getWorkInfo).not.toHaveBeenCalled();
+        wrapper.unmount();
+    });
+
+    it('does not let stale size enrichment from an earlier query replace current results', async () => {
+        const firstTracks = deferred<any[]>();
+        mocks.searchWorks
+            .mockResolvedValueOnce({
+                works: [{ id: 47, title: 'First', duration: 60, thumbnailCoverUrl: 'https://images.example.test/47.jpg', tags: [{ name: 'First' }] }],
+                pagination: { currentPage: 1, pageSize: 20, totalCount: 1 },
+            })
+            .mockResolvedValueOnce({
+                works: [{ id: 48, title: 'Second', duration: 60, thumbnailCoverUrl: 'https://images.example.test/48.jpg', tags: [{ name: 'Second' }] }],
+                pagination: { currentPage: 1, pageSize: 20, totalCount: 1 },
+            });
+        mocks.getTracks.mockImplementation((id: string) => id === 'RJ000047'
+            ? firstTracks.promise
+            : Promise.resolve([{ type: 'audio', title: 'second.wav', size: 2048, mediaDownloadUrl: 'https://media.example.test/second.wav' }]));
+        const wrapper = mount(DownloadCenter, { attachTo: document.body });
+        await wrapper.get('[data-testid="download-center-open"]').trigger('click');
+        const input = document.querySelector('[data-testid="search"]') as HTMLInputElement;
+        input.value = 'first'; input.dispatchEvent(new Event('input', { bubbles: true }));
+        await flushPromises();
+        (document.querySelector('[data-testid="search-all-works"]') as HTMLButtonElement).click();
+        await vi.waitFor(() => expect(document.querySelector('[data-testid="search-work-RJ000047"]')).not.toBeNull());
+
+        input.value = 'second'; input.dispatchEvent(new Event('input', { bubbles: true }));
+        await flushPromises();
+        (document.querySelector('[data-testid="search-all-works"]') as HTMLButtonElement).click();
+        await vi.waitFor(() => expect(document.querySelector('[data-testid="search-work-RJ000048"]')?.textContent).toContain('2 KB'));
+        firstTracks.resolve([{ type: 'audio', title: 'first.wav', size: 999999, mediaDownloadUrl: 'https://media.example.test/first.wav' }]);
+        await flushPromises();
+
+        expect(document.querySelector('[data-testid="search-work-RJ000047"]')).toBeNull();
+        expect(document.querySelector('[data-testid="search-work-RJ000048"]')?.textContent).toContain('2 KB');
+        wrapper.unmount();
+    });
+
+    it('does not promote a cached partial manifest to an exact size on repeated enrichment', async () => {
+        mocks.searchWorks.mockResolvedValue({
+            works: [{ id: 49, title: 'Partial', duration: 60, thumbnailCoverUrl: 'https://images.example.test/49.jpg', tags: [{ name: 'Partial' }] }],
+            pagination: { currentPage: 1, pageSize: 20, totalCount: 1 },
+        });
+        mocks.getTracks.mockResolvedValue([
+            { type: 'audio', title: 'known.wav', size: 1024, mediaDownloadUrl: 'https://media.example.test/known.wav' },
+            { type: 'image', title: 'unknown.jpg', mediaDownloadUrl: 'https://media.example.test/unknown.jpg' },
+        ]);
+        const wrapper = mount(DownloadCenter, { attachTo: document.body });
+        await wrapper.get('[data-testid="download-center-open"]').trigger('click');
+        const input = document.querySelector('[data-testid="search"]') as HTMLInputElement;
+        input.value = 'partial'; input.dispatchEvent(new Event('input', { bubbles: true }));
+        await flushPromises();
+        (document.querySelector('[data-testid="search-all-works"]') as HTMLButtonElement).click();
+        await vi.waitFor(() => expect(document.querySelector('[data-testid="search-work-RJ000049"]')?.textContent).toContain('at least 1 KB'));
+
+        (document.querySelector('[data-testid="search-all-works"]') as HTMLButtonElement).click();
+        await flushPromises();
+
+        expect(document.querySelector('[data-testid="search-work-RJ000049"]')?.textContent).toContain('at least 1 KB');
+        expect(mocks.getTracks).toHaveBeenCalledTimes(1);
+        wrapper.unmount();
+    });
+
+    it('stops queued work enrichment when the component unmounts', async () => {
+        const tracks = [deferred<any[]>(), deferred<any[]>(), deferred<any[]>()];
+        mocks.searchWorks.mockResolvedValue({
+            works: [50, 51, 52, 53].map(id => ({
+                id, title: `Work ${id}`, duration: 60,
+                thumbnailCoverUrl: `https://images.example.test/${id}.jpg`, tags: [{ name: 'Test' }],
+            })),
+            pagination: { currentPage: 1, pageSize: 20, totalCount: 4 },
+        });
+        mocks.getTracks.mockImplementation((_id: string) => tracks[mocks.getTracks.mock.calls.length - 1]?.promise ?? Promise.resolve([]));
+        const wrapper = mount(DownloadCenter, { attachTo: document.body });
+        await wrapper.get('[data-testid="download-center-open"]').trigger('click');
+        const input = document.querySelector('[data-testid="search"]') as HTMLInputElement;
+        input.value = 'queue'; input.dispatchEvent(new Event('input', { bubbles: true }));
+        await flushPromises();
+        (document.querySelector('[data-testid="search-all-works"]') as HTMLButtonElement).click();
+        await vi.waitFor(() => expect(mocks.getTracks).toHaveBeenCalledTimes(3));
+
+        wrapper.unmount();
+        tracks.forEach(item => item.resolve([]));
+        await flushPromises();
+
+        expect(mocks.getTracks).toHaveBeenCalledTimes(3);
     });
 
     it('keeps semantic results when the live site search is unavailable', async () => {
@@ -329,6 +464,7 @@ describe('DownloadCenter', () => {
         mocks.fetchOwn.mockRejectedValue(new Error('offline'));
         const wrapper = mount(DownloadCenter, { attachTo: document.body });
         await wrapper.get('[data-testid="download-center-open"]').trigger('click');
+        (document.querySelector('[data-testid="source-own"]') as HTMLButtonElement).click();
         await flushPromises();
 
         expect(document.querySelector('[data-testid="source-load-error"]')).not.toBeNull();
@@ -351,6 +487,7 @@ describe('DownloadCenter', () => {
         Object.defineProperty(window, 'showDirectoryPicker', { configurable: true, value: vi.fn() });
         const wrapper = mount(DownloadCenter, { attachTo: document.body });
         await wrapper.get('[data-testid="download-center-open"]').trigger('click');
+        (document.querySelector('[data-testid="source-own"]') as HTMLButtonElement).click();
         await flushPromises();
         (document.querySelector('[data-testid="playlist-check-mine"]') as HTMLInputElement).click();
         await flushPromises();
@@ -376,6 +513,8 @@ describe('DownloadCenter', () => {
         (document.querySelector('[data-testid="source-public"]') as HTMLButtonElement).click();
         await flushPromises();
         (document.querySelector('[data-testid^="expand-"]') as HTMLButtonElement).click();
+        await flushPromises();
+        (document.querySelector('[data-testid="source-site"]') as HTMLButtonElement).click();
         await flushPromises();
         const search = document.querySelector('[data-testid="search"]') as HTMLInputElement;
         search.value = 'Search';

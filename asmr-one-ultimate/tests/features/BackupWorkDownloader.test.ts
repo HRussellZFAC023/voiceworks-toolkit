@@ -11,7 +11,7 @@ const labels: BackupDownloaderLabels = {
     playlistOwner: 'by {owner}', playlistWorks: '{count} works', loading: 'Loading', loadFailed: 'Unavailable',
     options: 'Options', progress: 'Progress', pause: 'Pause', resume: 'Resume', alreadyRunning: 'Already running', resumableDownloads: 'Resume jobs',
     expandPlaylist: 'Expand', collapsePlaylist: 'Collapse', selectedSummary: '{count} selected · {bytes}',
-    unknownSize: 'unknown size', estimatedOpusSize: 'about {size} after Opus', noResults: 'No results', fileTypes: 'Files', audio: 'Audio', video: 'Video',
+    unknownSize: 'size unavailable', partialSize: 'at least {size}', estimatedOpusSize: 'about {size} after Opus', noResults: 'No results', fileTypes: 'Files', audio: 'Audio', video: 'Video',
     images: 'Images', text: 'Text', other: 'Other', filenameTitle: 'Titles', titleOriginal: 'Original',
     titleTranslated: 'Translated', titleOriginalTranslated: 'Original [Translated]', titleNone: 'No title changes',
     convertToOpus: 'Convert to Opus', opusBitrate: 'Bitrate', metadata: 'Metadata', metadataAdditive: 'Additive',
@@ -38,14 +38,16 @@ const playlists = [{
 }];
 
 describe('BackupWorkDownloader', () => {
-    it('defaults to the personal tab and switches between exactly two sources', async () => {
+    it('defaults to Site and keeps playlists isolated in Yours and Community', async () => {
         const wrapper = mount(BackupWorkDownloader, {
             props: { playlists: [...playlists, { id: 'p2', title: 'Public', source: 'public', worksCount: 1 }], works, profile: profile() },
         });
-        expect(wrapper.find('[data-testid="source-all"]').exists()).toBe(false);
-        expect(wrapper.get('[data-testid="source-own"]').attributes('aria-selected')).toBe('true');
-        expect(wrapper.find('[data-testid="playlist-p1"]').exists()).toBe(true);
+        expect(wrapper.get('[data-testid="source-site"]').attributes('aria-selected')).toBe('true');
+        expect(wrapper.find('[data-testid="playlist-p1"]').exists()).toBe(false);
         expect(wrapper.find('[data-testid="playlist-p2"]').exists()).toBe(false);
+        await wrapper.get('[data-testid="source-own"]').trigger('click');
+        expect(wrapper.emitted('sourceChange')?.at(-1)).toEqual(['own']);
+        expect(wrapper.find('[data-testid="playlist-p1"]').exists()).toBe(true);
         await wrapper.get('[data-testid="source-public"]').trigger('click');
         expect(wrapper.emitted('sourceChange')?.at(-1)).toEqual(['public']);
         expect(wrapper.find('[data-testid="playlist-p2"]').exists()).toBe(true);
@@ -53,6 +55,7 @@ describe('BackupWorkDownloader', () => {
 
     it('renders a fixed thumbnail, owner/count metadata, and tag filtering', async () => {
         const wrapper = mount(BackupWorkDownloader, { props: { playlists, works, profile: profile() } });
+        await wrapper.get('[data-testid="source-own"]').trigger('click');
         const image = wrapper.get('.playlist-cover img');
         expect(image.attributes('src')).toContain('cover.jpg');
         expect(wrapper.get('.playlist-copy').text()).toContain('by Alice');
@@ -73,6 +76,7 @@ describe('BackupWorkDownloader', () => {
             });
         });
         const wrapper = mount(BackupWorkDownloader, { props: { playlists: lazyPlaylist, works: mutableWorks, profile: profile(), resolvePlaylist } });
+        await wrapper.get('[data-testid="source-own"]').trigger('click');
         expect(resolvePlaylist).not.toHaveBeenCalled();
         await wrapper.get('[data-testid="expand-lazy"]').trigger('click');
         await vi.waitFor(() => expect(resolvePlaylist).toHaveBeenCalledTimes(1));
@@ -94,6 +98,43 @@ describe('BackupWorkDownloader', () => {
         expect(wrapper.get('[data-testid="all-work-results"]').text()).toContain('添い寝音声');
         await wrapper.get('[data-testid="search-work-99"] input').setValue(true);
         expect(wrapper.emitted('update')?.at(-1)?.[0]).toMatchObject({ selectedWorkIds: [99] });
+    });
+
+    it('renders site covers and recalculates manifest bytes when file filters change', async () => {
+        const result: BackupWorkDownloadItem = {
+            id: 'RJ99', title: 'Covered work', coverUrl: 'https://example.test/work.jpg', directSearchResult: true,
+            sizeBytes: 1.5 * 1024 * 1024, sizeBytesByType: { audio: 1024 * 1024, image: 512 * 1024 }, sizeState: 'resolved',
+        };
+        const searchAllWorks = vi.fn(async () => { await (wrapper as any).setProps({ works: [result] }); });
+        const wrapper = mount(BackupWorkDownloader, { props: { playlists: [], works: [], profile: profile(), searchAllWorks } });
+        await wrapper.get('[data-testid="search"]').setValue('covered');
+        await wrapper.get('[data-testid="search-all-works"]').trigger('click');
+        await vi.waitFor(() => expect(wrapper.find('[data-testid="search-work-RJ99"]').exists()).toBe(true));
+
+        expect(wrapper.get('[data-testid="search-work-RJ99"] .work-cover img').attributes('src')).toBe('https://example.test/work.jpg');
+        expect(wrapper.get('[data-testid="search-work-RJ99"] .work-size').text()).toBe('1.5 MB');
+        await wrapper.get('[data-testid="file-filter-image"]').setValue(false);
+        expect(wrapper.get('[data-testid="search-work-RJ99"] .work-size').text()).toBe('1 MB');
+    });
+
+    it('labels incomplete manifest totals only when an enabled category is incomplete', async () => {
+        const result: BackupWorkDownloadItem = {
+            id: 'RJ98', title: 'Partial work', directSearchResult: true,
+            sizeBytes: 1024 * 1024, sizeBytesByType: { audio: 1024 * 1024 },
+            unknownSizeCountByType: { image: 1 }, sizeState: 'partial',
+        };
+        const searchAllWorks = vi.fn(async () => { await (wrapper as any).setProps({ works: [result] }); });
+        const wrapper = mount(BackupWorkDownloader, { props: { playlists: [], works: [], profile: profile(), searchAllWorks } });
+        await wrapper.get('[data-testid="search"]').setValue('partial');
+        await wrapper.get('[data-testid="search-all-works"]').trigger('click');
+        await vi.waitFor(() => expect(wrapper.find('[data-testid="search-work-RJ98"]').exists()).toBe(true));
+
+        expect(wrapper.get('[data-testid="search-work-RJ98"] .work-size').text()).toBe('at least 1 MB');
+        await wrapper.get('[data-testid="file-filter-image"]').setValue(false);
+        expect(wrapper.get('[data-testid="search-work-RJ98"] .work-size').text()).toBe('1 MB');
+        await wrapper.get('[data-testid="file-filter-audio"]').setValue(false);
+        await wrapper.get('[data-testid="file-filter-image"]').setValue(true);
+        expect(wrapper.get('[data-testid="search-work-RJ98"] .work-size').text()).toBe('size unavailable');
     });
 
     it('hides results from the previous query until the next search completes', async () => {
@@ -181,7 +222,7 @@ describe('BackupWorkDownloader', () => {
         },
     );
 
-    it('keeps source and job errors outside progress and never prints 0 / 0', () => {
+    it('keeps source and job errors outside progress and never prints 0 / 0', async () => {
         const wrapper = mount(BackupWorkDownloader, {
             props: {
                 playlists: [], works: [], profile: profile(), ownLoadFailed: true,
@@ -190,6 +231,7 @@ describe('BackupWorkDownloader', () => {
             },
         });
 
+        await wrapper.get('[data-testid="source-own"]').trigger('click');
         expect(wrapper.get('[data-testid="source-load-error"]').text()).toBe('Unavailable');
         expect(wrapper.get('[data-testid="download-error"]').text()).toContain('Folder access is unavailable');
         expect(wrapper.find('[data-testid="progress-count"]').exists()).toBe(false);
@@ -200,6 +242,7 @@ describe('BackupWorkDownloader', () => {
         const wrapper = mount(BackupWorkDownloader, {
             props: { playlists, works, profile: profile({ selectedWorkIds: [1], convertToOpus: true, opusBitrate: 128 }) },
         });
+        await wrapper.get('[data-testid="source-own"]').trigger('click');
         await wrapper.get('[data-testid="expand-p1"]').trigger('click');
 
         expect(wrapper.get('[data-testid="work-1"] .work-size').text()).toMatch(/about 9\.3 MB after Opus/);

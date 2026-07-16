@@ -4,16 +4,20 @@ import { WorksApi } from '../../api';
 import type { PlaylistEntry } from '../../api/Playlist';
 import { useI18n } from '../../composables/useI18n';
 import { Logger } from '../../core/Utils';
+import { WorkService } from '../../services/WorkService';
 import { buildCoverUrl } from '../../types/api';
 import { fetchOwnPlaylistEntries, fetchPlaylistAsExported, type ExportedWork } from '../EmergencyExport';
 import type {
     BackupDownloadProfile,
     BackupDownloadProgress,
     BackupDownloadState,
+    BackupFileFilter,
     BackupPlaylistDownloadItem,
+    BackupPlaylistSource,
     BackupPlaylistSourceFilter,
     BackupWorkDownloadItem,
 } from '../backupWorkDownloaderTypes';
+import { discoverDownloadManifest, type DownloadTreeNode } from '../downloads/DownloadManifest';
 import { chooseDownloadDirectory } from '../downloads/DirectoryDownloadSink';
 import {
     DownloadCenterRunError,
@@ -22,7 +26,7 @@ import {
 } from '../downloads/DownloadCenterRunner';
 import { fetchCachedCommunityPlaylist } from '../playlist/CommunityPlaylistDetailsService';
 import { PlaylistDiscoveryService } from '../playlist/PlaylistDiscoveryService';
-import { getAuthHeader } from '../playlist/PlaylistService';
+import { getApiBaseUrl, getAuthHeader } from '../playlist/PlaylistService';
 import type { CommunityPlaylistSummary } from '../playlist/types';
 import { semanticWorkSearch } from '../SemanticWorkSearchService';
 import BackupWorkDownloader from './BackupWorkDownloader.vue';
@@ -46,7 +50,9 @@ const resumableJobs = ref<DownloadCenterJob[]>([]);
 const discoveryService = PlaylistDiscoveryService.getInstance();
 const ownSeeds = new Map<string, PlaylistEntry>();
 const resolving = new Map<string, Promise<void>>();
+const enrichingWorks = new Map<string, Promise<void>>();
 let unsubscribeRunner: (() => void) | undefined;
+let enrichmentGeneration = 0;
 
 const options = ref<Omit<BackupDownloadProfile, 'labels'>>({
     selectedWorkIds: [],
@@ -89,6 +95,7 @@ const labels = computed(() => ({
     collapsePlaylist: t('backupDownloaderCollapse'),
     selectedSummary: t('backupDownloaderSelected'),
     unknownSize: t('backupDownloaderUnknownSize'),
+    partialSize: t('backupDownloaderPartialSize'),
     estimatedOpusSize: t('backupDownloaderEstimatedOpusSize'),
     noResults: t('backupDownloaderNoResults'),
     fileTypes: t('backupDownloaderFileTypes'),
@@ -147,7 +154,7 @@ function mapCommunity(summary: CommunityPlaylistSummary): BackupPlaylistDownload
     };
 }
 
-function setSourcePlaylists(source: BackupPlaylistSourceFilter, items: BackupPlaylistDownloadItem[]): void {
+function setSourcePlaylists(source: BackupPlaylistSource, items: BackupPlaylistDownloadItem[]): void {
     const existing = new Map(playlists.value
         .filter(playlist => playlist.source === source)
         .map(playlist => [String(playlist.id), playlist]));
@@ -235,9 +242,19 @@ function open(): void {
     // the modal is already available to the user.
     visible.value = true;
     signedIn.value = hasAuthenticatedSession();
-    if (signedIn.value) void loadOwn();
-    else void loadCommunity();
+    enrichmentGeneration += 1;
     void refreshResumableJobs();
+}
+
+function close(): void {
+    visible.value = false;
+    enrichmentGeneration += 1;
+}
+
+function handleSourceChange(source: BackupPlaylistSourceFilter): void {
+    enrichmentGeneration += 1;
+    if (source === 'public') void loadCommunity();
+    else if (source === 'own' && signedIn.value) void loadOwn();
 }
 
 function updateProfile(state: BackupDownloadState): void {
@@ -291,12 +308,15 @@ async function resolvePlaylist(playlist: BackupPlaylistDownloadItem): Promise<vo
                     ...current,
                     id,
                     title: item.title || current?.title || id,
+                    coverUrl: current?.coverUrl || buildCoverUrl(id, '240x240', getApiBaseUrl()),
                     sizeBytes: item.sizeBytes ?? current?.sizeBytes,
+                    sizeState: item.sizeBytes ? 'resolved' : current?.sizeState ?? 'loading',
                     durationSeconds: item.durationSeconds ?? current?.durationSeconds,
                     playlistIds: [...playlistIds],
                 });
             }
             works.value = [...nextWorks.values()];
+            void enrichWorkItems(ids, enrichmentGeneration);
             playlists.value = playlists.value.map(item => item.source === playlist.source && String(item.id) === String(playlist.id)
                 ? { ...item, workIds: ids, worksCount: Math.max(playlist.worksCount ?? 0, resolvedWorksCount, ids.length), error: resolvedError }
                 : item);
@@ -330,22 +350,116 @@ function mergeDirectWork(
         .map(Number).find(value => Number.isSafeInteger(value) && value > 0);
     const durationSeconds = [result.durationSeconds, result.duration]
         .map(Number).find(value => Number.isFinite(value) && value > 0);
+    const coverUrl = [result.thumbnailCoverUrl, result.samCoverUrl, result.mainCoverUrl, result.coverUrl, result.cover]
+        .find(value => typeof value === 'string' && value.trim()) as string | undefined;
+    const tags = Array.isArray(result.tags)
+        ? result.tags.map(tag => typeof tag === 'string'
+            ? tag
+            : tag && typeof tag === 'object' && 'name' in tag ? String((tag as { name?: unknown }).name ?? '') : '')
+            .filter(Boolean)
+        : current?.tags;
     target.set(id, {
         ...current,
         id,
         title: (typeof result.title === 'string' && result.title) || fallbackTitle || current?.title || id,
+        coverUrl: coverUrl || current?.coverUrl || buildCoverUrl(id, '240x240', getApiBaseUrl()),
         sizeBytes: sizeBytes ?? current?.sizeBytes,
+        sizeState: sizeBytes ? 'resolved' : current?.sizeState ?? 'loading',
         durationSeconds: durationSeconds ?? current?.durationSeconds,
+        tags,
         playlistIds: current?.playlistIds,
         directSearchResult: true,
     });
 }
 
+function updateWork(id: string, update: Partial<BackupWorkDownloadItem>): void {
+    works.value = works.value.map(work => String(work.id) === id ? { ...work, ...update } : work);
+}
+
+async function enrichWorkItem(id: string, generation: number): Promise<void> {
+    if (!visible.value || generation !== enrichmentGeneration) return;
+    const key = `${generation}:${id}`;
+    const existing = enrichingWorks.get(key);
+    if (existing) return existing;
+    const request = (async () => {
+        const work = works.value.find(item => String(item.id) === id);
+        if (!work) return;
+        if (work.sizeBytesByType && work.durationSeconds != null && work.coverUrl) {
+            return;
+        }
+        updateWork(id, {
+            sizeState: work.sizeState === 'partial'
+                ? 'partial'
+                : work.sizeBytes != null ? 'resolved' : 'loading',
+        });
+        const needsInfo = !work.durationSeconds || !work.tags?.length || !work.coverUrl;
+        const [tracksResult, infoResult] = await Promise.allSettled([
+            WorkService.getTracks(id),
+            needsInfo ? WorkService.getWorkInfo(id) : Promise.resolve(null),
+        ]);
+        if (!visible.value || generation !== enrichmentGeneration) return;
+        const update: Partial<BackupWorkDownloadItem> = {};
+        if (tracksResult.status === 'fulfilled') {
+            const manifest = discoverDownloadManifest(tracksResult.value as unknown as DownloadTreeNode[]);
+            const byType: Partial<Record<BackupFileFilter, number>> = {};
+            const unknownByType: Partial<Record<BackupFileFilter, number>> = {};
+            for (const entry of manifest.entries) {
+                const category: BackupFileFilter = entry.category === 'unknown' ? 'other' : entry.category;
+                if (!entry.size || entry.size <= 0) {
+                    unknownByType[category] = (unknownByType[category] ?? 0) + 1;
+                    continue;
+                }
+                byType[category] = (byType[category] ?? 0) + entry.size;
+            }
+            const sizeBytes = Object.values(byType).reduce((sum, value) => sum + (value ?? 0), 0);
+            const unknownSizeCount = Object.values(unknownByType).reduce((sum, value) => sum + (value ?? 0), 0);
+            if (sizeBytes > 0) {
+                update.sizeBytesByType = byType;
+                update.unknownSizeCountByType = unknownByType;
+                update.sizeBytes = sizeBytes;
+                update.sizeState = unknownSizeCount > 0 ? 'partial' : 'resolved';
+            } else if (unknownSizeCount > 0) {
+                update.unknownSizeCountByType = unknownByType;
+                update.sizeState = 'partial';
+            }
+        }
+        if (infoResult.status === 'fulfilled' && infoResult.value) {
+            const info = infoResult.value;
+            update.title = work.title || info.title;
+            update.coverUrl = work.coverUrl || info.thumbnailCoverUrl || info.samCoverUrl || info.mainCoverUrl;
+            update.durationSeconds = work.durationSeconds || info.duration;
+            if (!work.tags?.length) update.tags = info.tags?.map(tag => tag.name).filter(Boolean);
+        }
+        if (update.sizeState == null && work.sizeBytes == null) update.sizeState = 'unavailable';
+        updateWork(id, update);
+    })().catch(error => {
+        if (!visible.value || generation !== enrichmentGeneration) return;
+        Logger.warn('[DownloadCenter] Could not calculate work size', id, error);
+        updateWork(id, { sizeState: 'unavailable' });
+    }).finally(() => { enrichingWorks.delete(key); });
+    enrichingWorks.set(key, request);
+    return request;
+}
+
+async function enrichWorkItems(ids: string[], generation: number): Promise<void> {
+    const queue = [...new Set(ids)];
+    let cursor = 0;
+    const workers = Array.from({ length: Math.min(3, queue.length) }, async () => {
+        for (;;) {
+            const id = queue[cursor++];
+            if (!id || !visible.value || generation !== enrichmentGeneration) return;
+            await enrichWorkItem(id, generation);
+        }
+    });
+    await Promise.all(workers);
+}
+
 async function searchAllWorks(query: string): Promise<void> {
+    const generation = ++enrichmentGeneration;
     const merged = new Map(works.value.map(work => [String(work.id), { ...work, directSearchResult: false }]));
     const exactRj = /^[A-Za-z]{2}\d+$/.test(query.trim());
     const [semantic, live] = await Promise.allSettled([
-        exactRj ? Promise.resolve([]) : semanticWorkSearch(query),
+        exactRj ? Promise.resolve([]) : semanticWorkSearch(query, 20),
         WorksApi.searchWorks(query, { page: 1 }),
     ]);
     if (semantic.status === 'fulfilled') {
@@ -361,7 +475,13 @@ async function searchAllWorks(query: string): Promise<void> {
     if ((exactRj && live.status === 'rejected') || (semantic.status === 'rejected' && live.status === 'rejected')) {
         throw live.status === 'rejected' ? live.reason : semantic.reason;
     }
-    works.value = [...merged.values()];
+    if (!visible.value || generation !== enrichmentGeneration) return;
+    const mergedWorks = [...merged.values()];
+    const retainedWorks = mergedWorks.filter(work => !work.directSearchResult);
+    const directWorks = mergedWorks.filter(work => work.directSearchResult).slice(0, 30);
+    works.value = [...retainedWorks, ...directWorks];
+    const resultIds = works.value.filter(work => work.directSearchResult).map(work => String(work.id));
+    void enrichWorkItems(resultIds, generation);
 }
 
 function setRunnerProgress(next: BackupDownloadProgress & { jobId?: string }): void {
@@ -475,7 +595,11 @@ onMounted(() => {
     });
     void refreshResumableJobs();
 });
-onUnmounted(() => { unsubscribeRunner?.(); });
+onUnmounted(() => {
+    visible.value = false;
+    enrichmentGeneration += 1;
+    unsubscribeRunner?.();
+});
 
 defineExpose({ open });
 </script>
@@ -483,6 +607,6 @@ defineExpose({ open });
 <template>
     <button class="q-btn q-btn-flat q-btn-dense asmr-download-center-btn text-white" data-testid="download-center-open" :title="t('downloadCenterButton')" :aria-label="t('downloadCenterButton')" @click="open"><span class="q-btn__content"><i class="q-icon material-icons" aria-hidden="true">download_for_offline</i></span></button>
     <Teleport to="body">
-        <BackupWorkDownloader v-if="visible" :playlists="playlists" :works="works" :profile="profile" :show-own="signedIn" :loading-own="loadingOwn" :loading-public="loadingPublic" :own-load-failed="ownLoadFailed" :public-load-failed="publicLoadFailed" :busy="busy" :progress="displayProgress" :error-message="jobError" :resumable-jobs="resumableJobs.map(job => ({ id: job.id, title: job.title }))" :resolve-playlist="resolvePlaylist" :search-all-works="searchAllWorks" @close="visible = false" @source-change="source => { if (source === 'public') void loadCommunity(); else if (signedIn) void loadOwn(); }" @update="updateProfile" @start="startDownload" @pause="pauseDownload" @resume="resumeDownload" />
+        <BackupWorkDownloader v-if="visible" :playlists="playlists" :works="works" :profile="profile" :show-own="signedIn" :loading-own="loadingOwn" :loading-public="loadingPublic" :own-load-failed="ownLoadFailed" :public-load-failed="publicLoadFailed" :busy="busy" :progress="displayProgress" :error-message="jobError" :resumable-jobs="resumableJobs.map(job => ({ id: job.id, title: job.title }))" :resolve-playlist="resolvePlaylist" :search-all-works="searchAllWorks" @close="close" @source-change="handleSourceChange" @update="updateProfile" @start="startDownload" @pause="pauseDownload" @resume="resumeDownload" />
     </Teleport>
 </template>

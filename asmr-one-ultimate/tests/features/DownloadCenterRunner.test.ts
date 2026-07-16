@@ -165,7 +165,7 @@ describe('DownloadCenterRunner', () => {
         const result = await (runner as any).continueDiscovery('job', persisted);
 
         expect(mocks.getTracks).toHaveBeenCalledTimes(1);
-        expect(mocks.getTracks).toHaveBeenCalledWith('RJ2');
+        expect(mocks.getTracks).toHaveBeenCalledWith('RJ2', false, true);
         expect(repo.appendFilesAndUpdateOptions).toHaveBeenCalledWith('job', expect.objectContaining({
             discovery: expect.objectContaining({ nextIndex: 2 }),
         }), expect.arrayContaining([expect.objectContaining({ path: 'Resume here/track.wav' })]));
@@ -256,7 +256,7 @@ describe('DownloadCenterRunner', () => {
         const runner = new DownloadCenterRunner(repo as any);
 
         const discovery = (runner as any).continueDiscovery('job', options([{ id: 'RJ2', title: 'Work' }]));
-        await vi.waitFor(() => expect(mocks.getTracks).toHaveBeenCalledWith('RJ2'));
+        await vi.waitFor(() => expect(mocks.getTracks).toHaveBeenCalledWith('RJ2', false, true));
         expect(mocks.getWorkInfo).toHaveBeenCalledWith('RJ2');
 
         tracks.resolve([{ type: 'audio', hash: 'audio', title: 'track.wav', mediaDownloadUrl: 'https://media.test/track.wav' }]);
@@ -275,12 +275,12 @@ describe('DownloadCenterRunner', () => {
             { id: 'RJ1', title: 'First' },
             { id: 'RJ2', title: 'Second' },
         ]));
-        await vi.waitFor(() => expect(mocks.getTracks).toHaveBeenCalledWith('RJ1'));
+        await vi.waitFor(() => expect(mocks.getTracks).toHaveBeenCalledWith('RJ1', false, true));
         await runner.pause();
         tracks.resolve([{ type: 'audio', hash: 'audio', title: 'track.wav', mediaDownloadUrl: 'https://media.test/track.wav' }]);
 
         await expect(discovery).rejects.toMatchObject({ code: 'paused' });
-        expect(mocks.getTracks).not.toHaveBeenCalledWith('RJ2');
+        expect(mocks.getTracks.mock.calls.some(([id]) => id === 'RJ2')).toBe(false);
         expect(repo.appendFilesAndUpdateOptions).toHaveBeenCalledTimes(1);
         expect(repo.appendFilesAndUpdateOptions).toHaveBeenCalledWith('job', expect.objectContaining({
             discovery: expect.objectContaining({ nextIndex: 1, complete: false }),

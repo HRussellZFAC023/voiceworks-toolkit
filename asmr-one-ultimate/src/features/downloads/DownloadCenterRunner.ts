@@ -328,7 +328,10 @@ export class DownloadCenterRunner {
             const newFiles: Array<{ id: string; path: string; url: string; totalBytes?: number }> = [];
             try {
                 const [tracks, info] = await Promise.all([
-                    WorkService.getTracks(work.id),
+                    // A non-essential size preview may already own the shared
+                    // in-flight request. Reuse fresh cache data, but never let
+                    // that preview stall a user-started download.
+                    WorkService.getTracks(work.id, false, true),
                     WorkService.getWorkInfo(work.id).catch(error => {
                         Logger.warn('[DownloadCenter] Optional work metadata unavailable; downloading files without enrichment', work.id, error);
                         return null;

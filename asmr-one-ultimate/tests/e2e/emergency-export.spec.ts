@@ -58,9 +58,21 @@ async function mockPlaylistApis(page: Page): Promise<void> {
     });
     await page.route('**/api/search/**', route => route.fulfill({
         status: 200, contentType: 'application/json', body: JSON.stringify({
-            works: [{ id: 999999, title: 'Direct search result' }],
+            works: [{
+                id: 999999, title: 'Direct search result', duration: 600,
+                thumbnailCoverUrl: 'https://media.e2e/direct-cover.jpg', tags: [{ name: 'Direct tag' }],
+            }],
             pagination: { currentPage: 1, pageSize: 20, totalCount: 1 },
         }),
+    }));
+    await page.route('**/api/tracks/999999*', route => route.fulfill({
+        status: 200, contentType: 'application/json', body: JSON.stringify([
+            { type: 'audio', hash: 'direct-audio', title: 'direct.wav', size: 1024 * 1024, mediaDownloadUrl: 'https://media.e2e/direct.wav' },
+            { type: 'image', hash: 'direct-cover', title: 'cover.jpg', size: 512 * 1024, mediaDownloadUrl: 'https://media.e2e/direct-cover.jpg' },
+        ]),
+    }));
+    await page.route('https://media.e2e/direct-cover.jpg', route => route.fulfill({
+        status: 200, contentType: 'image/png', body: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Z6CsAAAAASUVORK5CYII=', 'base64'),
     }));
 }
 
@@ -133,7 +145,7 @@ test.describe('Emergency export and Download Center', () => {
         }
     });
 
-    test('opens instantly on Yours and lazily fetches the community catalog and playlist works', async ({ injectedPage, isScriptLoaded }) => {
+    test('opens instantly on Site and lazily fetches personal and community playlists', async ({ injectedPage, isScriptLoaded }) => {
         let communityCatalogRequests = 0;
         let publicWorksRequests = 0;
         let releaseOwn!: () => void;
@@ -152,7 +164,9 @@ test.describe('Emergency export and Download Center', () => {
         await helpers.gotoHome(injectedPage); await isScriptLoaded();
         communityCatalogRequests = 0;
         await openDownloadCenter(injectedPage, 500);
-        await expect(injectedPage.getByTestId('source-own')).toHaveAttribute('aria-selected', 'true');
+        await expect(injectedPage.getByTestId('source-site')).toHaveAttribute('aria-selected', 'true');
+        await expect(injectedPage.getByTestId('playlist-loading')).toHaveCount(0);
+        await injectedPage.getByTestId('source-own').click();
         await expect(injectedPage.getByTestId('playlist-loading')).toBeVisible();
         expect(communityCatalogRequests).toBe(0);
         releaseOwn();
@@ -167,30 +181,37 @@ test.describe('Emergency export and Download Center', () => {
         expect(publicWorksRequests).toBe(1);
     });
 
-    test('opens signed-out users on Community and keeps site-wide work search available', async ({ injectedPage, isScriptLoaded }) => {
+    test('opens signed-out users on Site and keeps Community separate', async ({ injectedPage, isScriptLoaded }) => {
         await helpers.gotoHome(injectedPage); await isScriptLoaded();
         await openDownloadCenter(injectedPage, 5_000, false);
 
         await expect(injectedPage.getByTestId('source-own')).toHaveCount(0);
-        await expect(injectedPage.getByTestId('source-public')).toHaveAttribute('aria-selected', 'true');
-        await expect(injectedPage.getByTestId(`playlist-${PUBLIC_ID}`)).toBeVisible();
+        await expect(injectedPage.getByTestId('source-site')).toHaveAttribute('aria-selected', 'true');
+        await expect(injectedPage.getByTestId(`playlist-${PUBLIC_ID}`)).toHaveCount(0);
         await expect(injectedPage.getByTestId('source-load-error')).toHaveCount(0);
         await expect(injectedPage.getByText('Find playlists or works', { exact: true })).toBeVisible();
         await expect(injectedPage.getByTestId('search-all-works')).toHaveText('Search');
         await injectedPage.getByTestId('search').fill('RJ999999');
         await injectedPage.getByTestId('search-all-works').click();
         await expect(injectedPage.getByTestId('search-work-RJ999999')).toBeVisible();
+        await expect(injectedPage.getByTestId('search-work-RJ999999').locator('.work-cover img')).toHaveAttribute('src', 'https://media.e2e/direct-cover.jpg');
+        await expect(injectedPage.getByTestId('search-work-RJ999999')).toContainText('1.5 MB');
+        await injectedPage.getByTestId('source-public').click();
+        await expect(injectedPage.getByTestId(`playlist-${PUBLIC_ID}`)).toBeVisible();
+        await expect(injectedPage.getByTestId('all-work-results')).toHaveCount(0);
     });
 
     test('offers themed selection, clear-all, tags, options, and direct work search in one modal', async ({ injectedPage, isScriptLoaded }) => {
         await injectedPage.setViewportSize({ width: 390, height: 844 });
         await helpers.gotoHome(injectedPage); await isScriptLoaded(); await openDownloadCenter(injectedPage);
+        await injectedPage.getByTestId('source-own').click();
         await injectedPage.getByTestId(`playlist-check-${OWN_ID}`).check();
         await expect(injectedPage.getByTestId('selection-summary')).toContainText('1');
         await injectedPage.getByTestId('clear-all').click();
         await expect(injectedPage.getByTestId('start')).toBeDisabled();
         await injectedPage.getByTestId('source-public').click();
         await expect(injectedPage.getByTestId('tag-filter')).toContainText('Relaxing');
+        await injectedPage.getByTestId('source-site').click();
         // Exact RJ lookup intentionally exercises the live-API fallback even
         // when the hosted semantic baseline is available in this real shell.
         await injectedPage.getByTestId('search').fill('RJ999999');
@@ -237,6 +258,7 @@ test.describe('Emergency export and Download Center', () => {
         await helpers.gotoHome(injectedPage); await isScriptLoaded();
         await injectedPage.evaluate(() => { (window as any).showDirectoryPicker = () => navigator.storage.getDirectory(); });
         await openDownloadCenter(injectedPage);
+        await injectedPage.getByTestId('source-own').click();
         await injectedPage.getByTestId(`playlist-check-${OWN_ID}`).check();
         await injectedPage.getByTestId('title-mode').selectOption('original');
         await injectedPage.getByTestId('start').click();
@@ -303,6 +325,7 @@ test.describe('Emergency export and Download Center', () => {
         await helpers.gotoHome(injectedPage); await isScriptLoaded();
         await injectedPage.evaluate(() => { (window as any).showDirectoryPicker = () => navigator.storage.getDirectory(); });
         await openDownloadCenter(injectedPage);
+        await injectedPage.getByTestId('source-own').click();
         await injectedPage.getByTestId(`playlist-check-${playlistId}`).check();
         await injectedPage.getByTestId('title-mode').selectOption('original');
         await injectedPage.getByTestId('start').click();
@@ -346,6 +369,7 @@ test.describe('Emergency export and Download Center', () => {
         await helpers.gotoHome(injectedPage); await isScriptLoaded();
         await injectedPage.evaluate(() => { (window as any).showDirectoryPicker = () => navigator.storage.getDirectory(); });
         await openDownloadCenter(injectedPage);
+        await injectedPage.getByTestId('source-own').click();
         await injectedPage.getByTestId(`playlist-check-${playlistId}`).check();
         await injectedPage.getByTestId('title-mode').selectOption('original');
         await injectedPage.getByTestId('start').click();
@@ -382,6 +406,7 @@ test.describe('Emergency export and Download Center', () => {
         await helpers.gotoHome(injectedPage); await isScriptLoaded();
         await injectedPage.evaluate(() => { (window as any).showDirectoryPicker = () => navigator.storage.getDirectory(); });
         await openDownloadCenter(injectedPage);
+        await injectedPage.getByTestId('source-own').click();
         await injectedPage.getByTestId(`playlist-check-${playlistId}`).check();
         await injectedPage.getByTestId('title-mode').selectOption('original');
         await injectedPage.getByTestId('opus-toggle').check();

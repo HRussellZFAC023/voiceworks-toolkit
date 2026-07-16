@@ -15,7 +15,7 @@ Individual playlist failures are recorded inside the export instead of aborting 
 
 ## Download works
 
-Choose **Download works** in the top toolbar. The panel opens synchronously on **Yours**; switching to **Community** reads one cached summary catalog instead of fetching hundreds of playlists. Covers, owners, work counts, and genre/tag filters are available from those summaries, while each playlist's works are fetched only when that playlist is expanded, selected, or downloaded. You can select all currently filtered rows, clear the entire selection, choose individual works, or search the full work catalog for something outside a playlist.
+Choose **Download works** in the top toolbar. The panel opens synchronously on **Site**, where multilingual semantic search is combined with the live work catalog and results include covers plus asynchronously calculated download sizes. **Yours** is shown only for signed-in users; **Community** reads one cached summary catalog instead of fetching hundreds of playlists. Covers, owners, work counts, and genre/tag filters are available from those summaries, while each playlist's works are fetched only when that playlist is expanded, selected, or downloaded. You can select all currently filtered rows, clear the entire selection, or choose individual works.
 
 Before choosing a destination folder, select which audio, video, image, text, and other files to include. Audio, images, and text use safe defaults; video and miscellaneous files are opt-in to reduce storage use.
 

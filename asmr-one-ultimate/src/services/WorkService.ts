@@ -160,7 +160,11 @@ export class WorkServiceImpl {
     /**
      * Get tracks structure
      */
-    public async getTracks(id: number | string, forceRefresh = false): Promise<TracksResponse> {
+    public async getTracks(
+        id: number | string,
+        forceRefresh = false,
+        bypassInflight = false,
+    ): Promise<TracksResponse> {
         const stripped = String(id).replace(/^[A-Za-z]+/, '');
         const workId = Number(stripped);
         if (!workId) throw new Error('Invalid work ID');
@@ -180,9 +184,10 @@ export class WorkServiceImpl {
 
         // Deduplicate concurrent requests for the same tracks
         const inflight = this.inflightTracks.get(workId);
-        if (inflight && !forceRefresh) return inflight;
+        if (inflight && !forceRefresh && !bypassInflight) return inflight;
 
         const promise = this.fetchTracks(workId);
+        if (bypassInflight) return promise;
         this.inflightTracks.set(workId, promise);
         promise.finally(() => this.inflightTracks.delete(workId));
         return promise;

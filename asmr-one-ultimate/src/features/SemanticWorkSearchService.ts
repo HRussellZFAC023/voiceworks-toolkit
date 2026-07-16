@@ -9,6 +9,7 @@ export interface SemanticWorkSearchResult {
     id: string;
     title: string;
     cover?: string;
+    tags: string[];
     score: number;
 }
 
@@ -23,7 +24,7 @@ export function rankSemanticWorkEntries(
     limit = 80,
 ): SemanticWorkSearchResult[] {
     return entries
-        .map(entry => ({ id: entry.id, title: entry.title, cover: entry.cover, score: semanticDotProduct(vector, entry.vector) }))
+        .map(entry => ({ id: entry.id, title: entry.title, cover: entry.cover, tags: entry.tags, score: semanticDotProduct(vector, entry.vector) }))
         .filter(result => Number.isFinite(result.score) && result.score >= DOWNLOAD_CENTER_SEMANTIC_MIN_SCORE)
         .sort((left, right) => right.score - left.score)
         .slice(0, Math.max(1, Math.min(200, limit)));
