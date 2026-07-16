@@ -6,8 +6,15 @@ const mocks = vi.hoisted(() => ({
     fetchPlaylist: vi.fn(),
     cachedCatalog: vi.fn(),
     loadCatalog: vi.fn(),
+    cachedDetails: vi.fn(),
+    semanticSearch: vi.fn(),
     searchWorks: vi.fn(),
     recover: vi.fn(),
+    runnerStart: vi.fn(),
+    runnerResume: vi.fn(),
+    runnerPause: vi.fn(),
+    loadSettledJob: vi.fn(),
+    chooseDirectory: vi.fn(),
 }));
 
 vi.mock('../../src/features/EmergencyExport', () => ({
@@ -17,7 +24,12 @@ vi.mock('../../src/features/EmergencyExport', () => ({
 vi.mock('../../src/features/playlist/PlaylistDiscoveryService', () => ({
     PlaylistDiscoveryService: { getInstance: () => ({ getCachedCommunityCatalog: mocks.cachedCatalog, loadCommunityCatalog: mocks.loadCatalog }) },
 }));
+vi.mock('../../src/features/playlist/CommunityPlaylistDetailsService', () => ({
+    fetchCachedCommunityPlaylist: mocks.cachedDetails,
+}));
+vi.mock('../../src/features/SemanticWorkSearchService', () => ({ semanticWorkSearch: mocks.semanticSearch }));
 vi.mock('../../src/api', () => ({ WorksApi: { searchWorks: mocks.searchWorks } }));
+vi.mock('../../src/features/downloads/DirectoryDownloadSink', () => ({ chooseDownloadDirectory: mocks.chooseDirectory }));
 vi.mock('../../src/features/downloads/DownloadCenterRunner', () => ({
     DownloadCenterRunError: class DownloadCenterRunError extends Error { constructor(public code: string) { super(code); } },
     DownloadCenterRunner: class DownloadCenterRunner {
@@ -25,10 +37,10 @@ vi.mock('../../src/features/downloads/DownloadCenterRunner', () => ({
         isRunning = false;
         progress = null;
         recoverInterruptedJobs = mocks.recover;
-        start = vi.fn();
-        resume = vi.fn();
-        pause = vi.fn();
-        loadSettledJob = vi.fn();
+        start = mocks.runnerStart;
+        resume = mocks.runnerResume;
+        pause = mocks.runnerPause;
+        loadSettledJob = mocks.loadSettledJob;
         subscribe(listener: (progress: null, running: boolean) => void) { listener(null, false); return vi.fn(); }
     },
 }));
@@ -44,17 +56,27 @@ function deferred<T>() {
 describe('DownloadCenter', () => {
     beforeEach(() => {
         vi.clearAllMocks();
+        mocks.runnerStart.mockReset();
+        mocks.runnerResume.mockReset();
+        mocks.runnerPause.mockReset();
         document.body.innerHTML = '';
         mocks.cachedCatalog.mockReturnValue([{
             id: '11111111-1111-4111-8111-111111111111', name: 'Cached public', userName: 'Community',
             worksCount: 4, coverUrl: 'https://example.test/public.jpg', tags: ['Relaxing'],
         }]);
         mocks.loadCatalog.mockResolvedValue(mocks.cachedCatalog());
+        mocks.cachedDetails.mockRejectedValue(new Error('cache miss'));
+        mocks.semanticSearch.mockResolvedValue([]);
         mocks.recover.mockResolvedValue([]);
+        mocks.loadSettledJob.mockResolvedValue(undefined);
+        mocks.chooseDirectory.mockResolvedValue({});
         mocks.searchWorks.mockResolvedValue({ works: [], pagination: { currentPage: 1, pageSize: 20, totalCount: 0 } });
     });
 
-    afterEach(() => { document.body.innerHTML = ''; });
+    afterEach(() => {
+        document.body.innerHTML = '';
+        delete (window as Window & { showDirectoryPicker?: unknown }).showDirectoryPicker;
+    });
 
     it('opens synchronously on Yours while its network request is still pending', async () => {
         const own = deferred<any[]>();
@@ -91,8 +113,34 @@ describe('DownloadCenter', () => {
         expect(mocks.fetchPlaylist).not.toHaveBeenCalled();
         (document.querySelector('[data-testid="expand-11111111-1111-4111-8111-111111111111"]') as HTMLButtonElement).click();
         await flushPromises();
+        expect(mocks.cachedDetails).toHaveBeenCalledWith('11111111-1111-4111-8111-111111111111');
         expect(mocks.fetchPlaylist).toHaveBeenCalledTimes(1);
         expect(document.querySelector('[data-testid="work-RJ9"]')).not.toBeNull();
+        wrapper.unmount();
+    });
+
+    it('uses shared community details first and maps duration and size without the live playlist request', async () => {
+        mocks.fetchOwn.mockResolvedValue([]);
+        mocks.cachedCatalog.mockReturnValue([{
+            id: '11111111-1111-4111-8111-111111111111', name: 'Cached public', userName: 'Community',
+            worksCount: 1, coverUrl: 'https://example.test/public.jpg', tags: ['Relaxing'],
+        }]);
+        mocks.loadCatalog.mockResolvedValue(mocks.cachedCatalog());
+        mocks.cachedDetails.mockResolvedValue({
+            version: 1, fetchedAt: new Date().toISOString(),
+            works: [{ rjCode: 'RJ123456', title: 'Shared work', sizeBytes: 1234, durationSeconds: 600 }],
+        });
+        const wrapper = mount(DownloadCenter, { attachTo: document.body });
+        await wrapper.get('[data-testid="download-center-open"]').trigger('click');
+        await flushPromises();
+        (document.querySelector('[data-testid="source-public"]') as HTMLButtonElement).click();
+        await flushPromises();
+        (document.querySelector('[data-testid^="expand-"]') as HTMLButtonElement).click();
+        await flushPromises();
+
+        expect(mocks.cachedDetails).toHaveBeenCalledTimes(1);
+        expect(mocks.fetchPlaylist).not.toHaveBeenCalled();
+        expect(document.querySelector('[data-testid="work-RJ123456"]')?.textContent).toContain('1.2 KB');
         wrapper.unmount();
     });
 
@@ -121,9 +169,9 @@ describe('DownloadCenter', () => {
         wrapper.unmount();
     });
 
-    it('adds selectable direct work-search results to the same collection', async () => {
+    it('uses Semantic Super Search and adds its direct results to the same collection', async () => {
         mocks.fetchOwn.mockResolvedValue([]);
-        mocks.searchWorks.mockResolvedValue({ works: [{ id: 42, title: 'Direct result' }], pagination: { currentPage: 1, pageSize: 20, totalCount: 1 } });
+        mocks.semanticSearch.mockResolvedValue([{ id: '42', title: 'Direct result', score: 0.8 }]);
         const wrapper = mount(DownloadCenter, { attachTo: document.body });
         await wrapper.get('[data-testid="download-center-open"]').trigger('click');
         await flushPromises();
@@ -133,7 +181,8 @@ describe('DownloadCenter', () => {
         await flushPromises();
         (document.querySelector('[data-testid="search-all-works"]') as HTMLButtonElement).click();
         await flushPromises();
-        expect(mocks.searchWorks).toHaveBeenCalledWith('Direct', { page: 1 });
+        expect(mocks.semanticSearch).toHaveBeenCalledWith('Direct');
+        expect(mocks.searchWorks).not.toHaveBeenCalled();
         expect(document.querySelector('[data-testid="search-work-RJ000042"]')?.textContent).toContain('Direct result');
         wrapper.unmount();
     });
@@ -160,24 +209,41 @@ describe('DownloadCenter', () => {
         wrapper.unmount();
     });
 
-    it('imports a saved backup without making it a prerequisite for live playlists', async () => {
-        mocks.fetchOwn.mockResolvedValue([]);
+    it('keeps source-loading failures out of job progress and has no backup import action', async () => {
+        mocks.fetchOwn.mockRejectedValue(new Error('offline'));
         const wrapper = mount(DownloadCenter, { attachTo: document.body });
         await wrapper.get('[data-testid="download-center-open"]').trigger('click');
         await flushPromises();
-        const input = document.querySelector('[data-testid="download-center-import-input"]') as HTMLInputElement;
-        const file = new File([JSON.stringify({
-            format: 'asmr-one-ultimate-playlist-backup', version: 1,
-            exportedAt: new Date().toISOString(), source: 'https://asmr.one', errors: [], publicPlaylists: [],
-            ownPlaylists: [{ id: 'imported', name: 'Saved offline', description: '', worksCount: 1, works: [{ rjCode: 'RJ777777', title: 'Saved work' }] }],
-        })], 'backup.json', { type: 'application/json' });
-        Object.defineProperty(input, 'files', { configurable: true, value: [file] });
-        input.dispatchEvent(new Event('change', { bubbles: true }));
+
+        expect(document.querySelector('[data-testid="source-load-error"]')).not.toBeNull();
+        expect(document.querySelector('[data-testid="download-progress"]')).toBeNull();
+        expect(document.querySelector('[data-testid="download-center-import-input"]')).toBeNull();
+        wrapper.unmount();
+    });
+
+    it('preserves the runner file counts when a work download fails', async () => {
+        mocks.fetchOwn.mockResolvedValue([{ id: 'mine', name: 'Mine', privacy: 0, works: ['RJ123456'], works_count: 1 }]);
+        mocks.fetchPlaylist.mockResolvedValue({
+            id: 'mine', name: 'Mine', description: '', worksCount: 1,
+            works: [{ rjCode: 'RJ123456', title: 'Selected work' }],
+        });
+        mocks.runnerStart.mockImplementation(async (_works, _state, _directory, _title, onProgress) => {
+            onProgress({ jobId: 'job-1', phase: 'downloading', current: 2, total: 5, label: 'Selected work/track.wav' });
+            const ErrorType = (await import('../../src/features/downloads/DownloadCenterRunner')).DownloadCenterRunError;
+            throw new ErrorType('failed');
+        });
+        Object.defineProperty(window, 'showDirectoryPicker', { configurable: true, value: vi.fn() });
+        const wrapper = mount(DownloadCenter, { attachTo: document.body });
+        await wrapper.get('[data-testid="download-center-open"]').trigger('click');
+        await flushPromises();
+        (document.querySelector('[data-testid="playlist-check-mine"]') as HTMLInputElement).click();
+        await flushPromises();
+        (document.querySelector('[data-testid="start"]') as HTMLButtonElement).click();
         await flushPromises();
 
-        await vi.waitFor(() => {
-            expect(document.querySelector('[data-testid="playlist-imported"]')?.textContent).toContain('Saved offline');
-        });
+        expect(document.querySelector('[data-testid="download-error"]')?.textContent).toMatch(/failed/i);
+        expect(document.querySelector('[data-testid="progress-count"]')?.textContent).toContain('2 / 5');
+        expect(document.querySelector('[data-testid="download-progress"]')?.textContent).not.toContain('0 / 0');
         wrapper.unmount();
     });
 
@@ -187,10 +253,7 @@ describe('DownloadCenter', () => {
             id: '11111111-1111-4111-8111-111111111111', name: 'Cached public', description: '', worksCount: 1,
             works: [{ rjCode: 'RJ000042', title: 'Playlist title' }],
         });
-        mocks.searchWorks.mockResolvedValue({
-            works: [{ id: 42, source_id: 'RJ000042', title: 'Search title' }],
-            pagination: { currentPage: 1, pageSize: 20, totalCount: 1 },
-        });
+        mocks.semanticSearch.mockResolvedValue([{ id: 'RJ000042', title: 'Search title', score: 0.8 }]);
         const wrapper = mount(DownloadCenter, { attachTo: document.body });
         await wrapper.get('[data-testid="download-center-open"]').trigger('click');
         await flushPromises();

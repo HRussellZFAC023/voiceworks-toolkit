@@ -22,10 +22,50 @@ export class RangeRestartRequiredError extends Error {
     }
 }
 
+export class DownloadStallError extends Error {
+    constructor(message = 'Download stalled while waiting for data') {
+        super(message);
+        this.name = 'DownloadStallError';
+    }
+}
+
 type FetchLike = typeof fetch;
 
+export interface DownloadRetryOptions {
+    maxAttempts?: number;
+    baseDelayMs?: number;
+    maxDelayMs?: number;
+    sleep?: (milliseconds: number) => Promise<void>;
+    random?: () => number;
+    stallTimeoutMs?: number;
+    setTimer?: (callback: () => void, milliseconds: number) => ReturnType<typeof setTimeout>;
+    clearTimer?: (timer: ReturnType<typeof setTimeout>) => void;
+}
+
+const DEFAULT_RETRY_ATTEMPTS = 3;
+
+function isAbortError(error: unknown): boolean {
+    return error instanceof DOMException
+        ? error.name === 'AbortError'
+        : error instanceof Error && error.name === 'AbortError';
+}
+
+function isRetryableStatus(status: number): boolean {
+    return status === 408 || status === 429 || status >= 500;
+}
+
+function retryAfterMilliseconds(value: string | null, now = Date.now()): number | undefined {
+    if (!value) return undefined;
+    const seconds = Number(value);
+    if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1_000;
+    const date = Date.parse(value);
+    return Number.isFinite(date) ? Math.max(0, date - now) : undefined;
+}
+
 function numericHeader(headers: Headers, key: string): number | undefined {
-    const value = Number(headers.get(key));
+    const raw = headers.get(key);
+    if (raw === null || raw.trim() === '') return undefined;
+    const value = Number(raw);
     return Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
@@ -63,10 +103,71 @@ function parseContentRange(value: string | null): ParsedContentRange | undefined
 
 /** Streaming transport with strict range validation for safe resume. */
 export class DownloadTransport {
-    constructor(private readonly fetchImpl: FetchLike = fetch) {}
+    private readonly maxAttempts: number;
+    private readonly baseDelayMs: number;
+    private readonly maxDelayMs: number;
+    private readonly sleep: (milliseconds: number) => Promise<void>;
+    private readonly random: () => number;
+    private readonly stallTimeoutMs: number;
+    private readonly setTimer: (callback: () => void, milliseconds: number) => ReturnType<typeof setTimeout>;
+    private readonly clearTimer: (timer: ReturnType<typeof setTimeout>) => void;
+
+    constructor(private readonly fetchImpl: FetchLike = fetch, retry: DownloadRetryOptions = {}) {
+        this.maxAttempts = Math.max(1, Math.floor(retry.maxAttempts ?? DEFAULT_RETRY_ATTEMPTS));
+        this.baseDelayMs = Math.max(0, retry.baseDelayMs ?? 300);
+        this.maxDelayMs = Math.max(this.baseDelayMs, retry.maxDelayMs ?? 5_000);
+        this.sleep = retry.sleep ?? (milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)));
+        this.random = retry.random ?? Math.random;
+        this.stallTimeoutMs = Math.max(0, retry.stallTimeoutMs ?? 30_000);
+        this.setTimer = retry.setTimer ?? ((callback, milliseconds) => setTimeout(callback, milliseconds));
+        this.clearTimer = retry.clearTimer ?? (timer => clearTimeout(timer));
+    }
+
+    private retryDelay(attempt: number, response?: Response): number {
+        const retryAfter = retryAfterMilliseconds(response?.headers.get('retry-after') ?? null);
+        if (retryAfter !== undefined) return Math.min(this.maxDelayMs, retryAfter);
+        const exponential = Math.min(this.maxDelayMs, this.baseDelayMs * (2 ** attempt));
+        return exponential * (0.5 + this.random() * 0.5);
+    }
+
+    /** Retries only request establishment/status failures, before any body bytes reach the sink. */
+    private async request(url: string, init: RequestInit): Promise<Response> {
+        for (let attempt = 0; ; attempt += 1) {
+            let response: Response;
+            try {
+                response = await this.fetchImpl(url, init);
+            } catch (error) {
+                if (isAbortError(error) || init.signal?.aborted || attempt + 1 >= this.maxAttempts) throw error;
+                await this.sleep(this.retryDelay(attempt));
+                continue;
+            }
+            if (!isRetryableStatus(response.status) || attempt + 1 >= this.maxAttempts) return response;
+            await response.body?.cancel().catch(() => undefined);
+            await this.sleep(this.retryDelay(attempt, response));
+        }
+    }
+
+    private readWithStallTimeout(
+        reader: ReadableStreamDefaultReader<Uint8Array>,
+        controller: AbortController,
+    ): Promise<ReadableStreamReadResult<Uint8Array>> {
+        if (this.stallTimeoutMs === 0) return reader.read();
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        return new Promise<ReadableStreamReadResult<Uint8Array>>((resolve, reject) => {
+            timer = this.setTimer(() => {
+                const error = new DownloadStallError();
+                controller.abort(error);
+                void reader.cancel(error).catch(() => undefined);
+                reject(error);
+            }, this.stallTimeoutMs);
+            reader.read().then(resolve, reject);
+        }).finally(() => {
+            if (timer !== undefined) this.clearTimer(timer);
+        });
+    }
 
     async probe(url: string, signal?: AbortSignal): Promise<DownloadProbe> {
-        const response = await this.fetchImpl(url, {
+        const response = await this.request(url, {
             method: 'HEAD',
             headers: getTrustedAuthHeader(url),
             signal,
@@ -92,48 +193,56 @@ export class DownloadTransport {
         if (offset > 0 && options.expectedEtag) headers['If-Range'] = options.expectedEtag;
         else if (offset > 0 && options.expectedLastModified) headers['If-Range'] = options.expectedLastModified;
 
-        const response = await this.fetchImpl(url, {
-            headers,
-            signal: options.signal,
-            credentials: 'include',
-        });
-        if (offset > 0 && response.status !== 206) throw new RangeRestartRequiredError();
-        if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        const requestController = new AbortController();
+        const forwardAbort = () => requestController.abort(options.signal?.reason);
+        if (options.signal?.aborted) forwardAbort();
+        else options.signal?.addEventListener('abort', forwardAbort, { once: true });
+        try {
+            const response = await this.request(url, {
+                headers,
+                signal: requestController.signal,
+                credentials: 'include',
+            });
+            if (offset > 0 && response.status !== 206) throw new RangeRestartRequiredError();
+            if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
 
-        const range = parseContentRange(response.headers.get('content-range'));
-        if (response.status === 206 && range?.start !== offset) {
-            throw new RangeRestartRequiredError('Server returned a mismatched byte range');
-        }
-        const etag = response.headers.get('etag') || undefined;
-        const lastModified = response.headers.get('last-modified') || undefined;
-        if (options.expectedEtag && etag && etag !== options.expectedEtag) {
-            throw new RangeRestartRequiredError('Remote file changed since the checkpoint');
-        }
-        if (options.expectedLastModified && lastModified && lastModified !== options.expectedLastModified) {
-            throw new RangeRestartRequiredError('Remote file changed since the checkpoint');
-        }
+            const range = parseContentRange(response.headers.get('content-range'));
+            if (response.status === 206 && range?.start !== offset) {
+                throw new RangeRestartRequiredError('Server returned a mismatched byte range');
+            }
+            const etag = response.headers.get('etag') || undefined;
+            const lastModified = response.headers.get('last-modified') || undefined;
+            if (options.expectedEtag && etag && etag !== options.expectedEtag) {
+                throw new RangeRestartRequiredError('Remote file changed since the checkpoint');
+            }
+            if (options.expectedLastModified && lastModified && lastModified !== options.expectedLastModified) {
+                throw new RangeRestartRequiredError('Remote file changed since the checkpoint');
+            }
 
-        const total = range?.total
-            ?? (response.status === 206 ? undefined : numericHeader(response.headers, 'content-length'));
-        const reader = response.body?.getReader();
-        if (!reader) throw new Error('Streaming response body is unavailable');
-        let cursor = offset;
-        for (;;) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            if (!value?.byteLength) continue;
-            await onChunk({ bytes: value, offset: cursor, total, etag, lastModified });
-            cursor += value.byteLength;
+            const total = range?.total
+                ?? (response.status === 206 ? undefined : numericHeader(response.headers, 'content-length'));
+            const reader = response.body?.getReader();
+            if (!reader) throw new Error('Streaming response body is unavailable');
+            let cursor = offset;
+            for (;;) {
+                const { done, value } = await this.readWithStallTimeout(reader, requestController);
+                if (done) break;
+                if (!value?.byteLength) continue;
+                await onChunk({ bytes: value, offset: cursor, total, etag, lastModified });
+                cursor += value.byteLength;
+            }
+            const expectedEnd = typeof total === 'number' ? total : range ? range.end + 1 : undefined;
+            if (typeof expectedEnd === 'number' && cursor !== expectedEnd) {
+                throw new Error(`Incomplete download: received ${cursor} of ${expectedEnd} bytes`);
+            }
+            return {
+                size: total,
+                etag,
+                lastModified,
+                acceptsRanges: response.status === 206 || /bytes/i.test(response.headers.get('accept-ranges') || ''),
+            };
+        } finally {
+            options.signal?.removeEventListener('abort', forwardAbort);
         }
-        const expectedEnd = typeof total === 'number' ? total : range ? range.end + 1 : undefined;
-        if (typeof expectedEnd === 'number' && cursor !== expectedEnd) {
-            throw new Error(`Incomplete download: received ${cursor} of ${expectedEnd} bytes`);
-        }
-        return {
-            size: total,
-            etag,
-            lastModified,
-            acceptsRanges: response.status === 206 || /bytes/i.test(response.headers.get('accept-ranges') || ''),
-        };
     }
 }

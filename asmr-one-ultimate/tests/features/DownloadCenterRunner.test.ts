@@ -264,6 +264,29 @@ describe('DownloadCenterRunner', () => {
         await discovery;
     });
 
+    it('pauses during discovery and atomically checkpoints the completed partial batch', async () => {
+        const tracks = deferred<unknown[]>();
+        mocks.getTracks.mockReturnValueOnce(tracks.promise);
+        const repo = repository();
+        const runner = new DownloadCenterRunner(repo as any);
+        (runner as any).activeJobId = 'job';
+
+        const discovery = (runner as any).continueDiscovery('job', options([
+            { id: 'RJ1', title: 'First' },
+            { id: 'RJ2', title: 'Second' },
+        ]));
+        await vi.waitFor(() => expect(mocks.getTracks).toHaveBeenCalledWith('RJ1'));
+        await runner.pause();
+        tracks.resolve([{ type: 'audio', hash: 'audio', title: 'track.wav', mediaDownloadUrl: 'https://media.test/track.wav' }]);
+
+        await expect(discovery).rejects.toMatchObject({ code: 'paused' });
+        expect(mocks.getTracks).not.toHaveBeenCalledWith('RJ2');
+        expect(repo.appendFilesAndUpdateOptions).toHaveBeenCalledTimes(1);
+        expect(repo.appendFilesAndUpdateOptions).toHaveBeenCalledWith('job', expect.objectContaining({
+            discovery: expect.objectContaining({ nextIndex: 1, complete: false }),
+        }), expect.arrayContaining([expect.objectContaining({ path: 'First/track.wav' })]));
+    });
+
     it('checkpoints discovery in fixed atomic batches instead of rewriting after every work', async () => {
         const workCount = DOWNLOAD_DISCOVERY_BATCH_SIZE * 2 + 1;
         const works = Array.from({ length: workCount }, (_, index) => ({ id: `RJ${index + 1}`, title: `Work ${index + 1}` }));
@@ -366,6 +389,18 @@ describe('DownloadCenterRunner', () => {
         await (runner as any).prepareAndRun('job', persisted).catch(() => undefined);
 
         expect(mocks.coordinatorArgs.at(-1)?.[3]).toBe(1);
+    });
+
+    it('uses three file workers when conversion is disabled', async () => {
+        const file = { id: 'file', jobId: 'job', path: 'Work/track.wav', status: 'paused', downloadedBytes: 0 };
+        const repo = repository([file]);
+        const runner = new DownloadCenterRunner(repo as any);
+        const persisted = options([{ id: 'RJ2', title: 'Work' }]);
+        persisted.discovery!.complete = true;
+
+        await (runner as any).prepareAndRun('job', persisted).catch(() => undefined);
+
+        expect(mocks.coordinatorArgs.at(-1)?.[3]).toBe(3);
     });
 
     it('persists only selected playlist/direct-search works and never polls listJobs while active', async () => {

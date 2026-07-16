@@ -16,7 +16,10 @@ export interface DownloadCoordinatorProgress {
 export type DownloadProgressListener = (progress: DownloadCoordinatorProgress) => void;
 // Closing a File System Access writer commits safely but may copy the partial
 // file. Use coarse checkpoints to avoid quadratic I/O on large audio files.
-const DURABLE_CHECKPOINT_INTERVAL = 64 * 1024 * 1024;
+// Closing a FileSystemWritable commits its safe-write copy. A small interval
+// makes large files approach quadratic disk I/O, so checkpoint coarsely while
+// retaining close-before-checkpoint ordering and a bounded resume-loss window.
+export const DOWNLOAD_DURABLE_CHECKPOINT_INTERVAL = 256 * 1024 * 1024;
 const RUNNING_JOB_IDS = new Set<string>();
 
 export class DownloadAlreadyRunningError extends Error {
@@ -149,7 +152,7 @@ export class DownloadCoordinator {
                         lastModified: chunk.lastModified,
                         totalBytes: chunk.total,
                     };
-                    if (received - durableOffset >= DURABLE_CHECKPOINT_INTERVAL) await commit(received, true);
+                    if (received - durableOffset >= DOWNLOAD_DURABLE_CHECKPOINT_INTERVAL) await commit(received, true);
                     onProgress?.({
                         jobId: file.jobId,
                         fileId: file.id,

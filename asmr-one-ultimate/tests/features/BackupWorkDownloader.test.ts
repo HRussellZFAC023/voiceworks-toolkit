@@ -6,13 +6,12 @@ import type { BackupDownloadProfile, BackupDownloaderLabels, BackupWorkDownloadI
 const labels: BackupDownloaderLabels = {
     dialogTitle: 'Download collection', close: 'Close', search: 'Find works', searchPlaceholder: 'Search',
     searchAll: 'Search all works', searchAllLoading: 'Searching', searchResults: 'Search results', searchFailed: 'Search failed',
-    importBackup: 'Import backup', importBackupInvalid: 'Invalid backup',
     playlistSource: 'Playlist source', sourceAll: 'All', sourceOwn: 'My playlists', sourcePublic: 'Community playlists',
     selectAll: 'Select all shown', clearAll: 'Clear all', filterTags: 'Tags', allTags: 'All tags',
     playlistOwner: 'by {owner}', playlistWorks: '{count} works', loading: 'Loading', loadFailed: 'Unavailable',
     options: 'Options', progress: 'Progress', pause: 'Pause', resume: 'Resume', alreadyRunning: 'Already running', resumableDownloads: 'Resume jobs',
     expandPlaylist: 'Expand', collapsePlaylist: 'Collapse', selectedSummary: '{count} selected · {bytes}',
-    unknownSize: 'unknown size', noResults: 'No results', fileTypes: 'Files', audio: 'Audio', video: 'Video',
+    unknownSize: 'unknown size', estimatedOpusSize: 'about {size} after Opus', noResults: 'No results', fileTypes: 'Files', audio: 'Audio', video: 'Video',
     images: 'Images', text: 'Text', other: 'Other', filenameTitle: 'Titles', titleOriginal: 'Original',
     titleTranslated: 'Translated', titleOriginalTranslated: 'Original [Translated]', titleNone: 'No title changes',
     convertToOpus: 'Convert to Opus', opusBitrate: 'Bitrate', metadata: 'Metadata', metadataAdditive: 'Additive',
@@ -30,7 +29,7 @@ function profile(overrides: Partial<BackupDownloadProfile> = {}): BackupDownload
 }
 
 const works = [
-    { id: 1, title: '作品一', translatedTitle: 'Work One', sizeBytes: 1024, playlistIds: ['p1'] },
+    { id: 1, title: '作品一', translatedTitle: 'Work One', sizeBytes: 1024, durationSeconds: 600, playlistIds: ['p1'] },
     { id: 2, title: '作品二', translatedTitle: 'Work Two', sizeBytes: 2048, playlistIds: ['p1'] },
 ];
 const playlists = [{
@@ -144,6 +143,56 @@ describe('BackupWorkDownloader', () => {
         expect(wrapper.get('[data-testid="download-progress"] p').text()).toContain('50%');
         expect(wrapper.get('.progress-track > div').attributes('style')).toContain('62.5%');
         expect(wrapper.find('[data-testid="pause"]').exists()).toBe(true);
+    });
+
+    it.each(['recovering', 'discovering', 'translating', 'downloading', 'converting'] as const)(
+        'offers pause throughout the active %s phase',
+        phase => {
+            const wrapper = mount(BackupWorkDownloader, {
+                props: {
+                    playlists, works, profile: profile({ selectedWorkIds: [1] }), busy: true,
+                    progress: { phase, current: 0, total: 2, label: phase },
+                },
+            });
+
+            expect(wrapper.find('[data-testid="pause"]').exists()).toBe(true);
+        },
+    );
+
+    it('keeps source and job errors outside progress and never prints 0 / 0', () => {
+        const wrapper = mount(BackupWorkDownloader, {
+            props: {
+                playlists: [], works: [], profile: profile(), ownLoadFailed: true,
+                errorMessage: 'Folder access is unavailable',
+                progress: { phase: 'failed', current: 0, total: 0, label: 'Stopped' },
+            },
+        });
+
+        expect(wrapper.get('[data-testid="source-load-error"]').text()).toBe('Unavailable');
+        expect(wrapper.get('[data-testid="download-error"]').text()).toContain('Folder access is unavailable');
+        expect(wrapper.find('[data-testid="progress-count"]').exists()).toBe(false);
+        expect(wrapper.get('[data-testid="download-progress"]').text()).not.toContain('0 / 0');
+    });
+
+    it('uses duration and selected bitrate for Opus size estimates', async () => {
+        const wrapper = mount(BackupWorkDownloader, {
+            props: { playlists, works, profile: profile({ selectedWorkIds: [1], convertToOpus: true, opusBitrate: 128 }) },
+        });
+        await wrapper.get('[data-testid="expand-p1"]').trigger('click');
+
+        expect(wrapper.get('[data-testid="work-1"] .work-size').text()).toMatch(/about 9\.3 MB after Opus/);
+        expect(wrapper.get('[data-testid="selection-summary"]').text()).toMatch(/about 9\.3 MB after Opus/);
+        await wrapper.get('[data-testid="opus-bitrate"]').setValue('64');
+        expect(wrapper.get('[data-testid="work-1"] .work-size').text()).toMatch(/about 4\.7 MB after Opus/);
+    });
+
+    it('uses a real options-content stack and has no backup-import control', async () => {
+        const wrapper = mount(BackupWorkDownloader, { props: { playlists, works, profile: profile() } });
+
+        expect(wrapper.find('.download-options-content').exists()).toBe(true);
+        expect(wrapper.get('[data-testid="opus-option"]').classes()).toContain('option-row');
+        expect(wrapper.get('[data-testid="artwork-option"]').classes()).toContain('hinted-option');
+        expect(wrapper.find('[data-testid="download-center-import-input"]').exists()).toBe(false);
     });
 
     it('emits the safe download options and never closes itself on start', async () => {

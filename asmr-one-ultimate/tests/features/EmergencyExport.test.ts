@@ -50,7 +50,7 @@ describe('EmergencyExport performance', () => {
         ]);
 
         resolvers[0]({
-            works: [{ source_id: 'RJ123456', title: 'Work' }],
+            works: [{ source_id: 'RJ123456', title: 'Work', size: 1234, duration: 600 }],
             pagination: { currentPage: 1, pageSize: 100, totalCount: 1 },
         });
         resolvers[1]({ id: 'playlist-id', name: 'Fast backup', works_count: 1 });
@@ -58,7 +58,7 @@ describe('EmergencyExport performance', () => {
         await expect(pending).resolves.toMatchObject({
             id: 'playlist-id',
             name: 'Fast backup',
-            works: [{ rjCode: 'RJ123456', title: 'Work' }],
+            works: [{ rjCode: 'RJ123456', title: 'Work', sizeBytes: 1234, durationSeconds: 600 }],
         });
     });
 

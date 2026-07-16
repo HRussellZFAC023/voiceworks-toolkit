@@ -20,6 +20,7 @@ Then paste the printed `https://asmr-api-proxy.<you>.workers.dev` URL into **Set
 - `GET|HEAD /semantic-index/manifest.json` — the revalidated semantic-search baseline manifest from the `SEMANTIC_INDEX` R2 binding
 - `GET|HEAD /semantic-index/objects/<sha256>.bin.gz` — immutable, content-addressed gzip binary baseline shards (served without `Content-Encoding`)
 - `GET|HEAD /community-playlists/catalog.json` — the public, revalidated community-playlist summary catalog from R2
+- `GET|HEAD /community-playlists/<uuid>.json` — cached work details for catalogued public playlists; stale entries are served immediately and refreshed in the background
 - `POST /community-playlists/submissions` — anonymously propose one public playlist with the exact JSON body `{ "id": "<lowercase-uuid>" }`
 
 Semantic-index routes are exact and public. They never forward authorization headers or map arbitrary paths to R2 keys. Publish every referenced shard first, verify its SHA-256 and byte length, and update `semantic-index/manifest.json` last. This avoids a manifest pointing at missing objects and protects clients from cached partial releases.

@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { DownloadTransport, RangeRestartRequiredError } from '../../src/features/downloads/DownloadTransport';
+import {
+    DownloadStallError,
+    DownloadTransport,
+    RangeRestartRequiredError,
+} from '../../src/features/downloads/DownloadTransport';
 
 function response(chunks: number[][], init: ResponseInit): Response {
     return new Response(new ReadableStream({
@@ -30,6 +34,14 @@ describe('DownloadTransport', () => {
 
         expect(new Headers(fetchMock.mock.calls[0][1]?.headers).has('Authorization')).toBe(false);
         expect(new Headers(fetchMock.mock.calls[1][1]?.headers).has('Authorization')).toBe(false);
+    });
+
+    it('keeps an absent Content-Length indeterminate instead of reporting zero bytes', async () => {
+        const result = await new DownloadTransport(vi.fn().mockResolvedValue(
+            response([], { status: 200 }),
+        ) as typeof fetch).probe('https://media.example/file');
+
+        expect(result.size).toBeUndefined();
     });
 
     it('retains authentication for relative and trusted ASMR API-origin requests', async () => {
@@ -112,5 +124,75 @@ describe('DownloadTransport', () => {
         await expect(new DownloadTransport(fetchMock as typeof fetch).stream(
             'https://media.example/file', 2, vi.fn(),
         )).rejects.toBeInstanceOf(RangeRestartRequiredError);
+    });
+
+    it('retries transient status failures before exposing any body bytes', async () => {
+        const fetchMock = vi.fn()
+            .mockResolvedValueOnce(response([], { status: 503, headers: { 'retry-after': '2' } }))
+            .mockResolvedValueOnce(response([[1]], { status: 200, headers: { 'content-length': '1' } }));
+        const sleep = vi.fn(async () => undefined);
+        const chunks = vi.fn();
+
+        await new DownloadTransport(fetchMock as typeof fetch, {
+            sleep, random: () => 0, maxAttempts: 3,
+        }).stream('https://media.example/file', 0, chunks);
+
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+        expect(sleep).toHaveBeenCalledWith(2_000);
+        expect(chunks).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not retry permanent HTTP or safe-range restart failures', async () => {
+        const notFound = vi.fn().mockResolvedValue(response([], { status: 404 }));
+        await expect(new DownloadTransport(notFound as typeof fetch, {
+            sleep: vi.fn(async () => undefined),
+        }).probe('https://media.example/missing')).rejects.toThrow('HTTP 404');
+        expect(notFound).toHaveBeenCalledTimes(1);
+
+        const ignoredRange = vi.fn().mockResolvedValue(response([[1]], { status: 200 }));
+        await expect(new DownloadTransport(ignoredRange as typeof fetch, {
+            sleep: vi.fn(async () => undefined),
+        }).stream('https://media.example/file', 2, vi.fn()))
+            .rejects.toBeInstanceOf(RangeRestartRequiredError);
+        expect(ignoredRange).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not retry an aborted request', async () => {
+        const controller = new AbortController();
+        controller.abort();
+        const aborted = new DOMException('stopped', 'AbortError');
+        const fetchMock = vi.fn().mockRejectedValue(aborted);
+        const sleep = vi.fn(async () => undefined);
+
+        await expect(new DownloadTransport(fetchMock as typeof fetch, { sleep }).probe(
+            'https://media.example/file', controller.signal,
+        )).rejects.toBe(aborted);
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(sleep).not.toHaveBeenCalled();
+    });
+
+    it('cancels a stalled body read and clears its inactivity timer', async () => {
+        const cancelled = vi.fn();
+        const body = new ReadableStream<Uint8Array>({
+            pull: () => new Promise(() => undefined),
+            cancel: cancelled,
+        });
+        const fetchMock = vi.fn().mockResolvedValue(new Response(body, { status: 200 }));
+        let expire!: () => void;
+        const timerToken = 7 as unknown as ReturnType<typeof setTimeout>;
+        const setTimer = vi.fn((callback: () => void) => { expire = callback; return timerToken; });
+        const clearTimer = vi.fn();
+        const streaming = new DownloadTransport(fetchMock as typeof fetch, {
+            stallTimeoutMs: 10,
+            setTimer,
+            clearTimer,
+        }).stream('https://media.example/file', 0, vi.fn());
+
+        await vi.waitFor(() => expect(setTimer).toHaveBeenCalledTimes(1));
+        expire();
+
+        await expect(streaming).rejects.toBeInstanceOf(DownloadStallError);
+        expect(cancelled).toHaveBeenCalledTimes(1);
+        expect(clearTimer).toHaveBeenCalledWith(timerToken);
     });
 });

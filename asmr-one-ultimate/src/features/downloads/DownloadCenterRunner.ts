@@ -84,6 +84,7 @@ export class DownloadCenterRunner {
     private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
     private heartbeatPending = false;
     private leaseLost = false;
+    private readonly pauseRequestedJobs = new Set<string>();
     private currentProgress: (BackupDownloadProgress & { jobId?: string }) | null = null;
     private readonly stateListeners = new Set<DownloadCenterStateListener>();
 
@@ -164,7 +165,9 @@ export class DownloadCenterRunner {
     }
 
     async pause(): Promise<void> {
-        if (this.activeCoordinator && this.activeJobId) await this.activeCoordinator.pause(this.activeJobId);
+        if (!this.activeJobId) return;
+        this.pauseRequestedJobs.add(this.activeJobId);
+        if (this.activeCoordinator) await this.activeCoordinator.pause(this.activeJobId);
     }
 
     private async runClaimed(
@@ -178,6 +181,7 @@ export class DownloadCenterRunner {
                 throw new DownloadCenterRunError('already-running');
             }
             this.activeJobId = jobId;
+            this.pauseRequestedJobs.delete(jobId);
             this.leaseLost = false;
             this.currentProgress = {
                 jobId,
@@ -213,6 +217,7 @@ export class DownloadCenterRunner {
                 await this.repository.pauseJob(jobId, this.ownerId).catch(() => false);
                 this.activeJobId = null;
                 this.activeCoordinator = null;
+                this.pauseRequestedJobs.delete(jobId);
                 this.notifyState();
             }
         });
@@ -238,7 +243,7 @@ export class DownloadCenterRunner {
             sink,
             // ffmpeg.wasm keeps input/output copies in memory. Serial Opus
             // conversion prevents two large source buffers being resident.
-            options.state.convertToOpus ? 1 : 2,
+            options.state.convertToOpus ? 1 : 3,
             this.createOpusTransformer(options),
             this.ownerId,
         );
@@ -374,13 +379,19 @@ export class DownloadCenterRunner {
             }
             pendingFiles.push(...newFiles);
             const completedInBatch = index - discovery.nextIndex + 1;
-            const checkpointDue = completedInBatch >= DOWNLOAD_DISCOVERY_BATCH_SIZE || index === discovery.works.length - 1;
+            const pauseRequested = this.pauseRequestedJobs.has(jobId);
+            const checkpointDue = pauseRequested
+                || completedInBatch >= DOWNLOAD_DISCOVERY_BATCH_SIZE
+                || index === discovery.works.length - 1;
             if (!checkpointDue) continue;
             discovery = { ...discovery, nextIndex: index + 1, skippedWorkIds: [...skippedWorkIds] };
             options = cloneOptions({ ...options, enrichment, discovery });
-            await this.assertLease(jobId);
+            // A pause requested while this work was loading still permits one
+            // final atomic batch commit; the job remains leased until it lands.
+            await this.assertLease(jobId, pauseRequested);
             await this.repository.appendFilesAndUpdateOptions(jobId, options, pendingFiles);
             pendingFiles = [];
+            if (pauseRequested) throw new DownloadCenterRunError('paused');
         }
         const allFiles = await this.repository.listFiles(jobId);
         options = cloneOptions({
@@ -393,7 +404,8 @@ export class DownloadCenterRunner {
         return options;
     }
 
-    private async assertLease(jobId: string): Promise<void> {
+    private async assertLease(jobId: string, allowPauseForCheckpoint = false): Promise<void> {
+        if (!allowPauseForCheckpoint && this.pauseRequestedJobs.has(jobId)) throw new DownloadCenterRunError('paused');
         if (this.leaseLost || !await this.repository.renewJobLease(jobId, this.ownerId, DOWNLOAD_JOB_LEASE_MS)) {
             this.leaseLost = true;
             throw new DownloadCenterRunError('paused');

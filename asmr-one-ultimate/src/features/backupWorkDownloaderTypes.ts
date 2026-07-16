@@ -11,6 +11,8 @@ export interface BackupWorkDownloadItem {
     title: string;
     translatedTitle?: string;
     sizeBytes?: number;
+    /** Total playable duration when the upstream response omits byte size. */
+    durationSeconds?: number;
     playlistIds?: Array<string | number>;
     /** Render in the direct-search section even when also present in a playlist. */
     directSearchResult?: boolean;
@@ -49,8 +51,6 @@ export interface BackupDownloaderLabels {
     searchAllLoading: string;
     searchResults: string;
     searchFailed: string;
-    importBackup: string;
-    importBackupInvalid: string;
     playlistSource: string;
     sourceAll: string;
     sourceOwn: string;
@@ -73,6 +73,7 @@ export interface BackupDownloaderLabels {
     collapsePlaylist: string;
     selectedSummary: string;
     unknownSize: string;
+    estimatedOpusSize: string;
     noResults: string;
     fileTypes: string;
     audio: string;

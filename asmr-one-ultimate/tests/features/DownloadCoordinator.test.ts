@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
-import { DownloadAlreadyRunningError, DownloadCoordinator } from '../../src/features/downloads/DownloadCoordinator';
+import {
+    DOWNLOAD_DURABLE_CHECKPOINT_INTERVAL,
+    DownloadAlreadyRunningError,
+    DownloadCoordinator,
+} from '../../src/features/downloads/DownloadCoordinator';
 import { DirectoryPermissionError, ResumeOffsetMismatchError } from '../../src/features/downloads/DirectoryDownloadSink';
 
 describe('DownloadCoordinator', () => {
@@ -140,8 +144,8 @@ describe('DownloadCoordinator', () => {
         }));
     });
 
-    it('durably closes and checkpoints before reopening at the 64 MiB boundary', async () => {
-        const boundary = 64 * 1024 * 1024;
+    it('uses coarse durable checkpoints and closes before persisting their offsets', async () => {
+        const boundary = DOWNLOAD_DURABLE_CHECKPOINT_INTERVAL;
         const file: any = { id: 'file', jobId: 'job', path: 'track.wav', url: 'url', status: 'pending' };
         const repository: any = {
             activateJob: vi.fn(), listFiles: vi.fn(async () => [file]), markFileActive: vi.fn(), getCheckpoint: vi.fn(),
@@ -152,7 +156,7 @@ describe('DownloadCoordinator', () => {
         const second = { write: vi.fn(), close: vi.fn(), abort: vi.fn() };
         const sink: any = { open: vi.fn().mockResolvedValueOnce(first).mockResolvedValueOnce(second) };
         const transport: any = { stream: vi.fn(async (_url: string, _offset: number, onChunk: any) => {
-            const block = new Uint8Array(1024 * 1024);
+            const block = new Uint8Array(4 * 1024 * 1024);
             for (let offset = 0; offset < boundary; offset += block.byteLength) {
                 await onChunk({ bytes: block, offset, total: boundary + 1, etag: 'stable' });
             }

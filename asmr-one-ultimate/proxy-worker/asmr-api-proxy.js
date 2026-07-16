@@ -9,6 +9,7 @@
  *   GET https://<worker>.workers.dev/api/playlist/get-playlist-metadata?id=<uuid>
  *   GET https://<worker>.workers.dev/api/playlists?__host=api.asmr-300.com
  *   GET https://<worker>.workers.dev/community-playlists/catalog.json
+ *   GET https://<worker>.workers.dev/community-playlists/<uuid>.json
  *   POST https://<worker>.workers.dev/community-playlists/submissions
  *
  * `__host` selects a specific API mirror (must match ASMR_HOST_PATTERN);
@@ -23,6 +24,7 @@ const ASMR_HOST_PATTERN = /^(?:[a-z0-9-]+\.)*asmr(-\d+)?\.(one|com)$/i;
 const DEFAULT_HOST = 'api.asmr-200.com';
 const COMMUNITY_CATALOG_PATH = '/community-playlists/catalog.json';
 const COMMUNITY_SUBMISSION_PATH = '/community-playlists/submissions';
+const COMMUNITY_DETAILS_PATH_PATTERN = /^\/community-playlists\/([a-f0-9-]{36})\.json$/;
 const COMMUNITY_CATALOG_KEY = 'community-playlists/catalog.json';
 const COMMUNITY_CATALOG_MAX_BYTES = 2 * 1024 * 1024;
 const COMMUNITY_SUBMISSION_MAX_BYTES = 256;
@@ -32,6 +34,10 @@ const COMMUNITY_SUBMISSION_INLINE_MAX_BYTES = 7 * 1024;
 const COMMUNITY_SUBMISSION_AGGREGATE_MAX_BYTES = 4 * 1024 * 1024;
 const COMMUNITY_SUBMISSION_LEGACY_READ_LIMIT = 900;
 const COMMUNITY_SUBMISSION_PREFIX = 'community-playlists/submissions/';
+const COMMUNITY_DETAILS_PREFIX = 'community-playlists/details/';
+const COMMUNITY_DETAILS_MAX_BYTES = 8 * 1024 * 1024;
+const COMMUNITY_DETAILS_MAX_WORKS = 10_000;
+const COMMUNITY_DETAILS_FRESH_MS = 60 * 60 * 1000;
 const UUID_PATTERN = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
 const COMMUNITY_SUBMISSION_KEY_PATTERN = /^community-playlists\/submissions\/([a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12})\.json$/;
 
@@ -40,7 +46,8 @@ export default {
         const url = new URL(request.url);
         if (request.method === 'OPTIONS') {
             const isCommunityRoute = url.pathname === COMMUNITY_CATALOG_PATH
-                || url.pathname === COMMUNITY_SUBMISSION_PATH;
+                || url.pathname === COMMUNITY_SUBMISSION_PATH
+                || COMMUNITY_DETAILS_PATH_PATTERN.test(url.pathname);
             return new Response(null, {
                 status: 204,
                 headers: isCommunityRoute || url.pathname.startsWith('/semantic-index/')
@@ -61,6 +68,15 @@ export default {
                 return communityJson({ error: 'Only POST is supported' }, 405, { Allow: 'POST, OPTIONS' });
             }
             return submitCommunityPlaylist(request, env, ctx);
+        }
+
+        const detailsMatch = COMMUNITY_DETAILS_PATH_PATTERN.exec(url.pathname);
+        if (detailsMatch) {
+            if (request.method !== 'GET' && request.method !== 'HEAD') {
+                return communityJson({ error: 'Only GET and HEAD are supported' }, 405, { Allow: 'GET, HEAD, OPTIONS' });
+            }
+            if (!UUID_PATTERN.test(detailsMatch[1])) return communityJson({ error: 'Playlist not found' }, 404);
+            return serveCommunityPlaylistDetails(request, detailsMatch[1], env, ctx);
         }
 
         if (request.method !== 'GET' && request.method !== 'HEAD') {
@@ -121,6 +137,113 @@ export default {
         }
     },
 };
+
+async function serveCommunityPlaylistDetails(request, id, env, ctx) {
+    if (!env?.SEMANTIC_INDEX) return communityJson({ error: 'Community playlist cache is unavailable' }, 503);
+    const key = `${COMMUNITY_DETAILS_PREFIX}${id}.json`;
+    let cached;
+    try { cached = await env.SEMANTIC_INDEX.get(key); }
+    catch { return communityJson({ error: 'Community playlist cache is unavailable' }, 503); }
+
+    if (cached?.body && cached.size <= COMMUNITY_DETAILS_MAX_BYTES) {
+        const fetchedAt = Date.parse(cached.customMetadata?.fetchedAt || '');
+        const fresh = Number.isFinite(fetchedAt) && Date.now() - fetchedAt <= COMMUNITY_DETAILS_FRESH_MS;
+        if (!fresh) {
+            try {
+                cached = await refreshCommunityPlaylistDetails(id, key, env);
+            } catch (error) {
+                if (error instanceof UpstreamPlaylistError && (error.status === 403 || error.status === 404)) {
+                    await env.SEMANTIC_INDEX.delete(key).catch(() => undefined);
+                    return communityJson({ error: error.message }, error.status);
+                }
+                return communityJson({ error: 'Community playlist revalidation is temporarily unavailable' }, 503);
+            }
+        }
+        const etag = cached.httpEtag || (cached.etag ? `"${cached.etag}"` : undefined);
+        const headers = communityDetailsHeaders(cached.size, etag);
+        if (etag && etagMatches(request.headers.get('If-None-Match'), etag)) {
+            return new Response(null, { status: 304, headers });
+        }
+        return new Response(request.method === 'HEAD' ? null : cached.body, { status: 200, headers });
+    }
+
+    if (!await communityPlaylistIsListed(env.SEMANTIC_INDEX, id)) {
+        return communityJson({ error: 'Playlist not found' }, 404);
+    }
+    try {
+        const stored = await refreshCommunityPlaylistDetails(id, key, env);
+        const etag = stored.httpEtag || (stored.etag ? `"${stored.etag}"` : undefined);
+        const headers = communityDetailsHeaders(stored.size, etag);
+        return new Response(request.method === 'HEAD' ? null : stored.body, { status: 200, headers });
+    } catch (error) {
+        if (error instanceof UpstreamPlaylistError) return communityJson({ error: error.message }, error.status);
+        return communityJson({ error: 'Community playlist is temporarily unavailable' }, 503);
+    }
+}
+
+async function communityPlaylistIsListed(bucket, id) {
+    if (await bucket.head(`${COMMUNITY_SUBMISSION_PREFIX}${id}.json`)) return true;
+    return baseCommunityCatalogContains(bucket, id);
+}
+
+async function refreshCommunityPlaylistDetails(id, key, env) {
+    const summary = await fetchVerifiedPublicPlaylist(id);
+    const works = [];
+    let page = 1;
+    let pageSize = 100;
+    for (;;) {
+        let response = await fetch(`https://${DEFAULT_HOST}/api/playlist/get-playlist-works?id=${encodeURIComponent(id)}&page=${page}&pageSize=${pageSize}`, {
+            headers: upstreamHeaders(), signal: AbortSignal.timeout(15_000),
+        });
+        if (page === 1 && pageSize === 100 && [400, 404, 422].includes(response.status)) {
+            pageSize = 20;
+            response = await fetch(`https://${DEFAULT_HOST}/api/playlist/get-playlist-works?id=${encodeURIComponent(id)}&page=1&pageSize=20`, {
+                headers: upstreamHeaders(), signal: AbortSignal.timeout(15_000),
+            });
+        }
+        if (!response.ok) throw new UpstreamPlaylistError(response.status === 404 ? 404 : 503, 'Playlist works are temporarily unavailable');
+        const payload = JSON.parse(await readBoundedResponseText(response, 2 * 1024 * 1024));
+        const items = Array.isArray(payload?.works) ? payload.works : [];
+        for (const item of items) {
+            if (works.length >= COMMUNITY_DETAILS_MAX_WORKS) throw new Error('Playlist exceeds work limit');
+            const work = normalizeCommunityWork(item);
+            if (work) works.push(work);
+        }
+        const total = normalizeNonNegativeInteger(payload?.pagination?.totalCount);
+        if (!items.length || (total > 0 ? works.length >= total : items.length < pageSize)) break;
+        page += 1;
+    }
+    const body = JSON.stringify({ version: 1, fetchedAt: new Date().toISOString(), playlist: summary, works });
+    const encoded = new TextEncoder().encode(body);
+    if (encoded.byteLength > COMMUNITY_DETAILS_MAX_BYTES) throw new Error('Playlist details exceed storage limit');
+    await env.SEMANTIC_INDEX.put(key, encoded, {
+        httpMetadata: { contentType: 'application/json' },
+        customMetadata: { fetchedAt: new Date().toISOString() },
+    });
+    const stored = await env.SEMANTIC_INDEX.get(key);
+    if (!stored?.body) throw new Error('Cached playlist could not be read back');
+    return stored;
+}
+
+function normalizeCommunityWork(value) {
+    if (!value || typeof value !== 'object') return undefined;
+    const id = normalizeWorkId(value.source_id ?? value.sourceId ?? value.id);
+    if (id === undefined) return undefined;
+    const work = { rjCode: typeof id === 'number' ? `RJ${String(id).padStart(6, '0')}` : id, title: compactString(value.title, 1024) };
+    const duration = Number(value.durationSeconds ?? value.duration);
+    const size = Number(value.sizeBytes ?? value.size ?? value.file_size ?? value.filesize ?? value.total_size);
+    if (Number.isFinite(duration) && duration > 0) work.durationSeconds = duration;
+    if (Number.isSafeInteger(size) && size > 0) work.sizeBytes = size;
+    return work;
+}
+
+function communityDetailsHeaders(size, etag) {
+    return {
+        'Content-Type': 'application/json; charset=utf-8', 'Content-Length': String(size),
+        'Cache-Control': 'public, max-age=300, stale-while-revalidate=86400',
+        ...(etag ? { ETag: etag } : {}), ...publicDataCorsHeaders(true),
+    };
+}
 
 const SEMANTIC_MANIFEST_PATH = '/semantic-index/manifest.json';
 const SEMANTIC_OBJECT_PATTERN = /^\/semantic-index\/objects\/([a-f0-9]{64})\.bin\.gz$/;

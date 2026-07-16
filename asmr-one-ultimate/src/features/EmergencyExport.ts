@@ -41,6 +41,8 @@ const PUBLIC_FETCH_START_INTERVAL_MS = 75;
 export interface ExportedWork {
     rjCode: string;
     title: string;
+    sizeBytes?: number;
+    durationSeconds?: number;
 }
 
 export interface ExportedPlaylist {
@@ -88,10 +90,17 @@ function toRjCode(raw: unknown): string {
 
 function workItemToExported(item: PlaylistWorkItem | Record<string, unknown>): ExportedWork {
     const record = item as Record<string, unknown>;
-    return {
+    const result: ExportedWork = {
         rjCode: toRjCode(record.source_id ?? record.sourceId ?? record.id),
         title: typeof record.title === 'string' ? record.title : '',
     };
+    const size = [record.sizeBytes, record.size, record.file_size, record.filesize, record.total_size]
+        .map(Number).find(value => Number.isSafeInteger(value) && value > 0);
+    const duration = [record.durationSeconds, record.duration]
+        .map(Number).find(value => Number.isFinite(value) && value > 0);
+    if (size !== undefined) result.sizeBytes = size;
+    if (duration !== undefined) result.durationSeconds = duration;
+    return result;
 }
 
 async function fetchAllWorks(

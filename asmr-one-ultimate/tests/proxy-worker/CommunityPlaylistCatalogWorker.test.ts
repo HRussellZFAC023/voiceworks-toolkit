@@ -91,6 +91,10 @@ class FakeR2Bucket {
         );
         return this.head(key);
     }
+
+    async delete(key: string) {
+        this.objects.delete(key);
+    }
 }
 
 class FakeEdgeCache {
@@ -288,6 +292,73 @@ describe('community playlist catalog R2 route', () => {
         const response = await worker.fetch(new Request('https://worker.test/community-playlists/catalog.json'), env(bucket));
         expect(response.status).toBe(503);
         expect(getSpy).not.toHaveBeenCalled();
+    });
+});
+
+describe('community playlist details cache', () => {
+    const detailsKey = `community-playlists/details/${BASE_ID}.json`;
+    const details = () => JSON.stringify({
+        version: 1,
+        fetchedAt: new Date().toISOString(),
+        playlist: summary(BASE_ID, 'Maintained playlist'),
+        works: [{ rjCode: 'RJ123456', title: 'Cached work', durationSeconds: 90 }],
+    });
+
+    it('serves an R2 hit without contacting the live playlist API', async () => {
+        const bucket = new FakeR2Bucket();
+        bucket.seed(detailsKey, details(), { fetchedAt: new Date().toISOString() });
+        const fetchSpy = vi.spyOn(globalThis, 'fetch');
+        const response = await worker.fetch(new Request(`https://worker.test/community-playlists/${BASE_ID}.json`), env(bucket));
+
+        expect(response.status).toBe(200);
+        expect(await response.json()).toMatchObject({ works: [{ rjCode: 'RJ123456', durationSeconds: 90 }] });
+        expect(response.headers.get('cache-control')).toContain('stale-while-revalidate');
+        expect(fetchSpy).not.toHaveBeenCalled();
+    });
+
+    it('hydrates an allowlisted public playlist once and reuses the stored expansion', async () => {
+        const bucket = new FakeR2Bucket({ 'community-playlists/catalog.json': catalog() });
+        const fetchSpy = vi.spyOn(globalThis, 'fetch')
+            .mockResolvedValueOnce(new Response(JSON.stringify({
+                id: BASE_ID, name: 'Maintained playlist', user_name: 'curator', privacy: 2, works_count: 1,
+                works: [{ source_id: 'RJ123456' }],
+            }), { headers: { 'Content-Type': 'application/json' } }))
+            .mockResolvedValueOnce(new Response(JSON.stringify({
+                works: [{ source_id: 'RJ123456', title: 'Live work', duration: 123 }],
+                pagination: { totalCount: 1 },
+            }), { headers: { 'Content-Type': 'application/json' } }));
+
+        const first = await worker.fetch(new Request(`https://worker.test/community-playlists/${BASE_ID}.json`), env(bucket));
+        expect(first.status).toBe(200);
+        expect(await first.json()).toMatchObject({ works: [{ rjCode: 'RJ123456', durationSeconds: 123 }] });
+        expect(bucket.objects.has(detailsKey)).toBe(true);
+
+        const second = await worker.fetch(new Request(`https://worker.test/community-playlists/${BASE_ID}.json`), env(bucket));
+        expect(second.status).toBe(200);
+        expect(fetchSpy).toHaveBeenCalledTimes(2);
+    });
+
+    it('revalidates stale details before conditional responses and deletes them when made private', async () => {
+        const bucket = new FakeR2Bucket();
+        bucket.seed(detailsKey, details(), { fetchedAt: '2026-01-01T00:00:00.000Z' });
+        vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response(JSON.stringify({
+            id: BASE_ID, name: 'Now private', privacy: 0, works_count: 1,
+        }), { headers: { 'Content-Type': 'application/json' } }));
+        const response = await worker.fetch(new Request(`https://worker.test/community-playlists/${BASE_ID}.json`, {
+            headers: { 'If-None-Match': '"etag-from-client"' },
+        }), env(bucket));
+
+        expect(response.status).toBe(403);
+        expect(bucket.objects.has(detailsKey)).toBe(false);
+    });
+
+    it('does not turn arbitrary UUID requests into unbounded cache writes', async () => {
+        const bucket = new FakeR2Bucket({ 'community-playlists/catalog.json': catalog() });
+        const fetchSpy = vi.spyOn(globalThis, 'fetch');
+        const response = await worker.fetch(new Request(`https://worker.test/community-playlists/${MISSING_ID}.json`), env(bucket));
+        expect(response.status).toBe(404);
+        expect(fetchSpy).not.toHaveBeenCalled();
+        expect(bucket.putCalls).toHaveLength(0);
     });
 });
 

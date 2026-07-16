@@ -5,7 +5,7 @@ import type { PlaylistEntry } from '../../api/Playlist';
 import { useI18n } from '../../composables/useI18n';
 import { Logger } from '../../core/Utils';
 import { buildCoverUrl } from '../../types/api';
-import { fetchOwnPlaylistEntries, fetchPlaylistAsExported, type EmergencyExportDocument } from '../EmergencyExport';
+import { fetchOwnPlaylistEntries, fetchPlaylistAsExported, type ExportedWork } from '../EmergencyExport';
 import type {
     BackupDownloadProfile,
     BackupDownloadProgress,
@@ -14,15 +14,16 @@ import type {
     BackupPlaylistSourceFilter,
     BackupWorkDownloadItem,
 } from '../backupWorkDownloaderTypes';
-import { mapBackupPlaylistSources } from '../backupWorkDownloaderUtils';
 import { chooseDownloadDirectory } from '../downloads/DirectoryDownloadSink';
 import {
     DownloadCenterRunError,
     DownloadCenterRunner,
     type DownloadCenterJob,
 } from '../downloads/DownloadCenterRunner';
+import { fetchCachedCommunityPlaylist } from '../playlist/CommunityPlaylistDetailsService';
 import { PlaylistDiscoveryService } from '../playlist/PlaylistDiscoveryService';
 import type { CommunityPlaylistSummary } from '../playlist/types';
+import { semanticWorkSearch } from '../SemanticWorkSearchService';
 import BackupWorkDownloader from './BackupWorkDownloader.vue';
 
 const { t, format } = useI18n();
@@ -33,6 +34,9 @@ const loadingOwn = ref(false);
 const loadingPublic = ref(false);
 const ownLoaded = ref(false);
 const publicRequested = ref(false);
+const ownLoadFailed = ref(false);
+const publicLoadFailed = ref(false);
+const jobError = ref('');
 const runner = DownloadCenterRunner.getInstance();
 const busy = ref(runner.isRunning);
 const progress = ref<(BackupDownloadProgress & { jobId?: string }) | null>(runner.progress);
@@ -61,8 +65,6 @@ const labels = computed(() => ({
     searchAllLoading: t('downloadCenterSearchAllLoading'),
     searchResults: t('downloadCenterSearchResults'),
     searchFailed: t('downloadCenterSearchFailed'),
-    importBackup: t('downloadCenterImportBackup'),
-    importBackupInvalid: t('backupDownloaderInvalid'),
     playlistSource: t('backupDownloaderSource'),
     sourceAll: t('backupDownloaderSourceAll'),
     sourceOwn: t('backupDownloaderSourceOwn'),
@@ -85,6 +87,7 @@ const labels = computed(() => ({
     collapsePlaylist: t('backupDownloaderCollapse'),
     selectedSummary: t('backupDownloaderSelected'),
     unknownSize: t('backupDownloaderUnknownSize'),
+    estimatedOpusSize: t('backupDownloaderEstimatedOpusSize'),
     noResults: t('backupDownloaderNoResults'),
     fileTypes: t('backupDownloaderFileTypes'),
     audio: t('backupDownloaderAudio'),
@@ -170,6 +173,7 @@ function mapOwn(entry: PlaylistEntry): BackupPlaylistDownloadItem {
 async function loadOwn(): Promise<void> {
     if (ownLoaded.value || loadingOwn.value) return;
     loadingOwn.value = true;
+    ownLoadFailed.value = false;
     try {
         const entries = await fetchOwnPlaylistEntries();
         ownSeeds.clear();
@@ -178,7 +182,7 @@ async function loadOwn(): Promise<void> {
         ownLoaded.value = true;
     } catch (error) {
         Logger.warn('[DownloadCenter] Could not load personal playlists', error);
-        progress.value = { phase: 'failed', current: 0, total: 0 };
+        ownLoadFailed.value = true;
     } finally {
         loadingOwn.value = false;
     }
@@ -188,11 +192,13 @@ async function loadCommunity(): Promise<void> {
     if (publicRequested.value || loadingPublic.value) return;
     publicRequested.value = true;
     loadingPublic.value = true;
+    publicLoadFailed.value = false;
     try {
         setSourcePlaylists('public', (await discoveryService.loadCommunityCatalog()).map(mapCommunity));
     } catch (error) {
         Logger.warn('[DownloadCenter] Could not refresh community catalog', error);
         publicRequested.value = false;
+        publicLoadFailed.value = true;
     } finally {
         loadingPublic.value = false;
     }
@@ -220,10 +226,33 @@ async function resolvePlaylist(playlist: BackupPlaylistDownloadItem): Promise<vo
             : item);
         const seed = playlist.source === 'own' ? ownSeeds.get(String(playlist.id)) : undefined;
         try {
-            const exported = await fetchPlaylistAsExported(String(playlist.id), seed);
+            let resolvedWorks: ExportedWork[];
+            let resolvedWorksCount: number;
+            let resolvedError: string | undefined;
+            if (playlist.source === 'public') {
+                try {
+                    const cached = await fetchCachedCommunityPlaylist(String(playlist.id));
+                    if (playlist.worksCount != null && cached.works.length < playlist.worksCount) {
+                        throw new Error(`Shared playlist details are incomplete (${cached.works.length}/${playlist.worksCount})`);
+                    }
+                    resolvedWorks = cached.works;
+                    resolvedWorksCount = cached.works.length;
+                } catch (error) {
+                    Logger.debug('[DownloadCenter] Shared playlist details unavailable; using live API', playlist.id, error);
+                    const exported = await fetchPlaylistAsExported(String(playlist.id));
+                    resolvedWorks = exported.works;
+                    resolvedWorksCount = exported.worksCount;
+                    resolvedError = exported.error;
+                }
+            } else {
+                const exported = await fetchPlaylistAsExported(String(playlist.id), seed);
+                resolvedWorks = exported.works;
+                resolvedWorksCount = exported.worksCount;
+                resolvedError = exported.error;
+            }
             const ids: string[] = [];
             const nextWorks = new Map(works.value.map(work => [String(work.id), { ...work }]));
-            for (const item of exported.works) {
+            for (const item of resolvedWorks) {
                 const id = String(item.rjCode);
                 if (!id) continue;
                 ids.push(id);
@@ -234,12 +263,14 @@ async function resolvePlaylist(playlist: BackupPlaylistDownloadItem): Promise<vo
                     ...current,
                     id,
                     title: item.title || current?.title || id,
+                    sizeBytes: item.sizeBytes ?? current?.sizeBytes,
+                    durationSeconds: item.durationSeconds ?? current?.durationSeconds,
                     playlistIds: [...playlistIds],
                 });
             }
             works.value = [...nextWorks.values()];
             playlists.value = playlists.value.map(item => item.source === playlist.source && String(item.id) === String(playlist.id)
-                ? { ...item, workIds: ids, worksCount: Math.max(exported.worksCount, ids.length), error: exported.error }
+                ? { ...item, workIds: ids, worksCount: Math.max(playlist.worksCount ?? 0, resolvedWorksCount, ids.length), error: resolvedError }
                 : item);
         } catch (error) {
             Logger.warn('[DownloadCenter] Could not resolve playlist', playlist.id, error);
@@ -252,78 +283,64 @@ async function resolvePlaylist(playlist: BackupPlaylistDownloadItem): Promise<vo
     return request;
 }
 
-async function searchAllWorks(query: string): Promise<void> {
-    const response = await WorksApi.searchWorks(query, { page: 1 });
-    const existing = new Map(works.value.map(work => [String(work.id), work]));
-    for (const result of response.works) {
-        const sourceId = result.source_id ?? result.sourceId ?? result.id;
-        const sourceText = String(sourceId).trim();
-        const id = /^[A-Za-z]{2}\d+$/.test(sourceText)
-            ? sourceText.toUpperCase()
-            : (/^\d+$/.test(sourceText) ? `RJ${sourceText.padStart(6, '0')}` : sourceText);
-        if (!id) continue;
-        const current = existing.get(id);
-        existing.set(id, {
-            ...current,
-            id,
-            title: result.title || current?.title || id,
-            playlistIds: current?.playlistIds,
-            directSearchResult: true,
-        });
-    }
-    works.value = [...existing.values()];
+function normalizeWorkId(value: unknown): string {
+    const sourceText = String(value ?? '').trim();
+    if (/^[A-Za-z]{2}\d+$/.test(sourceText)) return sourceText.toUpperCase();
+    if (/^\d+$/.test(sourceText)) return `RJ${sourceText.padStart(6, '0')}`;
+    return sourceText;
 }
 
-function isEmergencyExportDocument(value: unknown): value is EmergencyExportDocument {
-    if (!value || typeof value !== 'object') return false;
-    const document = value as Partial<EmergencyExportDocument>;
-    if (document.format !== 'asmr-one-ultimate-playlist-backup' || document.version !== 1
-        || !Array.isArray(document.ownPlaylists) || !Array.isArray(document.publicPlaylists)) return false;
-    return [...document.ownPlaylists, ...document.publicPlaylists].every(playlist =>
-        playlist && (typeof playlist.id === 'string' || typeof playlist.id === 'number')
-        && typeof playlist.name === 'string' && Array.isArray(playlist.works)
-        && playlist.works.every(work => work && typeof work.rjCode === 'string' && typeof work.title === 'string'));
-}
-
-async function readBackupText(file: File): Promise<string> {
-    if (typeof file.text === 'function') return file.text();
-    return new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(String(reader.result ?? ''));
-        reader.onerror = () => reject(reader.error ?? new Error('Could not read backup'));
-        reader.readAsText(file);
+function mergeDirectWork(
+    target: Map<string, BackupWorkDownloadItem>,
+    result: Record<string, unknown>,
+    fallbackTitle = '',
+): void {
+    const id = normalizeWorkId(result.source_id ?? result.sourceId ?? result.id);
+    if (!id) return;
+    const current = target.get(id);
+    const sizeBytes = [result.sizeBytes, result.size, result.file_size, result.filesize, result.total_size]
+        .map(Number).find(value => Number.isSafeInteger(value) && value > 0);
+    const durationSeconds = [result.durationSeconds, result.duration]
+        .map(Number).find(value => Number.isFinite(value) && value > 0);
+    target.set(id, {
+        ...current,
+        id,
+        title: (typeof result.title === 'string' && result.title) || fallbackTitle || current?.title || id,
+        sizeBytes: sizeBytes ?? current?.sizeBytes,
+        durationSeconds: durationSeconds ?? current?.durationSeconds,
+        playlistIds: current?.playlistIds,
+        directSearchResult: true,
     });
 }
 
-async function importBackup(file: File): Promise<void> {
+async function searchAllWorks(query: string): Promise<void> {
+    const merged = new Map(works.value.map(work => [String(work.id), work]));
+    let semanticResults: Awaited<ReturnType<typeof semanticWorkSearch>> = [];
+    let semanticError: unknown;
     try {
-        if (file.size > 64 * 1024 * 1024) throw new Error('Backup exceeds the import limit');
-        const document = JSON.parse(await readBackupText(file)) as unknown;
-        if (!isEmergencyExportDocument(document)) throw new Error('Invalid backup');
-        const mapped = mapBackupPlaylistSources(document);
-        const playlistMap = new Map(playlists.value.map(item => [`${item.source}:${String(item.id)}`, item]));
-        for (const item of mapped.playlists) {
-            const key = `${item.source}:${String(item.id)}`;
-            const current = playlistMap.get(key);
-            playlistMap.set(key, { ...current, ...item, coverUrl: current?.coverUrl, owner: current?.owner, tags: current?.tags });
-        }
-        playlists.value = [...playlistMap.values()];
-        const workMap = new Map(works.value.map(item => [String(item.id), item]));
-        for (const item of mapped.works) {
-            const current = workMap.get(String(item.id));
-            workMap.set(String(item.id), {
-                ...current,
-                ...item,
-                title: item.title || current?.title || String(item.id),
-                playlistIds: [...new Set([...(current?.playlistIds ?? []), ...(item.playlistIds ?? [])].map(String))],
-                directSearchResult: current?.directSearchResult,
-            });
-        }
-        works.value = [...workMap.values()];
+        semanticResults = await semanticWorkSearch(query);
+        for (const result of semanticResults) mergeDirectWork(merged, result as unknown as Record<string, unknown>, result.title);
     } catch (error) {
-        Logger.warn('[DownloadCenter] Invalid saved backup import', error);
-        progress.value = { phase: 'failed', current: 0, total: 0, label: t('backupDownloaderInvalid') };
+        semanticError = error;
+        Logger.warn('[DownloadCenter] Semantic work search unavailable; trying live API', error);
     }
+
+    const exactRj = /^[A-Za-z]{2}\d+$/.test(query.trim());
+    if (semanticResults.length > 0 && !exactRj) {
+        works.value = [...merged.values()];
+        return;
+    }
+    try {
+        const response = await WorksApi.searchWorks(query, { page: 1 });
+        for (const result of response.works) mergeDirectWork(merged, result as unknown as Record<string, unknown>);
+    } catch (error) {
+        if (semanticResults.length > 0) {
+            works.value = [...merged.values()];
+            return;
+        }
+        throw semanticError ?? error;
+    }
+    works.value = [...merged.values()];
 }
 
 function setRunnerProgress(next: BackupDownloadProgress & { jobId?: string }): void {
@@ -356,8 +373,10 @@ async function refreshResumableJobs(): Promise<void> {
 
 async function startDownload(state: BackupDownloadState): Promise<void> {
     if (busy.value) return;
+    jobError.value = '';
     if (typeof (window as Window & { showDirectoryPicker?: unknown }).showDirectoryPicker !== 'function') {
-        progress.value = { phase: 'failed', current: 0, total: 0, label: t('backupDownloaderUnsupported') };
+        progress.value = null;
+        jobError.value = t('backupDownloaderUnsupported');
         return;
     }
     let directory: FileSystemDirectoryHandle;
@@ -375,12 +394,19 @@ async function startDownload(state: BackupDownloadState): Promise<void> {
             next => { activeJobId = next.jobId ?? activeJobId; setRunnerProgress(next); },
         );
         resumableJobs.value = resumableJobs.value.filter(job => job.id !== result.jobId);
-        progress.value = { phase: 'complete', current: 1, total: 1, label: result.skipped ? format('backupDownloaderDoneWithSkipped', { count: result.skipped }) : t('backupDownloaderDone') };
+        progress.value = {
+            ...(progress.value ?? { current: 1, total: 1 }),
+            phase: 'complete',
+            label: result.skipped ? format('backupDownloaderDoneWithSkipped', { count: result.skipped }) : t('backupDownloaderDone'),
+        };
     } catch (error) {
         await rememberSettledJob(activeJobId);
-        progress.value = error instanceof DownloadCenterRunError && error.code === 'paused'
-            ? { phase: 'paused', current: progress.value?.current ?? 0, total: progress.value?.total ?? 0 }
-            : { phase: 'failed', current: 0, total: 1, label: friendlyError(error) };
+        if (error instanceof DownloadCenterRunError && error.code === 'paused') {
+            if (progress.value) progress.value = { ...progress.value, phase: 'paused' };
+        } else {
+            jobError.value = friendlyError(error);
+            if (progress.value) progress.value = { ...progress.value, phase: 'failed' };
+        }
     } finally {
         busy.value = false;
     }
@@ -389,15 +415,23 @@ async function startDownload(state: BackupDownloadState): Promise<void> {
 async function resumeDownload(jobId: string): Promise<void> {
     const job = resumableJobs.value.find(item => item.id === jobId);
     if (!job || busy.value) return;
+    jobError.value = '';
     busy.value = true;
     try {
         const result = await runner.resume(job, setRunnerProgress);
         resumableJobs.value = resumableJobs.value.filter(item => item.id !== jobId);
-        progress.value = { phase: 'complete', current: 1, total: 1, label: result.skipped ? format('backupDownloaderDoneWithSkipped', { count: result.skipped }) : t('backupDownloaderDone') };
+        progress.value = {
+            ...(progress.value ?? { current: 1, total: 1 }),
+            phase: 'complete',
+            label: result.skipped ? format('backupDownloaderDoneWithSkipped', { count: result.skipped }) : t('backupDownloaderDone'),
+        };
     } catch (error) {
-        progress.value = error instanceof DownloadCenterRunError && error.code === 'paused'
-            ? { phase: 'paused', current: progress.value?.current ?? 0, total: progress.value?.total ?? 0 }
-            : { phase: 'failed', current: 0, total: 1, label: friendlyError(error) };
+        if (error instanceof DownloadCenterRunError && error.code === 'paused') {
+            if (progress.value) progress.value = { ...progress.value, phase: 'paused' };
+        } else {
+            jobError.value = friendlyError(error);
+            if (progress.value) progress.value = { ...progress.value, phase: 'failed' };
+        }
     } finally {
         busy.value = false;
     }
@@ -405,14 +439,17 @@ async function resumeDownload(jobId: string): Promise<void> {
 
 async function pauseDownload(): Promise<void> {
     await runner.pause();
-    progress.value = { ...(progress.value ?? { current: 0, total: 0 }), phase: 'paused' };
+    if (progress.value) progress.value = { ...progress.value, phase: 'paused' };
 }
 
 onMounted(() => {
     setSourcePlaylists('public', discoveryService.getCachedCommunityCatalog().map(mapCommunity));
     unsubscribeRunner = runner.subscribe((next, running) => {
         busy.value = running;
-        if (next) progress.value = next;
+        if (next) {
+            progress.value = next;
+            if (next.phase !== 'failed') jobError.value = '';
+        }
         if (!running) void refreshResumableJobs();
     });
     void refreshResumableJobs();
@@ -425,6 +462,6 @@ defineExpose({ open });
 <template>
     <button class="q-btn q-btn-flat q-btn-dense asmr-download-center-btn text-white" data-testid="download-center-open" :title="t('downloadCenterButton')" :aria-label="t('downloadCenterButton')" @click="open"><span class="q-btn__content"><i class="q-icon material-icons" aria-hidden="true">download_for_offline</i></span></button>
     <Teleport to="body">
-        <BackupWorkDownloader v-if="visible" :playlists="playlists" :works="works" :profile="profile" :loading-own="loadingOwn" :loading-public="loadingPublic" :busy="busy" :progress="displayProgress" :resumable-jobs="resumableJobs.map(job => ({ id: job.id, title: job.title }))" :resolve-playlist="resolvePlaylist" :search-all-works="searchAllWorks" @close="visible = false" @source-change="source => { if (source === 'public') void loadCommunity(); else void loadOwn(); }" @update="updateProfile" @start="startDownload" @pause="pauseDownload" @resume="resumeDownload" @import-backup="importBackup" />
+        <BackupWorkDownloader v-if="visible" :playlists="playlists" :works="works" :profile="profile" :loading-own="loadingOwn" :loading-public="loadingPublic" :own-load-failed="ownLoadFailed" :public-load-failed="publicLoadFailed" :busy="busy" :progress="displayProgress" :error-message="jobError" :resumable-jobs="resumableJobs.map(job => ({ id: job.id, title: job.title }))" :resolve-playlist="resolvePlaylist" :search-all-works="searchAllWorks" @close="visible = false" @source-change="source => { if (source === 'public') void loadCommunity(); else void loadOwn(); }" @update="updateProfile" @start="startDownload" @pause="pauseDownload" @resume="resumeDownload" />
     </Teleport>
 </template>

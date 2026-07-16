@@ -6,7 +6,7 @@ ASMR.one Ultimate keeps the recovery paths explicit: local downloads remain avai
 
 Open **Settings → Emergency Backup** and choose:
 
-- **JSON** — canonical restorable snapshot. It contains separate `ownPlaylists` and `publicPlaylists` arrays and is also saved under `asmr-ult:emergency-export` in userscript storage.
+- **JSON** — canonical machine-readable snapshot. It contains separate `ownPlaylists` and `publicPlaylists` arrays and is also saved under `asmr-ult:emergency-export` in userscript storage.
 - **CSV** — two downloads, one for the user's playlists and one for community/public playlists.
 - **TXT** — two human-readable RJ-code lists with the same separation.
 - **Google Drive** — two timestamped JSON uploads named `asmr-playlists-own-…` and `asmr-playlists-public-…`.

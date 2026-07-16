@@ -29,6 +29,10 @@ async function mockPlaylistApis(page: Page): Promise<void> {
             coverUrl: 'https://media.e2e/public.jpg', tags: ['Relaxing'],
         }] }),
     }));
+    await page.route('**/community-playlists/*.json*', route => {
+        if (route.request().url().includes('/community-playlists/catalog.json')) return route.fallback();
+        return route.fulfill({ status: 404, contentType: 'application/json', body: JSON.stringify({ error: 'cache miss' }) });
+    });
     await page.route('**/api/playlist/get-playlists*', route => route.fulfill({
         status: 200, contentType: 'application/json', body: JSON.stringify({
             playlists: [{ id: OWN_ID, name: 'My Precious Playlist', description: 'mine', privacy: 0, works: [], works_count: 1, user_name: 'E2E' }],
@@ -174,6 +178,25 @@ test.describe('Emergency export and Download Center', () => {
         await injectedPage.getByTestId('search-work-RJ999999').locator('input').check();
         await injectedPage.getByTestId('opus-toggle').check();
         await expect(injectedPage.getByTestId('artwork-toggle')).toBeVisible();
+        await expect(injectedPage.getByTestId('download-center-import-input')).toHaveCount(0);
+        const layout = await injectedPage.evaluate(() => {
+            const rect = (selector: string) => {
+                const value = document.querySelector<HTMLElement>(selector)?.getBoundingClientRect();
+                if (!value) throw new Error(`Missing ${selector}`);
+                return { top: value.top, bottom: value.bottom };
+            };
+            return {
+                opus: rect('[data-testid="opus-option"]'),
+                bitrate: rect('[data-testid="opus-bitrate-option"]'),
+                metadata: rect('[data-testid="metadata-options"]'),
+                artwork: rect('[data-testid="artwork-option"]'),
+                artworkLabel: rect('[data-testid="artwork-option"] .option-row'),
+                artworkHint: rect('[data-testid="artwork-option"] .hint'),
+            };
+        });
+        expect(layout.bitrate.top).toBeGreaterThan(layout.opus.bottom);
+        expect(layout.artwork.top).toBeGreaterThan(layout.metadata.bottom);
+        expect(layout.artworkHint.top).toBeGreaterThanOrEqual(layout.artworkLabel.bottom);
         expect(await injectedPage.getByTestId('backup-downloader').evaluate(el => el.scrollWidth <= window.innerWidth + 1)).toBe(true);
     });
 
