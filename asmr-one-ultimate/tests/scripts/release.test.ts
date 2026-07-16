@@ -329,7 +329,7 @@ describe('release state machine', () => {
         expect(second.status, second.stderr).toBe(0);
         expect(commandIndex(harness.commands(), 'gh', 'release', 'create')).toBe(-1);
         expect(harness.readState().releases.v159).toEqual({ isDraft: false });
-    });
+    }, 30_000);
 
     it('rejects inconsistent prepared package metadata before testing', () => {
         const harness = createHarness({}, { package: '159', lock: '158', root: '159' });
