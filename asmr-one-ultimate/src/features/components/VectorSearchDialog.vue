@@ -1156,7 +1156,9 @@ defineExpose({ open });
     <!-- Trigger button (injected by controller into header) -->
     <button
         class="q-btn q-btn-flat q-btn-dense asmr-vector-btn text-white"
+        data-asmr="semantic-search"
         :title="t('magicSearchBtn')"
+        :aria-label="t('magicSearchBtn')"
         @click="open"
     >
         <span class="q-btn__content">

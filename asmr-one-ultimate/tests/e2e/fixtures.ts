@@ -872,7 +872,7 @@ export const helpers = {
 
     // Semantic search helpers
     getSemanticSearchButton(page: Page) {
-        return page.locator('.asmr-vector-search-btn, .asmr-vector-btn, [data-asmr="semantic-search"]');
+        return page.locator('[data-asmr="semantic-search"]');
     },
 
     async openSemanticSearch(page: Page) {

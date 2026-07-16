@@ -428,7 +428,7 @@ a.q-btn .material-icons {
   justify-content: center !important;
 }
 
-.asmr-header-actions :is(.asmr-playlist-btn, .asmr-vector-btn, .asmr-support-btn) {
+.asmr-header-actions :is(.asmr-playlist-btn, .asmr-vector-btn, .asmr-download-center-btn, .asmr-support-btn) {
   width: 32px !important;
   height: 32px !important;
   min-width: 32px !important;
@@ -439,7 +439,7 @@ a.q-btn .material-icons {
   overflow: hidden !important;
 }
 
-.asmr-header-actions :is(.asmr-playlist-btn, .asmr-vector-btn, .asmr-support-btn) .q-btn__content {
+.asmr-header-actions :is(.asmr-playlist-btn, .asmr-vector-btn, .asmr-download-center-btn, .asmr-support-btn) .q-btn__content {
   width: 100% !important;
   height: 100% !important;
   display: inline-flex !important;
@@ -594,36 +594,40 @@ a.q-btn .material-icons {
    Semantic Search & Playlist Header Buttons
    ======================================== */
 .asmr-vector-btn,
+.asmr-download-center-btn,
 .asmr-playlist-btn {
   color: var(--asmr-text-inverted) !important;
   transition: color 0.2s, background-color 0.2s;
 }
 
 .asmr-vector-btn .q-icon,
+.asmr-download-center-btn .q-icon,
 .asmr-playlist-btn .q-icon {
   font-size: 24px;
 }
 
 /* Vector button - light mode */
-.asmr-vector-btn .q-icon {
+:is(.asmr-vector-btn, .asmr-download-center-btn) .q-icon {
   color: var(--asmr-text-inverted) !important;
 }
 
 @media (hover: hover) {
   .asmr-vector-btn:hover,
+  .asmr-download-center-btn:hover,
   .asmr-playlist-btn:hover {
     background: rgba(255, 255, 255, 0.15) !important;
   }
 }
 
 /* Dark mode: Use accent */
-:is(.body--dark, .q-dark) .asmr-vector-btn,
-:is(.body--dark, .q-dark) .asmr-vector-btn .q-icon {
+:is(.body--dark, .q-dark) :is(.asmr-vector-btn, .asmr-download-center-btn),
+:is(.body--dark, .q-dark) :is(.asmr-vector-btn, .asmr-download-center-btn) .q-icon {
   color: var(--asmr-accent) !important;
 }
 
 @media (hover: hover) {
   :is(.body--dark, .q-dark) .asmr-vector-btn:hover,
+  :is(.body--dark, .q-dark) .asmr-download-center-btn:hover,
   :is(.body--dark, .q-dark) .asmr-playlist-btn:hover {
     background: color-mix(in srgb, var(--asmr-accent) 15%, transparent) !important;
   }
@@ -700,6 +704,7 @@ a.q-btn .material-icons {
 .asmr-whisper-btn:focus,
 .asmr-playlist-btn:focus,
 .asmr-vector-btn:focus,
+.asmr-download-center-btn:focus,
 .learner-controls button:focus,
 .learner-collapsed-controls button:focus,
 .asmr-radio-mini-btn:focus,
@@ -712,6 +717,7 @@ a.q-btn .material-icons {
 .asmr-whisper-btn:focus:not(:focus-visible),
 .asmr-playlist-btn:focus:not(:focus-visible),
 .asmr-vector-btn:focus:not(:focus-visible),
+.asmr-download-center-btn:focus:not(:focus-visible),
 .learner-controls button:focus:not(:focus-visible),
 .learner-collapsed-controls button:focus:not(:focus-visible) {
   outline: none !important;
@@ -720,7 +726,8 @@ a.q-btn .material-icons {
 /* Explicit focus-visible for keyboard navigation */
 .asmr-whisper-btn:focus-visible,
 .asmr-playlist-btn:focus-visible,
-.asmr-vector-btn:focus-visible {
+.asmr-vector-btn:focus-visible,
+.asmr-download-center-btn:focus-visible {
   outline: 2px solid var(--asmr-accent);
   outline-offset: 2px;
 }
@@ -731,6 +738,7 @@ a.q-btn .material-icons {
 .asmr-whisper-btn,
 .asmr-playlist-btn,
 .asmr-vector-btn,
+.asmr-download-center-btn,
 .asmr-support-btn,
 .asmr-radio-mini-btn {
   min-width: 44px !important;
@@ -744,6 +752,7 @@ a.q-btn .material-icons {
   .asmr-whisper-btn,
   .asmr-playlist-btn,
   .asmr-vector-btn,
+  .asmr-download-center-btn,
   .asmr-support-btn,
   .asmr-radio-mini-btn {
     min-width: unset !important;

@@ -423,7 +423,7 @@ defineExpose({ open });
 </script>
 
 <template>
-    <button class="q-btn q-btn-flat q-btn-dense asmr-vector-btn asmr-download-center-btn text-white" data-testid="download-center-open" :title="t('downloadCenterButton')" :aria-label="t('downloadCenterButton')" @click="open"><span class="q-btn__content"><i class="q-icon material-icons" aria-hidden="true">download_for_offline</i></span></button>
+    <button class="q-btn q-btn-flat q-btn-dense asmr-download-center-btn text-white" data-testid="download-center-open" :title="t('downloadCenterButton')" :aria-label="t('downloadCenterButton')" @click="open"><span class="q-btn__content"><i class="q-icon material-icons" aria-hidden="true">download_for_offline</i></span></button>
     <Teleport to="body">
         <BackupWorkDownloader v-if="visible" :playlists="playlists" :works="works" :profile="profile" :loading-own="loadingOwn" :loading-public="loadingPublic" :busy="busy" :progress="displayProgress" :resumable-jobs="resumableJobs.map(job => ({ id: job.id, title: job.title }))" :resolve-playlist="resolvePlaylist" :search-all-works="searchAllWorks" @close="visible = false" @source-change="source => { if (source === 'public') void loadCommunity(); else void loadOwn(); }" @update="updateProfile" @start="startDownload" @pause="pauseDownload" @resume="resumeDownload" @import-backup="importBackup" />
     </Teleport>
