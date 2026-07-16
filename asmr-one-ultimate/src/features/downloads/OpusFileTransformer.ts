@@ -4,8 +4,7 @@ import type { DownloadFile } from './DownloadJobRepository';
 import type { DirectoryDownloadSink } from './DirectoryDownloadSink';
 import type { OpusTranscoder } from './OpusTranscoder';
 import { canonicalDownloadPath, reserveCollisionFreePath, sanitizeRelativePath } from './DownloadPathUtils';
-
-const AUDIO_EXTENSIONS = /\.(?:wav|mp3|flac|m4a|aac|ogg|wma|aiff|ape)$/i;
+import { isDownloadAudioFile } from './DownloadMediaClassifier';
 
 export interface OpusTransformOptions {
     enabled: boolean;
@@ -28,7 +27,7 @@ export function planOpusOutputPaths(files: ReadonlyArray<Pick<DownloadFile, 'id'
     }
     const result: Record<string, string> = {};
     for (const file of files) {
-        if (!AUDIO_EXTENSIONS.test(file.path) || /\.opus$/i.test(file.path)) continue;
+        if (!isDownloadAudioFile(file.path) || /\.opus$/i.test(file.path)) continue;
         const desired = file.path.replace(/\.[^./]+$/, '') + '.opus';
         const reserved = reserveCollisionFreePath(sanitizeRelativePath(desired), occupied);
         result[file.id] = reserved.join('/');
@@ -40,10 +39,15 @@ export class OpusFileTransformer {
     constructor(private readonly transcoder: OpusTranscoder, private readonly options: OpusTransformOptions) {}
 
     shouldTransform(file: DownloadFile): boolean {
-        return this.options.enabled && AUDIO_EXTENSIONS.test(file.path) && !/\.opus$/i.test(file.path);
+        return this.options.enabled && isDownloadAudioFile(file.path) && !/\.opus$/i.test(file.path);
     }
 
-    async transform(file: DownloadFile, sink: DirectoryDownloadSink, signal?: AbortSignal): Promise<{ path: string; bytes: number }> {
+    async transform(
+        file: DownloadFile,
+        sink: DirectoryDownloadSink,
+        signal?: AbortSignal,
+        onProgress?: (ratio: number) => void,
+    ): Promise<{ path: string; bytes: number }> {
         if (!this.shouldTransform(file)) return { path: file.path, bytes: file.totalBytes ?? file.downloadedBytes };
         const sourcePath = file.path.split('/').filter(Boolean);
         const configuredOutput = this.options.outputPathForFile?.(file);
@@ -59,6 +63,7 @@ export class OpusFileTransformer {
             metadataPolicy: this.options.metadataPolicy,
             artwork: await this.options.artworkForFile?.(file),
             signal,
+            onProgress,
         });
         await sink.writeAll(outputPath, output);
         return { path: outputPath.join('/'), bytes: output.byteLength };

@@ -100,6 +100,12 @@ export default defineConfig({
         environment: 'jsdom',
         setupFiles: ['./tests/setup.ts'],
         globals: true,
+        // The release-state specs intentionally spawn many child processes.
+        // Vitest's fork pool can leave its `onTaskUpdate` RPC unanswered even
+        // after every assertion passes; the thread pool completes the same
+        // tests cleanly. Bound file fan-out so its coordinator stays responsive.
+        pool: 'threads',
+        maxWorkers: 4,
         exclude: ['**/tests/e2e/**', '**/node_modules/**', '**/dist/**'],
         coverage: {
             provider: 'v8',

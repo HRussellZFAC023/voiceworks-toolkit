@@ -8,7 +8,8 @@ export interface DownloadCoordinatorProgress {
     fileId: string;
     completedBytes: number;
     totalBytes?: number;
-    status: 'downloading' | 'complete' | 'failed' | 'paused';
+    status: 'downloading' | 'converting' | 'complete' | 'failed' | 'paused';
+    conversionRatio?: number;
     error?: string;
 }
 
@@ -36,6 +37,7 @@ export class DownloadCoordinator {
         private readonly sink: DirectoryDownloadSink,
         private readonly concurrency = 2,
         private readonly transformer?: OpusFileTransformer,
+        private readonly leaseOwnerId?: string,
     ) {}
 
     async run(jobId: string, onProgress?: DownloadProgressListener): Promise<void> {
@@ -50,7 +52,13 @@ export class DownloadCoordinator {
 
     private async runExclusive(jobId: string, onProgress?: DownloadProgressListener): Promise<void> {
         this.stoppedJobs.delete(jobId);
-        await this.repository.activateJob(jobId);
+        if (this.leaseOwnerId) {
+            if (!await this.repository.renewJobLease(jobId, this.leaseOwnerId)) {
+                throw new DownloadAlreadyRunningError(jobId);
+            }
+        } else {
+            await this.repository.activateJob(jobId);
+        }
         const files = (await this.repository.listFiles(jobId))
             .filter(file => file.status !== 'completed' && file.status !== 'cancelled');
         let cursor = 0;
@@ -65,9 +73,13 @@ export class DownloadCoordinator {
         });
         await Promise.all(workers);
         const finalFiles = await this.repository.listFiles(jobId);
-        if (finalFiles.every(file => file.status === 'completed')) await this.repository.completeJob(jobId);
+        if (finalFiles.every(file => file.status === 'completed')) {
+            if (this.leaseOwnerId) await this.repository.completeJob(jobId, this.leaseOwnerId);
+            else await this.repository.completeJob(jobId);
+        }
         else if (!finalFiles.every(file => file.status === 'completed' || file.status === 'cancelled')) {
-            await this.repository.pauseJob(jobId);
+            if (this.leaseOwnerId) await this.repository.pauseJob(jobId, this.leaseOwnerId);
+            else await this.repository.pauseJob(jobId);
         }
     }
 
@@ -76,7 +88,10 @@ export class DownloadCoordinator {
         for (const active of this.controllers.values()) {
             if (active.jobId === jobId) active.controller.abort('paused');
         }
-        return this.repository.pauseJob(jobId);
+        const result = this.leaseOwnerId
+            ? this.repository.pauseJob(jobId, this.leaseOwnerId)
+            : this.repository.pauseJob(jobId);
+        return result.then(() => undefined);
     }
 
     cancel(jobId: string): Promise<void> {
@@ -84,7 +99,10 @@ export class DownloadCoordinator {
         for (const active of this.controllers.values()) {
             if (active.jobId === jobId) active.controller.abort('cancelled');
         }
-        return this.repository.cancelJob(jobId);
+        const result = this.leaseOwnerId
+            ? this.repository.cancelJob(jobId, this.leaseOwnerId)
+            : this.repository.cancelJob(jobId);
+        return result.then(() => undefined);
     }
 
     private async downloadFile(file: DownloadFile, onProgress?: DownloadProgressListener): Promise<void> {
@@ -177,6 +195,14 @@ export class DownloadCoordinator {
                 onProgress?.({ jobId: file.jobId, fileId: file.id, completedBytes: total, totalBytes: total, status: 'downloading' });
                 transformed = await this.transformer.transform(
                     { ...file, downloadedBytes: total, totalBytes: total }, this.sink, controller.signal,
+                    ratio => onProgress?.({
+                        jobId: file.jobId,
+                        fileId: file.id,
+                        completedBytes: total,
+                        totalBytes: total,
+                        status: 'converting',
+                        conversionRatio: ratio,
+                    }),
                 );
             }
             if (transformed) await this.repository.markFileComplete(file.id, total, transformed);

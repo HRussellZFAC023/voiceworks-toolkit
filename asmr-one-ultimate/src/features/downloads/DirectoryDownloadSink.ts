@@ -9,6 +9,10 @@ type PermissionHandle = FileSystemDirectoryHandle & {
     queryPermission?: (options?: { mode: 'readwrite' }) => Promise<PermissionStateLike>;
     requestPermission?: (options?: { mode: 'readwrite' }) => Promise<PermissionStateLike>;
 };
+type EnumerableDirectoryHandle = FileSystemDirectoryHandle & {
+    entries?: () => AsyncIterableIterator<[string, FileSystemHandle]>;
+    values?: () => AsyncIterableIterator<FileSystemHandle>;
+};
 
 export class DirectoryPermissionError extends Error {
     constructor() {
@@ -24,6 +28,13 @@ export class ResumeOffsetMismatchError extends Error {
     }
 }
 
+class DirectoryInspectionError extends Error {
+    constructor() {
+        super('Download directory entries cannot be inspected safely');
+        this.name = 'DirectoryInspectionError';
+    }
+}
+
 /** Chromium directory sink that recreates nested folders and supports seek-on-resume. */
 export class DirectoryDownloadSink {
     constructor(private readonly root: FileSystemDirectoryHandle) {}
@@ -34,6 +45,24 @@ export class DirectoryDownloadSink {
         if (await handle.queryPermission({ mode: 'readwrite' }) === 'granted') return true;
         if (!request || !handle.requestPermission) return false;
         return await handle.requestPermission({ mode: 'readwrite' }) === 'granted';
+    }
+
+    /** Names already occupying the destination root, including files and folders. */
+    async listTopLevelEntryNames(): Promise<string[]> {
+        if (!await this.ensurePermission(false)) throw new DirectoryPermissionError();
+        const root = this.root as EnumerableDirectoryHandle;
+        const names: string[] = [];
+        if (typeof root.entries === 'function') {
+            for await (const [name] of root.entries()) names.push(name);
+            return names;
+        }
+        if (typeof root.values === 'function') {
+            for await (const handle of root.values()) names.push(handle.name);
+            return names;
+        }
+        // Creating a writable without first enumerating would let a later job
+        // truncate a same-named folder/file selected in an earlier run.
+        throw new DirectoryInspectionError();
     }
 
     async open(path: string[], offset: number): Promise<DownloadWriter> {

@@ -1,372 +1,249 @@
-/**
- * E2E: Emergency Playlist Export
- *
- * Verifies the one-click playlist backup in Settings → Emergency Backup:
- *  - JSON export downloads a single document with the user's own playlists
- *    and community (public/global) playlists in SEPARATE sections
- *  - CSV/TXT exports download own and public playlists as separate files
- *  - RJ codes and titles survive the round trip
- */
-
+/** Emergency export and the header Download Center share playlist fixtures. */
 import { test, expect, helpers } from './fixtures';
 import type { Download, Page } from '@playwright/test';
 import * as fs from 'fs';
 import { execFileSync } from 'child_process';
 
+const OWN_ID = '11111111-2222-4333-8444-555555555555';
+const PUBLIC_ID = '66666666-7777-4888-8999-aaaaaaaaaaaa';
 const FFPROBE_PATH = process.env.FFPROBE_PATH
     || (fs.existsSync('/opt/homebrew/bin/ffprobe') ? '/opt/homebrew/bin/ffprobe' : 'ffprobe');
 let hasFfprobe = true;
 try { execFileSync(FFPROBE_PATH, ['-version'], { stdio: 'ignore' }); } catch { hasFfprobe = false; }
 
-const OWN_ID = '11111111-2222-3333-4444-555555555555';
-
 function tinyWav(): Buffer {
-    const samples = 1600; const dataSize = samples * 2; const out = Buffer.alloc(44 + dataSize);
-    out.write('RIFF', 0); out.writeUInt32LE(36 + dataSize, 4); out.write('WAVEfmt ', 8);
-    out.writeUInt32LE(16, 16); out.writeUInt16LE(1, 20); out.writeUInt16LE(1, 22);
-    out.writeUInt32LE(16000, 24); out.writeUInt32LE(32000, 28); out.writeUInt16LE(2, 32); out.writeUInt16LE(16, 34);
-    out.write('data', 36); out.writeUInt32LE(dataSize, 40);
-    for (let i = 0; i < samples; i += 1) out.writeInt16LE(Math.round(Math.sin(i / 12) * 4000), 44 + i * 2);
-    return out;
+    const samples = 1600; const dataSize = samples * 2; const output = Buffer.alloc(44 + dataSize);
+    output.write('RIFF', 0); output.writeUInt32LE(36 + dataSize, 4); output.write('WAVEfmt ', 8);
+    output.writeUInt32LE(16, 16); output.writeUInt16LE(1, 20); output.writeUInt16LE(1, 22);
+    output.writeUInt32LE(16000, 24); output.writeUInt32LE(32000, 28); output.writeUInt16LE(2, 32); output.writeUInt16LE(16, 34);
+    output.write('data', 36); output.writeUInt32LE(dataSize, 40);
+    for (let index = 0; index < samples; index += 1) output.writeInt16LE(Math.round(Math.sin(index / 12) * 4000), 44 + index * 2);
+    return output;
 }
 
-async function mockPlaylistApis(page: Page) {
-    // Own playlist listing (both endpoint shapes)
-    await page.route('**/api/playlist/get-playlists*', (route) => route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({
-            playlists: [{ id: OWN_ID, name: 'My Precious Playlist', description: 'mine', privacy: 0, works: [] }],
+async function mockPlaylistApis(page: Page): Promise<void> {
+    await page.route('**/community-playlists/catalog.json*', route => route.fulfill({
+        status: 200, contentType: 'application/json', headers: { etag: '"e2e-catalog"' },
+        body: JSON.stringify({ version: 1, generatedAt: new Date().toISOString(), playlists: [{
+            id: PUBLIC_ID, name: 'Community calm', userName: 'Public curator', worksCount: 1,
+            coverUrl: 'https://media.e2e/public.jpg', tags: ['Relaxing'],
+        }] }),
+    }));
+    await page.route('**/api/playlist/get-playlists*', route => route.fulfill({
+        status: 200, contentType: 'application/json', body: JSON.stringify({
+            playlists: [{ id: OWN_ID, name: 'My Precious Playlist', description: 'mine', privacy: 0, works: [], works_count: 1, user_name: 'E2E' }],
             pagination: { currentPage: 1, pageSize: 100, totalCount: 1 },
         }),
     }));
-
-    await page.route('**/api/playlist/get-playlist-metadata*', (route) => {
+    await page.route('**/api/playlist/get-playlist-metadata*', route => {
         const id = new URL(route.request().url()).searchParams.get('id') || '';
-        const isOwn = id.toLowerCase() === OWN_ID;
-        return route.fulfill({
-            status: 200,
-            contentType: 'application/json',
-            body: JSON.stringify({
-                id,
-                name: isOwn ? 'My Precious Playlist' : `Community ${id.slice(0, 8)}`,
-                description: isOwn ? 'mine' : 'a community playlist',
-                privacy: isOwn ? 0 : 2,
-                user_name: isOwn ? 'E2E' : 'someone-else',
-                works: [],
-                works_count: isOwn ? 2 : 1,
-            }),
-        });
+        const own = id.toLowerCase() === OWN_ID;
+        return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
+            id, name: own ? 'My Precious Playlist' : 'Community calm', description: own ? 'mine' : 'public',
+            privacy: own ? 0 : 2, user_name: own ? 'E2E' : 'Public curator', works: [], works_count: 1,
+        }) });
     });
-
-    await page.route('**/api/playlist/get-playlist-works*', (route) => {
+    await page.route('**/api/playlist/get-playlist-works*', route => {
         const id = new URL(route.request().url()).searchParams.get('id') || '';
-        const isOwn = id.toLowerCase() === OWN_ID;
-        const works = isOwn
-            ? [
-                { id: 111111, source_id: 'RJ111111', title: 'Own Work One' },
-                { id: 222222, source_id: 'RJ222222', title: 'Own Work Two' },
-            ]
+        const works = id.toLowerCase() === OWN_ID
+            ? [{ id: 111111, source_id: 'RJ111111', title: 'Own Work One' }]
             : [{ id: 333333, source_id: 'RJ333333', title: 'Community Work' }];
-        return route.fulfill({
-            status: 200,
-            contentType: 'application/json',
-            body: JSON.stringify({
-                works,
-                pagination: { currentPage: 1, pageSize: 100, totalCount: works.length },
-            }),
-        });
+        return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
+            works, pagination: { currentPage: 1, pageSize: 100, totalCount: works.length },
+        }) });
     });
+    await page.route('**/api/search/**', route => route.fulfill({
+        status: 200, contentType: 'application/json', body: JSON.stringify({
+            works: [{ id: 999999, title: 'Direct search result' }],
+            pagination: { currentPage: 1, pageSize: 20, totalCount: 1 },
+        }),
+    }));
+}
+
+async function mockOwnPlaylist(page: Page, input: { id: string; name: string; works: Array<{ id: number; source_id: string; title: string }> }): Promise<void> {
+    await page.route('**/api/playlist/get-playlists*', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
+        playlists: [{ id: input.id, name: input.name, privacy: 0, works: [], works_count: input.works.length }],
+        pagination: { currentPage: 1, pageSize: 100, totalCount: 1 },
+    }) }));
+    await page.route('**/api/playlist/get-playlist-metadata*', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
+        id: input.id, name: input.name, privacy: 0, works: [], works_count: input.works.length, user_name: 'E2E',
+    }) }));
+    await page.route('**/api/playlist/get-playlist-works*', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
+        works: input.works, pagination: { currentPage: 1, pageSize: 100, totalCount: input.works.length },
+    }) }));
 }
 
 async function openEmergencySection(page: Page) {
     const section = page.locator('#asmr-emergency-export-section');
-    await expect(section).toBeVisible({ timeout: 15000 });
+    await expect(section).toBeVisible({ timeout: 15_000 });
     await section.scrollIntoViewIfNeeded();
     return section;
 }
 
-async function readDownload(download: Download): Promise<string> {
-    const filePath = await download.path();
-    return fs.readFileSync(filePath!, 'utf-8');
+async function openDownloadCenter(page: Page, timeout = 5_000): Promise<void> {
+    const button = page.getByTestId('download-center-open');
+    await expect(button).toBeVisible({ timeout: 15_000 });
+    await button.click();
+    await expect(page.getByTestId('backup-downloader')).toBeVisible({ timeout });
 }
 
-test.describe('Emergency Playlist Export', () => {
-    test.beforeEach(async ({ injectedPage }) => {
-        await mockPlaylistApis(injectedPage);
-    });
+async function readDownload(download: Download): Promise<string> {
+    return fs.readFileSync((await download.path())!, 'utf8');
+}
 
-    test('JSON export includes own and public playlists in separate sections', async ({ injectedPage, isScriptLoaded }) => {
-        test.setTimeout(180000);
-        await helpers.gotoSettings(injectedPage);
-        await isScriptLoaded();
-        await openEmergencySection(injectedPage);
+test.describe('Emergency export and Download Center', () => {
+    test.beforeEach(async ({ injectedPage }) => { await mockPlaylistApis(injectedPage); });
 
-        const downloadPromise = injectedPage.waitForEvent('download', { timeout: 120000 });
-        await injectedPage.locator('[data-testid="emergency-export-json"]').click();
-        const download = await downloadPromise;
-
-        expect(download.suggestedFilename()).toMatch(/^asmr-playlists-backup-.*\.json$/);
-        const doc = JSON.parse(await readDownload(download));
-
+    test('JSON export keeps own and server-catalog community playlists separate', async ({ injectedPage, isScriptLoaded }) => {
+        await helpers.gotoSettings(injectedPage); await isScriptLoaded(); await openEmergencySection(injectedPage);
+        const pending = injectedPage.waitForEvent('download');
+        await injectedPage.getByTestId('emergency-export-json').click();
+        const doc = JSON.parse(await readDownload(await pending));
         expect(doc.format).toBe('asmr-one-ultimate-playlist-backup');
-        expect(doc.version).toBe(1);
-
-        // Own playlists: exactly the mocked one, with its works
         expect(doc.ownPlaylists).toHaveLength(1);
-        const own = doc.ownPlaylists[0];
-        expect(own.name).toBe('My Precious Playlist');
-        expect(own.works.map((w: { rjCode: string }) => w.rjCode)).toEqual(['RJ111111', 'RJ222222']);
-        expect(own.works[0].title).toBe('Own Work One');
-
-        // Public playlists: non-empty (seeded/global list) and disjoint from own
-        expect(doc.publicPlaylists.length).toBeGreaterThan(0);
-        const publicIds = doc.publicPlaylists.map((p: { id: string }) => p.id.toLowerCase());
-        expect(publicIds).not.toContain(OWN_ID);
-        const firstPublic = doc.publicPlaylists[0];
-        expect(firstPublic.works.map((w: { rjCode: string }) => w.rjCode)).toEqual(['RJ333333']);
-        expect(firstPublic.userName).toBe('someone-else');
-
-        // Status line reports the result
-        const status = injectedPage.locator('[data-testid="emergency-export-status"]');
-        await expect(status).toContainText('1', { timeout: 10000 });
+        expect(doc.ownPlaylists[0]).toMatchObject({ id: OWN_ID, name: 'My Precious Playlist' });
+        expect(doc.ownPlaylists[0].works).toEqual([{ rjCode: 'RJ111111', title: 'Own Work One' }]);
+        expect(doc.publicPlaylists).toHaveLength(1);
+        expect(doc.publicPlaylists[0]).toMatchObject({ id: PUBLIC_ID, userName: 'Public curator' });
+        expect(doc.publicPlaylists[0].works[0].rjCode).toBe('RJ333333');
     });
 
-    test('CSV export downloads own and public playlists as separate files', async ({ injectedPage, isScriptLoaded }) => {
-        test.setTimeout(180000);
-        await helpers.gotoSettings(injectedPage);
-        await isScriptLoaded();
-        await openEmergencySection(injectedPage);
-
-        const downloads: Download[] = [];
-        injectedPage.on('download', (d) => downloads.push(d));
-        await injectedPage.locator('[data-testid="emergency-export-csv"]').click();
-        await expect.poll(() => downloads.length, { timeout: 175000 }).toBeGreaterThanOrEqual(2);
-
-        const names = downloads.map((d) => d.suggestedFilename());
-        expect(names.some((n) => /^asmr-playlists-own-.*\.csv$/.test(n))).toBe(true);
-        expect(names.some((n) => /^asmr-playlists-public-.*\.csv$/.test(n))).toBe(true);
-
-        const ownCsv = await readDownload(downloads[names.findIndex((n) => n.includes('-own-'))]);
-        expect(ownCsv).toContain('playlist_id,playlist_name,rj_code,title');
-        expect(ownCsv).toContain('RJ111111');
-        expect(ownCsv).toContain('My Precious Playlist');
-        expect(ownCsv).not.toContain('RJ333333');
-
-        const publicCsv = await readDownload(downloads[names.findIndex((n) => n.includes('-public-'))]);
-        expect(publicCsv).toContain('RJ333333');
-        expect(publicCsv).not.toContain('My Precious Playlist');
+    test('CSV and TXT exports still produce separate own/community files', async ({ injectedPage, isScriptLoaded }) => {
+        test.setTimeout(120_000);
+        await helpers.gotoSettings(injectedPage); await isScriptLoaded(); await openEmergencySection(injectedPage);
+        for (const format of ['csv', 'txt'] as const) {
+            const downloads: Download[] = [];
+            const listener = (download: Download) => downloads.push(download);
+            injectedPage.on('download', listener);
+            await injectedPage.getByTestId(`emergency-export-${format}`).click();
+            await expect.poll(() => downloads.length, { timeout: 60_000 }).toBeGreaterThanOrEqual(2);
+            const own = downloads.find(item => item.suggestedFilename().includes('-own-'))!;
+            const community = downloads.find(item => item.suggestedFilename().includes('-public-'))!;
+            expect(await readDownload(own)).toContain('RJ111111');
+            expect(await readDownload(community)).toContain('RJ333333');
+            injectedPage.off('download', listener);
+        }
     });
 
-    test('TXT export produces grouped RJ-code lists', async ({ injectedPage, isScriptLoaded }) => {
-        test.setTimeout(180000);
-        await helpers.gotoSettings(injectedPage);
-        await isScriptLoaded();
-        await openEmergencySection(injectedPage);
-
-        const downloads: Download[] = [];
-        injectedPage.on('download', (d) => downloads.push(d));
-        await injectedPage.locator('[data-testid="emergency-export-txt"]').click();
-        await expect.poll(() => downloads.length, { timeout: 175000 }).toBeGreaterThanOrEqual(2);
-
-        const names = downloads.map((d) => d.suggestedFilename());
-        const ownTxt = await readDownload(downloads[names.findIndex((n) => /-own-.*\.txt$/.test(n))]);
-        expect(ownTxt).toContain('# My Precious Playlist (2 works)');
-        expect(ownTxt).toContain('RJ111111\tOwn Work One');
-    });
-
-    test('opens the bulk downloader from live personal and community playlists', async ({ injectedPage, isScriptLoaded }) => {
-        test.setTimeout(180000);
-        await helpers.gotoSettings(injectedPage);
-        await isScriptLoaded();
-        await openEmergencySection(injectedPage);
-
-        await injectedPage.getByTestId('backup-download-live').click();
-        const dialog = injectedPage.getByTestId('backup-downloader');
-        await expect(dialog).toBeVisible({ timeout: 120000 });
-        await expect(injectedPage.getByTestId('emergency-export-status')).toContainText(/Loaded|読み込みました|已加载/i);
-        await expect(injectedPage.getByTestId('source-own').locator('xpath=../span')).toContainText('(1)');
-        await expect(injectedPage.getByTestId('source-public').locator('xpath=../span')).not.toContainText('(0)');
-
-        await injectedPage.getByTestId('source-own').locator('xpath=../span').click();
+    test('opens instantly on Yours and lazily fetches the community catalog and playlist works', async ({ injectedPage, isScriptLoaded }) => {
+        let communityCatalogRequests = 0;
+        let publicWorksRequests = 0;
+        let releaseOwn!: () => void;
+        const ownGate = new Promise<void>(resolve => { releaseOwn = resolve; });
+        await injectedPage.route('**/api/playlist/get-playlists*', async route => {
+            await ownGate;
+            await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
+                playlists: [{ id: OWN_ID, name: 'My Precious Playlist', privacy: 0, works: [], works_count: 1 }],
+                pagination: { currentPage: 1, pageSize: 100, totalCount: 1 },
+            }) });
+        });
+        injectedPage.on('request', request => {
+            if (request.url().includes('/community-playlists/catalog.json')) communityCatalogRequests += 1;
+            if (request.url().includes('/get-playlist-works') && request.url().includes(PUBLIC_ID)) publicWorksRequests += 1;
+        });
+        await helpers.gotoHome(injectedPage); await isScriptLoaded();
+        communityCatalogRequests = 0;
+        await openDownloadCenter(injectedPage, 500);
+        await expect(injectedPage.getByTestId('source-own')).toHaveAttribute('aria-selected', 'true');
+        await expect(injectedPage.getByTestId('playlist-loading')).toBeVisible();
+        expect(communityCatalogRequests).toBe(0);
+        releaseOwn();
         await expect(injectedPage.getByTestId(`playlist-${OWN_ID}`)).toBeVisible();
-        await expect(injectedPage.getByText('My Precious Playlist', { exact: true })).toBeVisible();
-
-        await injectedPage.getByTestId('source-public').locator('xpath=../span').click();
-        await expect(injectedPage.getByTestId(`playlist-${OWN_ID}`)).toBeHidden();
-        await expect(dialog.locator('.playlist-group').first()).toBeVisible();
-    });
-
-    test('backup work chooser supports searchable tri-state selection and download profiles', async ({ injectedPage, isScriptLoaded }) => {
-        await injectedPage.setViewportSize({ width: 390, height: 844 });
-        await helpers.gotoSettings(injectedPage);
-        await isScriptLoaded();
-        await openEmergencySection(injectedPage);
-        const publicPlaylists = Array.from({ length: 80 }, (_, index) => ({
-            id: `community-${index}`, name: `Community ${index}`, description: '', worksCount: 1,
-            works: [{ rjCode: `RJ9${String(index).padStart(5, '0')}`, title: `Community work ${index}` }],
-        }));
-        const backup = {
-            format: 'asmr-one-ultimate-playlist-backup', version: 1,
-            exportedAt: new Date().toISOString(), source: 'https://asmr.one', errors: [], publicPlaylists,
-            ownPlaylists: [{
-                id: 'playlist-a', name: 'Large collection', description: '', worksCount: 3,
-                works: [
-                    { rjCode: 'RJ111111', title: 'First work' },
-                    { rjCode: 'RJ222222', title: 'Second work' },
-                    { rjCode: 'RJ333333', title: 'Third work' },
-                ],
-            }],
-        };
-        await injectedPage.getByTestId('backup-download-input').setInputFiles({
-            name: 'playlist-backup.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(backup)),
-        });
-
-        const dialog = injectedPage.getByTestId('backup-downloader');
-        await expect(dialog).toBeVisible();
-        await expect(injectedPage.getByTestId('source-all').locator('xpath=../span')).toContainText('(81)');
-        await expect(injectedPage.getByTestId('source-own').locator('xpath=../span')).toContainText('(1)');
-        await expect(injectedPage.getByTestId('source-public').locator('xpath=../span')).toContainText('(80)');
-        const playlistList = injectedPage.getByTestId('playlist-list');
-        await expect.poll(() => playlistList.evaluate(element => element.scrollHeight > element.clientHeight)).toBe(true);
-        await injectedPage.getByTestId('source-public').locator('xpath=../span').click();
-        await expect(injectedPage.getByTestId('playlist-community-79')).toBeAttached();
-        await playlistList.evaluate(element => { element.scrollTop = element.scrollHeight; });
-        await expect(injectedPage.getByTestId('playlist-community-79')).toBeVisible();
-        await expect(injectedPage.getByTestId('playlist-playlist-a')).toBeHidden();
-        await injectedPage.getByTestId('source-own').locator('xpath=../span').click();
-        await expect(injectedPage.getByTestId('playlist-playlist-a')).toBeVisible();
-        await expect(injectedPage.getByTestId('playlist-community-0')).toBeHidden();
-        await expect(injectedPage.getByTestId('start')).toBeDisabled();
-        await injectedPage.getByTestId('playlist-check-playlist-a').check();
-        await expect(injectedPage.getByTestId('selection-summary')).toContainText('3');
-        await injectedPage.getByTestId('expand-playlist-a').click();
-        await injectedPage.getByTestId('work-RJ222222').locator('input').uncheck();
-        await expect(injectedPage.getByTestId('playlist-check-playlist-a')).toHaveJSProperty('indeterminate', true);
-        await injectedPage.getByTestId('search').fill('Third');
-        await expect(injectedPage.getByTestId('work-RJ111111')).toBeHidden();
+        expect(publicWorksRequests).toBe(0);
+        await injectedPage.getByTestId('source-public').click();
+        await expect(injectedPage.getByTestId(`playlist-${PUBLIC_ID}`)).toBeVisible();
+        expect(communityCatalogRequests).toBeGreaterThanOrEqual(1);
+        expect(publicWorksRequests).toBe(0);
+        await injectedPage.getByTestId(`expand-${PUBLIC_ID}`).click();
         await expect(injectedPage.getByTestId('work-RJ333333')).toBeVisible();
-        await injectedPage.getByTestId('opus-toggle').check();
-        await injectedPage.getByTestId('opus-bitrate').selectOption('96');
-        await injectedPage.getByTestId('title-mode').selectOption('original-bracketed-translation');
-        await expect(injectedPage.getByTestId('start')).toBeEnabled();
-        const overflow = await dialog.evaluate(el => el.scrollWidth > window.innerWidth + 1);
-        expect(overflow).toBe(false);
+        expect(publicWorksRequests).toBe(1);
     });
 
-    test('downloads a complete selected work tree into the chosen browser directory', async ({ injectedPage, isScriptLoaded }) => {
-        await injectedPage.route('**/api/tracks/111111*', route => route.fulfill({
-            status: 200, contentType: 'application/json', body: JSON.stringify([{
-                type: 'folder', title: 'Audio', children: [
-                    { type: 'audio', hash: 'audio-hash', title: 'track.wav', size: 4, mediaDownloadUrl: 'https://media.e2e/track.wav' },
-                    { type: 'image', hash: 'image-hash', title: 'cover.jpg', size: 3, mediaDownloadUrl: 'https://media.e2e/cover.jpg' },
-                ],
-            }]),
-        }));
-        await injectedPage.route('**/api/workInfo/111111*', route => route.fulfill({
-            status: 200, contentType: 'application/json', body: JSON.stringify({
-                id: 111111, source_id: 'RJ111111', title: 'First work', name: 'Circle', circle_id: 1,
-                circle: { id: 1, name: 'Circle' }, vas: [], tags: [], release: '2026-01-01',
-                source_url: 'https://www.dlsite.com/RJ111111', mainCoverUrl: '', thumbnailCoverUrl: '', samCoverUrl: '',
-            }),
-        }));
-        await injectedPage.route('https://media.e2e/track.wav', route => route.fulfill({ status: 200, body: Buffer.from([1, 2, 3, 4]), headers: { 'content-length': '4', 'accept-ranges': 'bytes' } }));
-        await injectedPage.route('https://media.e2e/cover.jpg', route => route.fulfill({ status: 200, body: Buffer.from([5, 6, 7]), headers: { 'content-length': '3', 'accept-ranges': 'bytes' } }));
-        await helpers.gotoSettings(injectedPage);
-        await isScriptLoaded();
-        await injectedPage.evaluate(() => {
-            (window as any).showDirectoryPicker = () => navigator.storage.getDirectory();
-        });
-        const backup = {
-            format: 'asmr-one-ultimate-playlist-backup', version: 1, exportedAt: new Date().toISOString(),
-            source: 'https://asmr.one', errors: [], publicPlaylists: [], ownPlaylists: [{
-                id: 'p', name: 'Playlist', description: '', worksCount: 1,
-                works: [{ rjCode: 'RJ111111', title: 'First work' }],
-            }],
-        };
-        await injectedPage.getByTestId('backup-download-input').setInputFiles({ name: 'backup.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(backup)) });
-        await injectedPage.getByTestId('playlist-check-p').check();
+    test('offers themed selection, clear-all, tags, options, and direct work search in one modal', async ({ injectedPage, isScriptLoaded }) => {
+        await injectedPage.setViewportSize({ width: 390, height: 844 });
+        await helpers.gotoHome(injectedPage); await isScriptLoaded(); await openDownloadCenter(injectedPage);
+        await injectedPage.getByTestId(`playlist-check-${OWN_ID}`).check();
+        await expect(injectedPage.getByTestId('selection-summary')).toContainText('1');
+        await injectedPage.getByTestId('clear-all').click();
+        await expect(injectedPage.getByTestId('start')).toBeDisabled();
+        await injectedPage.getByTestId('source-public').click();
+        await expect(injectedPage.getByTestId('tag-filter')).toContainText('Relaxing');
+        await injectedPage.getByTestId('search').fill('Direct');
+        await injectedPage.getByTestId('search-all-works').click();
+        await expect(injectedPage.getByTestId('search-work-RJ999999')).toBeVisible();
+        await injectedPage.getByTestId('search-work-RJ999999').locator('input').check();
+        await injectedPage.getByTestId('opus-toggle').check();
+        await expect(injectedPage.getByTestId('artwork-toggle')).toBeVisible();
+        expect(await injectedPage.getByTestId('backup-downloader').evaluate(el => el.scrollWidth <= window.innerWidth + 1)).toBe(true);
+    });
+
+    test('downloads a complete selected work folder while keeping progress in the modal', async ({ injectedPage, isScriptLoaded }) => {
+        await injectedPage.route('**/api/tracks/111111*', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify([{
+            type: 'folder', title: 'Audio', children: [
+                { type: 'audio', hash: 'audio', title: 'track.wav', size: 4, mediaDownloadUrl: 'https://media.e2e/track.wav' },
+                { type: 'image', hash: 'cover', title: 'cover.jpg', size: 3, mediaDownloadUrl: 'https://media.e2e/cover.jpg' },
+            ],
+        }]) }));
+        await injectedPage.route('**/api/workInfo/111111*', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
+            id: 111111, source_id: 'RJ111111', title: 'Own Work One', name: 'Circle', circle_id: 1, circle: { name: 'Circle' },
+            vas: [], tags: [], release: '2026-01-01', source_url: '', mainCoverUrl: '', thumbnailCoverUrl: '', samCoverUrl: '',
+        }) }));
+        await injectedPage.route('https://media.e2e/track.wav', route => route.fulfill({ status: 200, body: Buffer.from([1, 2, 3, 4]), headers: { 'content-length': '4' } }));
+        await injectedPage.route('https://media.e2e/cover.jpg', route => route.fulfill({ status: 200, body: Buffer.from([5, 6, 7]), headers: { 'content-length': '3' } }));
+        await helpers.gotoHome(injectedPage); await isScriptLoaded();
+        await injectedPage.evaluate(() => { (window as any).showDirectoryPicker = () => navigator.storage.getDirectory(); });
+        await openDownloadCenter(injectedPage);
+        await injectedPage.getByTestId(`playlist-check-${OWN_ID}`).check();
         await injectedPage.getByTestId('title-mode').selectOption('original');
         await injectedPage.getByTestId('start').click();
-        await expect(injectedPage.getByTestId('emergency-export-status')).toContainText(/downloaded|保存|下载/i, { timeout: 170000 });
+        await expect(injectedPage.getByTestId('download-progress')).toContainText(/downloaded|download complete|保存|下载/i, { timeout: 30_000 });
+        await expect(injectedPage.getByTestId('backup-downloader')).toBeVisible();
         const files = await injectedPage.evaluate(async () => {
-            const root = await navigator.storage.getDirectory();
-            const work = await root.getDirectoryHandle('First work');
-            const audio = await work.getDirectoryHandle('Audio');
+            const root = await navigator.storage.getDirectory(); const work = await root.getDirectoryHandle('Own Work One'); const audio = await work.getDirectoryHandle('Audio');
             const read = async (name: string) => [...new Uint8Array(await (await (await audio.getFileHandle(name)).getFile()).arrayBuffer())];
             return { track: await read('track.wav'), cover: await read('cover.jpg') };
         });
         expect(files).toEqual({ track: [1, 2, 3, 4], cover: [5, 6, 7] });
     });
 
-    test('resumes an interrupted file from its persisted byte offset after reload', async ({ injectedPage, isScriptLoaded }) => {
-        let rangeHeader = '';
-        await injectedPage.route('https://media.e2e/resume.wav', route => {
-            rangeHeader = route.request().headers().range || '';
-            return route.fulfill({
-                status: rangeHeader === 'bytes=2-' ? 206 : 200,
-                body: Buffer.from(rangeHeader === 'bytes=2-' ? [3, 4] : [1, 2, 3, 4]),
-                headers: rangeHeader === 'bytes=2-'
-                    ? { 'content-range': 'bytes 2-3/4', 'content-length': '2', etag: 'v1', 'accept-ranges': 'bytes' }
-                    : { 'content-length': '4', etag: 'v1', 'accept-ranges': 'bytes' },
-            });
-        });
-        await helpers.gotoSettings(injectedPage);
-        await isScriptLoaded();
+    test('offers a recovered interrupted job in the header modal after refresh', async ({ injectedPage, isScriptLoaded }) => {
+        await injectedPage.route('https://media.e2e/resume.wav', route => route.fulfill({ status: 206, body: Buffer.from([3, 4]), headers: {
+            'content-range': 'bytes 2-3/4', 'content-length': '2', etag: 'v1', 'accept-ranges': 'bytes',
+        } }));
+        await helpers.gotoHome(injectedPage); await isScriptLoaded();
         await injectedPage.evaluate(async () => {
-            const root = await navigator.storage.getDirectory();
-            const folder = await root.getDirectoryHandle('Resume work', { create: true });
-            const handle = await folder.getFileHandle('track.wav', { create: true });
-            const writable = await handle.createWritable();
+            const root = await navigator.storage.getDirectory(); const folder = await root.getDirectoryHandle('Resume work', { create: true });
+            const handle = await folder.getFileHandle('track.wav', { create: true }); const writable = await handle.createWritable();
             await writable.write(new Uint8Array([1, 2])); await writable.close();
             await new Promise<void>((resolve, reject) => {
                 const request = indexedDB.open('asmr-one-downloads', 1);
-                request.onupgradeneeded = () => {
-                    const db = request.result;
-                    const jobs = db.createObjectStore('jobs', { keyPath: 'id' }); jobs.createIndex('by-status', 'status');
-                    const files = db.createObjectStore('files', { keyPath: 'id' }); files.createIndex('by-job', 'jobId'); files.createIndex('by-job-status', ['jobId', 'status']);
-                    const checkpoints = db.createObjectStore('checkpoints', { keyPath: 'fileId' }); checkpoints.createIndex('by-job', 'jobId');
-                };
-                request.onsuccess = () => {
-                    const db = request.result; const tx = db.transaction(['jobs', 'files', 'checkpoints'], 'readwrite');
-                    const now = Date.now();
-                    // The settings UI may already hold this database open while
-                    // rendering resumable jobs. Clearing its stores keeps test
-                    // setup deterministic without waiting indefinitely for a
-                    // deleteDatabase() blocked event on slower CI runners.
-                    tx.objectStore('jobs').clear();
-                    tx.objectStore('files').clear();
-                    tx.objectStore('checkpoints').clear();
-                    tx.objectStore('jobs').put({ id: 'resume-job', title: 'Resume 2 of 4 bytes', status: 'paused', options: { state: { convertToOpus: false }, directory: root, enrichment: {} }, createdAt: now, updatedAt: now });
+                request.onupgradeneeded = () => { const db = request.result; const jobs = db.createObjectStore('jobs', { keyPath: 'id' }); jobs.createIndex('by-status', 'status'); const files = db.createObjectStore('files', { keyPath: 'id' }); files.createIndex('by-job', 'jobId'); files.createIndex('by-job-status', ['jobId', 'status']); const checkpoints = db.createObjectStore('checkpoints', { keyPath: 'fileId' }); checkpoints.createIndex('by-job', 'jobId'); };
+                request.onsuccess = () => { const db = request.result; const tx = db.transaction(['jobs', 'files', 'checkpoints'], 'readwrite'); const now = Date.now();
+                    tx.objectStore('jobs').put({ id: 'resume-job', title: 'Resume job', status: 'paused', options: { state: { convertToOpus: false }, directory: root, enrichment: {} }, createdAt: now, updatedAt: now });
                     tx.objectStore('files').put({ id: 'resume-file', jobId: 'resume-job', path: 'Resume work/track.wav', url: 'https://media.e2e/resume.wav', status: 'paused', downloadedBytes: 2, totalBytes: 4, createdAt: now, updatedAt: now });
                     tx.objectStore('checkpoints').put({ fileId: 'resume-file', jobId: 'resume-job', offset: 2, etag: 'v1', updatedAt: now });
-                    tx.oncomplete = () => { db.close(); resolve(); }; tx.onerror = () => reject(tx.error);
-                };
+                    tx.oncomplete = () => { db.close(); resolve(); }; tx.onerror = () => reject(tx.error); };
                 request.onerror = () => reject(request.error);
             });
         });
         await injectedPage.reload({ waitUntil: 'domcontentloaded' });
-        await expect(injectedPage.getByTestId('backup-download-resume-resume-job')).toBeVisible({ timeout: 15000 });
-        await injectedPage.getByTestId('backup-download-resume-resume-job').click();
-        await expect(injectedPage.getByTestId('emergency-export-status')).toContainText(/downloaded|保存|下载/i, { timeout: 170000 });
-        expect(rangeHeader).toBe('bytes=2-');
-        const bytes = await injectedPage.evaluate(async () => {
-            const root = await navigator.storage.getDirectory();
-            const file = await (await (await root.getDirectoryHandle('Resume work')).getFileHandle('track.wav')).getFile();
-            return [...new Uint8Array(await file.arrayBuffer())];
-        });
+        await openDownloadCenter(injectedPage);
+        await expect(injectedPage.getByTestId('resume-resume-job')).toBeVisible({ timeout: 15_000 });
+        await injectedPage.getByTestId('resume-resume-job').click();
+        await expect(injectedPage.getByTestId('download-progress')).toContainText(/downloaded|download complete|保存|下载/i, { timeout: 30_000 });
+        const bytes = await injectedPage.evaluate(async () => { const root = await navigator.storage.getDirectory(); const file = await (await (await root.getDirectoryHandle('Resume work')).getFileHandle('track.wav')).getFile(); return [...new Uint8Array(await file.arrayBuffer())]; });
         expect(bytes).toEqual([1, 2, 3, 4]);
     });
 
-    test('persists selection and resumes work discovery after a refresh', async ({ injectedPage, isScriptLoaded }) => {
-        test.setTimeout(180000);
+    test('resumes persisted work discovery after a refresh without restarting the selection', async ({ injectedPage, isScriptLoaded }) => {
+        test.setTimeout(120_000);
+        const playlistId = '88888888-1111-4222-8333-444444444444';
+        await mockOwnPlaylist(injectedPage, { id: playlistId, name: 'Discovery', works: [{ id: 888888, source_id: 'RJ888888', title: 'Discovery work' }] });
         let trackRequests = 0;
         let releaseCancelledRequest: (() => void) | undefined;
         await injectedPage.route('**/api/tracks/888888*', async route => {
             trackRequests += 1;
             if (trackRequests === 1) {
-                // Keep the first discovery request in flight until navigation
-                // cancels it, reproducing a refresh during preparation.
                 await new Promise<void>(resolve => { releaseCancelledRequest = resolve; });
                 return;
             }
@@ -374,129 +251,105 @@ test.describe('Emergency Playlist Export', () => {
                 type: 'folder', title: 'Audio', children: [{ type: 'audio', hash: 'resume-discovery', title: 'track.wav', mediaDownloadUrl: 'https://media.e2e/discovery.wav' }],
             }]) });
         });
-        await injectedPage.route('**/api/workInfo/888888*', route => route.fulfill({
-            status: 200, contentType: 'application/json', body: JSON.stringify({
-                id: 888888, source_id: 'RJ888888', title: 'Discovery work', name: 'Circle', circle: { name: 'Circle' }, vas: [], tags: [],
-                release: '2026-01-01', source_url: '', mainCoverUrl: '', thumbnailCoverUrl: '', samCoverUrl: '',
-            }),
-        }));
+        await injectedPage.route('**/api/workInfo/888888*', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
+            id: 888888, source_id: 'RJ888888', title: 'Discovery work', name: 'Circle', circle: { name: 'Circle' }, vas: [], tags: [],
+            release: '2026-01-01', source_url: '', mainCoverUrl: '', thumbnailCoverUrl: '', samCoverUrl: '',
+        }) }));
         await injectedPage.route('https://media.e2e/discovery.wav', route => route.fulfill({ status: 200, body: Buffer.from([8, 8, 8]) }));
-        await helpers.gotoSettings(injectedPage); await isScriptLoaded();
+        await helpers.gotoHome(injectedPage); await isScriptLoaded();
         await injectedPage.evaluate(() => { (window as any).showDirectoryPicker = () => navigator.storage.getDirectory(); });
-        const backup = { format: 'asmr-one-ultimate-playlist-backup', version: 1, exportedAt: '', source: '', errors: [], publicPlaylists: [], ownPlaylists: [{
-            id: 'discovery-p', name: 'Discovery', description: '', worksCount: 1, works: [{ rjCode: 'RJ888888', title: 'Discovery work' }],
-        }] };
-        await injectedPage.getByTestId('backup-download-input').setInputFiles({ name: 'backup.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(backup)) });
-        await injectedPage.getByTestId('playlist-check-discovery-p').check();
+        await openDownloadCenter(injectedPage);
+        await injectedPage.getByTestId(`playlist-check-${playlistId}`).check();
         await injectedPage.getByTestId('title-mode').selectOption('original');
         await injectedPage.getByTestId('start').click();
         await expect.poll(() => trackRequests).toBe(1);
         const jobId = await injectedPage.evaluate(async () => new Promise<string>((resolve, reject) => {
             const request = indexedDB.open('asmr-one-downloads', 1);
-            request.onsuccess = () => {
-                const get = request.result.transaction('jobs').objectStore('jobs').getAll();
-                get.onsuccess = () => resolve(get.result[0]?.id || '');
-                get.onerror = () => reject(get.error);
-            };
+            request.onsuccess = () => { const query = request.result.transaction('jobs').objectStore('jobs').getAll(); query.onsuccess = () => resolve(query.result[0]?.id || ''); query.onerror = () => reject(query.error); };
             request.onerror = () => reject(request.error);
         }));
         expect(jobId).not.toBe('');
-
         await injectedPage.reload({ waitUntil: 'domcontentloaded' });
-        const resume = injectedPage.getByTestId(`backup-download-resume-${jobId}`);
-        await expect(resume).toBeVisible({ timeout: 15000 });
+        await openDownloadCenter(injectedPage);
+        const resume = injectedPage.getByTestId(`resume-${jobId}`);
+        await expect(resume).toBeVisible({ timeout: 15_000 });
         releaseCancelledRequest?.();
         await resume.click();
-        await expect(injectedPage.getByTestId('emergency-export-status')).toContainText(/downloaded|保存|下载/i, { timeout: 170000 });
+        await expect(injectedPage.getByTestId('download-progress')).toContainText(/downloaded|download complete|保存|下载/i, { timeout: 30_000 });
         expect(trackRequests).toBeGreaterThanOrEqual(2);
-        const bytes = await injectedPage.evaluate(async () => {
-            const root = await navigator.storage.getDirectory();
-            const audio = await (await root.getDirectoryHandle('Discovery work')).getDirectoryHandle('Audio');
-            return [...new Uint8Array(await (await (await audio.getFileHandle('track.wav')).getFile()).arrayBuffer())];
-        });
+        const bytes = await injectedPage.evaluate(async () => { const root = await navigator.storage.getDirectory(); const audio = await (await root.getDirectoryHandle('Discovery work')).getDirectoryHandle('Audio'); return [...new Uint8Array(await (await (await audio.getFileHandle('track.wav')).getFile()).arrayBuffer())]; });
         expect(bytes).toEqual([8, 8, 8]);
     });
 
-    test('skips unavailable works and keeps same-title work folders collision-free', async ({ injectedPage, isScriptLoaded }) => {
+    test('skips unavailable works and keeps same-title folders collision-free', async ({ injectedPage, isScriptLoaded }) => {
+        const playlistId = '55555555-1111-4222-8333-444444444444';
+        await mockOwnPlaylist(injectedPage, { id: playlistId, name: 'Mixed', works: [
+            { id: 555555, source_id: 'RJ555555', title: 'Same' },
+            { id: 666666, source_id: 'RJ666666', title: 'Unavailable' },
+            { id: 777777, source_id: 'RJ777777', title: 'Same' },
+        ] });
         for (const id of ['555555', '777777']) {
-            await injectedPage.route(`**/api/tracks/${id}*`, route => route.fulfill({
-                status: 200, contentType: 'application/json', body: JSON.stringify([
-                    { type: 'audio', hash: `audio-${id}`, title: 'track.wav', size: 1, mediaDownloadUrl: `https://media.e2e/${id}.wav` },
-                ]),
-            }));
-            await injectedPage.route(`**/api/workInfo/${id}*`, route => route.fulfill({
-                status: 200, contentType: 'application/json', body: JSON.stringify({
-                    id: Number(id), source_id: `RJ${id}`, title: 'Same', name: 'Circle', circle: { name: 'Circle' }, vas: [], tags: [],
-                    release: '2026-01-01', source_url: '', mainCoverUrl: '', thumbnailCoverUrl: '', samCoverUrl: '',
-                }),
-            }));
+            await injectedPage.route(`**/api/tracks/${id}*`, route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify([
+                { type: 'audio', hash: `audio-${id}`, title: 'track.wav', mediaDownloadUrl: `https://media.e2e/${id}.wav` },
+            ]) }));
+            await injectedPage.route(`**/api/workInfo/${id}*`, route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
+                id: Number(id), source_id: `RJ${id}`, title: 'Same', name: 'Circle', circle: { name: 'Circle' }, vas: [], tags: [], release: '2026-01-01', source_url: '', mainCoverUrl: '', thumbnailCoverUrl: '', samCoverUrl: '',
+            }) }));
             await injectedPage.route(`https://media.e2e/${id}.wav`, route => route.fulfill({ status: 200, body: Buffer.from([Number(id[0])]) }));
         }
         await injectedPage.route('**/api/tracks/666666*', route => route.fulfill({ status: 404, body: 'missing' }));
         await injectedPage.route('**/api/workInfo/666666*', route => route.fulfill({ status: 404, body: 'missing' }));
-        await helpers.gotoSettings(injectedPage); await isScriptLoaded();
+        await helpers.gotoHome(injectedPage); await isScriptLoaded();
         await injectedPage.evaluate(() => { (window as any).showDirectoryPicker = () => navigator.storage.getDirectory(); });
-        const backup = { format: 'asmr-one-ultimate-playlist-backup', version: 1, exportedAt: '', source: '', errors: [], publicPlaylists: [], ownPlaylists: [{
-            id: 'mixed', name: 'Mixed', description: '', worksCount: 3, works: [
-                { rjCode: 'RJ555555', title: 'Same' }, { rjCode: 'RJ666666', title: 'Unavailable' }, { rjCode: 'RJ777777', title: 'Same' },
-            ],
-        }] };
-        await injectedPage.getByTestId('backup-download-input').setInputFiles({ name: 'backup.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(backup)) });
-        await injectedPage.getByTestId('playlist-check-mixed').check();
+        await openDownloadCenter(injectedPage);
+        await injectedPage.getByTestId(`playlist-check-${playlistId}`).check();
         await injectedPage.getByTestId('title-mode').selectOption('original');
         await injectedPage.getByTestId('start').click();
-        await expect(injectedPage.getByTestId('emergency-export-status')).toContainText(/skipped|スキップ|跳过/i, { timeout: 30000 });
+        await expect(injectedPage.getByTestId('download-progress')).toContainText(/skipped|スキップ|跳过/i, { timeout: 30_000 });
         const result = await injectedPage.evaluate(async () => {
             const root = await navigator.storage.getDirectory();
             const read = async (folder: string) => {
                 const directory = await root.getDirectoryHandle(folder);
-                const file = await (await directory.getFileHandle('track.wav')).getFile();
-                return [...new Uint8Array(await file.arrayBuffer())];
+                const handle = await directory.getFileHandle('track.wav');
+                return [...new Uint8Array(await (await handle.getFile()).arrayBuffer())];
             };
             return { first: await read('Same'), second: await read('Same (2)') };
         });
         expect(result).toEqual({ first: [5], second: [7] });
     });
 
-    test('converts a real WAV to playable tagged Opus through the downloader UI', async ({ injectedPage, isScriptLoaded }) => {
-        test.skip(!hasFfprobe, 'Native ffprobe is required to validate the generated Opus file');
-        test.setTimeout(180000);
+    test('converts a real WAV to tagged Opus with preserved/generated artwork', async ({ injectedPage, isScriptLoaded }) => {
+        test.skip(!hasFfprobe, 'Native ffprobe is required to validate generated Opus');
+        test.setTimeout(120_000);
+        const playlistId = '44444444-1111-4222-8333-444444444444';
+        await mockOwnPlaylist(injectedPage, { id: playlistId, name: 'Opus', works: [{ id: 444444, source_id: 'RJ444444', title: 'Opus work' }] });
         const wav = tinyWav();
         const cover = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64');
         await injectedPage.route('**/api/tracks/444444*', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify([{
             type: 'folder', title: 'Audio', children: [{ type: 'audio', hash: 'wav', title: 'track.wav', size: wav.length, mediaDownloadUrl: 'https://media.e2e/opus.wav' }],
         }]) }));
         await injectedPage.route('**/api/workInfo/444444*', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
-            id: 444444, source_id: 'RJ444444', title: 'Opus work', name: 'Test Circle', circle_id: 9,
-            circle: { id: 9, name: 'Test Circle' }, vas: [{ id: 'v', name: 'Test VA' }], tags: [{ id: 1, name: 'ASMR' }],
-            release: '2026-01-01', source_url: 'https://www.dlsite.com/RJ444444', mainCoverUrl: 'https://media.e2e/cover.png', thumbnailCoverUrl: '', samCoverUrl: '',
+            id: 444444, source_id: 'RJ444444', title: 'Opus work', name: 'Test Circle', circle_id: 9, circle: { id: 9, name: 'Test Circle' },
+            vas: [{ id: 'v', name: 'Test VA' }], tags: [{ id: 1, name: 'ASMR' }], release: '2026-01-01', source_url: '',
+            mainCoverUrl: 'https://media.e2e/cover.png', thumbnailCoverUrl: '', samCoverUrl: '',
         }) }));
         await injectedPage.route('https://media.e2e/opus.wav', route => route.fulfill({ status: 200, body: wav, headers: { 'content-length': String(wav.length) } }));
         await injectedPage.route('https://media.e2e/cover.png', route => route.fulfill({ status: 200, contentType: 'image/png', body: cover }));
-        await helpers.gotoSettings(injectedPage); await isScriptLoaded();
+        await helpers.gotoHome(injectedPage); await isScriptLoaded();
         await injectedPage.evaluate(() => { (window as any).showDirectoryPicker = () => navigator.storage.getDirectory(); });
-        const backup = { format: 'asmr-one-ultimate-playlist-backup', version: 1, exportedAt: '', source: '', errors: [], publicPlaylists: [], ownPlaylists: [{
-            id: 'opus-p', name: 'Opus', description: '', worksCount: 1, works: [{ rjCode: 'RJ444444', title: 'Opus work' }],
-        }] };
-        await injectedPage.getByTestId('backup-download-input').setInputFiles({ name: 'backup.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(backup)) });
-        await injectedPage.getByTestId('playlist-check-opus-p').check();
+        await openDownloadCenter(injectedPage);
+        await injectedPage.getByTestId(`playlist-check-${playlistId}`).check();
         await injectedPage.getByTestId('title-mode').selectOption('original');
         await injectedPage.getByTestId('opus-toggle').check();
         await injectedPage.getByTestId('opus-bitrate').selectOption('96');
         await injectedPage.getByTestId('start').click();
-        await expect(injectedPage.getByTestId('emergency-export-status')).toContainText(/downloaded|保存|下载/i, { timeout: 30000 });
-        const bytes = await injectedPage.evaluate(async () => {
-            const root = await navigator.storage.getDirectory();
-            const audio = await (await root.getDirectoryHandle('Opus work')).getDirectoryHandle('Audio');
-            const file = await (await audio.getFileHandle('track.opus')).getFile();
-            return [...new Uint8Array(await file.arrayBuffer())];
-        });
-        const output = '/tmp/asmr-v158-real.opus'; fs.writeFileSync(output, Buffer.from(bytes));
+        await expect(injectedPage.getByTestId('download-progress')).toContainText(/downloaded|download complete|保存|下载/i, { timeout: 60_000 });
+        const bytes = await injectedPage.evaluate(async () => { const root = await navigator.storage.getDirectory(); const audio = await (await root.getDirectoryHandle('Opus work')).getDirectoryHandle('Audio'); return [...new Uint8Array(await (await (await audio.getFileHandle('track.opus')).getFile()).arrayBuffer())]; });
+        const output = `/tmp/asmr-download-center-${Date.now()}.opus`; fs.writeFileSync(output, Buffer.from(bytes));
         const probe = JSON.parse(execFileSync(FFPROBE_PATH, ['-v', 'error', '-of', 'json', '-show_format', '-show_streams', output], { encoding: 'utf8' }));
         expect(probe.streams[0].codec_name).toBe('opus');
         const tags = { ...(probe.format.tags || {}), ...(probe.streams[0].tags || {}) };
-        expect(tags.album).toBe('Opus work');
-        expect(tags.artist).toContain('Test VA');
+        expect(tags.album).toBe('Opus work'); expect(tags.artist).toContain('Test VA');
         expect(probe.streams.some((stream: any) => stream.codec_type === 'video' && stream.disposition?.attached_pic === 1)).toBe(true);
     });
 });

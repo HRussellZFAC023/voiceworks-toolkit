@@ -10,11 +10,12 @@ vi.mock('../../src/features/playlist/PlaylistService', () => ({
     getApiBaseUrl: () => 'https://api.asmr.one',
 }));
 
-import { PlaylistDiscoveryService } from '../../src/features/playlist/PlaylistDiscoveryService';
+import { PlaylistDiscoveryService, parseCommunityPlaylistCatalog } from '../../src/features/playlist/PlaylistDiscoveryService';
 
 describe('PlaylistDiscoveryService cover resolution', () => {
     beforeEach(() => {
         mockApiRequest.mockReset();
+        vi.mocked(fetch).mockReset();
         (PlaylistDiscoveryService as unknown as { instance?: PlaylistDiscoveryService }).instance = undefined;
     });
 
@@ -176,5 +177,119 @@ describe('PlaylistDiscoveryService cover resolution', () => {
         } finally {
             vi.useRealTimers();
         }
+    });
+
+    it('loads one bounded community catalog and seeds metadata without per-playlist requests', async () => {
+        const playlist = {
+            id: '34f993cb-e8ee-4d3c-9901-9047355a6cd4',
+            name: 'Recorded oho',
+            userName: 'Wing',
+            worksCount: 1,
+            coverUrl: 'https://cdn.example.com/cover.jpg',
+            tags: ['Whisper'],
+        };
+        const body = JSON.stringify({ version: 1, generatedAt: new Date().toISOString(), playlists: [playlist] });
+        vi.mocked(fetch).mockResolvedValueOnce(new Response(body, {
+            status: 200,
+            headers: {
+                etag: '"catalog-1"',
+                'content-length': String(new TextEncoder().encode(body).byteLength),
+                'content-type': 'application/json; charset=utf-8',
+            },
+        }));
+
+        const service = PlaylistDiscoveryService.getInstance();
+        await expect(service.loadCommunityCatalog(true)).resolves.toEqual([playlist]);
+
+        expect(fetch).toHaveBeenCalledTimes(1);
+        expect(mockApiRequest).not.toHaveBeenCalled();
+        expect(service.getDiscoveredIds()).toContain(playlist.id);
+        expect(service.getCachedMetadata(playlist.id)).toMatchObject({
+            name: playlist.name,
+            worksCount: 1,
+            coverUrl: playlist.coverUrl,
+        });
+    });
+
+    it('keeps the verified cached catalog when conditional revalidation returns 304', async () => {
+        const playlist = {
+            id: '34f993cb-e8ee-4d3c-9901-9047355a6cd4', name: 'Cached', userName: '',
+            worksCount: 3, coverUrl: '', tags: [],
+        };
+        const body = JSON.stringify({ version: 1, generatedAt: new Date().toISOString(), playlists: [playlist] });
+        vi.mocked(fetch)
+            .mockResolvedValueOnce(new Response(body, {
+                status: 200,
+                headers: { etag: '"catalog-2"', 'content-type': 'application/json' },
+            }))
+            .mockResolvedValueOnce(new Response(null, { status: 304 }));
+
+        const service = PlaylistDiscoveryService.getInstance();
+        await service.loadCommunityCatalog(true);
+        await expect(service.loadCommunityCatalog(true)).resolves.toEqual([playlist]);
+        expect(vi.mocked(fetch).mock.calls[1]?.[1]).toMatchObject({
+            headers: expect.objectContaining({ 'If-None-Match': '"catalog-2"' }),
+        });
+    });
+
+    it('does not let an orphaned ETag trap an empty client in a permanent 304 loop', async () => {
+        const playlist = {
+            id: '34f993cb-e8ee-4d3c-9901-9047355a6cd4', name: 'Recovered', userName: '',
+            worksCount: 1, coverUrl: '', tags: [],
+        };
+        (globalThis as unknown as { GM_setValue: (key: string, value: string) => void }).GM_setValue(
+            'asmr_ultimate_community_playlist_catalog_v1',
+            JSON.stringify({ catalog: null, loadedAt: 0 }),
+        );
+        (globalThis as unknown as { GM_setValue: (key: string, value: string) => void }).GM_setValue(
+            'asmr_ultimate_community_playlist_catalog_etag_v1', '"orphaned"',
+        );
+        const body = JSON.stringify({ version: 1, generatedAt: new Date().toISOString(), playlists: [playlist] });
+        vi.mocked(fetch)
+            .mockResolvedValueOnce(new Response(null, { status: 304 }))
+            .mockResolvedValueOnce(new Response(body, { status: 200, headers: { 'content-type': 'application/json' } }));
+
+        const service = PlaylistDiscoveryService.getInstance();
+        await expect(service.loadCommunityCatalog(true)).resolves.toEqual([playlist]);
+        expect(fetch).toHaveBeenCalledTimes(2);
+        expect(vi.mocked(fetch).mock.calls[0]?.[1]).toMatchObject({ headers: { Accept: 'application/json' } });
+        expect(vi.mocked(fetch).mock.calls[1]?.[1]).toMatchObject({ headers: { Accept: 'application/json' } });
+    });
+
+    it('rejects malformed or non-UUID catalog entries', () => {
+        expect(() => parseCommunityPlaylistCatalog({
+            version: 1,
+            generatedAt: new Date().toISOString(),
+            playlists: [{ id: 'not-a-uuid', name: 'Bad' }],
+        })).toThrow('Invalid community playlist catalog entry');
+        expect(() => parseCommunityPlaylistCatalog({
+            version: 1,
+            generatedAt: new Date().toISOString(),
+            playlists: [{
+                id: '34f993cb-e8ee-1d3c-9901-9047355a6cd4', name: 'Wrong UUID version',
+                userName: '', worksCount: 0, coverUrl: '', tags: [],
+            }],
+        })).toThrow('Invalid community playlist catalog entry');
+    });
+
+    it('submits only the normalized playlist UUID and merges the verified response', async () => {
+        const playlist = {
+            id: '34f993cb-e8ee-4d3c-9901-9047355a6cd4',
+            name: 'Shared playlist', userName: 'Wing', worksCount: 2,
+            coverUrl: 'https://cdn.example.com/shared.jpg', tags: ['ASMR'],
+        };
+        vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify({ status: 'added', playlist }), {
+            status: 201,
+            headers: { 'content-type': 'application/json; charset=utf-8' },
+        }));
+
+        const service = PlaylistDiscoveryService.getInstance();
+        await expect(service.submitCommunityPlaylist(`https://asmr.one/playlist/${playlist.id}`)).resolves.toEqual(playlist);
+        expect(fetch).toHaveBeenCalledWith(expect.stringContaining('/community-playlists/submissions'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+            body: JSON.stringify({ id: playlist.id }),
+        });
+        expect(service.getCachedCommunityCatalog()).toContainEqual(playlist);
     });
 });

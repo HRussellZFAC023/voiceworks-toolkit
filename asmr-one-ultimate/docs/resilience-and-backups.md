@@ -11,15 +11,17 @@ Open **Settings → Emergency Backup** and choose:
 - **TXT** — two human-readable RJ-code lists with the same separation.
 - **Google Drive** — two timestamped JSON uploads named `asmr-playlists-own-…` and `asmr-playlists-public-…`.
 
-Individual playlist failures are recorded inside the export instead of aborting the whole backup. Reads are sequential or conservatively batched with pauses; public discovery is capped at 200 playlists per export.
+Individual playlist failures are recorded inside the export instead of aborting the whole backup. Reads use bounded rolling batches, reuse complete work lists already returned by the signed-in playlist listing, and cover every discovered community playlist without silently truncating the export.
 
-## Download works from a backup
+## Download works
 
-Choose **Download works from backup** and open a canonical JSON backup. The collection dialog supports playlist/work search, tri-state playlist selection, and individual work checkboxes without eagerly rendering every work in a large backup. Before choosing a destination folder, select which audio, video, image, text, and other files to include.
+Choose **Download works** in the top toolbar. The panel opens synchronously on **Yours**; switching to **Community** reads one cached summary catalog instead of fetching hundreds of playlists. Covers, owners, work counts, and genre/tag filters are available from those summaries, while each playlist's works are fetched only when that playlist is expanded, selected, or downloaded. You can select all currently filtered rows, clear the entire selection, choose individual works, or search the full work catalog for something outside a playlist.
+
+Before choosing a destination folder, select which audio, video, image, text, and other files to include. Audio, images, and text use safe defaults; video and miscellaneous files are opt-in to reduce storage use.
 
 Work folders can use the original title, the translation in the active UI language, `Original [Translation]`, or the RJ code only. Optional Opus conversion offers several bitrates. Its safe additive metadata mode preserves existing tags and cover art and fills missing work fields; overwrite replaces the managed fields and cover for a more consistent collection while retaining unknown custom tags. Conversion completes and writes the playable Opus file before the source audio is removed, so a conversion failure leaves the downloaded source intact.
 
-The downloader stores a per-file byte checkpoint, ETag/Last-Modified validators, job options, and the selected destination handle in IndexedDB. After a refresh, use the displayed resume action and grant the original folder again if prompted. Servers that honor byte ranges continue inside the partial file; otherwise that one file safely restarts, while completed files are never fetched again. Reliable writable-folder handles currently require a Chromium browser with the File System Access API; unsupported browsers show an explicit capability error rather than pretending resumability is available.
+The downloader stores playlist discovery checkpoints, a per-file byte checkpoint, ETag/Last-Modified validators, job options, and the selected destination handle in IndexedDB. Progress and resume actions remain in the toolbar panel. After a refresh, reopen it, choose the saved job, and grant the original folder again if prompted. Servers that honor byte ranges continue inside the partial file; otherwise that one file safely restarts, while completed files are never fetched again. Reliable writable-folder handles currently require a Chromium browser with the File System Access API; unsupported browsers show an explicit capability error rather than pretending resumability is available.
 
 ## Google Drive OAuth setup
 
@@ -47,9 +49,9 @@ Playlist reads use a separate fallback order:
 2. a direct userscript CORS request to the selected API mirror;
 3. the configured read-only Cloudflare Worker.
 
-The default Worker uses targeted placement in Japan, permits only ASMR.one/mirror upstream hosts, accepts only GET/HEAD, forwards `Authorization` when present, and sets `no-store` for authorized responses. Configure a private deployment through **Settings → Proxy → ASMR API Proxy URL**. The donation banner appears only after the maintained proxy was actually used.
+The default Worker uses targeted placement in Japan, permits only ASMR.one/mirror upstream hosts, relays only GET/HEAD, forwards `Authorization` when present, and sets `no-store` for authorized responses. Configure a private deployment through **Settings → Proxy → ASMR API Proxy URL**. The donation banner appears only after the maintained proxy was actually used.
 
-The Worker accepts only GET/HEAD and is not a general browsing VPN. Normal navigation, interactive requests, and writes remain on the real ASMR.one origin. Executable recovery assets come directly from ASMR.one through privileged userscript requests; only non-executable CSS dependencies and supported API reads may use the scoped relay.
+The Worker is not a general browsing VPN. Normal navigation, interactive requests, and writes remain on the real ASMR.one origin. Executable recovery assets come directly from ASMR.one through privileged userscript requests; only non-executable CSS dependencies and supported API reads may use the scoped relay. A separate exact community-catalog endpoint accepts only `{ "id": "<lowercase-uuid-v4>" }`, verifies the playlist live, and publishes it only when the host reports it as public. The submission path is rate-limited and idempotent. Its summary retains public playlist metadata such as the displayed owner name, but no comments, submitter account identity, IP address, or user agent.
 
 ## Testing through the proxy
 

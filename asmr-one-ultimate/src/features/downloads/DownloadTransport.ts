@@ -1,4 +1,4 @@
-import { getAuthHeader } from '../playlist/PlaylistService';
+import { getApiBaseUrl, getAuthHeader } from '../playlist/PlaylistService';
 
 export interface DownloadProbe {
     size?: number;
@@ -29,6 +29,26 @@ function numericHeader(headers: Headers, key: string): number | undefined {
     return Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
+/**
+ * Return host authentication only when the request resolves to the selected
+ * ASMR API origin. Resolving against that base also permits relative API URLs,
+ * while rejecting protocol-relative CDN URLs and arbitrary manifest origins.
+ */
+function getTrustedAuthHeader(url: string): Record<string, string> {
+    try {
+        const apiUrl = new URL(getApiBaseUrl());
+        const requestUrl = new URL(url, apiUrl);
+        if (!/^https?:$/.test(apiUrl.protocol)
+            || !/^https?:$/.test(requestUrl.protocol)
+            || requestUrl.origin !== apiUrl.origin) {
+            return {};
+        }
+        return getAuthHeader();
+    } catch {
+        return {};
+    }
+}
+
 interface ParsedContentRange { start: number; end: number; total?: number }
 function parseContentRange(value: string | null): ParsedContentRange | undefined {
     const match = value?.match(/^bytes\s+(\d+)-(\d+)\/(\d+|\*)$/i);
@@ -48,7 +68,7 @@ export class DownloadTransport {
     async probe(url: string, signal?: AbortSignal): Promise<DownloadProbe> {
         const response = await this.fetchImpl(url, {
             method: 'HEAD',
-            headers: getAuthHeader(),
+            headers: getTrustedAuthHeader(url),
             signal,
             credentials: 'include',
         });
@@ -67,7 +87,7 @@ export class DownloadTransport {
         onChunk: (chunk: DownloadChunk) => void | Promise<void>,
         options: { signal?: AbortSignal; expectedEtag?: string; expectedLastModified?: string } = {},
     ): Promise<DownloadProbe> {
-        const headers: Record<string, string> = { ...getAuthHeader() };
+        const headers: Record<string, string> = { ...getTrustedAuthHeader(url) };
         if (offset > 0) headers.Range = `bytes=${offset}-`;
         if (offset > 0 && options.expectedEtag) headers['If-Range'] = options.expectedEtag;
         else if (offset > 0 && options.expectedLastModified) headers['If-Range'] = options.expectedLastModified;

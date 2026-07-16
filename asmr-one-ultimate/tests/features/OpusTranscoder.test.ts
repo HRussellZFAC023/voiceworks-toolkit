@@ -1,5 +1,13 @@
-import { describe, expect, it } from 'vitest';
-import { AsyncSerialQueue, buildOpusArguments, encodeMetadataBlockPicture, hasOpusContainerSignature } from '../../src/features/downloads/OpusTranscoder';
+import { describe, expect, it, vi } from 'vitest';
+import {
+    AsyncSerialQueue,
+    buildOpusArguments,
+    encodeMetadataBlockPicture,
+    hasOpusContainerSignature,
+    loadFfmpegInstanceFromCdn,
+    rewriteFfmpegClassWorkerSource,
+    type FfmpegLoaderRuntime,
+} from '../../src/features/downloads/OpusTranscoder';
 
 describe('buildOpusArguments', () => {
     it('writes preserved and generated metadata into the Opus stream', () => {
@@ -52,5 +60,60 @@ describe('buildOpusArguments', () => {
         releaseFirst();
         await Promise.all([first, second]);
         expect(order).toEqual(['first-start', 'first-end', 'second']);
+    });
+
+    it('rewrites every FFmpeg class-worker import to its pinned CDN package', () => {
+        const rewritten = rewriteFfmpegClassWorkerSource(
+            'import { CORE_URL } from "./const.js";\nimport { ERROR_UNKNOWN_MESSAGE_TYPE } from \'./errors.js\';',
+            'https://cdn.example/@ffmpeg/ffmpeg@0.12.15/dist/esm/',
+        );
+
+        expect(rewritten).toContain('https://cdn.example/@ffmpeg/ffmpeg@0.12.15/dist/esm/const.js');
+        expect(rewritten).toContain('https://cdn.example/@ffmpeg/ffmpeg@0.12.15/dist/esm/errors.js');
+        expect(rewritten).not.toMatch(/from\s*["']\.\//);
+        expect(() => rewriteFfmpegClassWorkerSource('export {};', 'https://cdn.example/pkg/'))
+            .toThrow('missing required import');
+    });
+
+    it('passes a same-origin blob classWorkerURL and revokes it on termination', async () => {
+        const load = vi.fn().mockResolvedValue(true);
+        const terminate = vi.fn();
+        class FakeFfmpeg {
+            load = load;
+            terminate = terminate;
+        }
+        const toBlobURL = vi.fn(async (url: string) => `blob:dependency:${url}`);
+        let createdWorkerBlob: Blob | undefined;
+        const createObjectURL = vi.fn((blob: Blob) => {
+            createdWorkerBlob = blob;
+            return 'blob:https://asmr.one/class-worker';
+        });
+        const revokeObjectURL = vi.fn();
+        const importModule = vi.fn(async (url: string) => url.includes('@ffmpeg/util')
+            ? { toBlobURL }
+            : { FFmpeg: FakeFfmpeg });
+        const fetchImpl = vi.fn(async () => new Response(
+            'import { CORE_URL } from "./const.js";\nimport { ERROR_UNKNOWN_MESSAGE_TYPE } from "./errors.js";',
+            { status: 200, headers: { 'content-type': 'text/javascript' } },
+        ));
+        const runtime: FfmpegLoaderRuntime = {
+            importModule,
+            fetchImpl: fetchImpl as unknown as typeof fetch,
+            createObjectURL,
+            revokeObjectURL,
+        };
+
+        const ffmpeg = await loadFfmpegInstanceFromCdn('https://unpkg.com', runtime);
+
+        expect(load).toHaveBeenCalledWith(expect.objectContaining({
+            classWorkerURL: 'blob:https://asmr.one/class-worker',
+            coreURL: expect.stringContaining('@ffmpeg/core@0.12.10'),
+            wasmURL: expect.stringContaining('@ffmpeg/core@0.12.10'),
+        }));
+        expect(createdWorkerBlob).toBeInstanceOf(Blob);
+        expect(createdWorkerBlob?.type).toBe('text/javascript');
+        ffmpeg.terminate();
+        expect(revokeObjectURL).toHaveBeenCalledWith('blob:https://asmr.one/class-worker');
+        expect(terminate).toHaveBeenCalledTimes(1);
     });
 });

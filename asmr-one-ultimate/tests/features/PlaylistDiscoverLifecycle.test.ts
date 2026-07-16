@@ -29,6 +29,7 @@ vi.mock('../../src/features/playlist/PlaylistDiscoveryService', () => ({
             discoveredCount: 1,
             isGoogleRateLimited: false,
             getDiscoveredIds: () => ['playlist-a'],
+            loadCommunityCatalog: async () => [],
             getCachedMetadata: () => null,
             isFailed: () => false,
             isTransientFailed: () => false,
@@ -37,6 +38,7 @@ vi.mock('../../src/features/playlist/PlaylistDiscoveryService', () => ({
             fetchMetadata: mocks.fetchMetadata,
             triggerGoogleSearch: mocks.triggerGoogleSearch,
             addManualPlaylist: () => null,
+            submitCommunityPlaylist: vi.fn(),
         }),
     },
 }));

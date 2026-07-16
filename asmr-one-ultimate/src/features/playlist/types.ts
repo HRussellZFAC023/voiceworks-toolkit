@@ -37,6 +37,27 @@ export interface CachedPlaylistMetadata {
     cachedAt: number;
 }
 
+/**
+ * Lightweight, server-verified playlist data used by the shared community
+ * catalog. Work lists deliberately are not part of this shape: callers fetch
+ * them only when the user expands or selects a playlist.
+ */
+export interface CommunityPlaylistSummary {
+    id: string;
+    name: string;
+    userName: string;
+    worksCount: number;
+    coverUrl: string;
+    tags: string[];
+    latestWorkId?: string | number;
+}
+
+export interface CommunityPlaylistCatalog {
+    version: 1;
+    generatedAt: string;
+    playlists: CommunityPlaylistSummary[];
+}
+
 export interface CachedUserPlaylists {
     playlists: PlaylistEntry[];
     userName: string | null;

@@ -35,3 +35,8 @@ export function classifyDownloadMedia(filename: string, declaredType?: string | 
             return 'unknown';
     }
 }
+
+/** Shared extension predicate for transformations that need a concrete decoder input type. */
+export function isDownloadAudioFile(filename: string): boolean {
+    return EXTENSION_CATEGORIES[fileExtension(filename)] === 'audio';
+}

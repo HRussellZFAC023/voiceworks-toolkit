@@ -141,7 +141,7 @@ function toggleCollapsed() {
     }
 }
 
-function refreshAndLoad() {
+function applyDiscoverySnapshot() {
     allIds.value = service.getDiscoveredIds().filter(id => !service.isFailed(id));
     fetchedIds.clear();
 
@@ -163,7 +163,18 @@ function refreshAndLoad() {
     if (uncached.length > 0) {
         void loadNextBatch();
     }
+}
 
+async function refreshAndLoad() {
+    const generation = lifecycleGeneration;
+    // Paint a previously verified snapshot synchronously, then revalidate the
+    // one-file catalog in the background. Never crawl every playlist merely
+    // because the section was opened.
+    applyDiscoverySnapshot();
+    try { await service.loadCommunityCatalog(); }
+    catch (error) { Logger.debug('[PlaylistDiscoverSection] Community catalog revalidation failed', error); }
+    if (!isLifecycleCurrent(generation)) return;
+    applyDiscoverySnapshot();
 }
 
 async function loadNextBatch() {
@@ -262,6 +273,13 @@ function onAddPlaylist() {
             if (meta && !loadedPlaylists.value.some(p => p.id === meta.id)) {
                 loadedPlaylists.value.unshift(meta);
             }
+            if (meta) {
+                // Sharing is intentionally UUID-only. The Worker repeats the
+                // live existence/publicity check before accepting it.
+                void service.submitCommunityPlaylist(id).catch(error => {
+                    Logger.debug('[PlaylistDiscoverSection] Public catalog submission was not accepted', error);
+                });
+            }
         });
     } else {
         addFeedback.value = { type: 'err', text: t('playlistAddInvalid') };
@@ -336,7 +354,7 @@ onUnmounted(() => {
                 {{ t('playlistPublicTitle') }}
             </span>
             <span id="public-playlist-count" class="text-caption q-ml-sm" style="opacity: 0.6;">
-                ({{ service.discoveredCount }})
+                ({{ allIds.length }})
             </span>
         </div>
 

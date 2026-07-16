@@ -7,7 +7,7 @@
  *
  *   • ownPlaylists    — the logged-in user's playlists with every work
  *   • publicPlaylists — community/global playlists surfaced by Playlist
- *                       Discovery (known seed list + discovered/manual IDs)
+ *                       Discovery (maintained server catalog + manual IDs)
  *
  * The two groups are kept in separate top-level sections (and separate files
  * for CSV/TXT) so a user restoring their own data can't confuse community
@@ -162,8 +162,18 @@ export async function fetchPlaylistAsExported(id: string, seed?: PlaylistEntry):
     // Keep fetching authoritative metadata: listing/discovery seeds can be
     // stale or omit description/privacy, and a backup must not silently lose
     // those fields. The seed remains a fallback when that request fails.
-    const worksRequest = fetchFirstWorks(id).then(value => ({ value, error: null as unknown }))
-        .catch(error => ({ value: undefined, error }));
+    const seedWorks = Array.isArray(seed?.works) ? seed.works : [];
+    const seedWorkCount = seed?.works_count ?? seed?.worksCount;
+    // The authenticated playlist listing often already contains the complete
+    // work-ID array. Trust it only when its declared count agrees; this removes
+    // one request per personal playlist without risking a truncated backup.
+    const listingLooksComplete = typeof seedWorkCount === 'number'
+        && seedWorkCount >= 0
+        && seedWorks.length >= seedWorkCount;
+    const worksRequest = listingLooksComplete
+        ? Promise.resolve({ value: undefined, error: null as unknown })
+        : fetchFirstWorks(id).then(value => ({ value, error: null as unknown }))
+            .catch(error => ({ value: undefined, error }));
     const metadataRequest = apiRequest<PlaylistMetadata>('/api/playlist/get-playlist-metadata', { id })
         .then(value => ({ value, error: null as unknown }))
         .catch(error => ({ value: undefined, error }));
@@ -172,6 +182,18 @@ export async function fetchPlaylistAsExported(id: string, seed?: PlaylistEntry):
         worksRequest,
     ]);
     const meta = metadata.value;
+    // The listing can be stale (notably works_count=0 while metadata says the
+    // playlist has works). Skip the paged endpoint only after comparing the
+    // embedded array with the authoritative count.
+    const authoritativeWorkCount = meta?.works_count ?? seedWorkCount;
+    const expectedWorkCount = typeof authoritativeWorkCount === 'number'
+        && Number.isSafeInteger(authoritativeWorkCount)
+        && authoritativeWorkCount >= 0
+        ? authoritativeWorkCount
+        : undefined;
+    const completeSeedWorks = Boolean(seed) && typeof authoritativeWorkCount === 'number'
+        && authoritativeWorkCount >= 0
+        && seedWorks.length >= authoritativeWorkCount;
     const base: ExportedPlaylist = {
         id,
         name: meta?.name || seed?.name || I18n.t('emergencyUnknownPlaylist'),
@@ -183,8 +205,17 @@ export async function fetchPlaylistAsExported(id: string, seed?: PlaylistEntry):
         works: [],
     };
     try {
-        if (firstWorks.error) throw firstWorks.error;
-        base.works = await fetchAllWorks(id, firstWorks.value?.response, firstWorks.value?.pageSize);
+        if (completeSeedWorks) {
+            base.works = seedWorks.map((work) => typeof work === 'string'
+                ? { rjCode: toRjCode(work), title: '' }
+                : workItemToExported(work));
+        } else {
+            const firstPage = listingLooksComplete
+                ? await fetchFirstWorks(id)
+                : firstWorks.value;
+            if (!firstPage) throw firstWorks.error || new Error('Playlist works could not be loaded');
+            base.works = await fetchAllWorks(id, firstPage.response, firstPage.pageSize);
+        }
         if (!base.works.length && (Array.isArray(meta?.works) || Array.isArray(seed?.works))) {
             // Fallback: metadata sometimes embeds the work list directly.
             const embeddedWorks = meta?.works?.length ? meta.works : (seed?.works || []);
@@ -193,13 +224,23 @@ export async function fetchPlaylistAsExported(id: string, seed?: PlaylistEntry):
                 : workItemToExported(w));
         }
         base.worksCount = Math.max(base.works.length, base.worksCount);
+        if (expectedWorkCount !== undefined && base.works.length < expectedWorkCount) {
+            base.error = I18n.format('emergencyIncompleteWorks', {
+                loaded: base.works.length,
+                expected: expectedWorkCount,
+            });
+        }
     } catch (error) {
         const embeddedWorks = meta?.works?.length ? meta.works : (seed?.works || []);
         base.works = embeddedWorks.map((w) => typeof w === 'string'
             ? { rjCode: toRjCode(w), title: '' }
             : workItemToExported(w));
         base.worksCount = Math.max(base.works.length, base.worksCount);
-        if (!base.works.length) base.error = (error as Error)?.message || String(error);
+        const hasEmbeddedFallback = Array.isArray(meta?.works) || Array.isArray(seed?.works);
+        const fallbackIsComplete = expectedWorkCount !== undefined
+            && base.works.length >= expectedWorkCount
+            && (expectedWorkCount > 0 || hasEmbeddedFallback);
+        if (!fallbackIsComplete) base.error = (error as Error)?.message || String(error);
     }
     if (metadata.error && !seed && !base.error) {
         base.error = (metadata.error as Error)?.message || String(metadata.error);
@@ -213,7 +254,7 @@ interface PlaylistListLike {
 }
 
 /** Fetch the logged-in user's playlists, tolerating both API response shapes. */
-async function fetchOwnPlaylistEntries(): Promise<PlaylistEntry[]> {
+export async function fetchOwnPlaylistEntries(): Promise<PlaylistEntry[]> {
     const entries: PlaylistEntry[] = [];
     let page = 1;
     for (;;) {
@@ -292,7 +333,7 @@ export async function buildEmergencyExport(onProgress?: ProgressCallback): Promi
 
     // --- Public/community playlists from discovery --------------------------
     const discovery = PlaylistDiscoveryService.getInstance();
-    const allPublicIds = discovery.getDiscoveredIds()
+    const allPublicIds = (await discovery.getDiscoveredIdsAsync())
         .filter((id) => !doc.ownPlaylists.some((p) => p.id.toLowerCase() === id.toLowerCase()));
     // The rolling pool bounds request pressure while allowing every discovered
     // playlist to be represented; large collections must not be silently cut.

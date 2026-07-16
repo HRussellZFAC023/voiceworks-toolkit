@@ -60,6 +60,7 @@ import { TagFilters } from './features/TagFilters';
 import { TranslatedTags } from './features/TranslatedTags';
 import { ListSearchEnhancer } from './features/ListSearchEnhancer';
 import { VectorSearchController } from './features/VectorSearchController';
+import { DownloadCenterController } from './features/DownloadCenterController';
 import { Whisper } from './features/Whisper';
 import { TranscriptFileInjector } from './features/TranscriptFileInjector';
 import { MediaViewerController } from './features/MediaViewerController';
@@ -435,6 +436,9 @@ function initializeQOLFeatures(): void {
     registerFeature('enableRouteStateSync', new RouteStateSync());
     registerFeature('enableKeyboardManager', KeyboardManager.getInstance());
     registerFeature('enableVectorSearch', new VectorSearchController());
+    // Downloads are a core header action, adjacent to semantic search, and do
+    // not require users to opt into the playlist-discovery feature.
+    new DownloadCenterController().enable();
 
     Logger.debug('[Init] All QOL features initialized');
 }

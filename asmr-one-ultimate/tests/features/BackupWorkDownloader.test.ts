@@ -1,14 +1,16 @@
 import { mount } from '@vue/test-utils';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import BackupWorkDownloader from '../../src/features/components/BackupWorkDownloader.vue';
-import type {
-    BackupDownloadProfile,
-    BackupDownloaderLabels,
-} from '../../src/features/backupWorkDownloaderTypes';
+import type { BackupDownloadProfile, BackupDownloaderLabels, BackupWorkDownloadItem } from '../../src/features/backupWorkDownloaderTypes';
 
 const labels: BackupDownloaderLabels = {
     dialogTitle: 'Download collection', close: 'Close', search: 'Find works', searchPlaceholder: 'Search',
+    searchAll: 'Search all works', searchAllLoading: 'Searching', searchResults: 'Search results', searchFailed: 'Search failed',
+    importBackup: 'Import backup', importBackupInvalid: 'Invalid backup',
     playlistSource: 'Playlist source', sourceAll: 'All', sourceOwn: 'My playlists', sourcePublic: 'Community playlists',
+    selectAll: 'Select all shown', clearAll: 'Clear all', filterTags: 'Tags', allTags: 'All tags',
+    playlistOwner: 'by {owner}', playlistWorks: '{count} works', loading: 'Loading', loadFailed: 'Unavailable',
+    options: 'Options', progress: 'Progress', pause: 'Pause', resume: 'Resume', alreadyRunning: 'Already running', resumableDownloads: 'Resume jobs',
     expandPlaylist: 'Expand', collapsePlaylist: 'Collapse', selectedSummary: '{count} selected · {bytes}',
     unknownSize: 'unknown size', noResults: 'No results', fileTypes: 'Files', audio: 'Audio', video: 'Video',
     images: 'Images', text: 'Text', other: 'Other', filenameTitle: 'Titles', titleOriginal: 'Original',
@@ -20,128 +22,136 @@ const labels: BackupDownloaderLabels = {
 
 function profile(overrides: Partial<BackupDownloadProfile> = {}): BackupDownloadProfile {
     return {
-        labels,
-        selectedWorkIds: [],
+        labels, selectedWorkIds: [],
         filters: { audio: true, video: false, image: true, text: true, other: false },
-        titleMode: 'original-bracketed-translation',
-        convertToOpus: false,
-        opusBitrate: 128,
-        metadataMode: 'additive',
-        includeArtwork: true,
-        ...overrides,
+        titleMode: 'original-bracketed-translation', convertToOpus: false, opusBitrate: 128,
+        metadataMode: 'additive', includeArtwork: true, ...overrides,
     };
 }
 
-const playlists = [{ id: 'p1', title: 'Favorites', source: 'own' as const, workIds: [1, 2] }];
 const works = [
-    { id: 1, title: '作品一', translatedTitle: 'Work One', sizeBytes: 1024 },
-    { id: 2, title: '作品二', translatedTitle: 'Work Two', sizeBytes: 2048 },
+    { id: 1, title: '作品一', translatedTitle: 'Work One', sizeBytes: 1024, playlistIds: ['p1'] },
+    { id: 2, title: '作品二', translatedTitle: 'Work Two', sizeBytes: 2048, playlistIds: ['p1'] },
 ];
+const playlists = [{
+    id: 'p1', title: 'Favorites', source: 'own' as const, workIds: [1, 2], worksCount: 2,
+    owner: 'Alice', coverUrl: 'https://example.test/cover.jpg', tags: ['ASMR'],
+}];
 
 describe('BackupWorkDownloader', () => {
-    it('supports tri-state playlist and per-work selection', async () => {
-        const wrapper = mount(BackupWorkDownloader, { props: { playlists, works, profile: profile() } });
-        const playlistCheck = wrapper.get('[data-testid="playlist-check-p1"]');
-
-        expect((playlistCheck.element as HTMLInputElement).indeterminate).toBe(false);
-        await wrapper.get('[data-testid="expand-p1"]').trigger('click');
-        await wrapper.get('[data-testid="work-1"] input').setValue(true);
-        expect((playlistCheck.element as HTMLInputElement).indeterminate).toBe(true);
-        expect(wrapper.get('[data-testid="selection-summary"]').text()).toContain('1 selected · 1 KB');
-
-        await playlistCheck.setValue(true);
-        expect(wrapper.emitted('update')?.at(-1)?.[0]).toMatchObject({ selectedWorkIds: [1, 2] });
-        expect(wrapper.get('[data-testid="start"]').attributes('disabled')).toBeUndefined();
-    });
-
-    it('searches original and translated titles and exposes expansion state', async () => {
-        const wrapper = mount(BackupWorkDownloader, { props: { playlists, works, profile: profile() } });
-        expect(wrapper.find('[data-testid="work-1"]').exists()).toBe(false);
-        await wrapper.get('[data-testid="expand-p1"]').trigger('click');
-        expect(wrapper.get('[data-testid="expand-p1"]').attributes('aria-expanded')).toBe('true');
-
-        await wrapper.get('[data-testid="search"]').setValue('work two');
-        expect(wrapper.find('[data-testid="work-1"]').exists()).toBe(false);
-        expect(wrapper.find('[data-testid="work-2"]').exists()).toBe(true);
-        expect(wrapper.find('[data-testid="expand-p1"]').exists()).toBe(false);
-        expect(wrapper.find('#backup-playlist-own-p1').exists()).toBe(true);
-
-        await wrapper.get('[data-testid="search"]').setValue('Favorites');
-        expect(wrapper.find('[data-testid="work-1"]').exists()).toBe(true);
-        expect(wrapper.find('[data-testid="work-2"]').exists()).toBe(true);
-
-        await wrapper.get('[data-testid="search"]').setValue('2');
-        expect(wrapper.find('[data-testid="work-1"]').exists()).toBe(false);
-        expect(wrapper.find('[data-testid="work-2"]').exists()).toBe(true);
-    });
-
-    it('does not mount collapsed work rows for very large backups', () => {
-        const manyWorks = Array.from({ length: 1_000 }, (_, index) => ({ id: index, title: `Work ${index}` }));
-        const manyPlaylists = Array.from({ length: 100 }, (_, index) => ({
-            id: `p${index}`, title: `Playlist ${index}`, source: index % 2 ? 'public' as const : 'own' as const, workIds: manyWorks.slice(index * 10, index * 10 + 10).map(work => work.id),
-        }));
-        const wrapper = mount(BackupWorkDownloader, { props: { playlists: manyPlaylists, works: manyWorks, profile: profile() } });
-        expect(wrapper.findAll('.playlist-group')).toHaveLength(100);
-        expect(wrapper.findAll('.work-row')).toHaveLength(0);
-    });
-
-    it('filters playlist sources with counts and composes with search', async () => {
-        const sourcePlaylists = [
-            ...playlists,
-            { id: 'p2', title: 'Community gems', source: 'public' as const, workIds: [2] },
-        ];
-        const wrapper = mount(BackupWorkDownloader, { props: { playlists: sourcePlaylists, works, profile: profile() } });
-
-        expect(wrapper.get('[data-testid="source-all"] + span').text()).toBe('All (2)');
-        expect(wrapper.get('[data-testid="source-own"] + span').text()).toBe('My playlists (1)');
-        expect(wrapper.get('[data-testid="source-public"] + span').text()).toBe('Community playlists (1)');
-
-        await wrapper.get('[data-testid="source-public"]').setValue(true);
-        expect(wrapper.find('[data-testid="playlist-p1"]').exists()).toBe(false);
-        expect(wrapper.find('[data-testid="playlist-p2"]').exists()).toBe(true);
-        await wrapper.get('[data-testid="search"]').setValue('Favorites');
-        expect(wrapper.find('[data-testid="playlist-p1"]').exists()).toBe(false);
-        expect(wrapper.find('[data-testid="playlist-p2"]').exists()).toBe(false);
-        expect(wrapper.find('[data-testid="no-results"]').exists()).toBe(true);
-    });
-
-    it('keeps expansion state and controlled regions distinct when sources reuse an id', async () => {
-        const duplicateIdPlaylists = [
-            { id: 'shared', title: 'Mine', source: 'own' as const, workIds: [1] },
-            { id: 'shared', title: 'Community', source: 'public' as const, workIds: [2] },
-        ];
-        const wrapper = mount(BackupWorkDownloader, { props: { playlists: duplicateIdPlaylists, works, profile: profile() } });
-        const expandButtons = wrapper.findAll('[data-testid="expand-shared"]');
-
-        await expandButtons[0].trigger('click');
-        expect(expandButtons[0].attributes('aria-expanded')).toBe('true');
-        expect(expandButtons[1].attributes('aria-expanded')).toBe('false');
-        expect(expandButtons[0].attributes('aria-controls')).toBe('backup-playlist-own-shared');
-        expect(expandButtons[1].attributes('aria-controls')).toBe('backup-playlist-public-shared');
-    });
-
-    it('focuses the search field and closes with Escape', async () => {
-        const wrapper = mount(BackupWorkDownloader, { attachTo: document.body, props: { playlists, works, profile: profile() } });
-        await new Promise(resolve => setTimeout(resolve, 0));
-        expect(document.activeElement).toBe(wrapper.get('[data-testid="search"]').element);
-        await wrapper.get('[role="dialog"]').trigger('keydown', { key: 'Escape' });
-        expect(wrapper.emitted('close')).toHaveLength(1);
-        wrapper.unmount();
-    });
-
-    it('emits complete settings without permitting an empty start', async () => {
+    it('defaults to the personal tab and switches between exactly two sources', async () => {
         const wrapper = mount(BackupWorkDownloader, {
-            props: { playlists, works, profile: profile({ selectedWorkIds: [1] }) },
+            props: { playlists: [...playlists, { id: 'p2', title: 'Public', source: 'public', worksCount: 1 }], works, profile: profile() },
+        });
+        expect(wrapper.find('[data-testid="source-all"]').exists()).toBe(false);
+        expect(wrapper.get('[data-testid="source-own"]').attributes('aria-selected')).toBe('true');
+        expect(wrapper.find('[data-testid="playlist-p1"]').exists()).toBe(true);
+        expect(wrapper.find('[data-testid="playlist-p2"]').exists()).toBe(false);
+        await wrapper.get('[data-testid="source-public"]').trigger('click');
+        expect(wrapper.emitted('sourceChange')?.at(-1)).toEqual(['public']);
+        expect(wrapper.find('[data-testid="playlist-p2"]').exists()).toBe(true);
+    });
+
+    it('renders a fixed thumbnail, owner/count metadata, and tag filtering', async () => {
+        const wrapper = mount(BackupWorkDownloader, { props: { playlists, works, profile: profile() } });
+        const image = wrapper.get('.playlist-cover img');
+        expect(image.attributes('src')).toContain('cover.jpg');
+        expect(wrapper.get('.playlist-copy').text()).toContain('by Alice');
+        expect(wrapper.get('.playlist-copy').text()).toContain('2 works');
+        expect(wrapper.get('[data-testid="tag-filter"] option').text()).toBe('All tags');
+        await wrapper.get('[data-testid="tag-filter"]').setValue('ASMR');
+        expect(wrapper.find('[data-testid="playlist-p1"]').exists()).toBe(true);
+    });
+
+    it('resolves playlist works only on expand/select and supports clear all', async () => {
+        const lazyPlaylist = [{ id: 'lazy', title: 'Lazy', source: 'own' as const, worksCount: 1 }];
+        const mutableWorks: BackupWorkDownloadItem[] = [];
+        const resolvePlaylist = vi.fn(async (playlist: typeof lazyPlaylist[number]) => {
+            mutableWorks.push({ id: 9, title: 'Nine', sizeBytes: 9, playlistIds: ['lazy'] });
+            await (wrapper as any).setProps({
+                works: mutableWorks,
+                playlists: [{ ...playlist, workIds: [9] }],
+            });
+        });
+        const wrapper = mount(BackupWorkDownloader, { props: { playlists: lazyPlaylist, works: mutableWorks, profile: profile(), resolvePlaylist } });
+        expect(resolvePlaylist).not.toHaveBeenCalled();
+        await wrapper.get('[data-testid="expand-lazy"]').trigger('click');
+        await vi.waitFor(() => expect(resolvePlaylist).toHaveBeenCalledTimes(1));
+        await vi.waitFor(() => expect(wrapper.find('[data-testid="work-9"]').exists()).toBe(true));
+        await wrapper.get('[data-testid="playlist-check-lazy"]').setValue(true);
+        expect(wrapper.emitted('update')?.at(-1)?.[0]).toMatchObject({ selectedWorkIds: [9] });
+        await wrapper.get('[data-testid="clear-all"]').trigger('click');
+        expect(wrapper.emitted('update')?.at(-1)?.[0]).toMatchObject({ selectedWorkIds: [] });
+    });
+
+    it('searches all works and exposes returned standalone works for selection', async () => {
+        const searchAllWorks = vi.fn(async () => {
+            await (wrapper as any).setProps({ works: [...works, { id: 99, title: 'Found result', directSearchResult: true }] });
+        });
+        const wrapper = mount(BackupWorkDownloader, { props: { playlists, works, profile: profile(), searchAllWorks } });
+        await wrapper.get('[data-testid="search"]').setValue('Found');
+        await wrapper.get('[data-testid="search-all-works"]').trigger('click');
+        await vi.waitFor(() => expect(searchAllWorks).toHaveBeenCalledWith('Found'));
+        expect(wrapper.get('[data-testid="all-work-results"]').text()).toContain('Found result');
+        await wrapper.get('[data-testid="search-work-99"] input').setValue(true);
+        expect(wrapper.emitted('update')?.at(-1)?.[0]).toMatchObject({ selectedWorkIds: [99] });
+    });
+
+    it('selects standalone direct-search results even when no playlist row is visible', async () => {
+        const direct = [{ id: 'RJ9', title: 'Direct only', directSearchResult: true }];
+        const wrapper = mount(BackupWorkDownloader, { props: { playlists: [], works: direct, profile: profile() } });
+
+        expect(wrapper.get('[data-testid="select-all"]').attributes('disabled')).toBeUndefined();
+        await wrapper.get('[data-testid="select-all"]').trigger('click');
+
+        expect(wrapper.emitted('update')?.at(-1)?.[0]).toMatchObject({ selectedWorkIds: ['RJ9'] });
+    });
+
+    it('shows a localized inline error when direct search fails', async () => {
+        const wrapper = mount(BackupWorkDownloader, {
+            props: { playlists: [], works: [], profile: profile(), searchAllWorks: vi.fn().mockRejectedValue(new Error('offline')) },
+        });
+        await wrapper.get('[data-testid="search"]').setValue('anything');
+        await wrapper.get('[data-testid="search-all-works"]').trigger('click');
+        await vi.waitFor(() => expect(wrapper.get('[data-testid="all-work-search-error"]').text()).toBe('Search failed'));
+    });
+
+    it('keeps progress and resume actions inside the open panel', async () => {
+        const wrapper = mount(BackupWorkDownloader, {
+            props: {
+                playlists, works, profile: profile({ selectedWorkIds: [1] }), busy: true,
+                progress: { phase: 'downloading', current: 3, total: 10, label: 'track.opus' },
+                resumableJobs: [{ id: 'job-1', title: 'Yesterday' }],
+            },
+        });
+        expect(wrapper.get('[data-testid="download-progress"]').text()).toContain('3 / 10');
+        expect(wrapper.get('.progress-track > div').attributes('style')).toContain('30%');
+        await wrapper.get('[data-testid="pause"]').trigger('click');
+        expect(wrapper.emitted('pause')).toHaveLength(1);
+        expect(wrapper.get('[data-testid="resume-job-1"]').attributes('disabled')).toBeDefined();
+        await wrapper.get('[data-testid="close"]').trigger('click');
+        expect(wrapper.emitted('close')).toHaveLength(1);
+    });
+
+    it('shows incremental Opus conversion progress and keeps pause available', () => {
+        const wrapper = mount(BackupWorkDownloader, {
+            props: {
+                playlists, works, profile: profile({ selectedWorkIds: [1] }), busy: true,
+                progress: { phase: 'converting', current: 2, total: 4, conversionRatio: 0.5, label: 'Converting to Opus… 50%' },
+            },
         });
 
+        expect(wrapper.get('[data-testid="download-progress"] p').text()).toContain('50%');
+        expect(wrapper.get('.progress-track > div').attributes('style')).toContain('62.5%');
+        expect(wrapper.find('[data-testid="pause"]').exists()).toBe(true);
+    });
+
+    it('emits the safe download options and never closes itself on start', async () => {
+        const wrapper = mount(BackupWorkDownloader, { props: { playlists, works, profile: profile({ selectedWorkIds: [1] }) } });
         await wrapper.get('[data-testid="opus-toggle"]').setValue(true);
         await wrapper.get('[data-testid="opus-bitrate"]').setValue('160');
-        await wrapper.get('[data-testid="title-mode"]').setValue('translated');
         await wrapper.get('[data-testid="start"]').trigger('click');
-
-        expect(wrapper.emitted('start')?.[0]?.[0]).toMatchObject({
-            selectedWorkIds: [1], convertToOpus: true, opusBitrate: 160, titleMode: 'translated',
-            metadataMode: 'additive', includeArtwork: true,
-        });
+        expect(wrapper.emitted('start')?.[0]?.[0]).toMatchObject({ selectedWorkIds: [1], convertToOpus: true, opusBitrate: 160, metadataMode: 'additive', includeArtwork: true });
+        expect(wrapper.emitted('close')).toBeUndefined();
     });
 });

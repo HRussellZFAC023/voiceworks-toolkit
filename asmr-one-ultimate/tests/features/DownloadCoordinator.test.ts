@@ -113,6 +113,33 @@ describe('DownloadCoordinator', () => {
         expect(repository.markFileFailed).toHaveBeenCalledWith('file', 'database crash');
     });
 
+    it('reports live Opus conversion progress after the source download completes', async () => {
+        const file: any = {
+            id: 'file', jobId: 'job', path: 'track.wav', url: 'url', status: 'pending', sourceComplete: true, totalBytes: 4,
+        };
+        const repository: any = {
+            activateJob: vi.fn(), listFiles: vi.fn(async () => [file]), markFileActive: vi.fn(), getCheckpoint: vi.fn(),
+            markSourceComplete: vi.fn(), markFileComplete: vi.fn(async () => { file.status = 'completed'; }),
+            markFileFailed: vi.fn(), pauseJob: vi.fn(), completeJob: vi.fn(),
+        };
+        const writer = { close: vi.fn(), abort: vi.fn() };
+        const sink: any = { open: vi.fn(async () => writer), remove: vi.fn() };
+        const transformer: any = {
+            shouldTransform: () => true,
+            transform: vi.fn(async (_file, _sink, _signal, onProgress) => {
+                onProgress(0.5);
+                return { path: 'track.opus', bytes: 2 };
+            }),
+        };
+        const progress = vi.fn();
+
+        await new DownloadCoordinator(repository, {} as any, sink, 1, transformer).run('job', progress);
+
+        expect(progress).toHaveBeenCalledWith(expect.objectContaining({
+            fileId: 'file', status: 'converting', conversionRatio: 0.5,
+        }));
+    });
+
     it('durably closes and checkpoints before reopening at the 64 MiB boundary', async () => {
         const boundary = 64 * 1024 * 1024;
         const file: any = { id: 'file', jobId: 'job', path: 'track.wav', url: 'url', status: 'pending' };

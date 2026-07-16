@@ -125,7 +125,7 @@ Export all settings and preferences to a JSON file. Import to restore configurat
 #### Emergency Playlist Backup
 Exports playlist metadata and every RJ code even during site instability. JSON is the canonical snapshot and is also retained in userscript storage; CSV and TXT downloads keep the user's own playlists separate from community/public playlists. Optional Google Drive upload creates two explicitly named JSON files under the least-privilege `drive.file` scope. See [Resilience and backups](docs/resilience-and-backups.md).
 
-The download collection can load personal and community playlists directly from the signed-in site; importing a saved JSON backup remains available for offline recovery. Scroll or search hundreds of playlists, switch between all, personal, and community playlists, select whole playlists or individual works, include or exclude media types, and recreate each selected work's complete folder tree. Optional in-browser Opus conversion preserves source tags and artwork by default, adds missing work metadata safely, and supports an explicit overwrite mode. File checkpoints and destination-folder handles are persisted so interrupted downloads resume rather than restarting completed files.
+The **Download works** action in the top toolbar opens immediately on **Yours**, with a separate **Community** tab backed by a cached server catalog. Playlist summaries, covers, counts, and tags render without crawling every playlist; full work lists are fetched only when expanded, selected, or downloaded. Search either tab or search the full work catalog, select whole playlists or individual works, include or exclude media types, and recreate each selected work's complete folder tree. Optional in-browser Opus conversion preserves source tags and artwork by default, adds missing metadata and `cover.jpg` safely, and supports an explicit overwrite mode. Per-file checkpoints, discovery progress, options, and destination-folder handles are persisted so interrupted downloads resume without repeating completed files.
 
 #### Player Translator — Track Title Translation
 Translates Japanese and Chinese track titles in the player to the active UI language in real time using the web translation pipeline.
@@ -137,7 +137,7 @@ Translates CJK tags throughout the entire UI (work cards, search, filters) to th
 Transparent proxy workaround for cross-origin restrictions on content delivery, ensuring media files load reliably.
 
 #### Region-Gate Frontend Recovery & API Fallback
-If ASMR.one replaces the site with its English-language gate, the userscript automatically reloads the trusted application shell, bootstrap assets, and validated lazy-route chunks through Chinese-first privileged requests while keeping the real ASMR.one origin, login, and local storage. Preloading the route chunks prevents later navigation from falling back to an English-first browser request. It does not change the browser's global language preference. Playlist API reads separately try the selected mirror first and use the Tokyo-placed read-only Cloudflare Worker only after direct and CORS requests fail. The proxy forwards authentication for the user's own playlist backup, never caches authorized responses, and accepts only GET/HEAD.
+If ASMR.one replaces the site with its English-language gate, the userscript automatically reloads the trusted application shell, bootstrap assets, and validated lazy-route chunks through Chinese-first privileged requests while keeping the real ASMR.one origin, login, and local storage. Preloading the route chunks prevents later navigation from falling back to an English-first browser request. It does not change the browser's global language preference. Playlist API reads separately try the selected mirror first and use the Tokyo-placed Cloudflare Worker only after direct and CORS requests fail. The proxy forwards authentication for the user's own playlist backup, never caches authorized responses, and otherwise relays only GET/HEAD. Its separate public-catalog route accepts a narrowly validated playlist UUID submission and verifies that the live playlist is public. It stores the public playlist summary (including its displayed owner name), but no comments or submitter identity, IP address, or user agent.
 
 #### Localization
 Full English, Chinese, and Japanese UI localization. All user-facing strings use `I18n.t()` with interpolation support via `I18n.format()`.
@@ -167,7 +167,7 @@ Full English, Chinese, and Japanese UI localization. All user-facing strings use
 ## Testing
 
 ```bash
-npm test                # Vitest unit tests (1,522 tests across 136 files)
+npm test                # Vitest unit tests (1,795 tests across 169 files)
 npm run test:e2e        # Playwright E2E (headless Chromium)
 npm run test:e2e:headed # E2E with visible browser
 npm run test:e2e:ui     # Playwright UI mode
@@ -183,7 +183,7 @@ npm run build
 E2E_PROXY=1 npm run test:e2e
 ```
 
-Set `E2E_PROXY_URL` for a private worker. Restricted runners that cannot bind a Vite port can add `E2E_SKIP_WEBSERVER=1`; the fixtures still inject the built userscript directly. The current unit baseline is 136 files / 1,522 tests.
+Set `E2E_PROXY_URL` for a private worker. Restricted runners that cannot bind a Vite port can add `E2E_SKIP_WEBSERVER=1`; the fixtures still inject the built userscript directly. The current unit baseline is 169 files / 1,795 tests.
 
 ## Architecture
 

@@ -18,8 +18,8 @@ export interface OpusTranscoder {
     transcode(request: OpusTranscodeRequest): Promise<Uint8Array>;
 }
 
-interface FfmpegInstance {
-    load(config: { coreURL: string; wasmURL: string }): Promise<boolean>;
+export interface FfmpegInstance {
+    load(config: { coreURL: string; wasmURL: string; classWorkerURL?: string }): Promise<boolean>;
     writeFile(path: string, data: Uint8Array): Promise<void>;
     readFile(path: string): Promise<Uint8Array | string>;
     deleteFile(path: string): Promise<void>;
@@ -45,6 +45,102 @@ interface ProbeDocument {
 
 type DynamicImport = (url: string) => Promise<any>;
 const dynamicImport: DynamicImport = new Function('url', 'return import(url)') as DynamicImport;
+
+export interface FfmpegLoaderRuntime {
+    importModule: DynamicImport;
+    fetchImpl: typeof fetch;
+    createObjectURL: (blob: Blob) => string;
+    revokeObjectURL: (url: string) => void;
+}
+
+const DEFAULT_FFMPEG_LOADER_RUNTIME: FfmpegLoaderRuntime = {
+    importModule: dynamicImport,
+    fetchImpl: (...args) => fetch(...args),
+    createObjectURL: blob => URL.createObjectURL(blob),
+    revokeObjectURL: url => URL.revokeObjectURL(url),
+};
+
+const MAX_FFMPEG_CLASS_WORKER_BYTES = 256 * 1024;
+
+/**
+ * FFmpeg's ESM wrapper creates a module worker from its package URL. Browsers
+ * reject that cross-origin worker even though normal ESM imports are CORS
+ * enabled. A same-origin blob worker is allowed, but its relative imports must
+ * first be pinned back to the selected CDN package directory.
+ */
+export function rewriteFfmpegClassWorkerSource(source: string, packageBaseUrl: string): string {
+    let rewritten = source;
+    for (const specifier of ['./const.js', './errors.js']) {
+        const escaped = specifier.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const pattern = new RegExp(`from\\s*(["'])${escaped}\\1`, 'g');
+        let found = false;
+        rewritten = rewritten.replace(pattern, (_match, quote: string) => {
+            found = true;
+            return `from ${quote}${new URL(specifier, packageBaseUrl).href}${quote}`;
+        });
+        if (!found) throw new Error(`FFmpeg worker is missing required import: ${specifier}`);
+    }
+    return rewritten;
+}
+
+async function fetchFfmpegClassWorkerSource(url: string, runtime: FfmpegLoaderRuntime): Promise<string> {
+    const response = await runtime.fetchImpl(url, {
+        credentials: 'omit',
+        headers: { Accept: 'text/javascript' },
+    });
+    if (!response.ok) throw new Error(`Unable to load the FFmpeg worker (HTTP ${response.status})`);
+    const declared = response.headers.get('content-length');
+    if (declared && (!/^\d+$/.test(declared) || Number(declared) > MAX_FFMPEG_CLASS_WORKER_BYTES)) {
+        throw new Error('FFmpeg worker exceeds its size limit');
+    }
+    const source = await response.text();
+    if (new TextEncoder().encode(source).byteLength > MAX_FFMPEG_CLASS_WORKER_BYTES) {
+        throw new Error('FFmpeg worker exceeds its size limit');
+    }
+    return source;
+}
+
+/** Load one pinned CDN candidate and own/revoke its same-origin class worker. */
+export async function loadFfmpegInstanceFromCdn(
+    cdn: string,
+    runtime: FfmpegLoaderRuntime = DEFAULT_FFMPEG_LOADER_RUNTIME,
+): Promise<FfmpegInstance> {
+    const packageUrl = (name: string, version: string, path: string) => `${cdn}/${name}@${version}/${path}`;
+    const wrapperBase = packageUrl('@ffmpeg/ffmpeg', '0.12.15', 'dist/esm/');
+    const workerUrl = new URL('worker.js', wrapperBase).href;
+    const [{ FFmpeg }, { toBlobURL }, workerSource] = await Promise.all([
+        runtime.importModule(new URL('index.js', wrapperBase).href),
+        runtime.importModule(packageUrl('@ffmpeg/util', '0.12.2', 'dist/esm/index.js')),
+        fetchFfmpegClassWorkerSource(workerUrl, runtime),
+    ]);
+    const ffmpeg = new FFmpeg() as FfmpegInstance;
+    let classWorkerURL = '';
+    let revoked = false;
+    const revoke = (): void => {
+        if (!classWorkerURL || revoked) return;
+        revoked = true;
+        runtime.revokeObjectURL(classWorkerURL);
+    };
+    const originalTerminate = ffmpeg.terminate.bind(ffmpeg);
+    ffmpeg.terminate = (): void => {
+        revoke();
+        originalTerminate();
+    };
+    try {
+        const rewrittenWorker = rewriteFfmpegClassWorkerSource(workerSource, wrapperBase);
+        classWorkerURL = runtime.createObjectURL(new Blob([rewrittenWorker], { type: 'text/javascript' }));
+        const core = packageUrl('@ffmpeg/core', '0.12.10', 'dist/esm');
+        await ffmpeg.load({
+            coreURL: await toBlobURL(`${core}/ffmpeg-core.js`, 'text/javascript'),
+            wasmURL: await toBlobURL(`${core}/ffmpeg-core.wasm`, 'application/wasm'),
+            classWorkerURL,
+        });
+        return ffmpeg;
+    } catch (error) {
+        try { ffmpeg.terminate(); } catch { revoke(); }
+        throw error;
+    }
+}
 
 export class AsyncSerialQueue {
     private tail: Promise<unknown> = Promise.resolve();
@@ -140,19 +236,7 @@ export class FfmpegOpusTranscoder implements OpusTranscoder {
         let lastError: unknown;
         for (const cdn of cdns) {
             try {
-                const packageUrl = (name: string, version: string, path: string) => `${cdn}/${name}@${version}/${path}`;
-                const [{ FFmpeg }, { toBlobURL }] = await Promise.all([
-                    dynamicImport(packageUrl('@ffmpeg/ffmpeg', '0.12.15', 'dist/esm/index.js')),
-                    dynamicImport(packageUrl('@ffmpeg/util', '0.12.2', 'dist/esm/index.js')),
-                ]);
-                const ffmpeg = new FFmpeg() as FfmpegInstance;
-                // The wrapper worker is an ES module, so its core must be ESM too.
-                const core = packageUrl('@ffmpeg/core', '0.12.10', 'dist/esm');
-                await ffmpeg.load({
-                    coreURL: await toBlobURL(`${core}/ffmpeg-core.js`, 'text/javascript'),
-                    wasmURL: await toBlobURL(`${core}/ffmpeg-core.wasm`, 'application/wasm'),
-                });
-                return ffmpeg;
+                return await loadFfmpegInstanceFromCdn(cdn);
             } catch (error) {
                 lastError = error;
             }

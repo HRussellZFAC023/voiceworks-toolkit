@@ -7,6 +7,7 @@ vi.mock('../../src/features/playlist/PlaylistService', () => ({ apiRequest: mock
 vi.mock('../../src/features/playlist/PlaylistDiscoveryService', () => ({
     PlaylistDiscoveryService: { getInstance: () => ({
         getDiscoveredIds: () => mocks.discoveredIds,
+        getDiscoveredIdsAsync: async () => mocks.discoveredIds,
         getCachedMetadata: () => null,
     }) },
 }));
@@ -115,6 +116,81 @@ describe('EmergencyExport performance', () => {
         ]);
         expect(result.error).toBeUndefined();
         expect(mocks.apiRequest.mock.calls.some(([url]) => String(url).includes('metadata'))).toBe(true);
+    });
+
+    it('skips the works request when the personal listing declares a complete embedded work list', async () => {
+        mocks.apiRequest.mockReset().mockImplementation(async (url: string) => {
+            if (url.includes('metadata')) return { id: 'own-fast', name: 'Fast', works_count: 2 };
+            throw new Error(`Unexpected works request: ${url}`);
+        });
+
+        const result = await fetchPlaylistAsExported('own-fast', {
+            id: 'own-fast', name: 'Fast', privacy: 0,
+            works: ['RJ111111', 'RJ222222'], works_count: 2,
+        });
+
+        expect(result.works.map(work => work.rjCode)).toEqual(['RJ111111', 'RJ222222']);
+        expect(mocks.apiRequest).toHaveBeenCalledTimes(1);
+        expect(mocks.apiRequest).toHaveBeenCalledWith('/api/playlist/get-playlist-metadata', { id: 'own-fast' });
+    });
+
+    it('does not trust a stale zero-work listing when authoritative metadata reports works', async () => {
+        const authoritativeWorks = Array.from({ length: 16 }, (_, index) => ({
+            source_id: `RJ${String(index + 1).padStart(6, '0')}`,
+            title: `Recovered ${index + 1}`,
+        }));
+        mocks.apiRequest.mockReset().mockImplementation(async (url: string) => url.includes('metadata')
+            ? { id: 'stale-zero', name: 'Recovered playlist', works_count: 16 }
+            : { works: authoritativeWorks, pagination: { currentPage: 1, pageSize: 100, totalCount: 16 } });
+
+        const result = await fetchPlaylistAsExported('stale-zero', {
+            id: 'stale-zero', name: 'Stale listing', privacy: 0, works: [], works_count: 0,
+        });
+
+        expect(result.works).toHaveLength(16);
+        expect(result.worksCount).toBe(16);
+        expect(mocks.apiRequest).toHaveBeenCalledWith('/api/playlist/get-playlist-works', {
+            id: 'stale-zero', page: 1, pageSize: 100,
+        });
+    });
+
+    it('marks an embedded fallback incomplete when it has fewer works than authoritative metadata', async () => {
+        mocks.apiRequest.mockReset().mockImplementation(async (url: string) => {
+            if (url.includes('metadata')) return { id: 'partial-seed', name: 'Partial', works_count: 20 };
+            throw Object.assign(new Error('HTTP 503: unavailable'), { status: 503 });
+        });
+        const seedWorks = Array.from({ length: 10 }, (_, index) => `RJ${String(index + 1).padStart(6, '0')}`);
+
+        const result = await fetchPlaylistAsExported('partial-seed', {
+            id: 'partial-seed', name: 'Partial', privacy: 0, works: seedWorks, works_count: 10,
+        });
+
+        expect(result.works).toHaveLength(10);
+        expect(result.worksCount).toBe(20);
+        expect(result.error).toContain('HTTP 503');
+    });
+
+    it('marks a nominally successful paginated response incomplete when a later page is empty', async () => {
+        const firstPage = Array.from({ length: 20 }, (_, index) => ({
+            source_id: `RJ${String(index + 1).padStart(6, '0')}`,
+            title: `Work ${index + 1}`,
+        }));
+        mocks.apiRequest.mockReset().mockImplementation(async (url: string, params: { page?: number; pageSize?: number }) => {
+            if (url.includes('metadata')) return { id: 'truncated-pages', name: 'Truncated', works_count: 25 };
+            if (params.pageSize === 100) throw Object.assign(new Error('HTTP 404: Error'), { status: 404 });
+            return params.page === 2
+                ? { works: [], pagination: { currentPage: 2, pageSize: 20, totalCount: 25 } }
+                : { works: firstPage, pagination: { currentPage: 1, pageSize: 20, totalCount: 25 } };
+        });
+
+        const result = await fetchPlaylistAsExported('truncated-pages');
+
+        expect(result.works).toHaveLength(20);
+        expect(result.worksCount).toBe(25);
+        expect(result.error).toBe('emergencyIncompleteWorks');
+        expect(mocks.apiRequest).toHaveBeenCalledWith('/api/playlist/get-playlist-works', {
+            id: 'truncated-pages', page: 2, pageSize: 20,
+        });
     });
 
     it('prefers authoritative metadata over an incomplete listing seed', async () => {

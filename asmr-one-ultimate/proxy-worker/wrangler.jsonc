@@ -11,5 +11,14 @@
             "bucket_name": "asmr-semantic-index"
         }
     ],
+    // Anonymous playlist submissions are intentionally narrow and idempotent.
+    // This limiter is abuse friction; R2's create-only UUID key is definitive.
+    "ratelimits": [
+        {
+            "name": "COMMUNITY_SUBMISSION_RATE_LIMITER",
+            "namespace_id": "563283162",
+            "simple": { "limit": 20, "period": 60 }
+        }
+    ],
     "observability": { "enabled": true }
 }

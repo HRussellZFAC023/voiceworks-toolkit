@@ -3,7 +3,13 @@ import { OpusFileTransformer, planOpusOutputPaths } from '../../src/features/dow
 
 describe('OpusFileTransformer', () => {
     it('converts audio and leaves source cleanup to the coordinator commit boundary', async () => {
-        const transcoder: any = { isSupported: () => true, transcode: vi.fn().mockResolvedValue(new Uint8Array([7, 8])) };
+        const transcoder: any = {
+            isSupported: () => true,
+            transcode: vi.fn(async (request) => {
+                request.onProgress?.(0.42);
+                return new Uint8Array([7, 8]);
+            }),
+        };
         const transformer = new OpusFileTransformer(transcoder, {
             enabled: true, bitrateKbps: 96, metadataPolicy: 'additive',
             tagsForFile: () => ({ album: 'Work [作品]' }),
@@ -14,13 +20,15 @@ describe('OpusFileTransformer', () => {
         };
         const file: any = { id: 'f', path: 'Work/track.flac', totalBytes: 4, downloadedBytes: 4 };
 
-        const result = await transformer.transform(file, sink);
+        const onProgress = vi.fn();
+        const result = await transformer.transform(file, sink, undefined, onProgress);
 
         expect(transcoder.transcode).toHaveBeenCalledWith(expect.objectContaining({
             inputExtension: 'flac', bitrateKbps: 96, generatedTags: { album: 'Work [作品]' }, metadataPolicy: 'additive',
         }));
         expect(sink.writeAll).toHaveBeenCalledWith(['Work', 'track.opus'], new Uint8Array([7, 8]));
         expect(sink.remove).not.toHaveBeenCalled();
+        expect(onProgress).toHaveBeenCalledWith(0.42);
         expect(result).toEqual({ path: 'Work/track.opus', bytes: 2 });
     });
 
@@ -42,5 +50,14 @@ describe('OpusFileTransformer', () => {
         expect(paths.wav).toBe('Work/track (2).opus');
         expect(paths.flac).toBe('Work/TRACK (3).opus');
         expect(paths.existing).toBeUndefined();
+    });
+
+    it.each(['alac', 'oga'])('converts every classified %s audio extension', (extension) => {
+        const transformer = new OpusFileTransformer({ transcode: vi.fn() } as any, {
+            enabled: true, bitrateKbps: 96, metadataPolicy: 'additive',
+        });
+        const file = { id: extension, path: `Work/track.${extension}` } as any;
+        expect(transformer.shouldTransform(file)).toBe(true);
+        expect(planOpusOutputPaths([file])[extension]).toBe('Work/track.opus');
     });
 });

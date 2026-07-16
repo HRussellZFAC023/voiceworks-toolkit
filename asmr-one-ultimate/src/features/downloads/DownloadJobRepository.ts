@@ -9,6 +9,9 @@ export interface DownloadJob<TOptions = Record<string, unknown>> {
     status: DownloadJobStatus;
     /** Complete selection/profile snapshot required to reproduce the job after reload. */
     options: TOptions;
+    /** Cross-tab owner for an active run. Missing leases are treated as stale. */
+    leaseOwnerId?: string;
+    leaseExpiresAt?: number;
     createdAt: number;
     updatedAt: number;
 }
@@ -78,6 +81,8 @@ interface DownloadDatabase extends DBSchema {
 
 const DATABASE_NAME = 'asmr-one-downloads';
 const DATABASE_VERSION = 1;
+/** Long enough for throttled background tabs; Web Locks provide immediate crash recovery in Chromium. */
+export const DOWNLOAD_JOB_LEASE_MS = 2 * 60 * 1000;
 
 export class DownloadRecordNotFoundError extends Error {
     constructor(kind: 'job' | 'file', id: string) {
@@ -253,8 +258,81 @@ export class DownloadJobRepository {
             : file);
     }
 
-    async pauseJob(jobId: string): Promise<void> {
-        await this.transitionJob(jobId, 'paused', (file) => file.status === 'active' ? { ...file, status: 'paused' } : file);
+    /** Atomically claim a job unless another live tab owns it. */
+    async claimJob(jobId: string, ownerId: string, leaseMs = DOWNLOAD_JOB_LEASE_MS): Promise<boolean> {
+        if (!ownerId || !Number.isFinite(leaseMs) || leaseMs <= 0) throw new RangeError('A valid download lease is required');
+        const database = await this.getDatabase();
+        const transaction = database.transaction(['jobs', 'files'], 'readwrite');
+        const jobStore = transaction.objectStore('jobs');
+        const job = await jobStore.get(jobId);
+        if (!job) throw new DownloadRecordNotFoundError('job', jobId);
+        const now = Date.now();
+        const ownedElsewhere = job.status === 'active'
+            && job.leaseOwnerId !== ownerId
+            && typeof job.leaseExpiresAt === 'number'
+            && job.leaseExpiresAt > now;
+        if (ownedElsewhere) {
+            await transaction.done;
+            return false;
+        }
+        const files = await transaction.objectStore('files').index('by-job').getAll(jobId);
+        await jobStore.put({
+            ...job,
+            status: 'active',
+            leaseOwnerId: ownerId,
+            leaseExpiresAt: now + leaseMs,
+            updatedAt: now,
+        });
+        await Promise.all(files.filter(file => file.status === 'paused').map(file =>
+            transaction.objectStore('files').put({ ...file, status: 'pending', updatedAt: now })));
+        await transaction.done;
+        return true;
+    }
+
+    /** Extend a lease only while the same tab still owns it. */
+    async renewJobLease(jobId: string, ownerId: string, leaseMs = DOWNLOAD_JOB_LEASE_MS): Promise<boolean> {
+        const database = await this.getDatabase();
+        const transaction = database.transaction('jobs', 'readwrite');
+        const job = await transaction.store.get(jobId);
+        if (!job) throw new DownloadRecordNotFoundError('job', jobId);
+        if (job.status !== 'active' || job.leaseOwnerId !== ownerId) {
+            await transaction.done;
+            return false;
+        }
+        const now = Date.now();
+        await transaction.store.put({ ...job, leaseExpiresAt: now + leaseMs, updatedAt: now });
+        await transaction.done;
+        return true;
+    }
+
+    /** Pause an orphan only while the caller holds its cross-tab Web Lock. */
+    async recoverActiveJob(jobId: string): Promise<boolean> {
+        const database = await this.getDatabase();
+        const transaction = database.transaction(['jobs', 'files'], 'readwrite');
+        const jobStore = transaction.objectStore('jobs');
+        const job = await jobStore.get(jobId);
+        if (!job) throw new DownloadRecordNotFoundError('job', jobId);
+        if (job.status !== 'active') {
+            await transaction.done;
+            return false;
+        }
+        const now = Date.now();
+        const files = await transaction.objectStore('files').index('by-job').getAll(jobId);
+        await jobStore.put({
+            ...job,
+            status: 'paused',
+            leaseOwnerId: undefined,
+            leaseExpiresAt: undefined,
+            updatedAt: now,
+        });
+        await Promise.all(files.filter(file => file.status === 'active').map(file =>
+            transaction.objectStore('files').put({ ...file, status: 'paused', updatedAt: now })));
+        await transaction.done;
+        return true;
+    }
+
+    async pauseJob(jobId: string, ownerId?: string): Promise<boolean> {
+        return this.transitionJob(jobId, 'paused', (file) => file.status === 'active' ? { ...file, status: 'paused' } : file, ownerId);
     }
 
     async retryJob(jobId: string): Promise<void> {
@@ -263,23 +341,34 @@ export class DownloadJobRepository {
             : file);
     }
 
-    async cancelJob(jobId: string): Promise<void> {
-        await this.transitionJob(jobId, 'cancelled', (file) => file.status === 'completed'
+    async cancelJob(jobId: string, ownerId?: string): Promise<boolean> {
+        return this.transitionJob(jobId, 'cancelled', (file) => file.status === 'completed'
             ? file
-            : { ...file, status: 'cancelled' });
+            : { ...file, status: 'cancelled' }, ownerId);
     }
 
-    async completeJob(jobId: string): Promise<void> {
+    async completeJob(jobId: string, ownerId?: string): Promise<boolean> {
         const database = await this.getDatabase();
         const transaction = database.transaction(['jobs', 'files'], 'readwrite');
         const job = await transaction.objectStore('jobs').get(jobId);
         if (!job) throw new DownloadRecordNotFoundError('job', jobId);
+        if (ownerId && job.leaseOwnerId !== ownerId) {
+            await transaction.done;
+            return false;
+        }
         const unfinished = await transaction.objectStore('files').index('by-job').getAll(jobId);
         if (unfinished.some((file) => file.status !== 'completed')) {
             throw new Error(`Cannot complete download job with unfinished files: ${jobId}`);
         }
-        await transaction.objectStore('jobs').put({ ...job, status: 'completed', updatedAt: Date.now() });
+        await transaction.objectStore('jobs').put({
+            ...job,
+            status: 'completed',
+            leaseOwnerId: undefined,
+            leaseExpiresAt: undefined,
+            updatedAt: Date.now(),
+        });
         await transaction.done;
+        return true;
     }
 
     async startOverJob(jobId: string): Promise<void> {
@@ -291,7 +380,7 @@ export class DownloadJobRepository {
         const now = Date.now();
         const files = await transaction.objectStore('files').index('by-job').getAll(jobId);
         const checkpoints = await transaction.objectStore('checkpoints').index('by-job').getAllKeys(jobId);
-        await jobStore.put({ ...job, status: 'pending', updatedAt: now });
+        await jobStore.put({ ...job, status: 'pending', leaseOwnerId: undefined, leaseExpiresAt: undefined, updatedAt: now });
         await Promise.all(files.map((file) => transaction.objectStore('files').put({
             ...file,
             status: 'pending',
@@ -364,10 +453,18 @@ export class DownloadJobRepository {
         const database = await this.getDatabase();
         const transaction = database.transaction(['jobs', 'files'], 'readwrite');
         const jobs = await transaction.objectStore('jobs').index('by-status').getAll('active');
-        const files = await transaction.objectStore('files').getAll();
         const now = Date.now();
-        await Promise.all(jobs.map((job) => transaction.objectStore('jobs').put({ ...job, status: 'paused', updatedAt: now })));
-        await Promise.all(files.filter((file) => file.status === 'active').map((file) =>
+        const staleJobs = jobs.filter(job => typeof job.leaseExpiresAt !== 'number' || job.leaseExpiresAt <= now);
+        const staleIds = new Set(staleJobs.map(job => job.id));
+        const files = staleIds.size ? await transaction.objectStore('files').getAll() : [];
+        await Promise.all(staleJobs.map((job) => transaction.objectStore('jobs').put({
+            ...job,
+            status: 'paused',
+            leaseOwnerId: undefined,
+            leaseExpiresAt: undefined,
+            updatedAt: now,
+        })));
+        await Promise.all(files.filter(file => staleIds.has(file.jobId) && file.status === 'active').map(file =>
             transaction.objectStore('files').put({ ...file, status: 'paused', updatedAt: now })));
         await transaction.done;
     }
@@ -376,20 +473,31 @@ export class DownloadJobRepository {
         jobId: string,
         status: DownloadJobStatus,
         transformFile: (file: DownloadFile) => DownloadFile,
-    ): Promise<void> {
+        ownerId?: string,
+    ): Promise<boolean> {
         const database = await this.getDatabase();
         const transaction = database.transaction(['jobs', 'files'], 'readwrite');
         const jobStore = transaction.objectStore('jobs');
         const job = await jobStore.get(jobId);
         if (!job) throw new DownloadRecordNotFoundError('job', jobId);
+        if (ownerId && job.leaseOwnerId !== ownerId) {
+            await transaction.done;
+            return false;
+        }
         const now = Date.now();
         const files = await transaction.objectStore('files').index('by-job').getAll(jobId);
-        await jobStore.put({ ...job, status, updatedAt: now });
+        await jobStore.put({
+            ...job,
+            status,
+            ...(status === 'active' ? {} : { leaseOwnerId: undefined, leaseExpiresAt: undefined }),
+            updatedAt: now,
+        });
         await Promise.all(files.map((file) => {
             const next = transformFile(file);
             return next === file ? Promise.resolve() : transaction.objectStore('files').put({ ...next, updatedAt: now });
         }));
         await transaction.done;
+        return true;
     }
 
     private async updateFile(fileId: string, update: (file: DownloadFile, now: number) => DownloadFile): Promise<DownloadFile> {

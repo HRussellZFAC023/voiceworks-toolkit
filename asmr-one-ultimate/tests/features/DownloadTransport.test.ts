@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { DownloadTransport, RangeRestartRequiredError } from '../../src/features/downloads/DownloadTransport';
 
 function response(chunks: number[][], init: ResponseInit): Response {
@@ -11,6 +11,48 @@ function response(chunks: number[][], init: ResponseInit): Response {
 }
 
 describe('DownloadTransport', () => {
+    afterEach(() => {
+        localStorage.removeItem('jwt-token');
+    });
+
+    it('never sends the host JWT to cross-origin manifest media', async () => {
+        localStorage.setItem('jwt-token', 'host-secret');
+        const fetchMock = vi.fn()
+            .mockResolvedValueOnce(response([], { status: 200 }))
+            .mockResolvedValueOnce(response([[1]], {
+                status: 200,
+                headers: { 'content-length': '1' },
+            }));
+        const transport = new DownloadTransport(fetchMock as typeof fetch);
+
+        await transport.probe('//cdn.example/media/file.mp3');
+        await transport.stream('https://untrusted.example/media/file.mp3', 0, vi.fn());
+
+        expect(new Headers(fetchMock.mock.calls[0][1]?.headers).has('Authorization')).toBe(false);
+        expect(new Headers(fetchMock.mock.calls[1][1]?.headers).has('Authorization')).toBe(false);
+    });
+
+    it('retains authentication for relative and trusted ASMR API-origin requests', async () => {
+        localStorage.setItem('jwt-token', 'host-secret');
+        const fetchMock = vi.fn()
+            .mockResolvedValueOnce(response([], { status: 200 }))
+            .mockResolvedValueOnce(response([[1]], {
+                status: 200,
+                headers: { 'content-length': '1' },
+            }));
+        const transport = new DownloadTransport(fetchMock as typeof fetch);
+
+        await transport.probe('/api/media/check/hash');
+        await transport.stream(
+            'https://api.asmr-200.com/api/media/stream/hash', 0, vi.fn(),
+        );
+
+        expect(new Headers(fetchMock.mock.calls[0][1]?.headers).get('Authorization'))
+            .toBe('Bearer host-secret');
+        expect(new Headers(fetchMock.mock.calls[1][1]?.headers).get('Authorization'))
+            .toBe('Bearer host-secret');
+    });
+
     it('streams a validated range from its persisted offset', async () => {
         const fetchMock = vi.fn().mockResolvedValue(response([[3, 4], [5]], {
             status: 206,

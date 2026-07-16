@@ -103,6 +103,8 @@ Recently refactored:
 - Host queue replacement for Flat View and Media Viewer is centralized in `src/features/audioPlayerQueueUtils.ts`; it advances the track/index before replacing a queue and refreshes legacy compatibility state to avoid synchronous stale-index watcher crashes.
 - Whisper fetches and workers are identity/generation guarded, and same-worker model initialization is deduplicated across warmup and transcription start so stale async completions cannot stop or dispose a replacement run.
 - `src/core/RegionGateRecovery.ts` runs before bridge initialization on the exact English-language gate response, validates/fetches same-host bootstrap and Webpack lazy-route assets with Chinese-first privileged requests, and restores the SPA without changing the browser language or page origin.
+- Bulk work downloads now use `DownloadCenterController` + the Vue `DownloadCenter`/`BackupWorkDownloader` panel in the shared header. `DownloadCenterRunner` owns checkpointed discovery, translation, folder recreation, optional Opus conversion, and resume state independently of the modal. Community playlist summaries come from the bounded server catalog; work lists remain lazy until expansion, selection, or download.
+- Community playlist seeds live under `proxy-worker/data/`, outside the userscript bundle. `PlaylistDiscoveryService` consumes one validated, ETag-cached catalog and may submit only a playlist UUID; the Worker independently verifies that it is public before an atomic, rate-limited R2 write.
 
 Not refactored yet (legacy imperative DOM-heavy paths still present):
 
