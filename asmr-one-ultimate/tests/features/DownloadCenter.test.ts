@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
     runnerPause: vi.fn(),
     loadSettledJob: vi.fn(),
     chooseDirectory: vi.fn(),
+    getAuthHeader: vi.fn(),
 }));
 
 vi.mock('../../src/features/EmergencyExport', () => ({
@@ -27,6 +28,7 @@ vi.mock('../../src/features/playlist/PlaylistDiscoveryService', () => ({
 vi.mock('../../src/features/playlist/CommunityPlaylistDetailsService', () => ({
     fetchCachedCommunityPlaylist: mocks.cachedDetails,
 }));
+vi.mock('../../src/features/playlist/PlaylistService', () => ({ getAuthHeader: mocks.getAuthHeader }));
 vi.mock('../../src/features/SemanticWorkSearchService', () => ({ semanticWorkSearch: mocks.semanticSearch }));
 vi.mock('../../src/api', () => ({ WorksApi: { searchWorks: mocks.searchWorks } }));
 vi.mock('../../src/features/downloads/DirectoryDownloadSink', () => ({ chooseDownloadDirectory: mocks.chooseDirectory }));
@@ -70,6 +72,7 @@ describe('DownloadCenter', () => {
         mocks.recover.mockResolvedValue([]);
         mocks.loadSettledJob.mockResolvedValue(undefined);
         mocks.chooseDirectory.mockResolvedValue({});
+        mocks.getAuthHeader.mockReturnValue({ Authorization: 'Bearer unit-test' });
         mocks.searchWorks.mockResolvedValue({ works: [], pagination: { currentPage: 1, pageSize: 20, totalCount: 0 } });
     });
 
@@ -93,6 +96,37 @@ describe('DownloadCenter', () => {
         await flushPromises();
         const image = document.querySelector('[data-testid="playlist-mine"] .playlist-cover img') as HTMLImageElement;
         expect(image.src).toContain('/api/cover/123456.jpg?type=240x240');
+        wrapper.unmount();
+    });
+
+    it('opens on Community without a Yours tab or personal-playlist error when signed out', async () => {
+        mocks.getAuthHeader.mockReturnValue({});
+        mocks.fetchOwn.mockRejectedValue(new Error('should not be requested'));
+        const wrapper = mount(DownloadCenter, { attachTo: document.body });
+
+        await wrapper.get('[data-testid="download-center-open"]').trigger('click');
+        await flushPromises();
+
+        expect(mocks.fetchOwn).not.toHaveBeenCalled();
+        expect(mocks.loadCatalog).toHaveBeenCalledTimes(1);
+        expect(document.querySelector('[data-testid="source-own"]')).toBeNull();
+        expect(document.querySelector('[data-testid="source-public"]')?.getAttribute('aria-selected')).toBe('true');
+        expect(document.querySelector('[data-testid="source-load-error"]')).toBeNull();
+        expect(document.querySelector('[data-testid="playlist-11111111-1111-4111-8111-111111111111"]')).not.toBeNull();
+        wrapper.unmount();
+    });
+
+    it('switches to Community when a stale session is rejected', async () => {
+        mocks.fetchOwn.mockRejectedValue(Object.assign(new Error('HTTP 401: Unauthorized'), { status: 401 }));
+        const wrapper = mount(DownloadCenter, { attachTo: document.body });
+
+        await wrapper.get('[data-testid="download-center-open"]').trigger('click');
+        await flushPromises();
+
+        expect(document.querySelector('[data-testid="source-own"]')).toBeNull();
+        expect(document.querySelector('[data-testid="source-public"]')?.getAttribute('aria-selected')).toBe('true');
+        expect(document.querySelector('[data-testid="source-load-error"]')).toBeNull();
+        expect(mocks.loadCatalog).toHaveBeenCalledTimes(1);
         wrapper.unmount();
     });
 
@@ -169,9 +203,13 @@ describe('DownloadCenter', () => {
         wrapper.unmount();
     });
 
-    it('uses Semantic Super Search and adds its direct results to the same collection', async () => {
+    it('uses full-site semantic search and adds its direct results to the same collection', async () => {
         mocks.fetchOwn.mockResolvedValue([]);
-        mocks.semanticSearch.mockResolvedValue([{ id: '42', title: 'Direct result', score: 0.8 }]);
+        mocks.semanticSearch.mockResolvedValue([{ id: '42', title: '添い寝音声', score: 0.8 }]);
+        mocks.searchWorks.mockResolvedValue({
+            works: [{ id: 43, title: 'Newest live result' }],
+            pagination: { currentPage: 1, pageSize: 20, totalCount: 1 },
+        });
         const wrapper = mount(DownloadCenter, { attachTo: document.body });
         await wrapper.get('[data-testid="download-center-open"]').trigger('click');
         await flushPromises();
@@ -182,8 +220,86 @@ describe('DownloadCenter', () => {
         (document.querySelector('[data-testid="search-all-works"]') as HTMLButtonElement).click();
         await flushPromises();
         expect(mocks.semanticSearch).toHaveBeenCalledWith('Direct');
-        expect(mocks.searchWorks).not.toHaveBeenCalled();
-        expect(document.querySelector('[data-testid="search-work-RJ000042"]')?.textContent).toContain('Direct result');
+        expect(mocks.searchWorks).toHaveBeenCalledWith('Direct', { page: 1 });
+        expect(document.querySelector('[data-testid="search-work-RJ000042"]')?.textContent).toContain('添い寝音声');
+        expect(document.querySelector('[data-testid="search-work-RJ000043"]')?.textContent).toContain('Newest live result');
+        wrapper.unmount();
+    });
+
+    it('keeps semantic results when the live site search is unavailable', async () => {
+        mocks.fetchOwn.mockResolvedValue([]);
+        mocks.semanticSearch.mockResolvedValue([{ id: '44', title: '意味検索の結果', score: 0.8 }]);
+        mocks.searchWorks.mockRejectedValue(new Error('live site unavailable'));
+        const wrapper = mount(DownloadCenter, { attachTo: document.body });
+        await wrapper.get('[data-testid="download-center-open"]').trigger('click');
+        await flushPromises();
+        const input = document.querySelector('[data-testid="search"]') as HTMLInputElement;
+        input.value = 'comfort';
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        await flushPromises();
+        (document.querySelector('[data-testid="search-all-works"]') as HTMLButtonElement).click();
+        await flushPromises();
+
+        expect(document.querySelector('[data-testid="search-work-RJ000044"]')).not.toBeNull();
+        expect(document.querySelector('[data-testid="all-work-search-error"]')).toBeNull();
+        wrapper.unmount();
+    });
+
+    it('keeps live site results when the hosted semantic search is unavailable', async () => {
+        mocks.fetchOwn.mockResolvedValue([]);
+        mocks.semanticSearch.mockRejectedValue(new Error('semantic baseline unavailable'));
+        mocks.searchWorks.mockResolvedValue({
+            works: [{ id: 45, title: 'Live catalogue result' }],
+            pagination: { currentPage: 1, pageSize: 20, totalCount: 1 },
+        });
+        const wrapper = mount(DownloadCenter, { attachTo: document.body });
+        await wrapper.get('[data-testid="download-center-open"]').trigger('click');
+        await flushPromises();
+        const input = document.querySelector('[data-testid="search"]') as HTMLInputElement;
+        input.value = 'latest';
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        await flushPromises();
+        (document.querySelector('[data-testid="search-all-works"]') as HTMLButtonElement).click();
+        await flushPromises();
+
+        expect(document.querySelector('[data-testid="search-work-RJ000045"]')).not.toBeNull();
+        expect(document.querySelector('[data-testid="all-work-search-error"]')).toBeNull();
+        wrapper.unmount();
+    });
+
+    it('shows a search error only when both site-wide search sources fail', async () => {
+        mocks.fetchOwn.mockResolvedValue([]);
+        mocks.semanticSearch.mockRejectedValue(new Error('semantic baseline unavailable'));
+        mocks.searchWorks.mockRejectedValue(new Error('live site unavailable'));
+        const wrapper = mount(DownloadCenter, { attachTo: document.body });
+        await wrapper.get('[data-testid="download-center-open"]').trigger('click');
+        await flushPromises();
+        const input = document.querySelector('[data-testid="search"]') as HTMLInputElement;
+        input.value = 'anything';
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        await flushPromises();
+        (document.querySelector('[data-testid="search-all-works"]') as HTMLButtonElement).click();
+        await flushPromises();
+
+        expect(document.querySelector('[data-testid="all-work-search-error"]')).not.toBeNull();
+        wrapper.unmount();
+    });
+
+    it('shows a search error when an exact RJ lookup cannot reach the live catalogue', async () => {
+        mocks.fetchOwn.mockResolvedValue([]);
+        mocks.searchWorks.mockRejectedValue(new Error('live site unavailable'));
+        const wrapper = mount(DownloadCenter, { attachTo: document.body });
+        await wrapper.get('[data-testid="download-center-open"]').trigger('click');
+        await flushPromises();
+        const input = document.querySelector('[data-testid="search"]') as HTMLInputElement;
+        input.value = 'RJ123456';
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        await flushPromises();
+        (document.querySelector('[data-testid="search-all-works"]') as HTMLButtonElement).click();
+        await flushPromises();
+
+        expect(mocks.semanticSearch).not.toHaveBeenCalled();
+        expect(document.querySelector('[data-testid="all-work-search-error"]')).not.toBeNull();
         wrapper.unmount();
     });
 

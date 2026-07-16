@@ -83,22 +83,44 @@ describe('BackupWorkDownloader', () => {
         expect(wrapper.emitted('update')?.at(-1)?.[0]).toMatchObject({ selectedWorkIds: [] });
     });
 
-    it('searches all works and exposes returned standalone works for selection', async () => {
+    it('shows meaning-based results whose title does not literally contain the query', async () => {
         const searchAllWorks = vi.fn(async () => {
-            await (wrapper as any).setProps({ works: [...works, { id: 99, title: 'Found result', directSearchResult: true }] });
+            await (wrapper as any).setProps({ works: [...works, { id: 99, title: '添い寝音声', directSearchResult: true }] });
         });
         const wrapper = mount(BackupWorkDownloader, { props: { playlists, works, profile: profile(), searchAllWorks } });
-        await wrapper.get('[data-testid="search"]').setValue('Found');
+        await wrapper.get('[data-testid="search"]').setValue('sleepy comfort');
         await wrapper.get('[data-testid="search-all-works"]').trigger('click');
-        await vi.waitFor(() => expect(searchAllWorks).toHaveBeenCalledWith('Found'));
-        expect(wrapper.get('[data-testid="all-work-results"]').text()).toContain('Found result');
+        await vi.waitFor(() => expect(searchAllWorks).toHaveBeenCalledWith('sleepy comfort'));
+        expect(wrapper.get('[data-testid="all-work-results"]').text()).toContain('添い寝音声');
         await wrapper.get('[data-testid="search-work-99"] input').setValue(true);
         expect(wrapper.emitted('update')?.at(-1)?.[0]).toMatchObject({ selectedWorkIds: [99] });
     });
 
+    it('hides results from the previous query until the next search completes', async () => {
+        const searchAllWorks = vi.fn(async (query: string) => {
+            const direct = query === 'first' ? [{ id: 'RJ9', title: 'First result', directSearchResult: true }] : [];
+            await (wrapper as any).setProps({ works: direct });
+        });
+        const wrapper = mount(BackupWorkDownloader, { props: { playlists: [], works: [], profile: profile(), searchAllWorks } });
+        await wrapper.get('[data-testid="search"]').setValue('first');
+        await wrapper.get('[data-testid="search-all-works"]').trigger('click');
+        await vi.waitFor(() => expect(wrapper.find('[data-testid="search-work-RJ9"]').exists()).toBe(true));
+
+        await wrapper.get('[data-testid="search"]').setValue('second');
+        expect(wrapper.find('[data-testid="search-work-RJ9"]').exists()).toBe(false);
+        await wrapper.get('[data-testid="search-all-works"]').trigger('click');
+        await vi.waitFor(() => expect(searchAllWorks).toHaveBeenLastCalledWith('second'));
+        expect(wrapper.find('[data-testid="search-work-RJ9"]').exists()).toBe(false);
+    });
+
     it('selects standalone direct-search results even when no playlist row is visible', async () => {
-        const direct = [{ id: 'RJ9', title: 'Direct only', directSearchResult: true }];
-        const wrapper = mount(BackupWorkDownloader, { props: { playlists: [], works: direct, profile: profile() } });
+        const searchAllWorks = vi.fn(async () => {
+            await (wrapper as any).setProps({ works: [{ id: 'RJ9', title: 'Direct only', directSearchResult: true }] });
+        });
+        const wrapper = mount(BackupWorkDownloader, { props: { playlists: [], works: [], profile: profile(), searchAllWorks } });
+        await wrapper.get('[data-testid="search"]').setValue('direct');
+        await wrapper.get('[data-testid="search-all-works"]').trigger('click');
+        await vi.waitFor(() => expect(wrapper.find('[data-testid="search-work-RJ9"]').exists()).toBe(true));
 
         expect(wrapper.get('[data-testid="select-all"]').attributes('disabled')).toBeUndefined();
         await wrapper.get('[data-testid="select-all"]').trigger('click');

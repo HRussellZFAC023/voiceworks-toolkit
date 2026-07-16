@@ -84,7 +84,11 @@ async function openEmergencySection(page: Page) {
     return section;
 }
 
-async function openDownloadCenter(page: Page, timeout = 5_000): Promise<void> {
+async function openDownloadCenter(page: Page, timeout = 5_000, signedIn = true): Promise<void> {
+    await page.evaluate((authenticated) => {
+        if (authenticated) localStorage.setItem('jwt-token', 'e2e-token');
+        else localStorage.removeItem('jwt-token');
+    }, signedIn);
     const button = page.getByTestId('download-center-open');
     await expect(button).toBeVisible({ timeout: 15_000 });
     await button.click();
@@ -163,6 +167,21 @@ test.describe('Emergency export and Download Center', () => {
         expect(publicWorksRequests).toBe(1);
     });
 
+    test('opens signed-out users on Community and keeps site-wide work search available', async ({ injectedPage, isScriptLoaded }) => {
+        await helpers.gotoHome(injectedPage); await isScriptLoaded();
+        await openDownloadCenter(injectedPage, 5_000, false);
+
+        await expect(injectedPage.getByTestId('source-own')).toHaveCount(0);
+        await expect(injectedPage.getByTestId('source-public')).toHaveAttribute('aria-selected', 'true');
+        await expect(injectedPage.getByTestId(`playlist-${PUBLIC_ID}`)).toBeVisible();
+        await expect(injectedPage.getByTestId('source-load-error')).toHaveCount(0);
+        await expect(injectedPage.getByText('Find playlists or works', { exact: true })).toBeVisible();
+        await expect(injectedPage.getByTestId('search-all-works')).toHaveText('Search');
+        await injectedPage.getByTestId('search').fill('RJ999999');
+        await injectedPage.getByTestId('search-all-works').click();
+        await expect(injectedPage.getByTestId('search-work-RJ999999')).toBeVisible();
+    });
+
     test('offers themed selection, clear-all, tags, options, and direct work search in one modal', async ({ injectedPage, isScriptLoaded }) => {
         await injectedPage.setViewportSize({ width: 390, height: 844 });
         await helpers.gotoHome(injectedPage); await isScriptLoaded(); await openDownloadCenter(injectedPage);
@@ -172,7 +191,9 @@ test.describe('Emergency export and Download Center', () => {
         await expect(injectedPage.getByTestId('start')).toBeDisabled();
         await injectedPage.getByTestId('source-public').click();
         await expect(injectedPage.getByTestId('tag-filter')).toContainText('Relaxing');
-        await injectedPage.getByTestId('search').fill('Direct');
+        // Exact RJ lookup intentionally exercises the live-API fallback even
+        // when the hosted semantic baseline is available in this real shell.
+        await injectedPage.getByTestId('search').fill('RJ999999');
         await injectedPage.getByTestId('search-all-works').click();
         await expect(injectedPage.getByTestId('search-work-RJ999999')).toBeVisible();
         await injectedPage.getByTestId('search-work-RJ999999').locator('input').check();

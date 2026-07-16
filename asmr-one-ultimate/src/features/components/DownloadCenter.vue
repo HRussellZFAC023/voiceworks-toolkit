@@ -22,6 +22,7 @@ import {
 } from '../downloads/DownloadCenterRunner';
 import { fetchCachedCommunityPlaylist } from '../playlist/CommunityPlaylistDetailsService';
 import { PlaylistDiscoveryService } from '../playlist/PlaylistDiscoveryService';
+import { getAuthHeader } from '../playlist/PlaylistService';
 import type { CommunityPlaylistSummary } from '../playlist/types';
 import { semanticWorkSearch } from '../SemanticWorkSearchService';
 import BackupWorkDownloader from './BackupWorkDownloader.vue';
@@ -36,6 +37,7 @@ const ownLoaded = ref(false);
 const publicRequested = ref(false);
 const ownLoadFailed = ref(false);
 const publicLoadFailed = ref(false);
+const signedIn = ref(false);
 const jobError = ref('');
 const runner = DownloadCenterRunner.getInstance();
 const busy = ref(runner.isRunning);
@@ -170,6 +172,18 @@ function mapOwn(entry: PlaylistEntry): BackupPlaylistDownloadItem {
     };
 }
 
+function readHttpStatus(error: unknown): number | undefined {
+    if (!error || typeof error !== 'object') return undefined;
+    const candidate = error as { status?: unknown; response?: { status?: unknown }; message?: unknown };
+    if (typeof candidate.status === 'number') return candidate.status;
+    if (typeof candidate.response?.status === 'number') return candidate.response.status;
+    if (typeof candidate.message === 'string') {
+        const match = candidate.message.match(/\bHTTP\s+(\d{3})\b/i);
+        if (match) return Number(match[1]);
+    }
+    return undefined;
+}
+
 async function loadOwn(): Promise<void> {
     if (ownLoaded.value || loadingOwn.value) return;
     loadingOwn.value = true;
@@ -182,10 +196,22 @@ async function loadOwn(): Promise<void> {
         ownLoaded.value = true;
     } catch (error) {
         Logger.warn('[DownloadCenter] Could not load personal playlists', error);
-        ownLoadFailed.value = true;
+        const status = readHttpStatus(error);
+        if (status === 401 || status === 403) {
+            signedIn.value = false;
+            ownLoadFailed.value = false;
+            setSourcePlaylists('own', []);
+            void loadCommunity();
+        } else {
+            ownLoadFailed.value = true;
+        }
     } finally {
         loadingOwn.value = false;
     }
+}
+
+function hasAuthenticatedSession(): boolean {
+    return Boolean(getAuthHeader().Authorization);
 }
 
 async function loadCommunity(): Promise<void> {
@@ -208,7 +234,9 @@ function open(): void {
     // Visibility is synchronous. Network and IndexedDB work only starts after
     // the modal is already available to the user.
     visible.value = true;
-    void loadOwn();
+    signedIn.value = hasAuthenticatedSession();
+    if (signedIn.value) void loadOwn();
+    else void loadCommunity();
     void refreshResumableJobs();
 }
 
@@ -314,31 +342,24 @@ function mergeDirectWork(
 }
 
 async function searchAllWorks(query: string): Promise<void> {
-    const merged = new Map(works.value.map(work => [String(work.id), work]));
-    let semanticResults: Awaited<ReturnType<typeof semanticWorkSearch>> = [];
-    let semanticError: unknown;
-    try {
-        semanticResults = await semanticWorkSearch(query);
-        for (const result of semanticResults) mergeDirectWork(merged, result as unknown as Record<string, unknown>, result.title);
-    } catch (error) {
-        semanticError = error;
-        Logger.warn('[DownloadCenter] Semantic work search unavailable; trying live API', error);
-    }
-
+    const merged = new Map(works.value.map(work => [String(work.id), { ...work, directSearchResult: false }]));
     const exactRj = /^[A-Za-z]{2}\d+$/.test(query.trim());
-    if (semanticResults.length > 0 && !exactRj) {
-        works.value = [...merged.values()];
-        return;
+    const [semantic, live] = await Promise.allSettled([
+        exactRj ? Promise.resolve([]) : semanticWorkSearch(query),
+        WorksApi.searchWorks(query, { page: 1 }),
+    ]);
+    if (semantic.status === 'fulfilled') {
+        for (const result of semantic.value) mergeDirectWork(merged, result as unknown as Record<string, unknown>, result.title);
+    } else {
+        Logger.warn('[DownloadCenter] Hosted semantic work search unavailable', semantic.reason);
     }
-    try {
-        const response = await WorksApi.searchWorks(query, { page: 1 });
-        for (const result of response.works) mergeDirectWork(merged, result as unknown as Record<string, unknown>);
-    } catch (error) {
-        if (semanticResults.length > 0) {
-            works.value = [...merged.values()];
-            return;
-        }
-        throw semanticError ?? error;
+    if (live.status === 'fulfilled') {
+        for (const result of live.value.works) mergeDirectWork(merged, result as unknown as Record<string, unknown>);
+    } else {
+        Logger.warn('[DownloadCenter] Live work search unavailable', live.reason);
+    }
+    if ((exactRj && live.status === 'rejected') || (semantic.status === 'rejected' && live.status === 'rejected')) {
+        throw live.status === 'rejected' ? live.reason : semantic.reason;
     }
     works.value = [...merged.values()];
 }
@@ -462,6 +483,6 @@ defineExpose({ open });
 <template>
     <button class="q-btn q-btn-flat q-btn-dense asmr-download-center-btn text-white" data-testid="download-center-open" :title="t('downloadCenterButton')" :aria-label="t('downloadCenterButton')" @click="open"><span class="q-btn__content"><i class="q-icon material-icons" aria-hidden="true">download_for_offline</i></span></button>
     <Teleport to="body">
-        <BackupWorkDownloader v-if="visible" :playlists="playlists" :works="works" :profile="profile" :loading-own="loadingOwn" :loading-public="loadingPublic" :own-load-failed="ownLoadFailed" :public-load-failed="publicLoadFailed" :busy="busy" :progress="displayProgress" :error-message="jobError" :resumable-jobs="resumableJobs.map(job => ({ id: job.id, title: job.title }))" :resolve-playlist="resolvePlaylist" :search-all-works="searchAllWorks" @close="visible = false" @source-change="source => { if (source === 'public') void loadCommunity(); else void loadOwn(); }" @update="updateProfile" @start="startDownload" @pause="pauseDownload" @resume="resumeDownload" />
+        <BackupWorkDownloader v-if="visible" :playlists="playlists" :works="works" :profile="profile" :show-own="signedIn" :loading-own="loadingOwn" :loading-public="loadingPublic" :own-load-failed="ownLoadFailed" :public-load-failed="publicLoadFailed" :busy="busy" :progress="displayProgress" :error-message="jobError" :resumable-jobs="resumableJobs.map(job => ({ id: job.id, title: job.title }))" :resolve-playlist="resolvePlaylist" :search-all-works="searchAllWorks" @close="visible = false" @source-change="source => { if (source === 'public') void loadCommunity(); else if (signedIn) void loadOwn(); }" @update="updateProfile" @start="startDownload" @pause="pauseDownload" @resume="resumeDownload" />
     </Teleport>
 </template>

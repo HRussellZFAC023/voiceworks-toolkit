@@ -57,11 +57,12 @@ The Worker is not a general browsing VPN. Normal navigation, interactive request
 
 ```bash
 npm run build
-E2E_PROXY=1 npm run test:e2e
+npm run test:e2e
 ```
 
 Optional variables:
 
 - `E2E_PROXY_URL` — private Worker URL.
+- `E2E_PROXY=0` — explicitly bypass the maintained Japan relay and exercise direct host networking.
 - `E2E_SKIP_WEBSERVER=1` — skip the unused local Vite server in restricted runners.
 - `E2E_REQUIRE_AUTH=1` plus the documented test credentials — include authenticated scenarios without storing credentials in git.

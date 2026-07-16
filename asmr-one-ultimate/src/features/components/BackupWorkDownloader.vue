@@ -15,6 +15,7 @@ const props = withDefaults(defineProps<{
     playlists: BackupPlaylistDownloadItem[];
     works: BackupWorkDownloadItem[];
     profile: BackupDownloadProfile;
+    showOwn?: boolean;
     loadingOwn?: boolean;
     loadingPublic?: boolean;
     ownLoadFailed?: boolean;
@@ -26,6 +27,7 @@ const props = withDefaults(defineProps<{
     resolvePlaylist?: (playlist: BackupPlaylistDownloadItem) => Promise<void>;
     searchAllWorks?: (query: string) => Promise<void>;
 }>(), {
+    showOwn: true,
     loadingOwn: false,
     loadingPublic: false,
     ownLoadFailed: false,
@@ -48,7 +50,7 @@ const emit = defineEmits<{
 }>();
 
 const searchQuery = ref('');
-const sourceFilter = ref<BackupPlaylistSourceFilter>('own');
+const sourceFilter = ref<BackupPlaylistSourceFilter>(props.showOwn ? 'own' : 'public');
 const tagFilter = ref('');
 const dialog = ref<HTMLElement | null>(null);
 const searchInput = ref<HTMLInputElement | null>(null);
@@ -58,6 +60,7 @@ const expandedIds = ref(new Set<string>());
 const resolvingIds = ref(new Set<string>());
 const searchingAll = ref(false);
 const searchError = ref(false);
+const completedSearchQuery = ref('');
 const filters = ref({ ...props.profile.filters });
 const titleMode = ref(props.profile.titleMode);
 const convertToOpus = ref(props.profile.convertToOpus);
@@ -128,7 +131,10 @@ const sourceCounts = computed(() => ({
     public: props.playlists.filter(playlist => playlist.source === 'public').length,
 }));
 const selectedWorks = computed(() => props.works.filter(work => selectedIds.value.has(String(work.id))));
-const standaloneWorks = computed(() => props.works.filter(work => work.directSearchResult && matchesSearch(work)));
+const standaloneWorks = computed(() => {
+    if (!completedSearchQuery.value || normalized(searchQuery.value.trim()) !== completedSearchQuery.value) return [];
+    return props.works.filter(work => work.directSearchResult);
+});
 const selectedMeasuredBytes = computed(() => selectedWorks.value.reduce((sum, work) => sum + Math.max(0, displayedSizeBytes(work) ?? 0), 0));
 const hasUnknownSelectedBytes = computed(() => selectedWorks.value.some(work => displayedSizeBytes(work) == null));
 const hasEstimatedSelectedBytes = computed(() => convertToOpus.value && selectedWorks.value.some(work => estimatedOpusBytes(work) != null));
@@ -252,8 +258,13 @@ async function runAllWorksSearch(): Promise<void> {
     if (!query || !props.searchAllWorks || searchingAll.value) return;
     searchingAll.value = true;
     searchError.value = false;
-    try { await props.searchAllWorks(query); }
-    catch { searchError.value = true; }
+    try {
+        await props.searchAllWorks(query);
+        completedSearchQuery.value = normalized(query);
+    } catch {
+        completedSearchQuery.value = '';
+        searchError.value = true;
+    }
     finally { searchingAll.value = false; }
 }
 
@@ -323,6 +334,9 @@ onMounted(() => { void nextTick(() => searchInput.value?.focus()); });
 onUnmounted(() => { if (returnFocus?.isConnected) returnFocus.focus(); });
 
 watch(sourceFilter, source => { tagFilter.value = ''; emit('sourceChange', source); });
+watch(() => props.showOwn, showOwn => {
+    if (!showOwn && sourceFilter.value === 'own') sourceFilter.value = 'public';
+});
 watch(searchQuery, () => { searchError.value = false; });
 watch(() => props.profile, profile => {
     selectedIds.value = new Set((profile.selectedWorkIds ?? []).map(String));
@@ -344,7 +358,7 @@ watch(() => props.profile, profile => {
             </header>
 
             <div class="source-tabs" role="tablist" :aria-label="profile.labels.playlistSource">
-                <button type="button" role="tab" data-testid="source-own" :aria-selected="sourceFilter === 'own'" :class="{ active: sourceFilter === 'own' }" @click="sourceFilter = 'own'">{{ profile.labels.sourceOwn }} <span>{{ sourceCounts.own.toLocaleString() }}</span></button>
+                <button v-if="showOwn" type="button" role="tab" data-testid="source-own" :aria-selected="sourceFilter === 'own'" :class="{ active: sourceFilter === 'own' }" @click="sourceFilter = 'own'">{{ profile.labels.sourceOwn }} <span>{{ sourceCounts.own.toLocaleString() }}</span></button>
                 <button type="button" role="tab" data-testid="source-public" :aria-selected="sourceFilter === 'public'" :class="{ active: sourceFilter === 'public' }" @click="sourceFilter = 'public'">{{ profile.labels.sourcePublic }} <span>{{ sourceCounts.public.toLocaleString() }}</span></button>
             </div>
 

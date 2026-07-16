@@ -17,7 +17,10 @@ const __dirname = path.dirname(__filename);
 const USERSCRIPT_PATH = path.join(__dirname, '../../dist/asmr-one-ultimate.user.js');
 const AUTH_PATH = path.join(__dirname, '.auth.json');
 const isRealE2E = process.env.E2E_REAL === '1' || process.env.E2E_NO_MOCKS === '1';
-const viaProxy = process.env.E2E_PROXY === '1';
+// Direct document requests are region/language gated from common CI and agent
+// networks. Keep the maintained Japan relay as the safe default; local runs
+// that explicitly need to exercise direct networking can opt out.
+const viaProxy = process.env.E2E_PROXY !== '0';
 const E2E_PROXY_URL = (process.env.E2E_PROXY_URL || 'https://asmr-api-proxy.henry-robert-christopher-russell.workers.dev').replace(/\/$/, '');
 const requireAuth = process.env.E2E_REQUIRE_AUTH === '1';
 const TEST_IMAGE_BODY = Buffer.from(
@@ -396,14 +399,30 @@ export const test = base.extend<Fixtures>({
                 u.searchParams.set('__host', u.hostname);
                 const proxied = `${E2E_PROXY_URL}${u.pathname}${u.search}`;
                 try {
-                    const resp = await context.request.get(proxied, { timeout: 30000 });
+                    const resp = await context.request.get(proxied, {
+                        timeout: 30000,
+                        headers: {
+                            Accept: request.headers().accept || '*/*',
+                            'Accept-Language': 'zh-CN,zh;q=0.9,ja;q=0.8',
+                            ...(request.headers().authorization ? { Authorization: request.headers().authorization } : {}),
+                            ...(request.headers().range ? { Range: request.headers().range } : {}),
+                            ...(request.headers()['if-none-match'] ? { 'If-None-Match': request.headers()['if-none-match'] } : {}),
+                            ...(request.headers()['if-modified-since'] ? { 'If-Modified-Since': request.headers()['if-modified-since'] } : {}),
+                        },
+                    });
                     return route.fulfill({
                         status: resp.status(),
                         contentType: resp.headers()['content-type'] || 'text/html',
                         body: await resp.body(),
                     });
-                } catch {
-                    return route.continue();
+                } catch (error) {
+                    // Never disguise relay failures as direct-host 403s. A
+                    // synthetic 502 leaves a precise URL/error in traces.
+                    return route.fulfill({
+                        status: 502,
+                        contentType: 'text/plain; charset=utf-8',
+                        body: `E2E relay failed for ${proxied}: ${String(error)}`,
+                    });
                 }
             });
         }
@@ -417,6 +436,12 @@ export const test = base.extend<Fixtures>({
             });
         });
 
+        // Telemetry is irrelevant to product behavior and the Sentry host is
+        // independently access-restricted. Block it in every mode so a beacon
+        // failure cannot masquerade as an app/API 403 in test output.
+        await context.route('**/api/**/sentry/**', (route) => route.abort());
+        await context.route('**://sentry.asmr.one/**', (route) => route.abort());
+
         if (!isRealE2E) {
             // Block heavy resources context-wide
             await context.route('**/*.{png,jpg,jpeg,gif,webp,svg,ico,woff2,ttf,eot,mp3,mp4,ogg,wav,flac}*', (route) => route.abort());
@@ -424,10 +449,6 @@ export const test = base.extend<Fixtures>({
                 BLOCKED_URL_PATTERNS.some(p => p.test(url.toString())),
                 (route) => route.abort()
             );
-        } else {
-            // In real mode keep all real APIs/media; only drop noisy telemetry.
-            await context.route('**/api/**/sentry/**', (route) => route.abort());
-            await context.route('**://sentry.asmr.one/**', (route) => route.abort());
         }
 
         // Flat-view mock tracks point at example.com. Serve valid local audio so
@@ -618,7 +639,8 @@ window.google.accounts.oauth2 = window.google.accounts.oauth2 || {
             const text = msg.text();
             if (msg.type() === 'error') {
                 if (text.includes('ERR_FAILED') || text.includes('net::ERR_')) return;
-                console.log(`[Browser error]: ${text}`);
+                const source = msg.location().url;
+                console.log(`[Browser error]${source ? ` ${source}` : ''}: ${text}`);
             } else if (text.includes('[E2E]') || text.includes('[ASMR]') || text.includes('[ASMR Ultimate]') || text.includes('Bridge')) {
                 console.log(`[Browser ${msg.type()}]: ${text}`);
             }
