@@ -57,6 +57,11 @@ test.describe('Unhandled Errors', () => {
 });
 
 test.describe('Resource Leaks', () => {
+  // These navigation-heavy checks exercise repeated real-host route changes.
+  // The default 60s budget is too tight under full-suite load even when every
+  // lifecycle assertion passes, so keep a focused allowance for this group.
+  test.describe.configure({ timeout: 90_000 });
+
   test('no duplicate event listeners after navigation cycle', async ({ injectedPage, isScriptLoaded, waitForBridge }) => {
     await helpers.gotoHome(injectedPage);
     expect(await isScriptLoaded()).toBe(true);
