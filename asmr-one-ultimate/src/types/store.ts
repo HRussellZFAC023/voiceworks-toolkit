@@ -198,7 +198,7 @@ export interface PluginConfig {
 
     // AI Features
     whisperModel: string;
-    /** Discoverable model preset: 'auto' | 'small' | 'medium' | 'large-v3-turbo'. */
+    /** Discoverable model preset: 'auto' | 'tiny' | 'small' | 'medium' | 'large-v3-turbo'. */
     whisperModelPreset: string;
     /** Pre-inference silence skipping: 'off' (recommended for ASMR) | 'conservative'. */
     whisperVadMode: string;

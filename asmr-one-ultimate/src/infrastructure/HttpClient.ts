@@ -60,6 +60,11 @@ export interface HttpRequestConfig {
     timeout?: number;
     cache?: { key: string; ttlMs: number };
     retry?: RetryConfig;
+    /**
+     * Share an in-flight request for the same URL. Disable only for an explicit
+     * foreground request that must not wait behind optional background work.
+     */
+    dedupe?: boolean;
 }
 
 export interface HttpResponse<T> {
@@ -388,6 +393,14 @@ class HttpClientImpl {
             }
         }
 
+        if (config?.dedupe === false) {
+            const response = await execute();
+            if (config.cache && response.status >= 200 && response.status < 300) {
+                SharedCache.set(cacheKey, response.data, config.cache.ttlMs);
+            }
+            return { ...response, cached: false };
+        }
+
         // In-flight deduplication
         if (this.inFlight.has(fullUrl)) {
             Logger.debug(`[HttpClient] Dedup: ${fullUrl}`);
@@ -455,27 +468,42 @@ class HttpClientImpl {
             fetchConfig.body = JSON.stringify(data);
         }
 
-        const response = await fetch(url, fetchConfig);
-
-        if (!response.ok) {
-            throw new HttpError(
-                response.status,
-                `HTTP ${response.status}: ${response.statusText}`,
-            );
-        }
-
-        const text = await response.text();
-        let responseData: T;
+        const controller = new AbortController();
+        fetchConfig.signal = controller.signal;
+        const timeout = Math.max(0, config?.timeout ?? TIMING.HTTP_TIMEOUT_MS);
+        const timeoutId = timeout > 0
+            ? setTimeout(() => controller.abort(new Error('Request timeout')), timeout)
+            : undefined;
         try {
-            responseData = JSON.parse(text) as T;
-        } catch {
-            throw new Error(`Invalid JSON response from ${url}: ${text.slice(0, 100)}…`);
+            const response = await fetch(url, fetchConfig);
+
+            if (!response.ok) {
+                throw new HttpError(
+                    response.status,
+                    `HTTP ${response.status}: ${response.statusText}`,
+                );
+            }
+
+            // Keep the same deadline active while consuming the body. Fetch can
+            // resolve its headers and then stall forever in response.text().
+            const text = await response.text();
+            let responseData: T;
+            try {
+                responseData = JSON.parse(text) as T;
+            } catch {
+                throw new Error(`Invalid JSON response from ${url}: ${text.slice(0, 100)}…`);
+            }
+
+            const responseHeaders: Record<string, string> = {};
+            response.headers.forEach((value, key) => { responseHeaders[key] = value; });
+
+            return { data: responseData, status: response.status, headers: responseHeaders, cached: false };
+        } catch (error) {
+            if (controller.signal.aborted) throw new Error('Request timeout');
+            throw error;
+        } finally {
+            if (timeoutId !== undefined) clearTimeout(timeoutId);
         }
-
-        const responseHeaders: Record<string, string> = {};
-        response.headers.forEach((value, key) => { responseHeaders[key] = value; });
-
-        return { data: responseData, status: response.status, headers: responseHeaders, cached: false };
     }
 
     private async fetchJsonViaGM<T>(url: string, config?: HttpRequestConfig): Promise<HttpResponse<T>> {

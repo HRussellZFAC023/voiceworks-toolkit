@@ -35,19 +35,23 @@ import { resolveLearnerSecondaryLanguage } from './learnerSubtitleMode';
 // ============================================================================
 
 const TARGET_SAMPLE_RATE = 16000;
-const DEFAULT_MAX_PENDING_CHUNKS = 6;
+// The worker executes inference sequentially. Keep one active inference and at
+// most one replaceable queued window so slow devices cannot accumulate a large
+// FIFO that later looks stalled.
+const DEFAULT_MAX_PENDING_CHUNKS = 2;
 const DEFAULT_MODEL = 'onnx-community/whisper-small_timestamped';
 const FALLBACK_MODEL = 'onnx-community/whisper-tiny';
 
 // Discoverable, browser-compatible Whisper model presets. `auto` defers to the
 // legacy `whisperModel` config (safe adaptive behavior). Explicit presets map to
 // official onnx-community IDs. Large v3 Turbo is experimental/heavy.
-type WhisperModelPreset = 'auto' | 'small' | 'medium' | 'large-v3-turbo';
+type WhisperModelPreset = 'auto' | 'tiny' | 'small' | 'medium' | 'large-v3-turbo';
 
 const WHISPER_PRESET_MODELS: Record<Exclude<WhisperModelPreset, 'auto'>, string> = {
+    tiny: 'onnx-community/whisper-tiny',
     small: 'onnx-community/whisper-small_timestamped',
     medium: 'onnx-community/whisper-medium_timestamped',
-    'large-v3-turbo': 'onnx-community/whisper-large-v3-turbo',
+    'large-v3-turbo': 'onnx-community/whisper-large-v3-turbo_timestamped',
 };
 
 /**
@@ -62,15 +66,11 @@ export function resolveWhisperModelPreset(preset: string, configuredModel: strin
     return String(configuredModel || DEFAULT_MODEL).trim() || DEFAULT_MODEL;
 }
 
-// Conservative VAD: only skip chunks at or below roughly -60 dBFS RMS, i.e.
-// effectively digital silence. Quiet ASMR (breaths, whispers) sits well above
-// this (~-40 dBFS and louder), so it is never dropped. `off` (default) uses 0.
-const CONSERVATIVE_SILENCE_RMS = 0.001;
 const MODEL_LOAD_STALL_TIMEOUT_MS = 120_000;
 const CACHE_TTL_MS = 1000 * 60 * 60 * 24 * 90; // 90 days
 const MODEL_READY_TTL_MS = 1000 * 60 * 60 * 24 * 30; // 30 days
 // No lookahead limit — transcribe the entire audio from start to finish.
-// DEFAULT_MAX_PENDING_CHUNKS provides natural backpressure (6 concurrent chunks max).
+// DEFAULT_MAX_PENDING_CHUNKS provides natural backpressure (one active + one queued).
 const INITIAL_BACKFILL_SEC = 30;
 const SEEK_BACKFILL_SEC = 15;
 const DEFAULT_POLL_INTERVAL_MS = 250;
@@ -163,6 +163,7 @@ type WorkerProgressMessage = {
     loaded?: number;
     total?: number;
     message?: string;
+    chunkId?: number;
 };
 
 type ChunkWordEntry = { text: string; start: number | null; end: number | null };
@@ -185,17 +186,76 @@ type WorkerCompleteMessage = {
     chunkId?: number;
 };
 
-type WorkerReadyMessage = { status: 'ready'; backend?: string; vendor?: string };
+type WorkerReadyMessage = {
+    status: 'ready';
+    backend?: string;
+    vendor?: string;
+    model?: string | null;
+    dtype?: string;
+    chunkId?: number;
+};
 
-type WorkerInitMessage = { status: 'initiate'; backend?: string; vendor?: string };
+type WorkerInitMessage = { status: 'initiate'; backend?: string; vendor?: string; chunkId?: number };
 
 type WorkerErrorMessage = { status: 'error'; data?: { message?: string; gpuFallback?: boolean }; chunkId?: number };
 
 type WorkerDeviceLostMessage = { status: 'gpu-device-lost'; data?: { message?: string } };
 
-type WorkerGpuDegradedMessage = { status: 'gpu-degraded'; data?: { message?: string } };
+type WorkerGpuDegradedMessage = { status: 'gpu-degraded'; data?: { message?: string }; chunkId?: number };
 
-type WorkerFallbackMessage = { status: 'fallback'; originalModel: string; fallbackModel: string; reason?: string };
+type WorkerFallbackMessage = {
+    status: 'fallback';
+    originalModel: string;
+    fallbackModel: string;
+    reason?: string;
+    backend?: string;
+    dtype?: string;
+    chunkId?: number;
+};
+
+type WorkerQueuedMessage = {
+    status: 'queued';
+    chunkId?: number;
+    data?: { queueDepth?: number };
+};
+
+type WorkerStartedMessage = {
+    status: 'started';
+    chunkId?: number;
+    data?: { queueDepth?: number };
+};
+
+type WorkerHeartbeatMessage = {
+    status: 'heartbeat';
+    chunkId?: number;
+    data?: { phase?: string; partialText?: string };
+};
+
+type WorkerDroppedMessage = {
+    status: 'dropped';
+    chunkId?: number;
+    data?: { reason?: string; replacedByChunkId?: number };
+};
+
+type WorkerPoisonedMessage = {
+    status: 'worker-poisoned';
+    data?: { reason?: string; message?: string; gpuFallback?: boolean };
+};
+
+type WorkerLoadFailedMessage = {
+    status: 'load-failed';
+    backend?: string;
+    model?: string | null;
+    dtype?: string;
+    data?: {
+        message?: string;
+        backend?: string;
+        model?: string | null;
+        dtype?: string;
+        sessionPoisoned?: boolean;
+    };
+    chunkId?: number;
+};
 
 type WorkerMessage =
     | WorkerProgressMessage
@@ -206,7 +266,13 @@ type WorkerMessage =
     | WorkerErrorMessage
     | WorkerDeviceLostMessage
     | WorkerGpuDegradedMessage
-    | WorkerFallbackMessage;
+    | WorkerFallbackMessage
+    | WorkerQueuedMessage
+    | WorkerStartedMessage
+    | WorkerHeartbeatMessage
+    | WorkerDroppedMessage
+    | WorkerPoisonedMessage
+    | WorkerLoadFailedMessage;
 
 // ============================================================================
 // Whisper Controller
@@ -221,8 +287,6 @@ interface WhisperSettings {
     strideLengthS: number;
     cacheTranscripts: boolean;
     autoWarmup: boolean;
-    silenceThreshold: number;
-    vadMode: 'off' | 'conservative';
     maxPendingChunks: number;
     pollIntervalMs: number;
     workerUpdateIntervalMs: number;
@@ -301,12 +365,18 @@ export class Whisper {
     private lastSegmentEnd = 0;
     private segments: WhisperSegment[] = [];
     private currentTrackSrc: string | null = null;
+    private currentCacheSource: string | null = null;
     private currentCacheKey: string | null = null;
     private currentCacheIdentity: string | null = null;
     private chunkSendTimes = new Map<number, number>();
     private chunkGenerations = new Map<number, number>();
     private chunkOffsets = new Map<number, number>();
+    private chunkAdvances = new Map<number, number>();
+    private chunkStartedAt = new Map<number, number>();
     private chunkLastActivity = new Map<number, number>();
+    private provisionalChunkText = new Map<number, { generation: number; text: string }>();
+    private completedUpTo = 0;
+    private droppedBufferSeconds = 0;
 
     private statusEl: HTMLElement | null = null;
     private errorDismissTimer: number | null = null;
@@ -316,6 +386,8 @@ export class Whisper {
     private modelLoadTimer: number | null = null;
     private modelReady = false;
     private workerBackend: 'webgpu' | 'wasm' | null = null;
+    private effectiveModelId: string | null = null;
+    private effectiveDtype: string | null = null;
     private modelOverride: string | null = null;
     private presetSafetyFallbackNotice: string | null = null;
     private autoTranscribeWorkId: string | null = null;
@@ -337,6 +409,7 @@ export class Whisper {
     private static webgpuFailed = false;
     private static readonly CHUNK_STALL_RECOVERY_COOLDOWN_MS = 10_000;
     private static readonly MAX_CHUNK_STALL_RECOVERIES = 4;
+    private static readonly MAX_CONSECUTIVE_INFERENCE_TIMEOUTS = 2;
     private gpuCrashed = false; // GPU device loss — cleared on next transcription attempt
     private static crashRecoveries = 0;
     private static readonly MAX_CRASH_RECOVERIES = 10;
@@ -351,6 +424,7 @@ export class Whisper {
     private autoStartTimer: number | null = null;
     private fetchAbortController: AbortController | null = null;
     private chunkStallRecoveryCount = 0;
+    private consecutiveInferenceTimeouts = 0;
     private lastChunkStallRecoveryAt = 0;
     private hasWorkerChunkActivity = false;
 
@@ -539,7 +613,17 @@ export class Whisper {
             }
             if (key !== 'forceWhisperWasm' && key !== 'whisperModel'
                 && key !== 'whisperModelPreset' && key !== 'whisperLanguage'
-                && key !== 'whisperVadMode') return;
+                && key !== 'whisperLiveChunkSec' && key !== 'whisperLiveOverlapSec'
+                && key !== 'whisperAutoWarmup') return;
+            if (key === 'whisperAutoWarmup') {
+                this.autoWarmupStarted = false;
+                const settings = this.getWhisperSettings();
+                if (value === true && settings.autoWarmup && !this.transcribing) {
+                    this.autoWarmupStarted = true;
+                    this.initWorker(settings);
+                }
+                return;
+            }
             const forceWasmEnabled = key === 'forceWhisperWasm' && value === true;
             if (key === 'forceWhisperWasm') {
                 Logger.log(`[Whisper] Force WASM ${forceWasmEnabled ? 'enabled' : 'disabled'} via settings`);
@@ -553,17 +637,35 @@ export class Whisper {
                 this.clearPresetSafetyFallbackNotice();
             }
 
-            if (!this.worker) return;
             const wasTranscribing = this.transcribing;
             if (wasTranscribing) {
                 this.stopTranscription('whisper-config-change');
             }
-            this.resetWorker(`config-change-${key}`);
+            if (this.worker) {
+                this.resetWorker(`config-change-${key}`);
+            } else {
+                // A previous idle unload may have removed the worker while the
+                // Settings panel still held a 100% ready state for the old
+                // model. A model-affecting change always invalidates that UI.
+                this.modelReady = false;
+                AppStore.setWhisperState({
+                    isTranscribing: false,
+                    isLoadingModel: false,
+                    progress: 0,
+                    progressMessage: '',
+                });
+            }
 
             if (wasTranscribing) {
                 const audio = getAudioElement();
                 if (audio && !audio.paused) {
                     this.startTranscription().catch(err => Logger.error('[Whisper] Restart after settings change failed:', err));
+                }
+            } else {
+                const settings = this.getWhisperSettings();
+                if (settings.autoWarmup) {
+                    this.autoWarmupStarted = true;
+                    this.initWorker(settings);
                 }
             }
         }));
@@ -756,6 +858,7 @@ export class Whisper {
         this.loggedTranscriptKeys.clear();
         this.lastSegmentEnd = 0;
         this.clearChunkTracking({ resetRecovery: true, resetChunkCounter: true });
+        this.consecutiveInferenceTimeouts = 0;
         this.finalizeOnIdle = false;
         this.resetTranslationAheadState();
         this.pcmBuffer = null;
@@ -765,8 +868,11 @@ export class Whisper {
         this.pcmSampleLength = 0;
         this.liveCaptureEnded = false;
         this.transcribedUpTo = 0;
+        this.completedUpTo = 0;
+        this.droppedBufferSeconds = 0;
 
         const settings = this.getWhisperSettings();
+        this.currentCacheSource = src;
         this.currentCacheIdentity = this.buildCacheIdentity(src, settings);
         this.currentCacheKey = this.buildCacheKey(src, settings);
 
@@ -810,6 +916,7 @@ export class Whisper {
                     // Incomplete cache — continue transcription from where we left off
                     Logger.debug('[Whisper] Cache incomplete, continuing transcription from', this.lastSegmentEnd.toFixed(1) + 's');
                     this.transcribedUpTo = Math.max(0, this.lastSegmentEnd - 2);
+                    this.completedUpTo = this.lastSegmentEnd;
                     this.lastTranslatedSegmentCount = this.segments.length;
                     this.translateAheadUpTo = this.lastSegmentEnd;
                 }
@@ -964,6 +1071,8 @@ export class Whisper {
         this.pcmBufferStartTime = 0;
         this.pcmSampleLength = 0;
         this.transcribedUpTo = 0;
+        this.completedUpTo = 0;
+        this.droppedBufferSeconds = 0;
 
         this.persistCache(shouldFinalize);
         this.scheduleIdleUnload();
@@ -1010,7 +1119,10 @@ export class Whisper {
         this.chunkSendTimes.clear();
         this.chunkGenerations.clear();
         this.chunkOffsets.clear();
+        this.chunkAdvances.clear();
+        this.chunkStartedAt.clear();
         this.chunkLastActivity.clear();
+        this.provisionalChunkText.clear();
         this.hasWorkerChunkActivity = false;
         if (resetRecovery) {
             this.chunkStallRecoveryCount = 0;
@@ -1018,6 +1130,8 @@ export class Whisper {
         }
         if (resetChunkCounter) {
             this.nextChunkId = 0;
+            this.completedUpTo = this.pcmBufferStartTime;
+            this.droppedBufferSeconds = 0;
         }
     }
 
@@ -1032,7 +1146,13 @@ export class Whisper {
             this.chunkLastActivity.set(chunkId, performance.now());
         }
         this.hasWorkerChunkActivity = true;
-        this.chunkStallRecoveryCount = 0;
+    }
+
+    private markChunkStarted(chunkId?: number): void {
+        if (typeof chunkId !== 'number' || !this.isCurrentChunkMessage(chunkId)) return;
+        const now = performance.now();
+        this.chunkStartedAt.set(chunkId, now);
+        this.chunkLastActivity.set(chunkId, now);
     }
 
     private dropChunk(chunkId?: number): void {
@@ -1041,7 +1161,53 @@ export class Whisper {
         this.chunkSendTimes.delete(chunkId);
         this.chunkGenerations.delete(chunkId);
         this.chunkOffsets.delete(chunkId);
+        this.chunkAdvances.delete(chunkId);
+        this.chunkStartedAt.delete(chunkId);
         this.chunkLastActivity.delete(chunkId);
+        this.provisionalChunkText.delete(chunkId);
+    }
+
+    private emitProvisionalChunkUpdate(chunkId: number | undefined, partialText: string | undefined): void {
+        if (typeof chunkId !== 'number' || !this.transcribing || !this.isCurrentChunkMessage(chunkId)) return;
+        const generation = this.chunkGenerations.get(chunkId);
+        if (generation !== this.transcriptionGeneration) return;
+
+        const text = String(partialText || '').replace(/\s+/g, ' ').trim();
+        if (!text) return;
+        const previous = this.provisionalChunkText.get(chunkId);
+        if (previous?.generation === generation && previous.text === text) return;
+
+        const offset = this.chunkOffsets.get(chunkId);
+        const advance = this.chunkAdvances.get(chunkId);
+        if (!Number.isFinite(offset) || !Number.isFinite(advance) || Number(advance) <= 0) return;
+        const chunkStart = Math.max(0, Number(offset));
+        const chunkEnd = chunkStart + Number(advance);
+        const availableEnd = this.pcmDuration > chunkStart
+            ? Math.min(chunkEnd, this.pcmDuration)
+            : chunkEnd;
+        // Finalized timestamps always win. The provisional lane starts after
+        // existing coverage so consumers never see overlapping duplicate rows.
+        const safeStart = Math.max(chunkStart, this.lastSegmentEnd);
+        if (availableEnd <= safeStart) return;
+
+        this.provisionalChunkText.set(chunkId, { generation, text });
+        const provisional: WhisperSegment = {
+            start: safeStart,
+            end: availableEnd,
+            text,
+        };
+        EventBus.emit('whisper:update', {
+            text,
+            // Deliberately do not merge this segment into this.segments.
+            // LearnerMode can display/pre-translate the event payload while
+            // cache persistence remains finalized-timestamp-only.
+            segments: [...this.segments, provisional].sort((a, b) => a.start - b.start),
+            final: false,
+            sourceLanguageHint: getWhisperSourceLanguageHint(this.getWhisperSettings().language),
+            chunkIndex: chunkId,
+            live: true,
+            source: 'heartbeat',
+        });
     }
 
     private resetState(reason: string): void {
@@ -1053,6 +1219,7 @@ export class Whisper {
         this.loggedTranscriptKeys.clear();
         this.currentCacheKey = null;
         this.currentCacheIdentity = null;
+        this.currentCacheSource = null;
         this.finalizeOnIdle = false;
         this.modelLoadingKey = '';
         this.resetTranslationAheadState();
@@ -1063,6 +1230,8 @@ export class Whisper {
         this.pcmBufferStartTime = 0;
         this.pcmSampleLength = 0;
         this.transcribedUpTo = 0;
+        this.completedUpTo = 0;
+        this.droppedBufferSeconds = 0;
         this.stopProcessingLoop();
         this.clearStatus();
     }
@@ -1206,6 +1375,8 @@ export class Whisper {
         this.pcmBuffer = new Float32Array(INITIAL_LIVE_PCM_SECONDS * TARGET_SAMPLE_RATE);
         this.pcmSourceUrl = null;
         this.transcribedUpTo = Math.max(this.pcmBufferStartTime, cursorTime);
+        this.completedUpTo = this.transcribedUpTo;
+        this.droppedBufferSeconds = 0;
         this.finalizeOnIdle = false;
         this.liveCaptureEnded = false;
     }
@@ -1217,17 +1388,21 @@ export class Whisper {
         let incoming = samples;
         if (incoming.length > maxSamples) incoming = incoming.subarray(incoming.length - maxSamples);
 
+        let unqueuedDropSeconds = 0;
         const requiredDrop = Math.max(0, this.pcmSampleLength + incoming.length - maxSamples);
         if (requiredDrop > 0) {
             // Trim in batches so a full buffer does not shift ~11 MB on every
             // 4096-sample callback.
             const trimBatch = LIVE_PCM_TRIM_SECONDS * TARGET_SAMPLE_RATE;
             const droppedSamples = Math.min(this.pcmSampleLength, Math.max(requiredDrop, trimBatch));
+            const previousCursor = this.transcribedUpTo;
             this.pcmBuffer.copyWithin(0, droppedSamples, this.pcmSampleLength);
             this.pcmSampleLength -= droppedSamples;
             this.pcmBufferStartTime += droppedSamples / TARGET_SAMPLE_RATE;
-            // A slow CPU must not accumulate unbounded work. Stay near live
-            // playback after the capped window is exhausted.
+            // The bounded live window cannot retain audio forever. If inference
+            // has not even queued the trimmed range, expose that gap before
+            // advancing the cursor instead of silently pretending it completed.
+            unqueuedDropSeconds = Math.max(0, this.pcmBufferStartTime - previousCursor);
             this.transcribedUpTo = Math.max(this.transcribedUpTo, this.pcmBufferStartTime);
         }
 
@@ -1243,6 +1418,61 @@ export class Whisper {
         this.pcmBuffer.set(incoming, this.pcmSampleLength);
         this.pcmSampleLength += incoming.length;
         this.pcmDuration = this.pcmBufferStartTime + this.pcmSampleLength / TARGET_SAMPLE_RATE;
+        if (unqueuedDropSeconds > 0) {
+            this.droppedBufferSeconds += unqueuedDropSeconds;
+            this.reportLiveLag('capture-buffer-trim', unqueuedDropSeconds);
+        }
+    }
+
+    private reportLiveLag(reason: string, droppedSeconds = 0): void {
+        const total = Math.max(this.pcmDuration, this.audio?.currentTime || 0);
+        const current = Math.max(0, Math.min(total, this.completedUpTo));
+        const message = reason === 'capture-buffer-trim' && droppedSeconds > 0
+            ? I18n.format('whisperLagDropped', {
+                seconds: Math.max(1, Math.ceil(droppedSeconds)),
+            })
+            : I18n.format('whisperChunkProgress', {
+                current: Math.round(current),
+                total: Math.round(total),
+            });
+        Logger.warn('[Whisper] Live transcription is behind playback', {
+            reason,
+            droppedSeconds: Math.round(droppedSeconds * 100) / 100,
+            droppedBufferSeconds: Math.round(this.droppedBufferSeconds * 100) / 100,
+            completedUpTo: this.completedUpTo,
+            availableUpTo: this.pcmDuration,
+        });
+        EventBus.emit('whisper:progress', { percent: 0, message, stage: 'transcribing' });
+        AppStore.setWhisperState({
+            isTranscribing: this.transcribing,
+            isLoadingModel: false,
+            progress: 0,
+            progressMessage: message,
+        });
+    }
+
+    /**
+     * Resume cursors can point behind the bounded live PCM window when a slow
+     * inference is replaced after capture has already trimmed old samples.
+     * That audio is no longer retryable, so make the loss explicit instead of
+     * silently presenting the clamped gap as transcribed.
+     */
+    private clampResumeToAvailablePcm(requestedResume: number): {
+        resumeFrom: number;
+        droppedSeconds: number;
+    } {
+        const normalizedResume = Number.isFinite(requestedResume)
+            ? Math.max(0, requestedResume)
+            : this.pcmBufferStartTime;
+        const droppedSeconds = Math.max(0, this.pcmBufferStartTime - normalizedResume);
+        if (droppedSeconds > 0) {
+            this.droppedBufferSeconds += droppedSeconds;
+            this.reportLiveLag('capture-buffer-trim', droppedSeconds);
+        }
+        return {
+            resumeFrom: Math.max(normalizedResume, this.pcmBufferStartTime),
+            droppedSeconds,
+        };
     }
 
     private isHlsUrl(url: string): boolean {
@@ -1779,9 +2009,7 @@ export class Whisper {
         const chunkSamples = Math.floor(chunkLengthS * TARGET_SAMPLE_RATE);
         const playhead = audio.currentTime;
 
-        if (this.transcribedUpTo < this.pcmBufferStartTime) {
-            this.transcribedUpTo = this.pcmBufferStartTime;
-        }
+        this.transcribedUpTo = this.clampResumeToAvailablePcm(this.transcribedUpTo).resumeFrom;
 
         // Don't process past currently available audio. A live buffer is not
         // complete until the media element actually ends.
@@ -1805,16 +2033,6 @@ export class Whisper {
         // chunk is padded below so short tracks are still transcribed.
         if (this.liveCaptureActive && !this.liveCaptureEnded && chunk.length < chunkSamples) return;
 
-        // Skip silence
-        if (settings.silenceThreshold > 0 && this.computeRms(chunk) < settings.silenceThreshold) {
-            const availableSeconds = chunk.length / TARGET_SAMPLE_RATE;
-            const isFinalAvailableChunk = endSample >= availableSamples
-                && (!this.liveCaptureActive || this.liveCaptureEnded);
-            if (isFinalAvailableChunk) this.transcribedUpTo = this.pcmDuration;
-            else this.transcribedUpTo += Math.max(0.01, availableSeconds - overlapSec);
-            return;
-        }
-
         // Pad final chunk if needed
         if (chunk.length < chunkSamples) {
             const padded = new Float32Array(chunkSamples);
@@ -1824,8 +2042,8 @@ export class Whisper {
 
         // Chunks near the playhead get high priority for responsive scrubbing
         const distFromPlayhead = Math.abs(this.transcribedUpTo - playhead);
-        const priority = distFromPlayhead <= 30 ? 1 : 0;
-        this.sendChunk(chunk, this.transcribedUpTo, settings, priority, chunkLengthS, overlapSec);
+        const priority = distFromPlayhead <= 30 ? 0 : 1;
+        this.sendChunk(chunk, this.transcribedUpTo, settings, priority, chunkLengthS, overlapSec, distFromPlayhead);
         this.transcribedUpTo += chunkLengthS - overlapSec;
     }
 
@@ -1839,14 +2057,14 @@ export class Whisper {
     }
 
     private checkForStalledChunks(settings: WhisperSettings): void {
-        if (!this.transcribing || this.pendingChunks <= 0 || this.chunkSendTimes.size === 0) return;
+        if (!this.transcribing || this.pendingChunks <= 0 || this.chunkStartedAt.size === 0) return;
         const timeoutMs = this.getChunkStallTimeoutMs(settings);
         const now = performance.now();
         let stalledChunkId: number | null = null;
         let stalledForMs = 0;
 
-        for (const [chunkId, sentAt] of this.chunkSendTimes.entries()) {
-            const lastActivity = this.chunkLastActivity.get(chunkId) ?? sentAt;
+        for (const [chunkId, startedAt] of this.chunkStartedAt.entries()) {
+            const lastActivity = this.chunkLastActivity.get(chunkId) ?? startedAt;
             const ageMs = now - lastActivity;
             if (ageMs > stalledForMs) {
                 stalledForMs = ageMs;
@@ -1909,9 +2127,128 @@ export class Whisper {
         this.clearChunkTracking({ resetRecovery: false, resetChunkCounter: false });
         // Don't rewind into regions we've already transcribed — existing segments
         // are still valid and re-processing creates duplicates.
-        this.transcribedUpTo = Math.max(resumeFrom, this.lastSegmentEnd);
+        this.transcribedUpTo = this.clampResumeToAvailablePcm(
+            Math.max(resumeFrom, this.lastSegmentEnd),
+        ).resumeFrom;
         this.modelReady = false;
         this.initWorker(this.getWhisperSettings());
+    }
+
+    private recoverFromPoisonedWorker(message: WorkerPoisonedMessage): void {
+        const reason = message.data?.reason || 'worker-poisoned';
+        if (!this.worker) return;
+        if (!this.transcribing) {
+            this.resetWorker(reason);
+            return;
+        }
+
+        this.consecutiveInferenceTimeouts += 1;
+        const queuedOffsets = Array.from(this.chunkOffsets.values());
+        const requestedResume = queuedOffsets.length > 0
+            ? Math.min(...queuedOffsets)
+            : Math.max(this.pcmBufferStartTime, this.transcribedUpTo - SEEK_BACKFILL_SEC);
+        const { resumeFrom, droppedSeconds } = this.clampResumeToAvailablePcm(requestedResume);
+        Logger.warn('[Whisper] Replacing poisoned inference worker without stopping the live run', {
+            reason,
+            pendingChunks: this.pendingChunks,
+            resumeFrom,
+            consecutiveTimeouts: this.consecutiveInferenceTimeouts,
+        });
+
+        if (this.consecutiveInferenceTimeouts >= Whisper.MAX_CONSECUTIVE_INFERENCE_TIMEOUTS) {
+            const stalledMessage = I18n.t('whisperProcessingStalled');
+            this.resetWorker('inference-timeout-terminal');
+            this.stopTranscription('inference-timeout-terminal');
+            AppStore.setWhisperState({
+                isTranscribing: false,
+                isLoadingModel: false,
+                progress: 0,
+                progressMessage: stalledMessage,
+            });
+            this.showStatus(`<span class="whisper-error-indicator">${this.escapeHtml(stalledMessage)}</span>`);
+            return;
+        }
+
+        if (message.data?.gpuFallback) {
+            const firstFailure = !Whisper.webgpuFailed;
+            this.markWebgpuFailed('poisoned-inference-timeout');
+            this.modelOverride = FALLBACK_MODEL;
+            if (firstFailure) EventBus.emit('webgpu:failed', { source: 'whisper' });
+        }
+
+        this.resetWorker(reason);
+        this.transcribedUpTo = resumeFrom;
+        this.modelReady = false;
+        // Preserve the explicit dropped-audio notice when the requested retry
+        // range has already aged out of the bounded capture buffer.
+        if (droppedSeconds === 0) {
+            this.dispatchProgress(I18n.t('whisperRecovering'), 0, 'transcribing');
+        }
+        this.initWorker(this.getWhisperSettings());
+    }
+
+    private recoverFromFailedWorkerLoad(message: WorkerLoadFailedMessage): void {
+        if (!this.worker) return;
+        if (typeof message.chunkId === 'number' && !this.isCurrentChunkMessage(message.chunkId)) return;
+
+        const backend = message.backend || message.data?.backend || this.workerBackend;
+        const errorMessage = message.data?.message || 'Whisper model session creation failed';
+        const attemptedModel = message.model
+            || message.data?.model
+            || this.getWhisperSettings().model;
+        const attemptedDtype = message.dtype || message.data?.dtype || '';
+
+        Logger.error('[Whisper] Worker model load failed', {
+            backend: backend || 'unknown',
+            model: attemptedModel,
+            dtype: attemptedDtype || 'unknown',
+            sessionPoisoned: message.data?.sessionPoisoned === true,
+            message: errorMessage,
+        });
+
+        if (backend === 'webgpu') {
+            const firstFailure = !Whisper.webgpuFailed;
+            this.markWebgpuFailed('model-load-failed');
+            this.modelOverride = FALLBACK_MODEL;
+            if (firstFailure) EventBus.emit('webgpu:failed', { source: 'whisper' });
+            EventBus.emit('whisper:fallback', {
+                originalModel: attemptedModel,
+                fallbackModel: FALLBACK_MODEL,
+                reason: errorMessage,
+            });
+
+            // Transformers.js serializes browser session creation through a
+            // module-level promise. Once session creation rejects, neither
+            // dispose nor another pipeline() call can make that worker healthy.
+            // Terminate it immediately and let the replacement receive the
+            // existing skip-webgpu policy before its init message.
+            this.resetWorker('webgpu-model-load-failed', true);
+            this.dispatchProgress(I18n.format('whisperFallbackModel', {
+                model: FALLBACK_MODEL.split('/').pop() || FALLBACK_MODEL,
+            }), 10, 'model');
+            this.initWorker(this.getWhisperSettings());
+            return;
+        }
+
+        // A failed WASM (or unclassified) load is already the bounded safety
+        // backend. Retrying the same poisoned module would loop, so stop with
+        // the existing localized memory/network guidance.
+        const reason = backend === 'wasm'
+            ? 'wasm-model-load-failed'
+            : 'unknown-model-load-failed';
+        const wasTranscribing = this.transcribing;
+        this.resetWorker(reason, true);
+        if (wasTranscribing) this.stopTranscription(reason);
+
+        const userMessage = I18n.t('whisperModelLoadStalled');
+        EventBus.emit('whisper:error', { message: userMessage });
+        AppStore.setWhisperState({
+            isTranscribing: false,
+            isLoadingModel: false,
+            progress: 0,
+            progressMessage: userMessage,
+        });
+        this.showStatus(`<span class="whisper-error-indicator">${this.escapeHtml(userMessage)}</span>`);
     }
 
     private seekDebounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -2166,7 +2503,7 @@ export class Whisper {
         this.workerInitPending = null;
     }
 
-    private resetWorker(reason: string): void {
+    private resetWorker(reason: string, terminateImmediately = false): void {
         this.releaseLoadLease();
         this.clearModelLoadTimer();
         this.workerInitGeneration++;
@@ -2179,9 +2516,16 @@ export class Whisper {
             this.worker = null;
             dyingWorker.onmessage = null;
             dyingWorker.onerror = null;
-            // Send reset so worker can dispose GPU pipeline before we kill it
-            try { dyingWorker.postMessage({ type: 'reset' }); } catch { /* ignore */ }
-            setTimeout(() => { try { dyingWorker.terminate(); } catch { /* ignore */ } }, 500);
+            if (terminateImmediately) {
+                // Session-creation failures can leave unreachable partial ONNX
+                // sessions and a rejected module-level initialization chain.
+                // There is no usable pipeline to dispose in that case.
+                try { dyingWorker.terminate(); } catch { /* ignore */ }
+            } else {
+                // Healthy pipelines get a short cleanup window before termination.
+                try { dyingWorker.postMessage({ type: 'reset' }); } catch { /* ignore */ }
+                setTimeout(() => { try { dyingWorker.terminate(); } catch { /* ignore */ } }, 500);
+            }
         }
         // Clear timers that reference the dead worker
         if (this.gpuRecoveryTimer) { clearTimeout(this.gpuRecoveryTimer); this.gpuRecoveryTimer = null; }
@@ -2189,7 +2533,15 @@ export class Whisper {
         this.modelLoadingKey = '';
         this.modelReady = false;
         this.workerBackend = null;
+        this.effectiveModelId = null;
+        this.effectiveDtype = null;
         this.clearChunkTracking({ resetRecovery: false, resetChunkCounter: false });
+        AppStore.setWhisperState({
+            isTranscribing: this.transcribing,
+            isLoadingModel: false,
+            progress: 0,
+            progressMessage: '',
+        });
         Logger.warn('[Whisper] Worker reset:', reason);
     }
 
@@ -2335,6 +2687,7 @@ export class Whisper {
         priority = 0,
         chunkLengthS = settings.chunkLengthS,
         strideLengthS = settings.strideLengthS,
+        playheadDistance = Number.POSITIVE_INFINITY,
     ): void {
         if (!this.worker) return;
         const chunkId = this.nextChunkId++;
@@ -2343,6 +2696,7 @@ export class Whisper {
         this.chunkSendTimes.set(chunkId, sentAt);
         this.chunkLastActivity.set(chunkId, sentAt);
         this.chunkOffsets.set(chunkId, timeOffset);
+        this.chunkAdvances.set(chunkId, Math.max(0.01, chunkLengthS - strideLengthS));
         this.chunkGenerations.set(chunkId, this.transcriptionGeneration);
         Logger.debug(`[Whisper] Sending chunk ${chunkId}, offset=${timeOffset.toFixed(2)}s, priority=${priority}, samples=${audio.length}`);
         this.worker!.postMessage({
@@ -2357,6 +2711,7 @@ export class Whisper {
             strideLengthS,
             chunkId,
             priority,
+            playheadDistance,
             updateIntervalMs: settings.workerUpdateIntervalMs,
             inputRms: this.computeRms(audio),
         });
@@ -2367,6 +2722,7 @@ export class Whisper {
 
         switch (message.status) {
             case 'initiate':
+                if (typeof message.chunkId === 'number' && !this.isCurrentChunkMessage(message.chunkId)) return;
                 if (message.backend) {
                     this.workerBackend = message.backend === 'wasm' ? 'wasm' : 'webgpu';
                     this.armModelLoadTimer(this.getWhisperSettings());
@@ -2378,12 +2734,20 @@ export class Whisper {
                 break;
 
             case 'ready':
+                if (typeof message.chunkId === 'number' && !this.isCurrentChunkMessage(message.chunkId)) return;
                 // Model ready - clear loading status and hide transcribing indicator
                 this.settleWorkerInitSentinel();
                 this.releaseLoadLease();
                 this.clearModelLoadTimer();
                 this.modelReady = true;
-                SharedCache.set(CacheKeys.whisperModelReady(this.getWhisperSettings().model), true, MODEL_READY_TTL_MS);
+                if (message.backend) {
+                    this.workerBackend = message.backend === 'wasm' ? 'wasm' : 'webgpu';
+                }
+                if (message.model && message.model !== this.getWhisperSettings().model) {
+                    this.modelOverride = message.model;
+                }
+                this.adoptEffectiveWorkerModel(message.model, message.dtype);
+                SharedCache.set(CacheKeys.whisperModelReady(this.getEffectiveModelId()), true, MODEL_READY_TTL_MS);
                 EventBus.emit('whisper:progress', { percent: 100, message: I18n.t('downloadWhisperModelReady'), stage: 'ready' });
                 if (this.transcribing) {
                     this.dispatchProgress(I18n.t('whisperTranscribing'), 0, 'transcribing');
@@ -2397,6 +2761,7 @@ export class Whisper {
                 break;
 
             case 'progress': {
+                if (typeof message.chunkId === 'number' && !this.isCurrentChunkMessage(message.chunkId)) return;
                 if (this.modelReady) return;
                 this.armModelLoadTimer(this.getWhisperSettings());
                 const fileName = message.file?.split('/').pop() || message.file || '';
@@ -2422,7 +2787,12 @@ export class Whisper {
 
             case 'fallback': {
                 const fallback = message as WorkerFallbackMessage;
+                if (typeof fallback.chunkId === 'number' && !this.isCurrentChunkMessage(fallback.chunkId)) return;
                 this.modelOverride = fallback.fallbackModel;
+                if (fallback.backend) {
+                    this.workerBackend = fallback.backend === 'wasm' ? 'wasm' : 'webgpu';
+                }
+                this.adoptEffectiveWorkerModel(fallback.fallbackModel, fallback.dtype);
                 this.armModelLoadTimer(this.getWhisperSettings());
                 const fallbackModelShort = fallback.fallbackModel.split('/').pop() || fallback.fallbackModel;
                 Logger.warn('[Whisper] Falling back from', fallback.originalModel, 'to', fallback.fallbackModel, '- reason:', fallback.reason);
@@ -2434,6 +2804,80 @@ export class Whisper {
                     fallbackModel: fallback.fallbackModel,
                     reason: fallback.reason
                 });
+                break;
+            }
+
+            case 'queued':
+                // Queued work deliberately has no stall timestamp. The worker
+                // owns one replaceable waiting window and will emit started when
+                // inference actually begins.
+                break;
+
+            case 'started': {
+                if (!this.transcribing || !this.isCurrentChunkMessage(message.chunkId)) return;
+                this.markChunkStarted(message.chunkId);
+                this.markChunkActivity(message.chunkId);
+                // Once one inference is genuinely active, keep at most one
+                // replaceable look-ahead window queued behind it.
+                this.maybeProcessNextChunk();
+                break;
+            }
+
+            case 'heartbeat': {
+                if (!this.transcribing || !this.isCurrentChunkMessage(message.chunkId)) return;
+                this.markChunkActivity(message.chunkId);
+                if (message.data?.partialText) {
+                    this.updateTranscribingProgress();
+                    this.emitProvisionalChunkUpdate(message.chunkId, message.data.partialText);
+                }
+                break;
+            }
+
+            case 'dropped': {
+                if (!this.transcribing || !this.isCurrentChunkMessage(message.chunkId)) return;
+                if (message.data?.reason === 'worker-poisoned') {
+                    this.recoverFromPoisonedWorker({
+                        status: 'worker-poisoned',
+                        data: { reason: 'worker-poisoned' },
+                    });
+                    break;
+                }
+                const droppedChunkId = message.chunkId;
+                const offset = typeof droppedChunkId === 'number'
+                    ? this.chunkOffsets.get(droppedChunkId)
+                    : undefined;
+                const advance = typeof droppedChunkId === 'number'
+                    ? this.chunkAdvances.get(droppedChunkId)
+                    : undefined;
+                this.dropChunk(droppedChunkId);
+                let expiredAudioSeconds = 0;
+                if (typeof offset === 'number') {
+                    // Requeue the unprocessed range on the next scheduler pass.
+                    const requestedResume = Math.max(
+                        this.lastSegmentEnd,
+                        Math.min(this.transcribedUpTo, offset),
+                    );
+                    const clamped = this.clampResumeToAvailablePcm(requestedResume);
+                    this.transcribedUpTo = clamped.resumeFrom;
+                    expiredAudioSeconds = clamped.droppedSeconds;
+                }
+                if (expiredAudioSeconds === 0) {
+                    this.reportLiveLag(
+                        message.data?.reason || 'worker-queue-drop',
+                        typeof advance === 'number' ? advance : 0,
+                    );
+                }
+                this.maybeProcessNextChunk();
+                break;
+            }
+
+            case 'worker-poisoned': {
+                this.recoverFromPoisonedWorker(message);
+                break;
+            }
+
+            case 'load-failed': {
+                this.recoverFromFailedWorkerLoad(message);
                 break;
             }
 
@@ -2478,7 +2922,24 @@ export class Whisper {
                 if (!this.transcribing) return;
                 const complete = message as WorkerCompleteMessage;
                 if (!this.isCurrentChunkMessage(complete.chunkId)) return;
+                const completeOffset = typeof complete.chunkId === 'number'
+                    ? this.chunkOffsets.get(complete.chunkId)
+                    : undefined;
+                const completeAdvance = typeof complete.chunkId === 'number'
+                    ? this.chunkAdvances.get(complete.chunkId)
+                    : undefined;
                 this.dropChunk(complete.chunkId);
+                // A completed inference proves the replacement worker/backend
+                // is healthy. Only now clear consecutive recovery accounting;
+                // "started" and token heartbeats can precede another timeout.
+                this.chunkStallRecoveryCount = 0;
+                this.consecutiveInferenceTimeouts = 0;
+                if (typeof completeOffset === 'number' && typeof completeAdvance === 'number') {
+                    this.completedUpTo = Math.max(
+                        this.completedUpTo,
+                        Math.min(this.pcmDuration, completeOffset + completeAdvance),
+                    );
+                }
                 this.markChunkActivity();
                 // Worker sends raw chunks + fullText; host processes
                 const fullText = complete.data?.text;
@@ -2553,6 +3014,7 @@ export class Whisper {
             }
 
             case 'gpu-degraded': {
+                if (typeof message.chunkId === 'number' && !this.isCurrentChunkMessage(message.chunkId)) return;
                 // GPU partially failed (e.g. createBuffer during word timestamps) but Whisper
                 // recovered with segment timestamps. Keep this local to Whisper and avoid
                 // escalating to global device-loss, which can unnecessarily disable other workers.
@@ -2562,6 +3024,14 @@ export class Whisper {
             }
 
             case 'error': {
+                const errorChunkId = (message as WorkerErrorMessage).chunkId;
+                if (typeof errorChunkId === 'number' && !this.isCurrentChunkMessage(errorChunkId)) {
+                    Logger.debug('[Whisper] Ignoring stale chunk error:', {
+                        chunkId: errorChunkId,
+                        message: message.data?.message,
+                    });
+                    break;
+                }
                 this.releaseLoadLease();
                 // If GPU already crashed fatally, don't overwrite the persistent crash message
                 if (this.gpuCrashed) {
@@ -2569,7 +3039,6 @@ export class Whisper {
                     break;
                 }
                 const errMsg = message.data?.message || I18n.t('whisperUnknownError');
-                const errorChunkId = (message as WorkerErrorMessage).chunkId;
                 if (typeof errorChunkId === 'number') {
                     this.dropChunk(errorChunkId);
                 }
@@ -3095,6 +3564,7 @@ export class Whisper {
         // Pre-populate Whisper state so startTranscription() finds segments ready
         this.segments = cached.segments;
         this.lastSegmentEnd = cached.segments[cached.segments.length - 1]?.end || 0;
+        this.currentCacheSource = src;
         this.currentCacheKey = key;
         this.currentCacheIdentity = identity;
 
@@ -3113,7 +3583,7 @@ export class Whisper {
 
     /** Build the identity string (pre-hash) for a transcript cache entry. */
     private buildCacheIdentity(src: string, settings: WhisperSettings): string {
-        return `${src}|${settings.model}|${settings.subtask}|${settings.language}|vad:${settings.vadMode}`;
+        return `${src}|${settings.model}|${settings.subtask}|${settings.language}`;
     }
 
     private buildCacheKey(src: string, settings: WhisperSettings): string {
@@ -3126,12 +3596,34 @@ export class Whisper {
         const now = Date.now();
         if (!complete && now - this.lastPersistAt < 30_000) return;
         this.lastPersistAt = now;
-        const settings = this.getWhisperSettings();
+        const configuredSettings = this.getWhisperSettings();
+        const settings: WhisperSettings = {
+            ...configuredSettings,
+            model: this.effectiveModelId || configuredSettings.model,
+        };
         if (!settings.cacheTranscripts) return;
 
         const existing = SharedCache.get<CachedTranscript>(this.currentCacheKey);
+        const currentText = this.segments.map((s) => s.text).join(' ');
+        const currentCoverageEnd = this.segments.reduce((max, segment) => Math.max(max, segment.end || 0), 0);
+        const existingCoverageEnd = existing?.segments?.reduce(
+            (max, segment) => Math.max(max, segment.end || 0),
+            0,
+        ) || 0;
+        if (existing && (
+            (existing.complete && !complete)
+            || existingCoverageEnd > currentCoverageEnd + 1
+        )) {
+            Logger.warn('[Whisper] Preserving a more complete transcript at the effective-model cache key', {
+                existingComplete: !!existing.complete,
+                existingCoverageEnd,
+                currentCoverageEnd,
+            });
+            return;
+        }
+        const canReuseExistingMetadata = existing?.text === currentText;
         const payload: CachedTranscript = {
-            text: this.segments.map((s) => s.text).join(' '),
+            text: currentText,
             segments: this.segments,
             model: settings.model,
             subtask: settings.subtask,
@@ -3139,8 +3631,8 @@ export class Whisper {
             createdAt: Date.now(),
             lrc: buildLrcFromSegments(this.segments),
             vtt: buildVttFromSegments(this.segments),
-            complete: complete || existing?.complete,
-            translations: existing?.translations,
+            complete,
+            translations: canReuseExistingMetadata ? existing?.translations : undefined,
             sourceIdentity: this.currentCacheIdentity || undefined,
         };
 
@@ -3403,7 +3895,47 @@ export class Whisper {
      * in sync with preset selection and safety fallbacks.
      */
     public getEffectiveModelId(): string {
-        return this.getWhisperSettings().model;
+        return this.effectiveModelId || this.getWhisperSettings().model;
+    }
+
+    /**
+     * Record the model that the worker actually loaded. A worker may fall back
+     * after the host has already created a cache key for the requested model;
+     * re-key immediately so tiny/WASM output can never be stored as small (or
+     * another requested preset).
+     */
+    private adoptEffectiveWorkerModel(model?: string | null, dtype?: string): void {
+        const normalizedModel = String(model || '').trim();
+        if (!normalizedModel) return;
+        const previousModel = this.effectiveModelId;
+        this.effectiveModelId = normalizedModel;
+        this.effectiveDtype = String(dtype || '').trim() || null;
+
+        if (previousModel !== normalizedModel) {
+            Logger.log('[Whisper] Effective worker model selected', {
+                requestedModel: this.getWhisperSettings().model,
+                effectiveModel: normalizedModel,
+                backend: this.workerBackend,
+                dtype: this.effectiveDtype,
+            });
+        }
+
+        if (!this.currentCacheSource) return;
+        const configuredSettings = this.getWhisperSettings();
+        const effectiveSettings: WhisperSettings = {
+            ...configuredSettings,
+            model: normalizedModel,
+        };
+        const identity = this.buildCacheIdentity(this.currentCacheSource, effectiveSettings);
+        const key = this.buildCacheKey(this.currentCacheSource, effectiveSettings);
+        if (identity !== this.currentCacheIdentity) {
+            Logger.warn('[Whisper] Re-keying transcript cache for effective worker model', {
+                previousIdentity: this.currentCacheIdentity,
+                effectiveIdentity: identity,
+            });
+            this.currentCacheIdentity = identity;
+            this.currentCacheKey = key;
+        }
     }
 
     /**
@@ -3472,6 +4004,7 @@ export class Whisper {
             workerUpdateIntervalMs = Math.max(workerUpdateIntervalMs, 350);
             preferLowPowerAdapter = true;
         }
+        maxPendingChunks = Math.min(DEFAULT_MAX_PENDING_CHUNKS, Math.max(1, maxPendingChunks));
 
         const configuredModel = String(Config.get('whisperModel') || DEFAULT_MODEL).trim() || DEFAULT_MODEL;
         const presetRaw = String(Config.get('whisperModelPreset') || 'auto').trim().toLowerCase();
@@ -3517,10 +4050,21 @@ export class Whisper {
         const language = resolveWhisperLanguage(configuredLanguage, currentWork);
         const configuredTask = String(Config.get('whisperTask') || 'transcribe').toLowerCase();
         const subtask = configuredTask === 'translate' ? 'translate' : 'transcribe';
-        const vadMode: WhisperSettings['vadMode'] = Config.get('whisperVadMode') === 'conservative'
-            ? 'conservative'
-            : 'off';
-        const silenceThreshold = vadMode === 'conservative' ? CONSERVATIVE_SILENCE_RMS : 0;
+        // ASMR speech routinely sits close to the noise floor and can be
+        // separated by long pauses. Legacy whisperVadMode is intentionally
+        // ignored: every captured window reaches the model.
+        const configuredChunkValue = Config.get('whisperLiveChunkSec');
+        const configuredChunkLength = Number(configuredChunkValue);
+        const chunkLengthS = Number.isFinite(configuredChunkLength) && configuredChunkLength > 0
+            ? Math.max(8, Math.min(29, configuredChunkLength))
+            : 29;
+        const configuredOverlapValue = Config.get('whisperLiveOverlapSec');
+        const configuredOverlap = Number(configuredOverlapValue);
+        const maxOverlap = Math.max(0, Math.min(8, chunkLengthS / 3));
+        const hasConfiguredOverlap = typeof configuredOverlapValue === 'number';
+        const strideLengthS = hasConfiguredOverlap && Number.isFinite(configuredOverlap)
+            ? Math.max(0, Math.min(maxOverlap, configuredOverlap))
+            : Math.min(5, maxOverlap);
         const autoWarmupConfigured = Config.get('whisperAutoWarmup') !== false;
         const cacheTranscripts = Config.get('whisperCacheTranscripts') !== false;
         const idleUnloadMs = DeviceCapabilities.budget.whisperIdleMs;
@@ -3530,12 +4074,10 @@ export class Whisper {
             subtask,
             language,
             multilingual: true,
-            chunkLengthS: 29,
-            strideLengthS: 5,
+            chunkLengthS,
+            strideLengthS,
             cacheTranscripts,
             autoWarmup: autoWarmupConfigured && DeviceCapabilities.shouldWarmup && !forceWasm,
-            silenceThreshold,
-            vadMode,
             maxPendingChunks,
             pollIntervalMs,
             workerUpdateIntervalMs,

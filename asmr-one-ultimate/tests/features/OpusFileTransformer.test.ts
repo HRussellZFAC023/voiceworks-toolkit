@@ -41,6 +41,35 @@ describe('OpusFileTransformer', () => {
         expect(sink.remove).not.toHaveBeenCalled();
     });
 
+    it('loads optional artwork before retaining the full source buffer', async () => {
+        const order: string[] = [];
+        const transformer = new OpusFileTransformer({
+            transcode: vi.fn(async () => {
+                order.push('transcode');
+                return new Uint8Array([2]);
+            }),
+        } as any, {
+            enabled: true,
+            bitrateKbps: 64,
+            metadataPolicy: 'additive',
+            artworkForFile: vi.fn(async () => {
+                order.push('artwork');
+                return undefined;
+            }),
+        });
+        const sink: any = {
+            read: vi.fn(async () => {
+                order.push('source');
+                return new Uint8Array([1]);
+            }),
+            writeAll: vi.fn(),
+        };
+
+        await transformer.transform({ id: 'file', path: 'track.wav' } as any, sink);
+
+        expect(order).toEqual(['artwork', 'source', 'transcode']);
+    });
+
     it('plans collision-free Opus paths against existing and converted files', () => {
         const paths = planOpusOutputPaths([
             { id: 'wav', path: 'Work/track.wav' },

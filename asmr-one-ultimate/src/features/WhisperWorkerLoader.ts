@@ -12,7 +12,7 @@
 
 import { createInlineWorker } from './workerLoaderShared';
 
-function getWorkerCode(): string {
+function getWorkerCode(enableTestHooks = false): string {
     return `
 let gpuDeviceLost = false;
 const GPU_ERROR_RE = /WebGPU Context Provider|context.*provider|device lost|GPUDevice|createComputePipeline|createShaderModule|createBuffer|mapAsync|mapping webgpu buffer|invalid buffer|Instance reference|AbortError|release session|invalid session|reading 'destroy'|reading 'dispose'/i;
@@ -40,10 +40,11 @@ self.addEventListener('unhandledrejection', (event) => {
 
 let pipeline;
 let env;
+let TextStreamer;
 
 const TRANSFORMER_URLS = [
-    'https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.0.0-next.4',
-    'https://esm.sh/@huggingface/transformers@4.0.0-next.4',
+    'https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.2.0',
+    'https://esm.sh/@huggingface/transformers@4.2.0',
 ];
 
 const HUB_BASE_URLS = [
@@ -62,6 +63,7 @@ async function loadTransformers() {
             ]);
             pipeline = mod.pipeline;
             env = mod.env;
+            TextStreamer = mod.TextStreamer;
             if (!pipeline || !env) throw new Error('Missing pipeline/env');
             env.allowLocalModels = false;
             env.allowRemoteModels = true;
@@ -81,6 +83,33 @@ function isUnauthorizedError(err) {
     return /Unauthorized access to file|401|403|AccessDenied/i.test(msg);
 }
 
+function toLoadFailure(error, model, backend, dtype) {
+    const message = error && error.message ? error.message : String(error || 'Failed to load model');
+    const failure = new Error(message);
+    failure.whisperLoadFailure = {
+        model,
+        backend,
+        dtype: typeof dtype === 'string' ? dtype : JSON.stringify(dtype),
+    };
+    return failure;
+}
+
+function postModelProgress(data, chunkId) {
+    const payload = data && typeof data === 'object'
+        ? data
+        : { message: String(data || '') };
+    self.postMessage({
+        status: 'progress',
+        file: payload.file,
+        progress: payload.progress,
+        loaded: payload.loaded,
+        total: payload.total,
+        message: payload.message,
+        sourceStatus: payload.status,
+        chunkId: typeof chunkId === 'number' ? chunkId : undefined,
+    });
+}
+
 // ------------------------------------------------------------
 // Backend / dtype selection
 // ------------------------------------------------------------
@@ -92,6 +121,18 @@ let currentDtype = '';
 let skipWebgpu = false;
 let preferLowPowerAdapter = false;
 let minWebgpuBufferBytes = 268435456;
+const WASM_DTYPE = 'q8';
+
+function postReady(context) {
+    self.postMessage({
+        status: 'ready',
+        backend: currentBackend,
+        vendor: currentVendor,
+        model: currentModel,
+        dtype: currentDtype,
+        chunkId: typeof context?.chunkId === 'number' ? context.chunkId : undefined,
+    });
+}
 
 async function detectWebGPU() {
     if (typeof navigator === 'undefined' || !('gpu' in navigator)) return null;
@@ -213,13 +254,20 @@ async function loadPipelineForModel(settings, progressCb) {
     if (pipelinePromise) {
         try { await (await pipelinePromise).dispose?.(); } catch {}
         pipelinePromise = null;
+        currentModel = null;
+        currentDtype = '';
     }
 
     const backend = await detectBackend();
     currentBackend = backend.device;
     currentVendor = backend.vendor || '';
 
-    self.postMessage({ status: 'initiate', backend: currentBackend, vendor: currentVendor });
+    self.postMessage({
+        status: 'initiate',
+        backend: currentBackend,
+        vendor: currentVendor,
+        chunkId: typeof settings.chunkId === 'number' ? settings.chunkId : undefined,
+    });
 
     // A host-level GPU probe can succeed while the worker ultimately lands on
     // WASM. Keep that backend bounded instead of loading a large model first.
@@ -230,6 +278,9 @@ async function loadPipelineForModel(settings, progressCb) {
             originalModel: settings.model,
             fallbackModel: FALLBACK_MODEL,
             reason: 'WASM backend requires the bounded tiny model',
+            backend: currentBackend,
+            dtype: WASM_DTYPE,
+            chunkId: typeof settings.chunkId === 'number' ? settings.chunkId : undefined,
         });
         return loadPipelineForModel({ ...settings, model: FALLBACK_MODEL }, progressCb);
     }
@@ -265,34 +316,23 @@ async function loadPipelineForModel(settings, progressCb) {
 
                         console.warn('[Whisper Worker] WebGPU load error:', JSON.stringify(dtype), msg);
 
-                        if (isContextErr) {
-                            await releaseGpuResources();
-                            skipWebgpu = true;
-                            break;
+                        if (isUnauthorizedError(err) && hubIdx + 1 < HUB_BASE_URLS.length) {
+                            continue;
                         }
-                        if (isGpuErr) {
-                            await releaseGpuResources();
-                            break;
-                        }
-                        if (!isUnauthorizedError(err)) break;
+                        if (isContextErr || isGpuErr) await releaseGpuResources();
+                        // A rejected ORT session creation poisons the module's
+                        // session-init chain. Recovery must happen in a fresh
+                        // worker; never try another dtype/backend in this one.
+                        throw toLoadFailure(err, modelName, 'webgpu', dtype);
                     }
                 }
             }
-            console.warn('[Whisper Worker] All WebGPU candidates failed, falling through to WASM');
-            skipWebgpu = true;
-            currentBackend = 'wasm';
-            currentVendor = '';
-            self.postMessage({ status: 'initiate', backend: 'wasm', vendor: '' });
-            if (settings.model !== FALLBACK_MODEL) {
-                fallbackModelOverride = FALLBACK_MODEL;
-                self.postMessage({
-                    status: 'fallback',
-                    originalModel: settings.model,
-                    fallbackModel: FALLBACK_MODEL,
-                    reason: 'WebGPU model load failed; WASM requires the bounded tiny model',
-                });
-                return loadPipelineForModel({ ...settings, model: FALLBACK_MODEL }, progressCb);
-            }
+            throw toLoadFailure(
+                new Error('No usable WebGPU model candidate'),
+                modelName,
+                'webgpu',
+                dtypeCandidates[0],
+            );
         }
     }
 
@@ -301,7 +341,14 @@ async function loadPipelineForModel(settings, progressCb) {
         progress_callback: progressCb,
         revision,
         device: 'wasm',
-        dtype: 'q8',
+        dtype: WASM_DTYPE,
+        session_options: {
+            // ORT's extended optimizer currently breaks Whisper's tied
+            // embedding QDQ graph before inference. Basic optimization keeps
+            // the compact q8 model usable until the upstream fix reaches the
+            // Transformers.js runtime bundled by our pinned CDN version.
+            graphOptimizationLevel: 'basic',
+        },
     };
 
     let lastErr = null;
@@ -312,39 +359,49 @@ async function loadPipelineForModel(settings, progressCb) {
             await pipelinePromise;
             currentModel = modelName;
             currentMultilingual = settings.multilingual;
-            currentDtype = 'q8';
-            console.log('[Whisper Worker] Model loaded on wasm:', modelName);
+            currentDtype = WASM_DTYPE;
+            console.log('[Whisper Worker] Model loaded on wasm [' + currentDtype + ']:', modelName);
             return pipelinePromise;
         } catch (err) {
             lastErr = err;
             pipelinePromise = null;
-            if (!isUnauthorizedError(err)) throw err;
+            if (!isUnauthorizedError(err)) {
+                throw toLoadFailure(err, modelName, 'wasm', WASM_DTYPE);
+            }
+            if (hubIdx + 1 >= HUB_BASE_URLS.length) break;
             console.warn('[Whisper Worker] Unauthorized model fetch, retrying with next hub base...');
         }
     }
 
-    throw lastErr || new Error('Failed to load model');
+    throw toLoadFailure(lastErr || new Error('Failed to load model'), modelName, 'wasm', WASM_DTYPE);
 }
 
 const FALLBACK_MODEL = 'onnx-community/whisper-tiny';
 let fallbackModelOverride = null;
+let pipelineLoadPromise = null;
+let pipelineLoadKey = '';
 
 async function ensurePipeline(settings, progressCb) {
     const effective = fallbackModelOverride
         ? { ...settings, model: fallbackModelOverride }
         : settings;
-    try {
+    const loadingKey = effective.model + '|' + String(effective.multilingual);
+    if (pipelineLoadPromise && pipelineLoadKey === loadingKey) {
+        return pipelineLoadPromise;
+    }
+
+    const loadTask = (async () => {
         return await loadPipelineForModel(effective, progressCb);
-    } catch (error) {
-        if (effective.model === FALLBACK_MODEL) throw error;
-        fallbackModelOverride = FALLBACK_MODEL;
-        self.postMessage({
-            status: 'fallback',
-            originalModel: effective.model,
-            fallbackModel: FALLBACK_MODEL,
-            reason: toErrorMessage(error),
-        });
-        return loadPipelineForModel({ ...settings, model: FALLBACK_MODEL }, progressCb);
+    })();
+    pipelineLoadPromise = loadTask;
+    pipelineLoadKey = loadingKey;
+    try {
+        return await loadTask;
+    } finally {
+        if (pipelineLoadPromise === loadTask) {
+            pipelineLoadPromise = null;
+            pipelineLoadKey = '';
+        }
     }
 }
 
@@ -365,85 +422,83 @@ function applyOffset(chunks, offset) {
 }
 
 async function transcribe(msg) {
-    const pipe = await ensurePipeline(msg, (data) => self.postMessage(data));
-    self.postMessage({ status: 'ready', backend: currentBackend, vendor: currentVendor });
+    let lastHeartbeatAt = 0;
+    const emitHeartbeat = (phase, partialText = '') => {
+        const now = Date.now();
+        if (now - lastHeartbeatAt < 500 && phase !== 'started') return;
+        lastHeartbeatAt = now;
+        self.postMessage({
+            status: 'heartbeat',
+            chunkId: msg.chunkId,
+            data: { phase, partialText },
+        });
+    };
+    const pipe = await ensurePipeline(msg, (data) => {
+        postModelProgress(data, msg.chunkId);
+        emitHeartbeat('model');
+    });
+    postReady(msg);
 
     const timeOffset = msg.timeOffset || 0;
     const chunkId = msg.chunkId;
-    const requestedUpdateInterval = Number(msg.updateIntervalMs);
-    const updateIntervalMs = Number.isFinite(requestedUpdateInterval)
-        ? Math.max(100, Math.min(1000, Math.floor(requestedUpdateInterval)))
-        : 200;
-    const useWordTimestamps = true;
+    // The bounded WASM export does not expose cross-attention tensors, so word
+    // timestamps always fail after a full decode and force a duplicate pass.
+    const useWordTimestamps = currentBackend !== 'wasm';
+    let partialText = '';
 
-    let wordBuffer = [];
-    let lastUpdateAt = 0;
-
-    function chunk_callback(chunk) {
-        wordBuffer.push(chunk);
-        const now = Date.now();
-        if (now - lastUpdateAt < updateIntervalMs) return;
-        lastUpdateAt = now;
-        sendBufferUpdate();
-    }
-
-    function sendBufferUpdate() {
-        if (wordBuffer.length === 0) return;
-        // Send raw chunks with offset — host does all processing
-        const raw = wordBuffer.map(c => ({
-            text: (c.text || '').trim(),
-            timestamp: [
-                c.timestamp?.[0] != null ? c.timestamp[0] + timeOffset : null,
-                c.timestamp?.[1] != null ? c.timestamp[1] + timeOffset : null,
-            ],
-        }));
-        self.postMessage({ status: 'update', data: { rawChunks: raw, inputRms: msg.inputRms }, chunkId });
-    }
-
-    const pipeOpts = {
+    const basePipeOpts = {
         do_sample: false,
         chunk_length_s: msg.chunkLengthS,
         stride_length_s: msg.strideLengthS,
         task: msg.subtask,
-        return_timestamps: useWordTimestamps ? 'word' : true,
-        chunk_callback,
     };
-    if (msg.language) pipeOpts.language = msg.language;
+    if (msg.language) basePipeOpts.language = msg.language;
 
-    const resetStreamState = (wordLevel) => {
-        wordBuffer = [];
-        lastUpdateAt = 0;
+    let activeAttempt = 0;
+    const createAttemptOptions = (returnTimestamps, targetPipe = pipe) => {
+        const attempt = ++activeAttempt;
+        partialText = '';
+        const opts = {
+            ...basePipeOpts,
+            return_timestamps: returnTimestamps,
+        };
+
+        // A streamer owns token-cache and prompt state. Every retry gets a
+        // fresh instance, and callbacks from a failed attempt are epoch-guarded.
+        if (TextStreamer && targetPipe?.tokenizer) {
+            opts.streamer = new TextStreamer(targetPipe.tokenizer, {
+                skip_prompt: true,
+                skip_special_tokens: true,
+                callback_function: (text) => {
+                    if (attempt !== activeAttempt || workerPoisoned) return;
+                    if (typeof text === 'string' && text) partialText += text;
+                    emitHeartbeat('decoding', partialText);
+                },
+                token_callback_function: () => {
+                    if (attempt === activeAttempt && !workerPoisoned) {
+                        emitHeartbeat('decoding', partialText);
+                    }
+                },
+            });
+        }
+        return opts;
     };
+    let pipeOpts = createAttemptOptions(useWordTimestamps ? 'word' : true);
 
+    let inferenceStarted = false;
     const runInference = async (targetPipe, opts, backendName, timeoutOverrideMs) => {
+        if (!inferenceStarted) {
+            inferenceStarted = true;
+            self.postMessage({
+                status: 'started',
+                chunkId,
+                data: { queueDepth: jobQueue.length },
+            });
+            emitHeartbeat('started');
+        }
         const timeoutMs = timeoutOverrideMs ?? getInferenceTimeoutMs(backendName, msg.chunkLengthS);
         console.log('[Whisper Worker] Starting inference on ' + backendName + ' (timeout=' + timeoutMs / 1000 + 's)');
         return withInferenceTimeout(targetPipe(msg.audio, opts), timeoutMs, backendName);
-    };
-
-    const fallbackToWasmAndRetry = async (reasonMsg) => {
-        if (currentBackend === 'wasm') throw new Error(reasonMsg);
-
-        console.warn('[Whisper Worker] GPU inference failed, falling back to WASM:', reasonMsg);
-        skipWebgpu = true;
-        if (pipelinePromise) {
-            try { await (await pipelinePromise).dispose?.(); } catch {}
-        }
-        pipelinePromise = null;
-        currentModel = null;
-        currentMultilingual = null;
-
-        await releaseGpuResources();
-
-        self.postMessage({ status: 'initiate', backend: 'wasm', vendor: '' });
-        const wasmPipe = await ensurePipeline(msg, (data) => self.postMessage(data));
-        self.postMessage({ status: 'ready', backend: currentBackend, vendor: currentVendor });
-
-        resetStreamState(false);
-        const fallbackOpts = { ...pipeOpts, return_timestamps: true };
-        const fallbackResult = await runInference(wasmPipe, fallbackOpts, 'wasm');
-        self.postMessage({ status: 'gpu-degraded', data: { message: reasonMsg } });
-        return fallbackResult;
     };
 
     let result = null;
@@ -456,39 +511,37 @@ async function transcribe(msg) {
         // inference concurrently on the same wedged pipeline. Let the host
         // terminate/recreate this worker instead.
         if (/inference timed out/i.test(initialMsg)) {
-            postChunkError(chunkId, initialMsg, currentBackend !== 'wasm');
+            haltTimedOutWorker(chunkId, initialMsg, currentBackend !== 'wasm');
             return null;
         }
         const canRetryWithoutWords = pipeOpts.return_timestamps === 'word';
 
         if (canRetryWithoutWords) {
             console.warn('[Whisper Worker] Word-level timestamps failed (' + initialMsg + '), retrying with segment timestamps');
-            resetStreamState(false);
-            pipeOpts.return_timestamps = true;
+            pipeOpts = createAttemptOptions(true);
             try {
                 const retryTimeoutMs = Math.max(getInferenceTimeoutMs(currentBackend, msg.chunkLengthS), FAST_BOOTSTRAP_TIMEOUT_MS);
                 result = await runInference(pipe, pipeOpts, currentBackend, retryTimeoutMs);
             } catch (retryError) {
                 const retryMsg = toErrorMessage(retryError);
+                if (/inference timed out/i.test(retryMsg)) {
+                    haltTimedOutWorker(chunkId, retryMsg, currentBackend !== 'wasm');
+                    return null;
+                }
                 if (currentBackend !== 'wasm' && GPU_INFERENCE_ERROR_RE.test(retryMsg)) {
-                    try {
-                        result = await fallbackToWasmAndRetry(retryMsg);
-                    } catch (fallbackError) {
-                        postChunkError(chunkId, toErrorMessage(fallbackError), true);
-                        return null;
-                    }
+                    // Switching execution providers in this worker can inherit
+                    // poisoned ORT session state. The host will terminate it
+                    // and retry the bounded model in a fresh WASM worker.
+                    postChunkError(chunkId, retryMsg, true);
+                    return null;
                 } else {
                     postChunkError(chunkId, retryMsg);
                     return null;
                 }
             }
         } else if (currentBackend !== 'wasm' && GPU_INFERENCE_ERROR_RE.test(initialMsg)) {
-            try {
-                result = await fallbackToWasmAndRetry(initialMsg);
-            } catch (fallbackError) {
-                postChunkError(chunkId, toErrorMessage(fallbackError), true);
-                return null;
-            }
+            postChunkError(chunkId, initialMsg, true);
+            return null;
         } else {
             postChunkError(chunkId, initialMsg);
             return null;
@@ -496,9 +549,6 @@ async function transcribe(msg) {
     }
 
     if (!result) return null;
-
-    // Final flush of any throttled streaming updates
-    sendBufferUpdate();
 
     // Apply time offset to raw chunks and send to host for processing
     const rawChunks = applyOffset(result.chunks || [], timeOffset);
@@ -517,6 +567,120 @@ async function transcribe(msg) {
 
 let jobQueue = [];
 let jobProcessing = false;
+let workerPoisoned = false;
+
+function normalizedPriority(msg) {
+    const priority = Number(msg?.priority);
+    return Number.isFinite(priority) ? priority : 1;
+}
+
+function normalizedDistance(msg) {
+    const distance = Number(msg?.playheadDistance);
+    return Number.isFinite(distance) ? distance : Number.POSITIVE_INFINITY;
+}
+
+function shouldReplaceQueued(existing, incoming) {
+    const existingPriority = normalizedPriority(existing);
+    const incomingPriority = normalizedPriority(incoming);
+    if (incomingPriority !== existingPriority) return incomingPriority < existingPriority;
+    return normalizedDistance(incoming) < normalizedDistance(existing);
+}
+
+function postDropped(msg, reason, replacedByChunkId) {
+    if (!msg || typeof msg.chunkId !== 'number') return;
+    self.postMessage({
+        status: 'dropped',
+        chunkId: msg.chunkId,
+        data: { reason, replacedByChunkId },
+    });
+}
+
+function postLoadFailed(error, chunkId) {
+    const details = error && error.whisperLoadFailure
+        ? error.whisperLoadFailure
+        : {
+            model: currentModel,
+            backend: currentBackend,
+            dtype: currentDtype,
+        };
+    workerPoisoned = true;
+    const queuedJobs = jobQueue;
+    jobQueue = [];
+    self.postMessage({
+        status: 'load-failed',
+        backend: details.backend || currentBackend,
+        model: details.model || currentModel,
+        dtype: details.dtype || currentDtype,
+        data: {
+            message: toErrorMessage(error),
+            backend: details.backend || currentBackend,
+            model: details.model || currentModel,
+            dtype: details.dtype || currentDtype,
+            sessionPoisoned: true,
+        },
+        chunkId: typeof chunkId === 'number' ? chunkId : undefined,
+    });
+    for (const queued of queuedJobs) postDropped(queued, 'worker-poisoned');
+}
+
+function haltTimedOutWorker(chunkId, message, gpuFallback) {
+    // Promise.race cannot cancel model.generate(). Once it times out, this
+    // worker may still be executing the old inference. Poison it so no queued
+    // job can overlap. Report poison before the chunk error: replacing the
+    // worker detaches its listener, so error-first could prevent the controller
+    // from ever receiving the lifecycle event that preserves the live run.
+    workerPoisoned = true;
+    self.postMessage({
+        status: 'worker-poisoned',
+        data: { reason: 'inference-timeout', message, gpuFallback: gpuFallback === true },
+    });
+    postChunkError(chunkId, message, gpuFallback);
+    const queuedJobs = jobQueue;
+    jobQueue = [];
+    for (const queued of queuedJobs) postDropped(queued, 'worker-poisoned');
+}
+${enableTestHooks ? "self.__whisperTestHalt = haltTimedOutWorker;" : ''}
+
+function enqueueJob(msg) {
+    if (workerPoisoned) {
+        postDropped(msg, 'worker-poisoned');
+        return;
+    }
+
+    if (!jobProcessing && jobQueue.length === 0) {
+        jobQueue.push(msg);
+        self.postMessage({
+            status: 'queued',
+            chunkId: msg.chunkId,
+            data: { queueDepth: jobQueue.length, active: 0 },
+        });
+        processNextJob();
+        return;
+    }
+
+    if (jobQueue.length === 0) {
+        jobQueue.push(msg);
+        self.postMessage({
+            status: 'queued',
+            chunkId: msg.chunkId,
+            data: { queueDepth: jobQueue.length, active: jobProcessing ? 1 : 0 },
+        });
+        return;
+    }
+
+    const queued = jobQueue[0];
+    if (shouldReplaceQueued(queued, msg)) {
+        jobQueue[0] = msg;
+        postDropped(queued, 'queue-replaced', msg.chunkId);
+        self.postMessage({
+            status: 'queued',
+            chunkId: msg.chunkId,
+            data: { queueDepth: jobQueue.length, active: jobProcessing ? 1 : 0 },
+        });
+    } else {
+        postDropped(msg, 'queue-full', queued.chunkId);
+    }
+}
 
 async function processNextJob() {
     if (jobProcessing || jobQueue.length === 0) return;
@@ -524,7 +688,9 @@ async function processNextJob() {
     const msg = jobQueue.shift();
 
     try {
-        const result = await transcribe(msg);
+        const result = ${enableTestHooks
+        ? "typeof self.__whisperTestTranscribe === 'function' ? await self.__whisperTestTranscribe(msg) : await transcribe(msg)"
+        : 'await transcribe(msg)'};
         if (result !== null) {
             self.postMessage({
                 status: 'complete',
@@ -534,15 +700,19 @@ async function processNextJob() {
             });
         }
     } catch (err) {
-        self.postMessage({
-            status: 'error',
-            data: { message: err instanceof Error ? err.message : String(err) },
-            chunkId: msg.chunkId,
-        });
+        if (err && err.whisperLoadFailure) {
+            postLoadFailed(err, msg.chunkId);
+        } else {
+            self.postMessage({
+                status: 'error',
+                data: { message: err instanceof Error ? err.message : String(err) },
+                chunkId: msg.chunkId,
+            });
+        }
     }
 
     jobProcessing = false;
-    processNextJob();
+    if (!workerPoisoned) processNextJob();
 }
 
 // ------------------------------------------------------------
@@ -560,12 +730,15 @@ self.addEventListener('message', async (event) => {
 
     if (msg.type === 'flush-queue') {
         const flushed = jobQueue.length;
+        for (const queued of jobQueue) postDropped(queued, 'queue-flushed');
         jobQueue = [];
         if (flushed > 0) console.log('[Whisper Worker] Flushed ' + flushed + ' queued jobs');
         return;
     }
 
     if (msg.type === 'reset') {
+        workerPoisoned = true;
+        jobQueue = [];
         if (pipelinePromise) {
             try { await (await pipelinePromise).dispose?.(); } catch {}
             pipelinePromise = null;
@@ -573,6 +746,8 @@ self.addEventListener('message', async (event) => {
         currentModel = null;
         currentMultilingual = null;
         fallbackModelOverride = null;
+        pipelineLoadPromise = null;
+        pipelineLoadKey = '';
         return;
     }
 
@@ -584,17 +759,21 @@ self.addEventListener('message', async (event) => {
             : 268435456;
         preferLowPowerAdapter = msg.preferLowPowerAdapter === true;
         try {
-            await ensurePipeline(msg, (data) => self.postMessage(data));
-            self.postMessage({ status: 'ready', backend: currentBackend, vendor: currentVendor });
+            await ensurePipeline(msg, (data) => postModelProgress(data, msg.chunkId));
+            postReady(msg);
         } catch (err) {
-            self.postMessage({ status: 'error', data: { message: err instanceof Error ? err.message : String(err) } });
+            if (err && err.whisperLoadFailure) {
+                postLoadFailed(err, msg.chunkId);
+            } else {
+                self.postMessage({ status: 'error', data: { message: err instanceof Error ? err.message : String(err) } });
+            }
         }
         return;
     }
 
-    // Queue transcription job
-    jobQueue.push(msg);
-    processNextJob();
+    // One active inference plus one replaceable queued window. This bounds
+    // memory and prevents queued-but-not-started work from looking stalled.
+    enqueueJob(msg);
 });
 `;
 }
@@ -604,6 +783,6 @@ export function createWhisperWorker(): Worker {
 }
 
 // Test-only helper: exposes generated worker code for unit assertions.
-export function __getWhisperWorkerCodeForTests(): string {
-    return getWorkerCode();
+export function __getWhisperWorkerCodeForTests(enableTestHooks = false): string {
+    return getWorkerCode(enableTestHooks);
 }

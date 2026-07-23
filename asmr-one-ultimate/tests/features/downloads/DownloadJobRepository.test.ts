@@ -54,6 +54,25 @@ describe('DownloadJobRepository', () => {
         expect(snapshot?.checkpoints).toEqual([expect.objectContaining({ fileId: 'file-1', offset: 42, etag: 'v1' })]);
     });
 
+    it('persists the selected full-quality source for refresh-safe resume', async () => {
+        const name = `download-jobs-${crypto.randomUUID()}`;
+        const first = repository(name);
+        await first.createJob({ id: 'fallback', title: 'Fallback', options: {} }, [{
+            id: 'audio',
+            path: 'Work/track.wav',
+            url: 'https://media.test/download.wav',
+            sourceUrls: ['https://media.test/stream.wav'],
+        }]);
+        await first.selectFileSource('audio', 'https://media.test/stream.wav', [
+            'https://media.test/download.wav',
+        ]);
+        await first.close();
+
+        const file = (await repository(name).getFile('audio'));
+        expect(file).toMatchObject({ url: 'https://media.test/stream.wav' });
+        expect(file?.sourceUrls).toEqual(['https://media.test/download.wav']);
+    });
+
     it('atomically recovers stale active jobs and files as paused on load', async () => {
         const repo = repository();
         await seed(repo, { job: 'active', first: 'active' });

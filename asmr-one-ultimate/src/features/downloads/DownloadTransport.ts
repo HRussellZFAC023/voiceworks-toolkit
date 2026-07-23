@@ -5,6 +5,10 @@ export interface DownloadProbe {
     etag?: string;
     lastModified?: string;
     acceptsRanges: boolean;
+    /** A validator-proven 416 established that the persisted offset is exact EOF. */
+    confirmedCompleteAtOffset?: true;
+    /** A successful full response explicitly declared Content-Length: 0. */
+    confirmedEmpty?: true;
 }
 
 export interface DownloadChunk {
@@ -29,6 +33,13 @@ export class DownloadStallError extends Error {
     }
 }
 
+export class DownloadRequestTimeoutError extends Error {
+    constructor(message = 'Download request timed out before receiving a response') {
+        super(message);
+        this.name = 'DownloadRequestTimeoutError';
+    }
+}
+
 type FetchLike = typeof fetch;
 
 export interface DownloadRetryOptions {
@@ -38,8 +49,17 @@ export interface DownloadRetryOptions {
     sleep?: (milliseconds: number) => Promise<void>;
     random?: () => number;
     stallTimeoutMs?: number;
+    requestTimeoutMs?: number;
     setTimer?: (callback: () => void, milliseconds: number) => ReturnType<typeof setTimeout>;
     clearTimer?: (timer: ReturnType<typeof setTimeout>) => void;
+}
+
+export interface DownloadStreamOptions {
+    signal?: AbortSignal;
+    expectedEtag?: string;
+    expectedLastModified?: string;
+    /** Manifest/checkpoint total required to prove an offset-at-EOF 416 is complete. */
+    expectedTotal?: number;
 }
 
 const DEFAULT_RETRY_ATTEMPTS = 3;
@@ -69,23 +89,33 @@ function numericHeader(headers: Headers, key: string): number | undefined {
     return Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
+interface DownloadRequestTarget {
+    url: string;
+    headers: Record<string, string>;
+    credentials: RequestCredentials;
+}
+
 /**
- * Return host authentication only when the request resolves to the selected
- * ASMR API origin. Resolving against that base also permits relative API URLs,
- * while rejecting protocol-relative CDN URLs and arbitrary manifest origins.
+ * Resolve relative manifest URLs against the selected API (not the page), and
+ * send credentials only to that trusted API origin. Public media CDNs commonly
+ * answer with `Access-Control-Allow-Origin: *`; credentialed fetches are
+ * forbidden for those responses and fail in browsers even when the URL itself
+ * returns HTTP 200.
  */
-function getTrustedAuthHeader(url: string): Record<string, string> {
+export function resolveDownloadRequestTarget(url: string): DownloadRequestTarget {
     try {
         const apiUrl = new URL(getApiBaseUrl());
         const requestUrl = new URL(url, apiUrl);
-        if (!/^https?:$/.test(apiUrl.protocol)
-            || !/^https?:$/.test(requestUrl.protocol)
-            || requestUrl.origin !== apiUrl.origin) {
-            return {};
-        }
-        return getAuthHeader();
+        const trustedApiOrigin = /^https?:$/.test(apiUrl.protocol)
+            && /^https?:$/.test(requestUrl.protocol)
+            && requestUrl.origin === apiUrl.origin;
+        return {
+            url: requestUrl.href,
+            headers: trustedApiOrigin ? getAuthHeader() : {},
+            credentials: trustedApiOrigin ? 'include' : 'omit',
+        };
     } catch {
-        return {};
+        return { url, headers: {}, credentials: 'omit' };
     }
 }
 
@@ -101,6 +131,13 @@ function parseContentRange(value: string | null): ParsedContentRange | undefined
     return { start, end, total };
 }
 
+function parseUnsatisfiedContentRange(value: string | null): number | undefined {
+    const match = value?.match(/^bytes\s+\*\/(\d+)$/i);
+    if (!match) return undefined;
+    const total = Number(match[1]);
+    return Number.isSafeInteger(total) && total >= 0 ? total : undefined;
+}
+
 /** Streaming transport with strict range validation for safe resume. */
 export class DownloadTransport {
     private readonly maxAttempts: number;
@@ -109,6 +146,7 @@ export class DownloadTransport {
     private readonly sleep: (milliseconds: number) => Promise<void>;
     private readonly random: () => number;
     private readonly stallTimeoutMs: number;
+    private readonly requestTimeoutMs: number;
     private readonly setTimer: (callback: () => void, milliseconds: number) => ReturnType<typeof setTimeout>;
     private readonly clearTimer: (timer: ReturnType<typeof setTimeout>) => void;
 
@@ -119,6 +157,7 @@ export class DownloadTransport {
         this.sleep = retry.sleep ?? (milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)));
         this.random = retry.random ?? Math.random;
         this.stallTimeoutMs = Math.max(0, retry.stallTimeoutMs ?? 30_000);
+        this.requestTimeoutMs = Math.max(0, retry.requestTimeoutMs ?? 30_000);
         this.setTimer = retry.setTimer ?? ((callback, milliseconds) => setTimeout(callback, milliseconds));
         this.clearTimer = retry.clearTimer ?? (timer => clearTimeout(timer));
     }
@@ -134,12 +173,42 @@ export class DownloadTransport {
     private async request(url: string, init: RequestInit): Promise<Response> {
         for (let attempt = 0; ; attempt += 1) {
             let response: Response;
+            const attemptController = new AbortController();
+            const forwardAbort = () => attemptController.abort(init.signal?.reason);
+            if (init.signal?.aborted) forwardAbort();
+            else init.signal?.addEventListener('abort', forwardAbort, { once: true });
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            let timedOut = false;
+            const timeoutError = new DownloadRequestTimeoutError();
             try {
-                response = await this.fetchImpl(url, init);
+                const fetchRequest = this.fetchImpl(url, {
+                    ...init,
+                    signal: attemptController.signal,
+                });
+                if (this.requestTimeoutMs > 0) {
+                    const timeout = new Promise<never>((_resolve, reject) => {
+                        timer = this.setTimer(() => {
+                            timedOut = true;
+                            attemptController.abort(timeoutError);
+                            reject(timeoutError);
+                        }, this.requestTimeoutMs);
+                    });
+                    response = await Promise.race([fetchRequest, timeout]);
+                } else {
+                    response = await fetchRequest;
+                }
             } catch (error) {
-                if (isAbortError(error) || init.signal?.aborted || attempt + 1 >= this.maxAttempts) throw error;
+                const failure = timedOut ? timeoutError : error;
+                if (
+                    init.signal?.aborted
+                    || (!timedOut && isAbortError(error))
+                    || attempt + 1 >= this.maxAttempts
+                ) throw failure;
                 await this.sleep(this.retryDelay(attempt));
                 continue;
+            } finally {
+                if (timer !== undefined) this.clearTimer(timer);
+                init.signal?.removeEventListener('abort', forwardAbort);
             }
             if (!isRetryableStatus(response.status) || attempt + 1 >= this.maxAttempts) return response;
             await response.body?.cancel().catch(() => undefined);
@@ -167,11 +236,12 @@ export class DownloadTransport {
     }
 
     async probe(url: string, signal?: AbortSignal): Promise<DownloadProbe> {
-        const response = await this.request(url, {
+        const target = resolveDownloadRequestTarget(url);
+        const response = await this.request(target.url, {
             method: 'HEAD',
-            headers: getTrustedAuthHeader(url),
+            headers: target.headers,
             signal,
-            credentials: 'include',
+            credentials: target.credentials,
         });
         if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
         return {
@@ -186,9 +256,10 @@ export class DownloadTransport {
         url: string,
         offset: number,
         onChunk: (chunk: DownloadChunk) => void | Promise<void>,
-        options: { signal?: AbortSignal; expectedEtag?: string; expectedLastModified?: string } = {},
+        options: DownloadStreamOptions = {},
     ): Promise<DownloadProbe> {
-        const headers: Record<string, string> = { ...getTrustedAuthHeader(url) };
+        const target = resolveDownloadRequestTarget(url);
+        const headers: Record<string, string> = { ...target.headers };
         if (offset > 0) headers.Range = `bytes=${offset}-`;
         if (offset > 0 && options.expectedEtag) headers['If-Range'] = options.expectedEtag;
         else if (offset > 0 && options.expectedLastModified) headers['If-Range'] = options.expectedLastModified;
@@ -198,49 +269,144 @@ export class DownloadTransport {
         if (options.signal?.aborted) forwardAbort();
         else options.signal?.addEventListener('abort', forwardAbort, { once: true });
         try {
-            const response = await this.request(url, {
-                headers,
+            let validatorContinuityProven = false;
+            let response = await this.request(target.url, {
+                headers: { ...headers },
                 signal: requestController.signal,
-                credentials: 'include',
+                credentials: target.credentials,
             });
-            if (offset > 0 && response.status !== 206) throw new RangeRestartRequiredError();
-            if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            // Some Cloudflare-backed media origins return the full object when a
+            // date-based If-Range is present even though the identical plain
+            // Range request is supported. If the full response proves the
+            // persisted validator is still current, cancel it before consuming
+            // bytes and retry once with the same strictly validated range.
+            if (
+                offset > 0
+                && response.status === 200
+                && !options.expectedEtag
+                && !!options.expectedLastModified
+                && response.headers.get('last-modified') === options.expectedLastModified
+            ) {
+                validatorContinuityProven = true;
+                await response.body?.cancel().catch(() => undefined);
+                delete headers['If-Range'];
+                response = await this.request(target.url, {
+                    headers: { ...headers },
+                    signal: requestController.signal,
+                    credentials: target.credentials,
+                });
+            }
+            if (offset > 0 && response.status === 416) {
+                const remoteTotal = parseUnsatisfiedContentRange(response.headers.get('content-range'));
+                const responseEtag = response.headers.get('etag') || undefined;
+                const responseLastModified = response.headers.get('last-modified') || undefined;
+                const responseProvesContinuity = options.expectedEtag
+                    ? responseEtag === options.expectedEtag
+                    : options.expectedLastModified
+                        ? responseLastModified === options.expectedLastModified
+                        : false;
+                await response.body?.cancel().catch(() => undefined);
+                if (
+                    Number.isSafeInteger(options.expectedTotal)
+                    && options.expectedTotal === offset
+                    && remoteTotal === options.expectedTotal
+                    && (validatorContinuityProven || responseProvesContinuity)
+                ) {
+                    return {
+                        size: remoteTotal,
+                        etag: responseEtag ?? options.expectedEtag,
+                        lastModified: responseLastModified ?? options.expectedLastModified,
+                        acceptsRanges: true,
+                        confirmedCompleteAtOffset: true,
+                    };
+                }
+                throw new RangeRestartRequiredError('Server could not prove the completed byte range');
+            }
+            if (offset > 0 && response.status !== 206) {
+                await response.body?.cancel().catch(() => undefined);
+                throw new RangeRestartRequiredError();
+            }
+            if (!response.ok) {
+                await response.body?.cancel().catch(() => undefined);
+                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            }
 
             const range = parseContentRange(response.headers.get('content-range'));
             if (response.status === 206 && range?.start !== offset) {
+                await response.body?.cancel().catch(() => undefined);
                 throw new RangeRestartRequiredError('Server returned a mismatched byte range');
             }
-            const etag = response.headers.get('etag') || undefined;
-            const lastModified = response.headers.get('last-modified') || undefined;
-            if (options.expectedEtag && etag && etag !== options.expectedEtag) {
+            let etag = response.headers.get('etag') || undefined;
+            let lastModified = response.headers.get('last-modified') || undefined;
+            if (options.expectedEtag && etag !== options.expectedEtag) {
+                await response.body?.cancel().catch(() => undefined);
                 throw new RangeRestartRequiredError('Remote file changed since the checkpoint');
             }
-            if (options.expectedLastModified && lastModified && lastModified !== options.expectedLastModified) {
-                throw new RangeRestartRequiredError('Remote file changed since the checkpoint');
+            if (options.expectedLastModified && lastModified !== options.expectedLastModified) {
+                // Cloudflare may omit Last-Modified from the byte-bearing 206
+                // after the validated If-Range workaround. Do not append that
+                // response until an independent HEAD proves both the persisted
+                // date and the exact object total. This closes the
+                // old-prefix/new-suffix race while retaining real CDN resume.
+                if (validatorContinuityProven && !lastModified && response.status === 206) {
+                    let proof: DownloadProbe;
+                    try {
+                        proof = await this.probe(url, requestController.signal);
+                    } catch (error) {
+                        await response.body?.cancel().catch(() => undefined);
+                        throw error;
+                    }
+                    const expectedTotal = options.expectedTotal;
+                    const proofMatches = Number.isSafeInteger(expectedTotal)
+                        && range?.total === expectedTotal
+                        && proof.size === expectedTotal
+                        && proof.lastModified === options.expectedLastModified;
+                    if (!proofMatches) {
+                        await response.body?.cancel().catch(() => undefined);
+                        throw new RangeRestartRequiredError('Remote file changed since the checkpoint');
+                    }
+                    lastModified = proof.lastModified;
+                    etag = proof.etag ?? etag;
+                } else {
+                    await response.body?.cancel().catch(() => undefined);
+                    throw new RangeRestartRequiredError('Remote file changed since the checkpoint');
+                }
             }
 
             const total = range?.total
                 ?? (response.status === 206 ? undefined : numericHeader(response.headers, 'content-length'));
             const reader = response.body?.getReader();
-            if (!reader) throw new Error('Streaming response body is unavailable');
+            if (!reader) {
+                await response.body?.cancel().catch(() => undefined);
+                throw new Error('Streaming response body is unavailable');
+            }
             let cursor = offset;
-            for (;;) {
-                const { done, value } = await this.readWithStallTimeout(reader, requestController);
-                if (done) break;
-                if (!value?.byteLength) continue;
-                await onChunk({ bytes: value, offset: cursor, total, etag, lastModified });
-                cursor += value.byteLength;
+            try {
+                for (;;) {
+                    const { done, value } = await this.readWithStallTimeout(reader, requestController);
+                    if (done) break;
+                    if (!value?.byteLength) continue;
+                    await onChunk({ bytes: value, offset: cursor, total, etag, lastModified });
+                    cursor += value.byteLength;
+                }
+                const expectedEnd = typeof total === 'number' ? total : range ? range.end + 1 : undefined;
+                if (typeof expectedEnd === 'number' && cursor !== expectedEnd) {
+                    throw new Error(`Incomplete download: received ${cursor} of ${expectedEnd} bytes`);
+                }
+                return {
+                    size: total,
+                    etag,
+                    lastModified,
+                    acceptsRanges: response.status === 206 || /bytes/i.test(response.headers.get('accept-ranges') || ''),
+                    ...(response.status === 200 && total === 0 && cursor === 0
+                        ? { confirmedEmpty: true as const }
+                        : {}),
+                };
+            } catch (error) {
+                requestController.abort(error);
+                await reader.cancel(error).catch(() => undefined);
+                throw error;
             }
-            const expectedEnd = typeof total === 'number' ? total : range ? range.end + 1 : undefined;
-            if (typeof expectedEnd === 'number' && cursor !== expectedEnd) {
-                throw new Error(`Incomplete download: received ${cursor} of ${expectedEnd} bytes`);
-            }
-            return {
-                size: total,
-                etag,
-                lastModified,
-                acceptsRanges: response.status === 206 || /bytes/i.test(response.headers.get('accept-ranges') || ''),
-            };
         } finally {
             options.signal?.removeEventListener('abort', forwardAbort);
         }

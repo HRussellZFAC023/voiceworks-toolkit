@@ -71,8 +71,8 @@ const CONFIG_DEFAULTS: PluginConfig = {
     whisperTask: 'transcribe',
     whisperQuantized: false,
     whisperOverrideSubs: true,
-    whisperLiveChunkSec: 15,
-    whisperLiveOverlapSec: 0,
+    whisperLiveChunkSec: 29,
+    whisperLiveOverlapSec: 5,
     whisperCacheTranscripts: true,
     whisperAutoWarmup: true,
     alwaysTranscribe: false,
@@ -354,13 +354,23 @@ class AppStoreImpl {
     /** Move users who kept the former heavyweight default to the multilingual default. */
     private migrateWhisperDefaults(): void {
         if (typeof GM_getValue !== 'function' || typeof GM_setValue !== 'function') return;
-        const migrationKey = '__asmr_whisper_defaults_v2__';
+        const migrationKey = '__asmr_whisper_defaults_v3__';
         try {
             if (GM_getValue(migrationKey, false)) return;
             const storedModel = GM_getValue('whisperModel', undefined as unknown as string);
             if (storedModel === 'onnx-community/kotoba-whisper-v2.2-ONNX') {
                 GM_setValue('whisperModel', CONFIG_DEFAULTS.whisperModel);
             }
+            // Generic speech VAD is unsafe for quiet ASMR: migrate every legacy
+            // silence-skipping choice to full-audio transcription.
+            GM_setValue('whisperVadMode', 'off');
+            // Earlier releases stored 15/0 but did not expose these settings.
+            // Full Whisper context with overlap retains quiet boundary words
+            // without sacrificing the selected device-appropriate model tier.
+            const storedChunk = Number(GM_getValue('whisperLiveChunkSec', 15));
+            const storedOverlap = Number(GM_getValue('whisperLiveOverlapSec', 0));
+            if (storedChunk === 15) GM_setValue('whisperLiveChunkSec', CONFIG_DEFAULTS.whisperLiveChunkSec);
+            if (storedOverlap === 0) GM_setValue('whisperLiveOverlapSec', CONFIG_DEFAULTS.whisperLiveOverlapSec);
             GM_setValue(migrationKey, true);
         } catch {
             // Storage is optional during early userscript bootstrap/tests.

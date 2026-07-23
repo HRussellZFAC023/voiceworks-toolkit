@@ -1,4 +1,5 @@
 import { Logger } from '../../core/Utils';
+import { I18n } from '../../core/Config';
 import { TranslationService } from '../../services/TranslationService';
 import { WorkService } from '../../services/WorkService';
 import type { BackupDownloadProgress, BackupDownloadState, BackupWorkDownloadItem } from '../backupWorkDownloaderTypes';
@@ -7,7 +8,7 @@ import { canonicalDownloadPath, reserveCollisionFreePath } from './DownloadPathU
 import { DirectoryDownloadSink } from './DirectoryDownloadSink';
 import { discoverDownloadManifest, type DownloadTreeNode } from './DownloadManifest';
 import { DOWNLOAD_JOB_LEASE_MS, DownloadJobRepository, type DownloadJob } from './DownloadJobRepository';
-import { DownloadTransport } from './DownloadTransport';
+import { DownloadTransport, resolveDownloadRequestTarget } from './DownloadTransport';
 import { DownloadCoordinator, type DownloadCoordinatorProgress } from './DownloadCoordinator';
 import { FfmpegOpusTranscoder } from './OpusTranscoder';
 import { OpusFileTransformer, planOpusOutputPaths } from './OpusFileTransformer';
@@ -15,6 +16,15 @@ import type { AudioTags, EmbeddedArtwork } from './MetadataPolicy';
 
 interface DownloadEnrichment { tags: AudioTags; artworkUrl?: string }
 export const DOWNLOAD_DISCOVERY_BATCH_SIZE = 8;
+export const DOWNLOAD_DISCOVERY_CONCURRENCY = 3;
+export const DOWNLOAD_OPTIONAL_METADATA_CONCURRENCY = 3;
+export const DOWNLOAD_OPTIONAL_METADATA_WAIT_MS = 2_000;
+export const DOWNLOAD_OPTIONAL_TRANSLATION_WAIT_MS = 3_000;
+export const DOWNLOAD_ARTWORK_TIMEOUT_MS = 8_000;
+export const DOWNLOAD_ARTWORK_MAX_BYTES = 5 * 1024 * 1024;
+// Match the translation service's default remote concurrency so each
+// checkpoint is one bounded wave rather than one all-selection barrier.
+export const DOWNLOAD_TITLE_TRANSLATION_BATCH_SIZE = 8;
 
 export interface PersistedDownloadDiscovery {
     works: BackupWorkDownloadItem[];
@@ -59,6 +69,118 @@ function titleModeNeedsTranslation(state: BackupDownloadState): boolean {
     return state.titleMode === 'translated' || state.titleMode === 'original-bracketed-translation';
 }
 
+function workHasTitleTranslation(work: BackupWorkDownloadItem, targetLanguage: string): boolean {
+    const title = String(work.title || '').trim();
+    const translated = String(work.translatedTitle || '').trim();
+    if (translated && translated !== title) return true;
+    // Identifiers cannot be translated, and source text already written in the
+    // requested lane is a legitimate unchanged result. Other source echoes are
+    // provider fallbacks and must remain retryable.
+    if (/^RJ\d{5,}$/i.test(title)) return true;
+    return Boolean(title && TranslationService.isTargetLanguage(title, targetLanguage));
+}
+
+const ARTWORK_TIMEOUT = Symbol('artwork-timeout');
+const ARTWORK_ABORTED = Symbol('artwork-aborted');
+
+async function fetchBoundedArtwork(url: string, signal?: AbortSignal): Promise<EmbeddedArtwork | undefined> {
+    if (signal?.aborted) return undefined;
+    const target = resolveDownloadRequestTarget(url);
+    const controller = new AbortController();
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    let abandoned = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let onAbort: (() => void) | undefined;
+
+    const boundedExit = new Promise<typeof ARTWORK_TIMEOUT | typeof ARTWORK_ABORTED>(resolve => {
+        timer = setTimeout(() => resolve(ARTWORK_TIMEOUT), DOWNLOAD_ARTWORK_TIMEOUT_MS);
+        if (signal) {
+            onAbort = () => resolve(ARTWORK_ABORTED);
+            signal.addEventListener('abort', onAbort, { once: true });
+        }
+    });
+    const request = (async (): Promise<EmbeddedArtwork | undefined> => {
+        try {
+            const response = await fetch(target.url, {
+                credentials: target.credentials,
+                headers: target.headers,
+                signal: controller.signal,
+            });
+            if (abandoned) {
+                void response.body?.cancel().catch(() => undefined);
+                return undefined;
+            }
+            if (!response.ok) {
+                void response.body?.cancel().catch(() => undefined);
+                return undefined;
+            }
+            const declaredRaw = response.headers.get('content-length');
+            if (declaredRaw !== null) {
+                const declared = Number(declaredRaw);
+                if (
+                    !/^\d+$/.test(declaredRaw)
+                    || !Number.isSafeInteger(declared)
+                    || declared <= 0
+                    || declared > DOWNLOAD_ARTWORK_MAX_BYTES
+                ) {
+                    void response.body?.cancel().catch(() => undefined);
+                    return undefined;
+                }
+            }
+            reader = response.body?.getReader();
+            if (!reader) return undefined;
+            const chunks: Uint8Array[] = [];
+            let total = 0;
+            for (;;) {
+                const next = await reader.read();
+                if (abandoned) {
+                    void reader.cancel().catch(() => undefined);
+                    return undefined;
+                }
+                if (next.done) break;
+                if (!next.value?.byteLength) continue;
+                if (total + next.value.byteLength > DOWNLOAD_ARTWORK_MAX_BYTES) {
+                    void reader.cancel().catch(() => undefined);
+                    return undefined;
+                }
+                const copy = new Uint8Array(next.value.byteLength);
+                copy.set(next.value);
+                chunks.push(copy);
+                total += copy.byteLength;
+            }
+            if (total === 0) return undefined;
+            const data = new Uint8Array(total);
+            let offset = 0;
+            for (const chunk of chunks) {
+                data.set(chunk, offset);
+                offset += chunk.byteLength;
+            }
+            return {
+                mimeType: response.headers.get('content-type') || 'image/jpeg',
+                data,
+            };
+        } catch {
+            return undefined;
+        }
+    })();
+
+    try {
+        const result = await Promise.race([request, boundedExit]);
+        if (result === ARTWORK_TIMEOUT || result === ARTWORK_ABORTED) {
+            abandoned = true;
+            controller.abort(result === ARTWORK_TIMEOUT
+                ? new DOMException('Artwork request timed out', 'TimeoutError')
+                : signal?.reason);
+            void reader?.cancel().catch(() => undefined);
+            return undefined;
+        }
+        return result;
+    } finally {
+        if (timer) clearTimeout(timer);
+        if (signal && onAbort) signal.removeEventListener('abort', onAbort);
+    }
+}
+
 function resolvedWorkFolder(work: BackupWorkDownloadItem, state: BackupDownloadState): string {
     const original = work.title || String(work.id);
     const translated = work.translatedTitle && work.translatedTitle !== original ? work.translatedTitle : '';
@@ -66,6 +188,37 @@ function resolvedWorkFolder(work: BackupWorkDownloadItem, state: BackupDownloadS
     if (state.titleMode === 'original-bracketed-translation') return translated ? `${original} [${translated}]` : original;
     if (state.titleMode === 'none') return String(work.id);
     return original;
+}
+
+async function optionalWorkInfo(
+    workId: string | number,
+    activeRequests: Set<Promise<unknown>>,
+): Promise<Awaited<ReturnType<typeof WorkService.getWorkInfo>> | null> {
+    // An optional request must never starve the required track manifests. If
+    // transports ignore their timeout, retain at most a tiny bounded pool and
+    // omit enrichment for later works until a slot genuinely settles.
+    if (activeRequests.size >= DOWNLOAD_OPTIONAL_METADATA_CONCURRENCY) return null;
+    const metadata = WorkService.getWorkInfo(workId)
+        .catch(error => {
+            Logger.warn('[DownloadCenter] Optional work metadata unavailable; downloading files without enrichment', workId, error);
+            return null;
+        });
+    activeRequests.add(metadata);
+    void metadata.then(
+        () => activeRequests.delete(metadata),
+        () => activeRequests.delete(metadata),
+    );
+    return new Promise(resolve => {
+        let settled = false;
+        const finish = (value: Awaited<ReturnType<typeof WorkService.getWorkInfo>> | null): void => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            resolve(value);
+        };
+        const timer = setTimeout(() => finish(null), DOWNLOAD_OPTIONAL_METADATA_WAIT_MS);
+        void metadata.then(finish);
+    });
 }
 
 /**
@@ -79,6 +232,7 @@ export class DownloadCenterRunner {
     private readonly repository: DownloadJobRepository;
     private recoveryRequest: Promise<DownloadCenterJob[]> | null = null;
     private activeCoordinator: DownloadCoordinator | null = null;
+    private readonly optionalMetadataRequests = new Set<Promise<unknown>>();
     private activeJobId: string | null = null;
     private readonly ownerId: string;
     private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -273,9 +427,15 @@ export class DownloadCenterRunner {
         await coordinator.run(jobId, notify);
         const finalFiles = await this.repository.listFiles(jobId);
         if (!finalFiles.every(file => file.status === 'completed')) {
-            const error = finalFiles.find(file => file.error)?.error;
-            if (error) Logger.warn('[DownloadCenter] File download failed', error);
-            throw new DownloadCenterRunError(error ? 'failed' : 'paused', error);
+            const failedFile = finalFiles.find(file => file.error);
+            if (failedFile?.error) {
+                Logger.warn('[DownloadCenter] File download failed', failedFile.path, failedFile.error);
+                throw new DownloadCenterRunError(
+                    'failed',
+                    new Error(`${failedFile.path}: ${failedFile.error}`),
+                );
+            }
+            throw new DownloadCenterRunError('paused');
         }
         onProgress?.({ jobId, phase: 'complete', current: finalFiles.length, total: finalFiles.length });
         return options;
@@ -288,19 +448,76 @@ export class DownloadCenterRunner {
     ): Promise<PersistedDownloadCenterOptions> {
         const discovery = options.discovery;
         if (!discovery || discovery.titlesReady || !titleModeNeedsTranslation(options.state)) return options;
-        onProgress?.({ jobId, phase: 'translating', current: 0, total: discovery.works.length });
-        let works = discovery.works;
-        try {
-            const target = TranslationService.getUiTargetLang();
-            works = await resolveDownloadWorkTranslations(works, options.state.titleMode, texts =>
-                TranslationService.translateBatch(texts, target, { preserveRequestedTarget: true }));
-        } catch (error) {
-            Logger.warn('[DownloadCenter] Title translation unavailable; using original titles', error);
+        let works = discovery.works.map(work => ({ ...work }));
+        const target = TranslationService.getUiTargetLang();
+        const missingIndexes = works
+            .map((work, index) => ({ work, index }))
+            .filter(({ work }) => !workHasTitleTranslation(work, target))
+            .map(({ index }) => index);
+        let resolvedCount = works.length - missingIndexes.length;
+        let checkpointed = false;
+        onProgress?.({ jobId, phase: 'translating', current: resolvedCount, total: works.length });
+
+        const checkpoint = async (): Promise<void> => {
+            const titlesReady = works.every(work => workHasTitleTranslation(work, target));
+            options = cloneOptions({
+                ...options,
+                discovery: { ...discovery, works, titlesReady },
+            });
+            await this.assertLease(jobId);
+            await this.repository.appendFilesAndUpdateOptions(jobId, options, []);
+            checkpointed = true;
+        };
+
+        for (let offset = 0; offset < missingIndexes.length; offset += DOWNLOAD_TITLE_TRANSLATION_BATCH_SIZE) {
+            const indexes = missingIndexes.slice(offset, offset + DOWNLOAD_TITLE_TRANSLATION_BATCH_SIZE);
+            const batch = indexes.map(index => works[index]);
+            const cancellableKey = `download-titles:${jobId}:${offset}`;
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            const timedOut = Symbol('translation-timeout');
+            try {
+                const translation = resolveDownloadWorkTranslations(batch, options.state.titleMode, texts =>
+                    TranslationService.translateBatch(texts, target, {
+                        preserveRequestedTarget: true,
+                        cancellable: true,
+                        cancellableKey,
+                    }));
+                const result = await Promise.race([
+                    translation,
+                    new Promise<typeof timedOut>(resolve => {
+                        timer = setTimeout(() => resolve(timedOut), DOWNLOAD_OPTIONAL_TRANSLATION_WAIT_MS);
+                    }),
+                ]);
+                if (result === timedOut) {
+                    TranslationService.cancelPending({ cancellableKey });
+                    Logger.warn('[DownloadCenter] Title translation timed out; remaining titles will retry on resume');
+                    break;
+                }
+                result.forEach((work, batchIndex) => {
+                    works[indexes[batchIndex]] = work;
+                });
+                resolvedCount = works.filter(work => workHasTitleTranslation(work, target)).length;
+                await checkpoint();
+                onProgress?.({ jobId, phase: 'translating', current: resolvedCount, total: works.length });
+            } catch (error) {
+                TranslationService.cancelPending({ cancellableKey });
+                Logger.warn('[DownloadCenter] Title translation unavailable; remaining titles will retry on resume', error);
+                break;
+            } finally {
+                if (timer) clearTimeout(timer);
+            }
         }
-        const next = cloneOptions({ ...options, discovery: { ...discovery, works, titlesReady: true } });
-        await this.assertLease(jobId);
-        await this.repository.appendFilesAndUpdateOptions(jobId, next, []);
-        return next;
+
+        // Preserve the retryable false state even when the first batch stalls.
+        // Successful batches checkpoint themselves so a refresh loses no work.
+        if (!checkpointed) await checkpoint();
+        if (!options.discovery?.titlesReady) {
+            throw new DownloadCenterRunError(
+                'failed',
+                new Error(I18n.t('backupDownloaderTitleTranslationRequired')),
+            );
+        }
+        return options;
     }
 
     private async continueDiscovery(
@@ -318,25 +535,48 @@ export class DownloadCenterRunner {
             .map(folder => canonicalDownloadPath([folder])));
         const existingRootEntries = await new DirectoryDownloadSink(options.directory).listTopLevelEntryNames();
         for (const entry of existingRootEntries) occupiedWorkFolders.add(canonicalDownloadPath([entry]));
-        let pendingFiles: Array<{ id: string; path: string; url: string; totalBytes?: number }> = [];
+        let pendingFiles: Array<{ id: string; path: string; url: string; sourceUrls?: string[]; totalBytes?: number }> = [];
         const enrichment = { ...options.enrichment };
         const skippedWorkIds = [...discovery.skippedWorkIds];
+        const skippedWorkIdSet = new Set(skippedWorkIds.map(String));
+        const markWorkUnavailable = (workId: string | number): void => {
+            const normalized = String(workId);
+            if (skippedWorkIdSet.has(normalized)) return;
+            skippedWorkIdSet.add(normalized);
+            skippedWorkIds.push(normalized);
+        };
+        const manifestRequests = new Map<number, Promise<{
+            tracks: Awaited<ReturnType<typeof WorkService.getTracks>>;
+            info: Awaited<ReturnType<typeof WorkService.getWorkInfo>> | null;
+        }>>();
+        const prefetchManifest = (index: number): void => {
+            if (index >= discovery!.works.length || manifestRequests.has(index)) return;
+            const work = discovery!.works[index];
+            const request = Promise.all([
+                WorkService.getTracks(work.id, false, true),
+                optionalWorkInfo(work.id, this.optionalMetadataRequests),
+            ]).then(([tracks, info]) => ({ tracks, info }));
+            // A pause can leave speculative requests unconsumed. Attach a
+            // handler immediately while preserving rejection for ordered await.
+            void request.catch(() => undefined);
+            manifestRequests.set(index, request);
+        };
         for (let index = discovery.nextIndex; index < discovery.works.length; index += 1) {
             await this.assertLease(jobId);
             const work = discovery.works[index];
             onProgress?.({ jobId, phase: 'discovering', current: index, total: discovery.works.length, label: work.title });
-            const newFiles: Array<{ id: string; path: string; url: string; totalBytes?: number }> = [];
+            const newFiles: Array<{ id: string; path: string; url: string; sourceUrls?: string[]; totalBytes?: number }> = [];
             try {
-                const [tracks, info] = await Promise.all([
-                    // A non-essential size preview may already own the shared
-                    // in-flight request. Reuse fresh cache data, but never let
-                    // that preview stall a user-started download.
-                    WorkService.getTracks(work.id, false, true),
-                    WorkService.getWorkInfo(work.id).catch(error => {
-                        Logger.warn('[DownloadCenter] Optional work metadata unavailable; downloading files without enrichment', work.id, error);
-                        return null;
-                    }),
-                ]);
+                // Fetch several work manifests concurrently, then consume them
+                // in source order so folder names and resume checkpoints remain
+                // deterministic.
+                for (let ahead = 0; ahead < DOWNLOAD_DISCOVERY_CONCURRENCY; ahead += 1) {
+                    prefetchManifest(index + ahead);
+                }
+                const request = manifestRequests.get(index);
+                if (!request) throw new Error(`Could not prepare work ${String(work.id)}`);
+                const { tracks, info } = await request;
+                manifestRequests.delete(index);
                 const manifest = discoverDownloadManifest(tracks as unknown as DownloadTreeNode[]);
                 const folder = reserveCollisionFreePath([resolvedWorkFolder(work, options.state)], occupiedWorkFolders)[0];
                 const occupiedRelativePaths = new Set<string>();
@@ -347,10 +587,33 @@ export class DownloadCenterRunner {
                     if (category === 'image' && entry.primaryUrl && /(?:^|[\/_. -])(?:cover|main|folder|thumb)/i.test(entry.relativePath.at(-1) || entry.sourceTitle)) {
                         hasCoverImage = true;
                     }
-                    if (!options.state.filters[category] || !entry.primaryUrl) continue;
+                    if (!options.state.filters[category]) continue;
+                    const fullQualitySources = entry.sourceUrls
+                        .filter(source => source.kind !== 'low-quality-stream');
+                    const primarySource = fullQualitySources
+                        .find(source => source.url === entry.primaryUrl)
+                        ?? fullQualitySources[0];
+                    if (!primarySource) {
+                        markWorkUnavailable(work.id);
+                        Logger.warn(
+                            '[DownloadCenter] Skipping file without a full-quality source',
+                            String(work.id),
+                            entry.sourcePath.join('/'),
+                        );
+                        continue;
+                    }
                     const id = `${jobId}:${work.id}:${entry.id}`;
                     const path = [folder, ...entry.relativePath].join('/');
-                    newFiles.push({ id, path, url: entry.primaryUrl, totalBytes: entry.size });
+                    const sourceUrls = fullQualitySources
+                        .map(source => source.url)
+                        .filter((url, sourceIndex, urls) => url !== primarySource.url && urls.indexOf(url) === sourceIndex);
+                    newFiles.push({
+                        id,
+                        path,
+                        url: primarySource.url,
+                        sourceUrls: sourceUrls.length ? sourceUrls : undefined,
+                        totalBytes: entry.size,
+                    });
                     const filename = entry.relativePath.at(-1) || entry.sourceTitle;
                     enrichment[id] = {
                         tags: {
@@ -377,7 +640,7 @@ export class DownloadCenterRunner {
                     });
                 }
             } catch (error) {
-                skippedWorkIds.push(String(work.id));
+                markWorkUnavailable(work.id);
                 Logger.warn('[DownloadCenter] Skipping unavailable work', String(work.id), error);
             }
             pendingFiles.push(...newFiles);
@@ -480,13 +743,10 @@ export class DownloadCenterRunner {
     private createOpusTransformer(options: PersistedDownloadCenterOptions): OpusFileTransformer | undefined {
         if (!options.state.convertToOpus) return undefined;
         const artworkCache = new Map<string, Promise<EmbeddedArtwork | undefined>>();
-        const loadArtwork = (url: string): Promise<EmbeddedArtwork | undefined> => {
+        const loadArtwork = (url: string, signal?: AbortSignal): Promise<EmbeddedArtwork | undefined> => {
             const existing = artworkCache.get(url);
             if (existing) return existing;
-            const request = fetch(url, { credentials: 'include' }).then(async response => {
-                if (!response.ok) return undefined;
-                return { mimeType: response.headers.get('content-type') || 'image/jpeg', data: new Uint8Array(await response.arrayBuffer()) };
-            }).catch(() => undefined);
+            const request = fetchBoundedArtwork(url, signal);
             artworkCache.set(url, request);
             return request;
         };
@@ -496,10 +756,10 @@ export class DownloadCenterRunner {
             metadataPolicy: options.state.metadataMode,
             tagsForFile: file => options.enrichment[file.id]?.tags || {},
             outputPathForFile: file => options.opusOutputPaths?.[file.id],
-            artworkForFile: async (file): Promise<EmbeddedArtwork | undefined> => {
+            artworkForFile: async (file, signal): Promise<EmbeddedArtwork | undefined> => {
                 if (!options.state.includeArtwork) return undefined;
                 const url = options.enrichment[file.id]?.artworkUrl;
-                return url ? loadArtwork(url) : undefined;
+                return url ? loadArtwork(url, signal) : undefined;
             },
         });
     }

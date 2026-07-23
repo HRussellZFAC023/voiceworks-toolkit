@@ -104,7 +104,10 @@ export class WorkServiceImpl {
 
         const promise = this.fetchWork(workId);
         this.inflightWork.set(workId, promise);
-        promise.finally(() => this.inflightWork.delete(workId));
+        void promise.then(
+            () => this.inflightWork.delete(workId),
+            () => this.inflightWork.delete(workId),
+        );
         return promise;
     }
 
@@ -186,18 +189,22 @@ export class WorkServiceImpl {
         const inflight = this.inflightTracks.get(workId);
         if (inflight && !forceRefresh && !bypassInflight) return inflight;
 
-        const promise = this.fetchTracks(workId);
+        const promise = this.fetchTracks(workId, bypassInflight);
         if (bypassInflight) return promise;
         this.inflightTracks.set(workId, promise);
-        promise.finally(() => this.inflightTracks.delete(workId));
+        void promise.then(
+            () => this.inflightTracks.delete(workId),
+            () => this.inflightTracks.delete(workId),
+        );
         return promise;
     }
 
-    private async fetchTracks(workId: number): Promise<TracksResponse> {
+    private async fetchTracks(workId: number, bypassInflight = false): Promise<TracksResponse> {
         try {
             const baseUrl = this.getApiBaseUrl();
             const response = await HttpClient.getJsonViaCors<TracksResponse>(`${baseUrl}/api/tracks/${workId}?v=2`, {
                 retry: RETRY.BLOB,
+                dedupe: !bypassInflight,
             });
             const data = Array.isArray(response.data) ? response.data : [];
             await this.setCache('tracks', workId, data);

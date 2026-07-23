@@ -21,6 +21,8 @@ export interface DownloadFile {
     jobId: string;
     path: string;
     url: string;
+    /** Ordered full-quality alternatives used when the preferred source fails. */
+    sourceUrls?: string[];
     status: DownloadFileStatus;
     downloadedBytes: number;
     totalBytes?: number;
@@ -57,6 +59,7 @@ export interface CreateDownloadFile {
     id: string;
     path: string;
     url: string;
+    sourceUrls?: string[];
     totalBytes?: number;
     status?: DownloadFileStatus;
 }
@@ -248,6 +251,16 @@ export class DownloadJobRepository {
             ...file,
             status: 'active',
             error: undefined,
+            updatedAt: now,
+        }));
+    }
+
+    /** Persist a verified full-quality fallback so refresh/resume uses it. */
+    async selectFileSource(fileId: string, url: string, sourceUrls: string[] = []): Promise<DownloadFile> {
+        return this.updateFile(fileId, (file, now) => ({
+            ...file,
+            url,
+            sourceUrls: sourceUrls.length ? [...sourceUrls] : undefined,
             updatedAt: now,
         }));
     }

@@ -121,6 +121,20 @@ describe('AppStore', () => {
             }
         });
 
+        it('migrates legacy silence skipping to full-audio ASMR transcription', async () => {
+            mockStorage.whisperVadMode = 'conservative';
+            delete mockStorage.__asmr_whisper_defaults_v3__;
+            vi.resetModules();
+            const g = (typeof global !== 'undefined' ? global : window) as any;
+            delete g.__ASMR_APP_STORE__;
+            const freshModule = await import('../../src/store/AppStore');
+
+            expect(freshModule.AppStore.getConfig('whisperVadMode')).toBe('off');
+            expect(freshModule.AppStore.getConfig('whisperLiveChunkSec')).toBe(29);
+            expect(freshModule.AppStore.getConfig('whisperLiveOverlapSec')).toBe(5);
+            expect(mockStorage.__asmr_whisper_defaults_v3__).toBe(true);
+        });
+
         it('ships the maintained public Google Drive OAuth client', () => {
             expect(AppStore.getConfig('googleDriveClientId')).toMatch(
                 /^166564421003-[a-z0-9]+\.apps\.googleusercontent\.com$/,

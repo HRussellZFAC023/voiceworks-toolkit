@@ -236,6 +236,105 @@ describe('gmRequest', () => {
     });
 });
 
+describe('HttpClient foreground request priority', () => {
+    afterEach(() => {
+        (globalThis as any).GM_xmlhttpRequest = undefined;
+        vi.useRealTimers();
+        vi.unstubAllGlobals();
+    });
+
+    it('does not wait behind a same-URL background request when dedupe is disabled', async () => {
+        let backgroundOptions: any;
+        const request = vi.fn((options: any) => {
+            if (!backgroundOptions) {
+                backgroundOptions = options;
+                return { abort: vi.fn() };
+            }
+            options.onload({
+                status: 200,
+                statusText: 'OK',
+                responseText: '{"source":"foreground"}',
+                response: { source: 'foreground' },
+                responseHeaders: 'Content-Type: application/json\r\n',
+            });
+            return { abort: vi.fn() };
+        });
+        (globalThis as any).GM_xmlhttpRequest = request;
+        const url = `https://api.example.test/priority-${crypto.randomUUID()}`;
+
+        const background = HttpClient.getJsonViaCors<{ source: string }>(url, {
+            retry: { attempts: 1 },
+        });
+        await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(1));
+
+        await expect(HttpClient.getJsonViaCors<{ source: string }>(url, {
+            retry: { attempts: 1 },
+            dedupe: false,
+        })).resolves.toMatchObject({ data: { source: 'foreground' } });
+        expect(request).toHaveBeenCalledTimes(2);
+
+        backgroundOptions.onload({
+            status: 200,
+            statusText: 'OK',
+            responseText: '{"source":"background"}',
+            response: { source: 'background' },
+            responseHeaders: 'Content-Type: application/json\r\n',
+        });
+        await expect(background).resolves.toMatchObject({ data: { source: 'background' } });
+    });
+
+    it('aborts the native fetch fallback at the configured timeout', async () => {
+        vi.useFakeTimers();
+        (globalThis as any).GM_xmlhttpRequest = undefined;
+        const fetchMock = vi.fn((_url: string, init?: RequestInit) =>
+            new Promise<Response>((_resolve, reject) => {
+                init?.signal?.addEventListener('abort', () => {
+                    reject(init.signal?.reason ?? new DOMException('Request aborted', 'AbortError'));
+                }, { once: true });
+            }));
+        vi.stubGlobal('fetch', fetchMock);
+        const request = HttpClient.getJsonViaCors(
+            `https://api.example.test/timeout-${crypto.randomUUID()}`,
+            { timeout: 25, retry: { attempts: 1 }, dedupe: false },
+        );
+        const rejection = expect(request).rejects.toThrow('Request timeout');
+
+        await vi.advanceTimersByTimeAsync(25);
+
+        await rejection;
+        expect(fetchMock).toHaveBeenCalledWith(
+            expect.any(String),
+            expect.objectContaining({ signal: expect.any(AbortSignal) }),
+        );
+    });
+
+    it('keeps the native fetch timeout active while the response body is read', async () => {
+        vi.useFakeTimers();
+        (globalThis as any).GM_xmlhttpRequest = undefined;
+        const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => ({
+            ok: true,
+            status: 200,
+            statusText: 'OK',
+            headers: new Headers(),
+            text: () => new Promise<string>((_resolve, reject) => {
+                init?.signal?.addEventListener('abort', () => {
+                    reject(init.signal?.reason ?? new DOMException('Request aborted', 'AbortError'));
+                }, { once: true });
+            }),
+        } as Response));
+        vi.stubGlobal('fetch', fetchMock);
+        const request = HttpClient.getJsonViaCors(
+            `https://api.example.test/body-timeout-${crypto.randomUUID()}`,
+            { timeout: 25, retry: { attempts: 1 }, dedupe: false },
+        );
+        const rejection = expect(request).rejects.toThrow('Request timeout');
+
+        await vi.advanceTimersByTimeAsync(25);
+
+        await rejection;
+    });
+});
+
 describe('KikoeruApiClient', () => {
     let mockAxios: any;
     let client: KikoeruApiClient;

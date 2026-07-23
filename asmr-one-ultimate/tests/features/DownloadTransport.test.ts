@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+    DownloadRequestTimeoutError,
     DownloadStallError,
     DownloadTransport,
     RangeRestartRequiredError,
@@ -34,6 +35,14 @@ describe('DownloadTransport', () => {
 
         expect(new Headers(fetchMock.mock.calls[0][1]?.headers).has('Authorization')).toBe(false);
         expect(new Headers(fetchMock.mock.calls[1][1]?.headers).has('Authorization')).toBe(false);
+        expect(fetchMock.mock.calls[0]).toEqual(expect.arrayContaining([
+            'https://cdn.example/media/file.mp3',
+            expect.objectContaining({ credentials: 'omit' }),
+        ]));
+        expect(fetchMock.mock.calls[1]).toEqual(expect.arrayContaining([
+            'https://untrusted.example/media/file.mp3',
+            expect.objectContaining({ credentials: 'omit' }),
+        ]));
     });
 
     it('keeps an absent Content-Length indeterminate instead of reporting zero bytes', async () => {
@@ -59,6 +68,9 @@ describe('DownloadTransport', () => {
             'https://api.asmr-200.com/api/media/stream/hash', 0, vi.fn(),
         );
 
+        expect(fetchMock.mock.calls[0][0]).toBe('https://api.asmr-200.com/api/media/check/hash');
+        expect(fetchMock.mock.calls[0][1]?.credentials).toBe('include');
+        expect(fetchMock.mock.calls[1][1]?.credentials).toBe('include');
         expect(new Headers(fetchMock.mock.calls[0][1]?.headers).get('Authorization'))
             .toBe('Bearer host-secret');
         expect(new Headers(fetchMock.mock.calls[1][1]?.headers).get('Authorization'))
@@ -91,11 +103,260 @@ describe('DownloadTransport', () => {
         expect(result.size).toBe(5);
     });
 
+    it('retries a date-validated Cloudflare resume without If-Range and still validates the range', async () => {
+        const lastModified = 'Thu, 23 Jul 2026 18:21:43 GMT';
+        const cancelled = vi.fn();
+        const ignoredBody = new ReadableStream<Uint8Array>({
+            start(controller) {
+                controller.enqueue(new Uint8Array([1, 2, 3, 4, 5]));
+            },
+            cancel: cancelled,
+        });
+        const fetchMock = vi.fn()
+            .mockResolvedValueOnce(new Response(ignoredBody, {
+                status: 200,
+                headers: { 'content-length': '5', 'last-modified': lastModified },
+            }))
+            .mockResolvedValueOnce(response([[3, 4], [5]], {
+                status: 206,
+                headers: {
+                    'content-range': 'bytes 2-4/5',
+                    'accept-ranges': 'bytes',
+                },
+            }))
+            .mockResolvedValueOnce(response([], {
+                status: 200,
+                headers: {
+                    'content-length': '5',
+                    'last-modified': lastModified,
+                    'accept-ranges': 'bytes',
+                },
+            }));
+        const chunks = vi.fn();
+
+        const result = await new DownloadTransport(fetchMock as typeof fetch).stream(
+            'https://media.example/file',
+            2,
+            chunks,
+            { expectedLastModified: lastModified, expectedTotal: 5 },
+        );
+
+        expect(fetchMock).toHaveBeenCalledTimes(3);
+        expect(fetchMock.mock.calls[0][1].headers).toMatchObject({
+            Range: 'bytes=2-',
+            'If-Range': lastModified,
+        });
+        expect(fetchMock.mock.calls[1][1].headers).toMatchObject({ Range: 'bytes=2-' });
+        expect(fetchMock.mock.calls[1][1].headers).not.toHaveProperty('If-Range');
+        expect(fetchMock.mock.calls[2][1]).toMatchObject({ method: 'HEAD' });
+        expect(cancelled).toHaveBeenCalledTimes(1);
+        expect(chunks).toHaveBeenCalledTimes(2);
+        expect(result.size).toBe(5);
+        expect(result.lastModified).toBe(lastModified);
+    });
+
+    it('does not append a headerless resumed range when its HEAD continuity proof mismatches', async () => {
+        const lastModified = 'Thu, 23 Jul 2026 18:21:43 GMT';
+        const cancelledRange = vi.fn();
+        const fetchMock = vi.fn()
+            .mockResolvedValueOnce(response([[1, 2, 3, 4, 5]], {
+                status: 200,
+                headers: { 'content-length': '5', 'last-modified': lastModified },
+            }))
+            .mockResolvedValueOnce(new Response(new ReadableStream({
+                start(controller) {
+                    controller.enqueue(new Uint8Array([3, 4, 5]));
+                },
+                cancel: cancelledRange,
+            }), {
+                status: 206,
+                headers: {
+                    'content-range': 'bytes 2-4/5',
+                    'accept-ranges': 'bytes',
+                },
+            }))
+            .mockResolvedValueOnce(response([], {
+                status: 200,
+                headers: {
+                    'content-length': '5',
+                    'last-modified': 'Thu, 23 Jul 2026 20:00:00 GMT',
+                },
+            }));
+        const chunks = vi.fn();
+
+        await expect(new DownloadTransport(fetchMock as typeof fetch).stream(
+            'https://media.example/file',
+            2,
+            chunks,
+            { expectedLastModified: lastModified, expectedTotal: 5 },
+        )).rejects.toBeInstanceOf(RangeRestartRequiredError);
+
+        expect(fetchMock).toHaveBeenCalledTimes(3);
+        expect(chunks).not.toHaveBeenCalled();
+        expect(cancelledRange).toHaveBeenCalledTimes(1);
+    });
+
+    it('cancels the pending resumed body when its HEAD continuity proof fails', async () => {
+        const lastModified = 'Thu, 23 Jul 2026 18:21:43 GMT';
+        const cancelledRange = vi.fn();
+        const fetchMock = vi.fn()
+            .mockResolvedValueOnce(response([[1, 2, 3, 4, 5]], {
+                status: 200,
+                headers: { 'content-length': '5', 'last-modified': lastModified },
+            }))
+            .mockResolvedValueOnce(new Response(new ReadableStream({
+                start(controller) {
+                    controller.enqueue(new Uint8Array([3, 4, 5]));
+                },
+                cancel: cancelledRange,
+            }), {
+                status: 206,
+                headers: {
+                    'content-range': 'bytes 2-4/5',
+                    'accept-ranges': 'bytes',
+                },
+            }))
+            .mockRejectedValueOnce(new TypeError('HEAD network failure'));
+        const chunks = vi.fn();
+
+        await expect(new DownloadTransport(fetchMock as typeof fetch, {
+            maxAttempts: 1,
+        }).stream(
+            'https://media.example/file',
+            2,
+            chunks,
+            { expectedLastModified: lastModified, expectedTotal: 5 },
+        )).rejects.toThrow('HEAD network failure');
+
+        expect(fetchMock).toHaveBeenCalledTimes(3);
+        expect(chunks).not.toHaveBeenCalled();
+        expect(cancelledRange).toHaveBeenCalledTimes(1);
+    });
+
+    it('rejects a resumed range that omits the persisted date without prior continuity proof', async () => {
+        const lastModified = 'Thu, 23 Jul 2026 18:21:43 GMT';
+        const fetchMock = vi.fn().mockResolvedValue(response([[3, 4], [5]], {
+            status: 206,
+            headers: {
+                'content-range': 'bytes 2-4/5',
+                'accept-ranges': 'bytes',
+            },
+        }));
+        const chunks = vi.fn();
+
+        await expect(new DownloadTransport(fetchMock as typeof fetch).stream(
+            'https://media.example/file',
+            2,
+            chunks,
+            { expectedLastModified: lastModified },
+        )).rejects.toBeInstanceOf(RangeRestartRequiredError);
+
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(chunks).not.toHaveBeenCalled();
+    });
+
+    it('accepts an exact offset-at-EOF 416 only after proving persisted validator continuity', async () => {
+        const lastModified = 'Thu, 23 Jul 2026 18:21:43 GMT';
+        const cancelledFull = vi.fn();
+        const cancelledRange = vi.fn();
+        const fetchMock = vi.fn()
+            .mockResolvedValueOnce(new Response(new ReadableStream({
+                start(controller) { controller.enqueue(new Uint8Array([1, 2, 3, 4, 5])); },
+                cancel: cancelledFull,
+            }), {
+                status: 200,
+                headers: { 'content-length': '5', 'last-modified': lastModified },
+            }))
+            .mockResolvedValueOnce(new Response(new ReadableStream({
+                cancel: cancelledRange,
+            }), {
+                status: 416,
+                headers: { 'content-range': 'bytes */5', 'content-length': '0' },
+            }));
+        const chunks = vi.fn();
+
+        const result = await new DownloadTransport(fetchMock as typeof fetch).stream(
+            'https://media.example/file',
+            5,
+            chunks,
+            { expectedLastModified: lastModified, expectedTotal: 5 },
+        );
+
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+        expect(fetchMock.mock.calls[0][1].headers).toMatchObject({
+            Range: 'bytes=5-',
+            'If-Range': lastModified,
+        });
+        expect(fetchMock.mock.calls[1][1].headers).toMatchObject({ Range: 'bytes=5-' });
+        expect(fetchMock.mock.calls[1][1].headers).not.toHaveProperty('If-Range');
+        expect(cancelledFull).toHaveBeenCalledTimes(1);
+        expect(cancelledRange).toHaveBeenCalledTimes(1);
+        expect(chunks).not.toHaveBeenCalled();
+        expect(result).toEqual({
+            size: 5,
+            lastModified,
+            acceptsRanges: true,
+            confirmedCompleteAtOffset: true,
+        });
+    });
+
+    it('rejects a matching offset-at-EOF 416 without validator continuity', async () => {
+        const cancelled = vi.fn();
+        const fetchMock = vi.fn().mockResolvedValue(new Response(new ReadableStream({
+            cancel: cancelled,
+        }), {
+            status: 416,
+            headers: { 'content-range': 'bytes */5' },
+        }));
+
+        await expect(new DownloadTransport(fetchMock as typeof fetch).stream(
+            'https://media.example/file',
+            5,
+            vi.fn(),
+            {
+                expectedLastModified: 'Thu, 23 Jul 2026 18:21:43 GMT',
+                expectedTotal: 5,
+            },
+        )).rejects.toBeInstanceOf(RangeRestartRequiredError);
+
+        expect(cancelled).toHaveBeenCalledTimes(1);
+    });
+
+    it('rejects a validator-proven 416 whose remote total differs from the checkpoint', async () => {
+        const lastModified = 'Thu, 23 Jul 2026 18:21:43 GMT';
+        const cancelledRange = vi.fn();
+        const fetchMock = vi.fn()
+            .mockResolvedValueOnce(response([[1, 2, 3, 4, 5]], {
+                status: 200,
+                headers: { 'content-length': '5', 'last-modified': lastModified },
+            }))
+            .mockResolvedValueOnce(new Response(new ReadableStream({
+                cancel: cancelledRange,
+            }), {
+                status: 416,
+                headers: { 'content-range': 'bytes */6' },
+            }));
+
+        await expect(new DownloadTransport(fetchMock as typeof fetch).stream(
+            'https://media.example/file',
+            5,
+            vi.fn(),
+            { expectedLastModified: lastModified, expectedTotal: 5 },
+        )).rejects.toBeInstanceOf(RangeRestartRequiredError);
+
+        expect(cancelledRange).toHaveBeenCalledTimes(1);
+    });
+
     it('requires a safe restart when a server ignores Range', async () => {
-        const fetchMock = vi.fn().mockResolvedValue(response([[1, 2, 3]], { status: 200 }));
+        const cancelled = vi.fn();
+        const fetchMock = vi.fn().mockResolvedValue(new Response(new ReadableStream({
+            start(controller) { controller.enqueue(new Uint8Array([1, 2, 3])); },
+            cancel: cancelled,
+        }), { status: 200 }));
         await expect(new DownloadTransport(fetchMock as typeof fetch).stream(
             'https://media.example/file', 2, vi.fn(),
         )).rejects.toBeInstanceOf(RangeRestartRequiredError);
+        expect(cancelled).toHaveBeenCalledTimes(1);
     });
 
     it('rejects truncated responses before marking a file complete', async () => {
@@ -108,6 +369,38 @@ describe('DownloadTransport', () => {
         )).rejects.toThrow('Incomplete download');
     });
 
+    it('cancels the response stream when the destination rejects a chunk', async () => {
+        const cancelled = vi.fn();
+        const destinationError = new DOMException('disk full', 'QuotaExceededError');
+        const fetchMock = vi.fn().mockResolvedValue(new Response(new ReadableStream({
+            start(controller) { controller.enqueue(new Uint8Array([1, 2, 3])); },
+            cancel: cancelled,
+        }), {
+            status: 200,
+            headers: { 'content-length': '3' },
+        }));
+
+        await expect(new DownloadTransport(fetchMock as typeof fetch).stream(
+            'https://media.example/file',
+            0,
+            async () => { throw destinationError; },
+        )).rejects.toBe(destinationError);
+
+        expect(cancelled).toHaveBeenCalledTimes(1);
+        expect(cancelled).toHaveBeenCalledWith(destinationError);
+    });
+
+    it('marks an explicit zero-length full response as a proven empty file', async () => {
+        const result = await new DownloadTransport(vi.fn().mockResolvedValue(
+            response([], { status: 200, headers: { 'content-length': '0' } }),
+        ) as typeof fetch).stream('https://media.example/empty.txt', 0, vi.fn());
+
+        expect(result).toMatchObject({
+            size: 0,
+            confirmedEmpty: true,
+        });
+    });
+
     it('rejects a truncated unknown-total byte range using its declared end', async () => {
         const fetchMock = vi.fn().mockResolvedValue(response([[3, 4]], {
             status: 206, headers: { 'content-range': 'bytes 2-5/*' },
@@ -118,12 +411,31 @@ describe('DownloadTransport', () => {
     });
 
     it('does not confuse offset 2 with a range starting at 20', async () => {
-        const fetchMock = vi.fn().mockResolvedValue(response([[1]], {
-            status: 206, headers: { 'content-range': 'bytes 20-20/21' },
+        const cancelled = vi.fn();
+        const fetchMock = vi.fn().mockResolvedValue(new Response(new ReadableStream({
+            start(controller) { controller.enqueue(new Uint8Array([1])); },
+            cancel: cancelled,
+        }), {
+            status: 206,
+            headers: { 'content-range': 'bytes 20-20/21' },
         }));
         await expect(new DownloadTransport(fetchMock as typeof fetch).stream(
             'https://media.example/file', 2, vi.fn(),
         )).rejects.toBeInstanceOf(RangeRestartRequiredError);
+        expect(cancelled).toHaveBeenCalledTimes(1);
+    });
+
+    it('cancels an error response body before surfacing the HTTP failure', async () => {
+        const cancelled = vi.fn();
+        const fetchMock = vi.fn().mockResolvedValue(new Response(new ReadableStream({
+            cancel: cancelled,
+        }), { status: 404, statusText: 'Not Found' }));
+
+        await expect(new DownloadTransport(fetchMock as typeof fetch, {
+            maxAttempts: 1,
+        }).stream('https://media.example/missing', 0, vi.fn())).rejects.toThrow('HTTP 404');
+
+        expect(cancelled).toHaveBeenCalledTimes(1);
     });
 
     it('retries transient status failures before exposing any body bytes', async () => {
@@ -140,6 +452,37 @@ describe('DownloadTransport', () => {
         expect(fetchMock).toHaveBeenCalledTimes(2);
         expect(sleep).toHaveBeenCalledWith(2_000);
         expect(chunks).toHaveBeenCalledTimes(1);
+    });
+
+    it('bounds and retries a request that never establishes a response', async () => {
+        const timers: Array<() => void> = [];
+        const fetchMock = vi.fn((_url: string, init?: RequestInit) =>
+            new Promise<Response>((_resolve, reject) => {
+                init?.signal?.addEventListener('abort', () => {
+                    reject(init.signal?.reason ?? new DOMException('aborted', 'AbortError'));
+                }, { once: true });
+            }));
+        const sleep = vi.fn(async () => undefined);
+        const transport = new DownloadTransport(fetchMock as typeof fetch, {
+            maxAttempts: 2,
+            requestTimeoutMs: 10,
+            sleep,
+            setTimer: callback => {
+                timers.push(callback);
+                return timers.length as unknown as ReturnType<typeof setTimeout>;
+            },
+            clearTimer: vi.fn(),
+        });
+        const probing = transport.probe('https://media.example/hangs');
+
+        await vi.waitFor(() => expect(timers).toHaveLength(1));
+        timers.shift()?.();
+        await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+        await vi.waitFor(() => expect(timers).toHaveLength(1));
+        timers.shift()?.();
+
+        await expect(probing).rejects.toBeInstanceOf(DownloadRequestTimeoutError);
+        expect(sleep).toHaveBeenCalledTimes(1);
     });
 
     it('does not retry permanent HTTP or safe-range restart failures', async () => {
@@ -184,6 +527,7 @@ describe('DownloadTransport', () => {
         const clearTimer = vi.fn();
         const streaming = new DownloadTransport(fetchMock as typeof fetch, {
             stallTimeoutMs: 10,
+            requestTimeoutMs: 0,
             setTimer,
             clearTimer,
         }).stream('https://media.example/file', 0, vi.fn());

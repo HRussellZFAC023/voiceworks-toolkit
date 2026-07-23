@@ -3,6 +3,7 @@ import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import SettingsToggle from './SettingsToggle.vue';
 import SettingsInput from './SettingsInput.vue';
 import SettingsSelect from './SettingsSelect.vue';
+import SettingsRangeSelect from './SettingsRangeSelect.vue';
 import SettingsHotkeyInput from './SettingsHotkeyInput.vue';
 import { useI18n } from '../../composables/useI18n';
 import { useConfig } from '../../composables/useConfig';
@@ -121,17 +122,38 @@ const whisperModelPreset = useConfig('whisperModelPreset');
 
 const whisperPresetOptions = computed(() => [
     { value: 'auto', label: t('whisperPresetAuto') },
+    { value: 'tiny', label: t('whisperPresetTiny') },
     { value: 'small', label: t('whisperPresetSmall') },
     { value: 'medium', label: t('whisperPresetMedium') },
     { value: 'large-v3-turbo', label: t('whisperPresetLargeTurbo') },
 ]);
 
-const whisperPresetHint = computed(() =>
-    whisperModelPreset.value === 'large-v3-turbo' ? t('whisperPresetLargeTurboWarning') : '');
+const whisperPresetHint = computed(() => {
+    if (whisperModelPreset.value === 'tiny') return t('whisperPresetTinyWarning');
+    if (whisperModelPreset.value === 'medium') return t('whisperPresetMediumWarning');
+    if (whisperModelPreset.value === 'large-v3-turbo') return t('whisperPresetLargeTurboWarning');
+    return '';
+});
 
-const whisperVadOptions = computed(() => [
-    { value: 'off', label: t('whisperVadOff') },
-    { value: 'conservative', label: t('whisperVadConservative') },
+const whisperLanguageOptions = computed(() => [
+    { value: 'auto', label: t('whisperLanguageAuto') },
+    { value: 'ja', label: t('whisperLanguageJapanese') },
+    { value: 'zh', label: t('whisperLanguageChinese') },
+    { value: 'en', label: t('whisperLanguageEnglish') },
+    { value: 'detect', label: t('whisperLanguageDetect') },
+]);
+
+const whisperContextOptions = computed(() => [
+    { value: 8, label: t('whisperContextQuick') },
+    { value: 15, label: t('whisperContextBalanced') },
+    { value: 22, label: t('whisperContextLong') },
+    { value: 29, label: t('whisperContextMaximum') },
+]);
+
+const whisperOverlapOptions = computed(() => [
+    { value: 0, label: t('whisperOverlapNone') },
+    { value: 2, label: t('whisperOverlapLight') },
+    { value: 5, label: t('whisperOverlapAsmr') },
 ]);
 
 const learnerSubtitleModeOptions = computed(() => [
@@ -146,6 +168,14 @@ const whisperDownloadStatus = ref({
     progress: 0,
     message: '',
 });
+
+function resetWhisperDownloadStatus() {
+    whisperDownloadStatus.value = {
+        isLoading: false,
+        progress: 0,
+        message: '',
+    };
+}
 
 const whisperModelStatusText = ref(t('whisperReady'));
 const whisperModelStatusColor = ref('');
@@ -426,6 +456,10 @@ on('whisper:progress', (payload) => {
 // Model preset, force-WASM, and whisperModel all change the effective model.
 on('config:change', ({ key }) => {
     if (key === 'whisperModelPreset' || key === 'whisperModel' || key === 'forceWhisperWasm') {
+        // This ref represents events for the previously effective runtime.
+        // With auto-warmup disabled there may be no replacement progress event,
+        // so invalidate it synchronously before resolving the new model.
+        resetWhisperDownloadStatus();
         refreshEffectiveWhisperModel();
         updateWhisperModelStatus();
     }
@@ -774,7 +808,7 @@ const credits = [
                 <hr class="q-separator q-separator--horizontal asmr-settings-separator">
                 <SettingsToggle config-key="alwaysTranscribe" :label="t('alwaysTranscribe')" :sublabel="t('alwaysTranscribeSub')" icon="auto_fix_high" />
                 <hr class="q-separator q-separator--horizontal asmr-settings-separator">
-                <SettingsSelect
+                <SettingsRangeSelect
                     config-key="whisperModelPreset"
                     :label="t('whisperModelPreset')"
                     :sublabel="t('whisperModelPresetSub')"
@@ -784,15 +818,39 @@ const credits = [
                     icon="tune"
                 />
                 <hr class="q-separator q-separator--horizontal asmr-settings-separator">
+                <SettingsToggle
+                    config-key="whisperAutoWarmup"
+                    :label="t('whisperAutoWarmup')"
+                    :sublabel="t('whisperAutoWarmupSub')"
+                    icon="downloading"
+                />
+                <hr class="q-separator q-separator--horizontal asmr-settings-separator">
                 <SettingsSelect
-                    config-key="whisperVadMode"
-                    :label="t('whisperVadMode')"
-                    :sublabel="t('whisperVadModeSub')"
-                    :options="whisperVadOptions"
+                    config-key="whisperLanguage"
+                    :label="t('whisperLanguage')"
+                    :sublabel="t('whisperLanguageSub')"
+                    :options="whisperLanguageOptions"
+                    icon="record_voice_over"
+                />
+                <hr class="q-separator q-separator--horizontal asmr-settings-separator">
+                <SettingsRangeSelect
+                    config-key="whisperLiveChunkSec"
+                    :label="t('whisperContextWindow')"
+                    :sublabel="t('whisperContextWindowSub')"
+                    :options="whisperContextOptions"
                     icon="graphic_eq"
                 />
                 <hr class="q-separator q-separator--horizontal asmr-settings-separator">
-                <SettingsInput config-key="whisperLanguage" :label="t('whisperLanguage')" :sublabel="t('whisperLanguageSub')" placeholder="auto, ja, zh" icon="record_voice_over" />
+                <SettingsRangeSelect
+                    config-key="whisperLiveOverlapSec"
+                    :label="t('whisperWindowOverlap')"
+                    :sublabel="t('whisperWindowOverlapSub')"
+                    :options="whisperOverlapOptions"
+                    icon="join_inner"
+                />
+                <div class="q-px-md q-pb-md asmr-settings-hint">
+                    <div class="text-caption asmr-settings-muted asmr-settings-hint-text">{{ t('whisperSilencePolicy') }}</div>
+                </div>
                 <hr class="q-separator q-separator--horizontal asmr-settings-separator">
                 <SettingsToggle config-key="forceWhisperWasm" :label="t('forceWhisperWasm')" :sublabel="t('forceWhisperWasmSub')" icon="developer_board_off" />
             </div>

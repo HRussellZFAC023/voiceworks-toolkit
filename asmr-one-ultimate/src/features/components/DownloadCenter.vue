@@ -342,10 +342,11 @@ function mergeDirectWork(
     target: Map<string, BackupWorkDownloadItem>,
     result: Record<string, unknown>,
     fallbackTitle = '',
+    previous?: ReadonlyMap<string, BackupWorkDownloadItem>,
 ): void {
     const id = normalizeWorkId(result.source_id ?? result.sourceId ?? result.id);
     if (!id) return;
-    const current = target.get(id);
+    const current = target.get(id) ?? previous?.get(id);
     const sizeBytes = [result.sizeBytes, result.size, result.file_size, result.filesize, result.total_size]
         .map(Number).find(value => Number.isSafeInteger(value) && value > 0);
     const durationSeconds = [result.durationSeconds, result.duration]
@@ -456,19 +457,31 @@ async function enrichWorkItems(ids: string[], generation: number): Promise<void>
 
 async function searchAllWorks(query: string): Promise<void> {
     const generation = ++enrichmentGeneration;
-    const merged = new Map(works.value.map(work => [String(work.id), { ...work, directSearchResult: false }]));
+    const previousWorks = new Map(works.value.map(work => [normalizeWorkId(work.id), work]));
+    // A direct-only result belongs to the query that produced it. Keeping it
+    // after a later query would leave an invisible selected work in the
+    // download job. Playlist-backed entries survive because they still belong
+    // to Yours/Community even when they are no longer a Site result.
+    const retainedWorks = works.value
+        .filter(work => !work.directSearchResult || (work.playlistIds?.length ?? 0) > 0)
+        .map(work => ({ ...work, directSearchResult: false }));
+    const merged = new Map(retainedWorks.map(work => [String(work.id), work]));
     const exactRj = /^[A-Za-z]{2}\d+$/.test(query.trim());
     const [semantic, live] = await Promise.allSettled([
         exactRj ? Promise.resolve([]) : semanticWorkSearch(query, 20),
         WorksApi.searchWorks(query, { page: 1 }),
     ]);
     if (semantic.status === 'fulfilled') {
-        for (const result of semantic.value) mergeDirectWork(merged, result as unknown as Record<string, unknown>, result.title);
+        for (const result of semantic.value) {
+            mergeDirectWork(merged, result as unknown as Record<string, unknown>, result.title, previousWorks);
+        }
     } else {
         Logger.warn('[DownloadCenter] Hosted semantic work search unavailable', semantic.reason);
     }
     if (live.status === 'fulfilled') {
-        for (const result of live.value.works) mergeDirectWork(merged, result as unknown as Record<string, unknown>);
+        for (const result of live.value.works) {
+            mergeDirectWork(merged, result as unknown as Record<string, unknown>, '', previousWorks);
+        }
     } else {
         Logger.warn('[DownloadCenter] Live work search unavailable', live.reason);
     }
@@ -477,15 +490,34 @@ async function searchAllWorks(query: string): Promise<void> {
     }
     if (!visible.value || generation !== enrichmentGeneration) return;
     const mergedWorks = [...merged.values()];
-    const retainedWorks = mergedWorks.filter(work => !work.directSearchResult);
+    const retained = mergedWorks.filter(work => !work.directSearchResult);
     const directWorks = mergedWorks.filter(work => work.directSearchResult).slice(0, 30);
-    works.value = [...retainedWorks, ...directWorks];
+    works.value = [...retained, ...directWorks];
+    const availableIds = new Set(works.value.map(work => String(work.id)));
+    const selectedWorkIds = options.value.selectedWorkIds.filter(id => availableIds.has(String(id)));
+    if (selectedWorkIds.length !== options.value.selectedWorkIds.length) {
+        options.value = { ...options.value, selectedWorkIds };
+    }
     const resultIds = works.value.filter(work => work.directSearchResult).map(work => String(work.id));
     void enrichWorkItems(resultIds, generation);
 }
 
 function setRunnerProgress(next: BackupDownloadProgress & { jobId?: string }): void {
     progress.value = next;
+}
+
+function sanitizeDownloadFailureDetail(error: unknown): string {
+    const cause = error instanceof Error
+        ? (error as Error & { cause?: unknown }).cause
+        : undefined;
+    const raw = cause instanceof Error ? cause.message : typeof cause === 'string' ? cause : '';
+    if (!raw) return '';
+    return raw
+        .replace(/https?:\/\/[^\s)]+/gi, t('downloadCenterRemoteSource'))
+        .replace(/\b(?:authorization|bearer|token|jwt|key|signature|sig)=[^\s&]+/gi, '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 240);
 }
 
 function friendlyError(error: unknown): string {
@@ -495,6 +527,12 @@ function friendlyError(error: unknown): string {
         if (error.code === 'no-files') return t('backupDownloaderNoFiles');
         if (error.code === 'paused') return t('downloadCenterPaused');
         if (error.code === 'already-running') return t('downloadCenterAlreadyRunning');
+        if (error.code === 'failed') {
+            const detail = sanitizeDownloadFailureDetail(error);
+            return detail
+                ? format('backupDownloaderFailedDetail', { detail })
+                : t('backupDownloaderFailed');
+        }
     }
     return t('backupDownloaderFailed');
 }

@@ -11,7 +11,7 @@ export interface OpusTransformOptions {
     bitrateKbps: number;
     metadataPolicy: MetadataWritePolicy;
     tagsForFile?: (file: DownloadFile) => AudioTags;
-    artworkForFile?: (file: DownloadFile) => Promise<EmbeddedArtwork | undefined>;
+    artworkForFile?: (file: DownloadFile, signal?: AbortSignal) => Promise<EmbeddedArtwork | undefined>;
     outputPathForFile?: (file: DownloadFile) => string | undefined;
 }
 
@@ -53,6 +53,11 @@ export class OpusFileTransformer {
         const configuredOutput = this.options.outputPathForFile?.(file);
         const outputPath = configuredOutput?.split('/').filter(Boolean) || [...sourcePath];
         if (!configuredOutput) outputPath[outputPath.length - 1] = outputPath[outputPath.length - 1].replace(/\.[^.]+$/, '') + '.opus';
+        if (signal?.aborted) throw new DOMException('Request aborted', 'AbortError');
+        // Resolve bounded optional artwork before retaining the full source
+        // audio buffer. This avoids cover-network stalls doubling peak memory.
+        const artwork = await this.options.artworkForFile?.(file, signal);
+        if (signal?.aborted) throw new DOMException('Request aborted', 'AbortError');
         const input = await sink.read(sourcePath);
         const extension = sourcePath[sourcePath.length - 1].split('.').pop() || 'audio';
         const output = await this.transcoder.transcode({
@@ -61,7 +66,7 @@ export class OpusFileTransformer {
             bitrateKbps: this.options.bitrateKbps,
             generatedTags: this.options.tagsForFile?.(file),
             metadataPolicy: this.options.metadataPolicy,
-            artwork: await this.options.artworkForFile?.(file),
+            artwork,
             signal,
             onProgress,
         });

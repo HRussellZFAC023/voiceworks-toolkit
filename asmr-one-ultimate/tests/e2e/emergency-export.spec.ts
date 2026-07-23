@@ -2,12 +2,17 @@
 import { test, expect, helpers } from './fixtures';
 import type { Download, Page } from '@playwright/test';
 import * as fs from 'fs';
+import * as path from 'path';
+import { createHash } from 'crypto';
 import { execFileSync } from 'child_process';
 
 const OWN_ID = '11111111-2222-4333-8444-555555555555';
 const PUBLIC_ID = '66666666-7777-4888-8999-aaaaaaaaaaaa';
 const FFPROBE_PATH = process.env.FFPROBE_PATH
     || (fs.existsSync('/opt/homebrew/bin/ffprobe') ? '/opt/homebrew/bin/ffprobe' : 'ffprobe');
+const REAL_OPUS_E2E = process.env.E2E_OPUS_REAL_INPUT === '1';
+const REAL_OPUS_INPUT_PATH = (process.env.E2E_OPUS_INPUT || '').trim();
+const REAL_OPUS_OUTPUT_PATH = (process.env.E2E_OPUS_OUTPUT || '').trim();
 let hasFfprobe = true;
 try { execFileSync(FFPROBE_PATH, ['-version'], { stdio: 'ignore' }); } catch { hasFfprobe = false; }
 
@@ -306,16 +311,27 @@ test.describe('Emergency export and Download Center', () => {
         const playlistId = '88888888-1111-4222-8333-444444444444';
         await mockOwnPlaylist(injectedPage, { id: playlistId, name: 'Discovery', works: [{ id: 888888, source_id: 'RJ888888', title: 'Discovery work' }] });
         let trackRequests = 0;
-        let releaseCancelledRequest: (() => void) | undefined;
+        let releaseTrackRequests = false;
+        const pendingTrackRequests: Array<() => void> = [];
         await injectedPage.route('**/api/tracks/888888*', async route => {
             trackRequests += 1;
-            if (trackRequests === 1) {
-                await new Promise<void>(resolve => { releaseCancelledRequest = resolve; });
-                return;
+            if (!releaseTrackRequests) {
+                await new Promise<void>(resolve => { pendingTrackRequests.push(resolve); });
             }
-            await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify([{
-                type: 'folder', title: 'Audio', children: [{ type: 'audio', hash: 'resume-discovery', title: 'track.wav', mediaDownloadUrl: 'https://media.e2e/discovery.wav' }],
-            }]) });
+            await route.fulfill({
+                status: 200,
+                contentType: 'application/json',
+                body: JSON.stringify([{
+                    type: 'folder',
+                    title: 'Audio',
+                    children: [{
+                        type: 'audio',
+                        hash: 'resume-discovery',
+                        title: 'track.wav',
+                        mediaDownloadUrl: 'https://media.e2e/discovery.wav',
+                    }],
+                }]),
+            }).catch(() => undefined);
         });
         await injectedPage.route('**/api/workInfo/888888*', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
             id: 888888, source_id: 'RJ888888', title: 'Discovery work', name: 'Circle', circle: { name: 'Circle' }, vas: [], tags: [],
@@ -329,7 +345,10 @@ test.describe('Emergency export and Download Center', () => {
         await injectedPage.getByTestId(`playlist-check-${playlistId}`).check();
         await injectedPage.getByTestId('title-mode').selectOption('original');
         await injectedPage.getByTestId('start').click();
-        await expect.poll(() => trackRequests).toBe(1);
+        // Selection-size enrichment and the foreground runner may both request
+        // the manifest. Hold every pre-refresh request so the job cannot finish
+        // before navigation, then prove the persisted discovery resumes.
+        await expect.poll(() => trackRequests).toBeGreaterThanOrEqual(1);
         const jobId = await injectedPage.evaluate(async () => new Promise<string>((resolve, reject) => {
             const request = indexedDB.open('asmr-one-downloads', 1);
             request.onsuccess = () => { const query = request.result.transaction('jobs').objectStore('jobs').getAll(); query.onsuccess = () => resolve(query.result[0]?.id || ''); query.onerror = () => reject(query.error); };
@@ -340,7 +359,8 @@ test.describe('Emergency export and Download Center', () => {
         await openDownloadCenter(injectedPage);
         const resume = injectedPage.getByTestId(`resume-${jobId}`);
         await expect(resume).toBeVisible({ timeout: 15_000 });
-        releaseCancelledRequest?.();
+        releaseTrackRequests = true;
+        pendingTrackRequests.splice(0).forEach(resolve => resolve());
         await resume.click();
         await expect(injectedPage.getByTestId('download-progress')).toContainText(/downloaded|download complete|保存|下载/i, { timeout: 30_000 });
         expect(trackRequests).toBeGreaterThanOrEqual(2);
@@ -420,5 +440,147 @@ test.describe('Emergency export and Download Center', () => {
         const tags = { ...(probe.format.tags || {}), ...(probe.streams[0].tags || {}) };
         expect(tags.album).toBe('Opus work'); expect(tags.artist).toContain('Test VA');
         expect(probe.streams.some((stream: any) => stream.codec_type === 'video' && stream.disposition?.attached_pic === 1)).toBe(true);
+    });
+
+    (REAL_OPUS_E2E ? test : test.skip)('opt-in converts a retained real ASMR input through browser FFmpeg', async ({ injectedPage, isScriptLoaded }) => {
+        test.skip(!hasFfprobe, 'Native ffprobe is required to validate generated Opus');
+        test.skip(!REAL_OPUS_INPUT_PATH || !REAL_OPUS_OUTPUT_PATH, 'E2E_OPUS_INPUT and E2E_OPUS_OUTPUT are required');
+        test.skip(!fs.existsSync(REAL_OPUS_INPUT_PATH), 'Configured real Opus input does not exist');
+        test.setTimeout(300_000);
+
+        const playlistId = '36393144-1111-4222-8333-444444444444';
+        const workTitle = 'RJ363931 browser Opus proof';
+        const input = fs.readFileSync(REAL_OPUS_INPUT_PATH);
+        const coverPath = path.join(path.dirname(REAL_OPUS_INPUT_PATH), 'cover.jpg');
+        const cover = fs.readFileSync(coverPath);
+        const inputProbe = JSON.parse(execFileSync(FFPROBE_PATH, [
+            '-v', 'error', '-of', 'json', '-show_format', '-show_streams', REAL_OPUS_INPUT_PATH,
+        ], { encoding: 'utf8' }));
+
+        await mockOwnPlaylist(injectedPage, {
+            id: playlistId,
+            name: 'Real Opus proof',
+            works: [{ id: 363931, source_id: 'RJ363931', title: workTitle }],
+        });
+        await injectedPage.route('**/api/tracks/363931*', route => route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify([{
+                type: 'folder',
+                title: 'Audio',
+                children: [{
+                    type: 'audio',
+                    hash: 'real-mp3',
+                    title: 'input.mp3',
+                    size: input.length,
+                    mediaDownloadUrl: 'https://media.e2e/real-opus.mp3',
+                }],
+            }]),
+        }));
+        await injectedPage.route('**/api/workInfo/363931*', route => route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({
+                id: 363931,
+                source_id: 'RJ363931',
+                title: workTitle,
+                name: 'Proof Circle',
+                circle_id: 363931,
+                circle: { id: 363931, name: 'Proof Circle' },
+                vas: [{ id: 'proof-va', name: 'Proof VA' }],
+                tags: [{ id: 1, name: 'ASMR' }],
+                release: '2022-01-16',
+                source_url: 'https://www.dlsite.com/maniax/work/=/product_id/RJ363931.html',
+                mainCoverUrl: 'https://media.e2e/real-cover.jpg',
+                thumbnailCoverUrl: '',
+                samCoverUrl: '',
+            }),
+        }));
+        await injectedPage.route('https://media.e2e/real-opus.mp3', route => route.fulfill({
+            status: 200,
+            contentType: 'audio/mpeg',
+            body: input,
+            headers: { 'content-length': String(input.length) },
+        }));
+        await injectedPage.route('https://media.e2e/real-cover.jpg', route => route.fulfill({
+            status: 200,
+            contentType: 'image/jpeg',
+            body: cover,
+            headers: { 'content-length': String(cover.length) },
+        }));
+
+        await helpers.gotoHome(injectedPage);
+        await isScriptLoaded();
+        await injectedPage.evaluate(() => {
+            (window as any).showDirectoryPicker = () => navigator.storage.getDirectory();
+        });
+        await openDownloadCenter(injectedPage);
+        await injectedPage.getByTestId('source-own').click();
+        await injectedPage.getByTestId(`playlist-check-${playlistId}`).check();
+        await injectedPage.getByTestId('title-mode').selectOption('original');
+        await injectedPage.getByTestId('opus-toggle').check();
+        await injectedPage.getByTestId('opus-bitrate').selectOption('64');
+
+        const started = Date.now();
+        await injectedPage.getByTestId('start').click();
+        await expect(injectedPage.getByTestId('download-progress')).toContainText(
+            /downloaded|download complete|保存|下载/i,
+            { timeout: 240_000 },
+        );
+        const elapsedMs = Date.now() - started;
+        const browserOutput = await injectedPage.evaluate(async ({ folder }) => {
+            const root = await navigator.storage.getDirectory();
+            const audio = await (await root.getDirectoryHandle(folder)).getDirectoryHandle('Audio');
+            const file = await (await audio.getFileHandle('input.opus')).getFile();
+            const bytes = new Uint8Array(await file.arrayBuffer());
+            let binary = '';
+            for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+                binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+            }
+            let sourceRetained = true;
+            try {
+                await audio.getFileHandle('input.mp3');
+            } catch {
+                sourceRetained = false;
+            }
+            return { base64: btoa(binary), sourceRetained };
+        }, { folder: workTitle });
+        const output = Buffer.from(browserOutput.base64, 'base64');
+        fs.writeFileSync(REAL_OPUS_OUTPUT_PATH, output);
+
+        const outputProbe = JSON.parse(execFileSync(FFPROBE_PATH, [
+            '-v', 'error', '-of', 'json', '-show_format', '-show_streams', REAL_OPUS_OUTPUT_PATH,
+        ], { encoding: 'utf8' }));
+        const tags = { ...(outputProbe.format.tags || {}), ...(outputProbe.streams[0]?.tags || {}) };
+        const inputDuration = Number(inputProbe.format.duration);
+        const outputDuration = Number(outputProbe.format.duration);
+        const artworkPresent = outputProbe.streams.some(
+            (stream: any) => stream.codec_type === 'video' && stream.disposition?.attached_pic === 1,
+        );
+        const sha256 = createHash('sha256').update(output).digest('hex');
+
+        expect(outputProbe.streams.some((stream: any) => stream.codec_name === 'opus')).toBe(true);
+        expect(browserOutput.sourceRetained).toBe(false);
+        expect(Math.abs(outputDuration - inputDuration)).toBeLessThan(1);
+        expect(tags.album).toBe(workTitle);
+        expect(String(tags.artist)).toContain('Proof VA');
+        expect(artworkPresent).toBe(true);
+        expect(output.length).toBeLessThan(input.length);
+        expect(output.length).toBeLessThan(10 * 1024 * 1024);
+        console.log('[real-opus-proof]', JSON.stringify({
+            input: REAL_OPUS_INPUT_PATH,
+            output: REAL_OPUS_OUTPUT_PATH,
+            inputBytes: input.length,
+            outputBytes: output.length,
+            inputDuration,
+            outputDuration,
+            codec: outputProbe.streams.find((stream: any) => stream.codec_name === 'opus')?.codec_name,
+            bitrate: outputProbe.format.bit_rate,
+            tags,
+            artworkPresent,
+            browserSourceRetained: browserOutput.sourceRetained,
+            sha256,
+            elapsedMs,
+        }));
     });
 });

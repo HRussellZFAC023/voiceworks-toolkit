@@ -41,7 +41,7 @@ describe('WhisperWorkerLoader', () => {
     it('uses Transformers.js V4 CDN URLs', () => {
         const code = __getWhisperWorkerCodeForTests();
 
-        expect(code).toContain('transformers@4.0.0-next.4');
+        expect(code).toContain('transformers@4.2.0');
         // V3 fallback removed — all workers now use V4 only
         expect(code).not.toContain('transformers@3.8.1');
     });
@@ -69,12 +69,13 @@ describe('WhisperWorkerLoader', () => {
         expect(code).toContain("status: 'gpu-device-lost'");
     });
 
-    it('pins worker to WASM after GPU inference failure to avoid backend thrash', () => {
+    it('delegates GPU inference fallback to a fresh host-created worker', () => {
         const code = __getWhisperWorkerCodeForTests();
 
-        expect(code).toContain('skipWebgpu = true;');
-        expect(code).toContain('GPU inference failed, falling back to WASM');
-        expect(code).toContain("status: 'gpu-degraded'");
+        expect(code).toContain('postChunkError(chunkId, retryMsg, true)');
+        expect(code).toContain('postChunkError(chunkId, initialMsg, true)');
+        expect(code).not.toContain('GPU inference failed, falling back to WASM');
+        expect(code).not.toContain("status: 'gpu-degraded'");
     });
 
     it('uses q4 decoder as primary WebGPU dtype (per HF official example)', () => {
@@ -100,15 +101,43 @@ describe('WhisperWorkerLoader', () => {
 
         expect(timeoutGuard).toBeGreaterThan(0);
         expect(wordRetry).toBeGreaterThan(timeoutGuard);
-        expect(code.slice(timeoutGuard, wordRetry)).toContain("postChunkError(chunkId, initialMsg, currentBackend !== 'wasm')");
+        expect(code.slice(timeoutGuard, wordRetry)).toContain("haltTimedOutWorker(chunkId, initialMsg, currentBackend !== 'wasm')");
         expect(code.slice(timeoutGuard, wordRetry)).toContain('return null');
+        expect(code).toContain('workerPoisoned = true');
+        expect(code).toContain("postDropped(queued, 'worker-poisoned')");
+        expect(code).toContain('if (!workerPoisoned) processNextJob()');
     });
 
-    it('falls back to a bounded tiny multilingual model when model loading fails', () => {
+    it('selects a bounded tiny multilingual model before loading on WASM', () => {
         const code = __getWhisperWorkerCodeForTests();
         expect(code).toContain("const FALLBACK_MODEL = 'onnx-community/whisper-tiny'");
         expect(code).toContain("status: 'fallback'");
         expect(code).toContain('loadPipelineForModel({ ...settings, model: FALLBACK_MODEL }');
+    });
+
+    it('uses the compact q8 WASM model with safe basic graph optimization', () => {
+        const code = __getWhisperWorkerCodeForTests();
+
+        expect(code).toContain("const WASM_DTYPE = 'q8'");
+        expect(code).toContain("graphOptimizationLevel: 'basic'");
+    });
+
+    it('poisons failed model loaders and reports a typed load-failed event', () => {
+        const code = __getWhisperWorkerCodeForTests();
+
+        expect(code).toContain('throw toLoadFailure(err, modelName');
+        expect(code).toContain("status: 'load-failed'");
+        expect(code).toContain('sessionPoisoned: true');
+        expect(code).not.toContain('All WebGPU candidates failed, falling through to WASM');
+    });
+
+    it('normalizes third-party model callbacks so only postReady emits ready', () => {
+        const code = __getWhisperWorkerCodeForTests();
+
+        expect(code).toContain('function postModelProgress(data, chunkId)');
+        expect(code).toContain("status: 'progress'");
+        expect(code).toContain('sourceStatus: payload.status');
+        expect(code).toContain('postModelProgress(data, msg.chunkId)');
     });
 
     it('produces syntactically valid worker JavaScript', () => {
@@ -129,6 +158,11 @@ describe('WhisperWorkerLoader', () => {
 
         expect(code).toContain('chunk_length_s: msg.chunkLengthS');
         expect(code).toContain('stride_length_s: msg.strideLengthS');
+        expect(code).toContain('new TextStreamer(');
+        expect(code).toContain("emitHeartbeat('decoding', partialText)");
+        expect(code).toContain('const createAttemptOptions = (returnTimestamps, targetPipe = pipe)');
+        expect(code).toContain('attempt !== activeAttempt || workerPoisoned');
+        expect(code).not.toContain('function chunk_callback');
     });
 
     it('delegates post-processing to host (no hallucination/grouping in worker)', () => {
@@ -141,10 +175,10 @@ describe('WhisperWorkerLoader', () => {
         expect(code).toContain('inputRms: msg.inputRms');
     });
 
-    it('enables word timestamps on all backends with retry fallback', () => {
+    it('avoids the guaranteed duplicate word-timestamp decode on WASM', () => {
         const code = __getWhisperWorkerCodeForTests();
 
-        expect(code).toContain('const useWordTimestamps = true');
+        expect(code).toContain("const useWordTimestamps = currentBackend !== 'wasm'");
     });
 
     it('detects WebGPU adapter with power preference', () => {
@@ -169,6 +203,8 @@ describe('WhisperWorkerLoader', () => {
         const code = __getWhisperWorkerCodeForTests();
 
         expect(code).toContain('pipelinePromise && currentModel === modelName');
+        expect(code).toContain('pipelineLoadPromise && pipelineLoadKey === loadingKey');
+        expect(code).toContain("const loadingKey = effective.model + '|' + String(effective.multilingual)");
     });
 
     it('supports host control messages for backend/queue lifecycle', () => {
@@ -177,6 +213,9 @@ describe('WhisperWorkerLoader', () => {
         expect(code).toContain("if (msg.type === 'skip-webgpu')");
         expect(code).toContain("if (msg.type === 'flush-queue')");
         expect(code).toContain("if (msg.type === 'reset')");
+        expect(code).toContain('const queued = jobQueue[0]');
+        expect(code).toContain("postDropped(queued, 'queue-replaced'");
+        expect(code).toContain("postDropped(msg, 'queue-full'");
     });
 
     it('emits status lifecycle messages needed by Whisper controller', () => {
@@ -184,8 +223,84 @@ describe('WhisperWorkerLoader', () => {
 
         expect(code).toContain("status: 'initiate'");
         expect(code).toContain("status: 'ready'");
-        expect(code).toContain("status: 'update'");
+        expect(code).toContain("status: 'queued'");
+        expect(code).toContain("status: 'started'");
+        expect(code).toContain("status: 'heartbeat'");
+        expect(code).toContain("status: 'dropped'");
         expect(code).toContain("status: 'complete'");
         expect(code).toContain("status: 'error'");
+        expect(code).toContain("status: 'load-failed'");
+        expect(code).toContain('model: currentModel');
+        expect(code).toContain('dtype: currentDtype');
+    });
+
+    it('executes at most one inference and replaces the sole queued job by priority', async () => {
+        let onMessage: ((event: { data: any }) => void) | null = null;
+        const emitted: any[] = [];
+        let resolveFirst!: (value: any) => void;
+        const first = new Promise<any>((resolve) => { resolveFirst = resolve; });
+        const third = new Promise<any>(() => {});
+        const transcribe = vi.fn((msg: any) => msg.chunkId === 1 ? first : third);
+        const workerSelf: any = {
+            __whisperTestTranscribe: transcribe,
+            addEventListener: (type: string, handler: (event: { data: any }) => void) => {
+                if (type === 'message') onMessage = handler;
+            },
+            postMessage: (message: any) => emitted.push(message),
+        };
+        new Function('self', __getWhisperWorkerCodeForTests(true))(workerSelf);
+        const send = (data: any) => onMessage!({ data });
+
+        send({ type: 'transcribe', chunkId: 1, priority: 1, playheadDistance: 100 });
+        send({ type: 'transcribe', chunkId: 2, priority: 1, playheadDistance: 80 });
+        send({ type: 'transcribe', chunkId: 3, priority: 0, playheadDistance: 2 });
+
+        expect(transcribe).toHaveBeenCalledTimes(1);
+        expect(emitted).toContainEqual(expect.objectContaining({
+            status: 'dropped',
+            chunkId: 2,
+            data: expect.objectContaining({ reason: 'queue-replaced', replacedByChunkId: 3 }),
+        }));
+        resolveFirst({ text: 'first', rawChunks: [] });
+        await Promise.resolve();
+        await Promise.resolve();
+
+        expect(transcribe.mock.calls.map(([msg]) => msg.chunkId)).toEqual([1, 3]);
+    });
+
+    it('poisons a timed-out worker and rejects every queued or later job', () => {
+        let onMessage: ((event: { data: any }) => void) | null = null;
+        const emitted: any[] = [];
+        const transcribe = vi.fn(() => new Promise<any>(() => {}));
+        const workerSelf: any = {
+            __whisperTestTranscribe: transcribe,
+            addEventListener: (type: string, handler: (event: { data: any }) => void) => {
+                if (type === 'message') onMessage = handler;
+            },
+            postMessage: (message: any) => emitted.push(message),
+        };
+        new Function('self', __getWhisperWorkerCodeForTests(true))(workerSelf);
+        const send = (data: any) => onMessage!({ data });
+
+        send({ type: 'transcribe', chunkId: 1, priority: 0 });
+        send({ type: 'transcribe', chunkId: 2, priority: 1 });
+        workerSelf.__whisperTestHalt(1, 'webgpu inference timed out after 45s', true);
+        send({ type: 'transcribe', chunkId: 3, priority: 0 });
+
+        expect(transcribe).toHaveBeenCalledTimes(1);
+        expect(emitted).toContainEqual(expect.objectContaining({ status: 'worker-poisoned' }));
+        expect(emitted.findIndex((message) => message.status === 'worker-poisoned')).toBeLessThan(
+            emitted.findIndex((message) => message.status === 'error' && message.chunkId === 1),
+        );
+        expect(emitted).toContainEqual(expect.objectContaining({
+            status: 'dropped',
+            chunkId: 2,
+            data: expect.objectContaining({ reason: 'worker-poisoned' }),
+        }));
+        expect(emitted).toContainEqual(expect.objectContaining({
+            status: 'dropped',
+            chunkId: 3,
+            data: expect.objectContaining({ reason: 'worker-poisoned' }),
+        }));
     });
 });

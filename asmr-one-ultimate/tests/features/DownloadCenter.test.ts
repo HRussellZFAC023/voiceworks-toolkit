@@ -41,7 +41,12 @@ vi.mock('../../src/services/WorkService', () => ({
 }));
 vi.mock('../../src/features/downloads/DirectoryDownloadSink', () => ({ chooseDownloadDirectory: mocks.chooseDirectory }));
 vi.mock('../../src/features/downloads/DownloadCenterRunner', () => ({
-    DownloadCenterRunError: class DownloadCenterRunError extends Error { constructor(public code: string) { super(code); } },
+    DownloadCenterRunError: class DownloadCenterRunError extends Error {
+        constructor(public code: string, cause?: unknown) {
+            super(code);
+            if (cause !== undefined) (this as Error & { cause?: unknown }).cause = cause;
+        }
+    },
     DownloadCenterRunner: class DownloadCenterRunner {
         static getInstance() { return new DownloadCenterRunner(); }
         isRunning = false;
@@ -311,6 +316,41 @@ describe('DownloadCenter', () => {
         wrapper.unmount();
     });
 
+    it('removes a selected direct-only result when a later site query replaces it', async () => {
+        mocks.searchWorks
+            .mockResolvedValueOnce({
+                works: [{ id: 47, title: 'First direct result' }],
+                pagination: { currentPage: 1, pageSize: 20, totalCount: 1 },
+            })
+            .mockResolvedValueOnce({
+                works: [{ id: 48, title: 'Second direct result' }],
+                pagination: { currentPage: 1, pageSize: 20, totalCount: 1 },
+            });
+        const wrapper = mount(DownloadCenter, { attachTo: document.body });
+        await wrapper.get('[data-testid="download-center-open"]').trigger('click');
+        const input = document.querySelector('[data-testid="search"]') as HTMLInputElement;
+
+        input.value = 'first';
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        await flushPromises();
+        (document.querySelector('[data-testid="search-all-works"]') as HTMLButtonElement).click();
+        await vi.waitFor(() => expect(document.querySelector('[data-testid="search-work-RJ000047"]')).not.toBeNull());
+        (document.querySelector('[data-testid="search-work-RJ000047"] input') as HTMLInputElement).click();
+        await flushPromises();
+        expect(document.querySelector('[data-testid="selection-summary"]')?.textContent).toMatch(/^1 /);
+
+        input.value = 'second';
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        await flushPromises();
+        (document.querySelector('[data-testid="search-all-works"]') as HTMLButtonElement).click();
+        await vi.waitFor(() => expect(document.querySelector('[data-testid="search-work-RJ000048"]')).not.toBeNull());
+
+        expect(document.querySelector('[data-testid="search-work-RJ000047"]')).toBeNull();
+        expect(document.querySelector('[data-testid="selection-summary"]')?.textContent).toMatch(/^0 /);
+        expect((document.querySelector('[data-testid="start"]') as HTMLButtonElement).disabled).toBe(true);
+        wrapper.unmount();
+    });
+
     it('does not promote a cached partial manifest to an exact size on repeated enrichment', async () => {
         mocks.searchWorks.mockResolvedValue({
             works: [{ id: 49, title: 'Partial', duration: 60, thumbnailCoverUrl: 'https://images.example.test/49.jpg', tags: [{ name: 'Partial' }] }],
@@ -482,7 +522,10 @@ describe('DownloadCenter', () => {
         mocks.runnerStart.mockImplementation(async (_works, _state, _directory, _title, onProgress) => {
             onProgress({ jobId: 'job-1', phase: 'downloading', current: 2, total: 5, label: 'Selected work/track.wav' });
             const ErrorType = (await import('../../src/features/downloads/DownloadCenterRunner')).DownloadCenterRunError;
-            throw new ErrorType('failed');
+            throw new ErrorType(
+                'failed',
+                new Error('Selected work/track.wav: HTTP 403 at https://cdn.example.test/file?token=do-not-leak'),
+            );
         });
         Object.defineProperty(window, 'showDirectoryPicker', { configurable: true, value: vi.fn() });
         const wrapper = mount(DownloadCenter, { attachTo: document.body });
@@ -495,6 +538,10 @@ describe('DownloadCenter', () => {
         await flushPromises();
 
         expect(document.querySelector('[data-testid="download-error"]')?.textContent).toMatch(/failed/i);
+        expect(document.querySelector('[data-testid="download-error"]')?.textContent).toContain('Selected work/track.wav');
+        expect(document.querySelector('[data-testid="download-error"]')?.textContent).toContain('HTTP 403');
+        expect(document.querySelector('[data-testid="download-error"]')?.textContent).not.toContain('do-not-leak');
+        expect(document.querySelector('[data-testid="download-error"]')?.textContent).not.toContain('cdn.example.test');
         expect(document.querySelector('[data-testid="progress-count"]')?.textContent).toContain('2 / 5');
         expect(document.querySelector('[data-testid="download-progress"]')?.textContent).not.toContain('0 / 0');
         wrapper.unmount();

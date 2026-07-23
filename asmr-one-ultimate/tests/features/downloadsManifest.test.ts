@@ -94,6 +94,37 @@ describe('download manifest discovery', () => {
         expect(manifest.entries).toHaveLength(1);
         expect(manifest.entries[0]).toMatchObject({ id: 'leaf', sourceTitle: 'leaf.mp3' });
     });
+
+    it('never promotes a low-quality preview to the full-folder primary source', () => {
+        const manifest = discoverDownloadManifest([{
+            type: 'audio',
+            hash: 'low-only',
+            title: 'preview-only.mp3',
+            streamLowQualityUrl: '/media/low/only',
+        }, {
+            type: 'audio',
+            hash: 'low-first',
+            title: 'full-source.wav',
+            streamLowQualityUrl: '/media/low/first',
+            src: '/media/full/later',
+            url: '/media/full/alternate',
+        }]);
+
+        expect(manifest.entries[0]).toMatchObject({
+            id: 'low-only',
+            primaryUrl: undefined,
+            sourceUrls: [{ kind: 'low-quality-stream', url: '/media/low/only' }],
+        });
+        expect(manifest.entries[1]).toMatchObject({
+            id: 'low-first',
+            primaryUrl: '/media/full/later',
+            sourceUrls: [
+                { kind: 'low-quality-stream', url: '/media/low/first' },
+                { kind: 'source', url: '/media/full/later' },
+                { kind: 'url', url: '/media/full/alternate' },
+            ],
+        });
+    });
 });
 
 describe('download media classification', () => {

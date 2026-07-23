@@ -110,6 +110,10 @@ function sourceUrlsOf(node: DownloadTreeNode): DownloadSourceUrl[] {
     return urls;
 }
 
+function firstFullQualityUrl(sourceUrls: readonly DownloadSourceUrl[]): string | undefined {
+    return sourceUrls.find(source => source.kind !== 'low-quality-stream')?.url;
+}
+
 function declaredSize(node: DownloadTreeNode): number | undefined {
     const raw = node.size ?? node.fileSize ?? node.file_size;
     if (raw === undefined || raw === null || raw === '') return undefined;
@@ -152,7 +156,10 @@ export function discoverDownloadManifest(tree: readonly DownloadTreeNode[]): Dow
             sourcePath,
             relativePath: reserveCollisionFreePath(sanitizeRelativePath(sourcePath), occupied),
             sourceUrls,
-            primaryUrl: sourceUrls[0]?.url,
+            // Low-quality streams exist for lightweight playback/transcription.
+            // Folder downloads must never promote that preview to the source
+            // file, even when it is the only or first URL in the host payload.
+            primaryUrl: firstFullQualityUrl(sourceUrls),
         });
     };
 

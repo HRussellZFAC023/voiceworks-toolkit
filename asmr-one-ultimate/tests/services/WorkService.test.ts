@@ -114,7 +114,22 @@ describe('WorkService', () => {
 
             await expect(svc.getTracks('RJ123456', false, true)).resolves.toEqual(fresh);
 
-            expect(fetchTracks).toHaveBeenCalledWith(123456);
+            expect(fetchTracks).toHaveBeenCalledWith(123456, true);
+        });
+
+        it('propagates foreground priority through the shared HTTP client', async () => {
+            const fresh = [{ type: 'audio', title: 'track.wav' }];
+            const { HttpClient } = await import('../../src/infrastructure/HttpClient');
+            vi.mocked(HttpClient.getJsonViaCors).mockResolvedValueOnce({
+                data: fresh, status: 200, headers: {}, cached: false,
+            });
+
+            await expect(svc.getTracks('RJ123456', true, true)).resolves.toEqual(fresh);
+
+            expect(HttpClient.getJsonViaCors).toHaveBeenCalledWith(
+                'https://api.asmr-200.com/api/tracks/123456?v=2',
+                expect.objectContaining({ dedupe: false }),
+            );
         });
     });
 

@@ -284,23 +284,25 @@ test.describe('Whisper Settings', () => {
 
     const download = section.getByRole('button', { name: /download whisper/i });
     await expect(download).toBeVisible({ timeout: 15000 });
-    await expect(section.locator('.asmr-settings-hint-text')).not.toHaveText('');
+    await expect(section.locator('.asmr-settings-hint-text').first()).not.toHaveText('');
   });
 
-  test('Whisper model quality and silence-skipping selectors are discoverable', async ({ injectedPage, isScriptLoaded }) => {
+  test('Whisper model quality slider and spoken-language selector are discoverable', async ({ injectedPage, isScriptLoaded }) => {
     await helpers.gotoSettings(injectedPage);
     await isScriptLoaded();
     await injectedPage.waitForTimeout(3000);
 
     const section = injectedPage.locator('#asmr-whisper-settings-section');
     await expect(section).toBeVisible({ timeout: 15000 });
-    const model = section.locator('[data-asmr-select="whisperModelPreset"]');
-    const vad = section.locator('[data-asmr-select="whisperVadMode"]');
+    const model = section.locator('[data-asmr-range="whisperModelPreset"]');
+    const language = section.locator('[data-asmr-select="whisperLanguage"]');
     await expect(model).toBeVisible();
-    await expect(vad).toBeVisible();
-    await expect(model).toHaveValue('auto');
-    await expect(vad).toHaveValue('off');
-    await expect(model.locator('option')).toHaveCount(4);
+    await expect(language).toBeVisible();
+    await expect(model).toHaveValue('0');
+    await expect(model).toHaveAttribute('aria-valuetext', /auto/i);
+    await expect(language).toHaveValue('auto');
+    await expect(language.locator('option')).toHaveCount(5);
+    await expect(section.locator('[data-asmr-select="whisperVadMode"]')).toHaveCount(0);
   });
 
   test('Force Whisper WASM toggle exists', async ({ injectedPage, isScriptLoaded }) => {
