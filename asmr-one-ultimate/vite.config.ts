@@ -74,8 +74,8 @@ export default defineConfig({
                 // otherwise waits for DOMContentLoaded before normal startup.
                 'run-at': 'document-start',
                 license: 'MIT',
-                downloadURL: 'https://update.greasyfork.org/scripts/563283/ASMRone%20Ultimate%20%28Radio%20%2B%20Learner%29.user.js',
-                updateURL: 'https://update.greasyfork.org/scripts/563283/ASMRone%20Ultimate%20%28Radio%20%2B%20Learner%29.meta.js'
+                downloadURL: 'https://update.sleazyfork.org/scripts/563283.user.js',
+                updateURL: 'https://update.sleazyfork.org/scripts/563283.meta.js'
             },
             build: {
                 externalGlobals: {
