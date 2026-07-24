@@ -30,6 +30,19 @@ describe('LearnerSecondarySubtitle', () => {
         expect(button.classes()).toContain('learner-en');
         expect(button.classes()).not.toContain('learner-zh');
         expect(button.classes()).toContain('blurred');
+        expect(button.attributes('title')).toBeUndefined();
+    });
+
+    it('exposes unclamped visible text without changing the subtitle lane geometry', () => {
+        const text = 'A complete translation that is longer than the two visible subtitle lines.';
+        const wrapper = mount(LearnerSecondarySubtitle, {
+            props: {
+                text, blurred: false, fallback: false,
+                language: 'en', chineseLayout: false, ariaLabel: 'Hide translation',
+            },
+        });
+
+        expect(wrapper.get('button').attributes('title')).toBe(text);
     });
 
     it('updates an already-mounted live lane when Chinese mode is selected', async () => {

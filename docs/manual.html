@@ -86,7 +86,7 @@
 
         <h3>AI Settings</h3>
         <ul>
-          <li><strong>Whisper Model:</strong> Choose the transcription model size (tiny, small, medium) and quantization level. Larger models are more accurate but use more memory</li>
+          <li><strong>Whisper Model:</strong> Choose Auto, Tiny, Base, Small, Medium, or Large v3 Turbo. Larger models can improve accuracy but require more memory, storage, and processing time</li>
           <li><strong>Whisper Language:</strong> Set the default transcription language (Japanese, English, Chinese, Korean, etc.)</li>
           <li><strong>Translation Settings:</strong> Configure web translation behavior and caching controls</li>
           <li><strong>Jina API Key:</strong> Enter your free Jina API key to enable semantic vector search</li>
@@ -136,7 +136,7 @@
         <h3>Enabling Transcription</h3>
         <ol>
           <li>Click the microphone icon in the player controls</li>
-          <li>On first use, the Whisper model will download (~150 MB). This is cached for future use</li>
+          <li>On first use, the selected Whisper model downloads in the background and is cached for future use. Size varies from a few hundred megabytes to several gigabytes</li>
           <li>Once loaded, transcription begins automatically as audio plays</li>
         </ol>
 
@@ -144,8 +144,10 @@
         <p>Choose the appropriate model size in Settings based on your hardware:</p>
         <ul>
           <li><strong>Tiny:</strong> Fastest, lowest memory, good for real-time use on modest hardware</li>
+          <li><strong>Base:</strong> A modest accuracy step up while remaining suitable for many laptops</li>
           <li><strong>Small:</strong> Better accuracy, recommended for systems with WebGPU support</li>
-          <li><strong>Medium:</strong> Best accuracy, requires a capable GPU and sufficient memory</li>
+          <li><strong>Medium:</strong> Higher accuracy, requires a capable GPU and substantial memory</li>
+          <li><strong>Large v3 Turbo:</strong> Highest available preset, intended for powerful GPUs with ample memory and storage</li>
         </ul>
 
         <h3>Caching</h3>
@@ -156,7 +158,7 @@
         <ul>
           <li><strong>LRC:</strong> Lyric format, compatible with most music players and study tools</li>
           <li><strong>VTT:</strong> WebVTT format, standard for web video subtitles</li>
-          <li><strong>SRT:</strong> SubRip format, widely supported by media players and Anki</li>
+          <li><strong>TXT:</strong> Plain transcript text for notes, search, and study tools</li>
         </ul>
         <p>Download buttons appear in the file tree and flat view after transcription completes.</p>
 
@@ -318,12 +320,12 @@
 
           <div class="feature-item">
             <h3>What browsers are supported?</h3>
-            <p>Any modern Chromium-based browser (Chrome, Edge, Brave) or Firefox with Tampermonkey installed. WebGPU support (Chrome 113+, Edge 113+) is recommended for best Whisper performance, but the toolkit falls back to WASM automatically.</p>
+            <p>Any modern Chromium-based browser (Chrome, Edge, Brave) or Firefox with Tampermonkey installed. WebGPU is recommended for best Whisper performance. If it is unavailable, select <strong>Force Whisper WASM</strong> in Settings; the toolkit does not silently change the model or runtime after a failed run.</p>
           </div>
 
           <div class="feature-item">
             <h3>How much disk space do AI assets use?</h3>
-            <p>The Whisper model is the main local download at roughly ~150 MB depending on model choice and quantization. Translation does not require a local model download. Cached transcripts, translations, and embeddings also use browser storage over time.</p>
+            <p>The Whisper model is the main local download. Depending on model and precision it can range from a few hundred megabytes to several gigabytes. Translation does not require a local model download. Cached transcripts, translations, and embeddings also use browser storage over time.</p>
           </div>
 
           <div class="feature-item">

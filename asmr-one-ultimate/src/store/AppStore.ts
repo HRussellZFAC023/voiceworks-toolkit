@@ -239,6 +239,17 @@ const DEFAULT_WHISPER_STATE: WhisperState = {
     progress: 0,
     progressMessage: '',
     currentTrackSrc: null,
+    stage: 'idle',
+    model: null,
+    backend: null,
+    processedSeconds: 0,
+    processedThroughSeconds: 0,
+    skippedSeconds: 0,
+    totalSeconds: 0,
+    playbackSeconds: 0,
+    backlogSeconds: 0,
+    pendingChunks: 0,
+    timingQuality: null,
 };
 
 const DEFAULT_SEARCH_STATE: SearchState = {

@@ -52,7 +52,7 @@
 
             <div class="feature-item">
               <h3>Live Transcription - On-Device Speech-to-Text</h3>
-              <p>Turns any voicework into study material by transcribing audio in real time from the player. No manual file handling required. Powered by Transformers.js Whisper in a dedicated Web Worker with WebGPU acceleration and automatic WASM fallback. Transcripts are cached per track with a 90-day TTL and export to LRC, VTT, and SRT.</p>
+              <p>Turns any voicework into study material by transcribing audio in real time from the player. No manual file handling required. Powered by Transformers.js Whisper in a dedicated Web Worker with WebGPU or explicitly selected WASM execution. The chosen model and runtime stay pinned for each run. Transcripts are cached per track with a 90-day TTL and export to LRC, VTT, and TXT.</p>
             </div>
 
             <div class="feature-item">
@@ -237,7 +237,7 @@
 
             <div class="feature-item">
               <h3>Hybrid AI Pipeline</h3>
-              <p>Whisper transcription runs on-device in dedicated Web Workers via Transformers.js, with WebGPU acceleration and automatic WASM fallback. Translation and semantic embedding use web APIs with caching, retry logic, and request coalescing for stable performance.</p>
+              <p>Whisper transcription runs on-device in dedicated Web Workers via Transformers.js. WebGPU provides the fastest path on supported hardware, while WASM can be selected explicitly for compatibility; a failed run never silently changes the chosen model or runtime. Translation and semantic embedding use web APIs with caching, retry logic, and request coalescing for stable performance.</p>
             </div>
 
             <div class="feature-item">

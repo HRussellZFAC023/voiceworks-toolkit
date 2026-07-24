@@ -72,6 +72,68 @@ function addItem(tree: HTMLElement, title: string, hash = ''): HTMLElement {
     return item;
 }
 
+function makeTimedTranscript(timingQuality?: 'word') {
+    return {
+        text: 'お邪魔します',
+        segments: [{
+            start: 0,
+            end: 2,
+            text: 'お邪魔します',
+            words: [
+                { start: 0, end: 1, text: 'お邪魔' },
+                { start: 1, end: 2, text: 'します' },
+            ],
+        }],
+        model: 'whisper-tiny',
+        subtask: 'transcribe',
+        language: 'ja',
+        createdAt: 1000,
+        complete: true,
+        ...(timingQuality ? { timingQuality } : {}),
+        translations: {
+            en: {
+                text: 'Excuse me',
+                lrc: '[00:00.00]Excuse me',
+                vtt: 'WEBVTT\n\n1\n00:00:00.000 --> 00:00:02.000\n<00:00:00.000>Excuse <00:00:01.000>me\n',
+            },
+        },
+    };
+}
+
+function makeTranscriptEntry(cacheKey: string, trackTitle: string) {
+    return {
+        cacheKey,
+        trackKey: cacheKey,
+        trackTitle,
+        model: 'whisper-tiny',
+        subtask: 'transcribe',
+        language: 'ja',
+        updatedAt: 1000,
+    };
+}
+
+function captureVttDownloads(
+    injector: TranscriptFileInjector,
+    entry: ReturnType<typeof makeTranscriptEntry>,
+    cachedTranscript: ReturnType<typeof makeTimedTranscript>,
+) {
+    sharedCacheGetMock.mockReturnValue(cachedTranscript);
+    const download = vi.spyOn(injector as any, 'download').mockImplementation(() => {});
+    const badge = (injector as any).createBadgeGroup(entry, cachedTranscript) as HTMLElement;
+
+    const clickDownload = (title: string, callIndex: number): string => {
+        Array.from(badge.querySelectorAll('button'))
+            .find(button => button.title === title)
+            ?.click();
+        return download.mock.calls[callIndex]?.[1] as string;
+    };
+
+    return {
+        source: clickDownload('vttDownload', 0),
+        translated: clickDownload('vttDownloadTranslated', 1),
+    };
+}
+
 describe('TranscriptFileInjector', () => {
     let tree: HTMLElement;
 
@@ -160,6 +222,36 @@ describe('TranscriptFileInjector', () => {
         expect(Array.from(buttons).some(button => button.title === 'whisperTranscriptDownloadTxt')).toBe(true);
 
         injector.disable();
+    });
+
+    it('does not export legacy v169 synthetic words without explicit word timing quality', () => {
+        const injector = new TranscriptFileInjector();
+        const downloads = captureVttDownloads(
+            injector,
+            makeTranscriptEntry('cache-v169', 'legacy.mp3'),
+            makeTimedTranscript(),
+        );
+
+        expect(downloads.source).toContain('お邪魔します');
+        expect(downloads.source).not.toContain('<00:00:00.000>');
+        expect(downloads.source).not.toContain('<00:00:01.000>');
+        expect(downloads.translated).toContain('Excuse me');
+        expect(downloads.translated).not.toContain('<00:00:00.000>');
+        expect(downloads.translated).not.toContain('<00:00:01.000>');
+    });
+
+    it('exports cached word cues only when timing quality is explicitly word', () => {
+        const injector = new TranscriptFileInjector();
+        const downloads = captureVttDownloads(
+            injector,
+            makeTranscriptEntry('cache-word', 'exact.mp3'),
+            makeTimedTranscript('word'),
+        );
+
+        expect(downloads.source).toContain('<00:00:00.000>お邪魔');
+        expect(downloads.source).toContain('<00:00:01.000>します');
+        expect(downloads.translated).toContain('<00:00:00.000>Excuse ');
+        expect(downloads.translated).toContain('<00:00:01.000>me');
     });
 
     it('does not inject badge for non-matching titles', async () => {

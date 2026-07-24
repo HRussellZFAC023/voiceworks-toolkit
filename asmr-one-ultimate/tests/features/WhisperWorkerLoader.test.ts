@@ -4,9 +4,13 @@ import { __getWhisperWorkerCodeForTests, createWhisperWorker } from '../../src/f
 const TIMESTAMPED_TINY_MODEL = 'onnx-community/whisper-tiny_timestamped';
 
 function createTestWorker(postMessage: (message: any) => void = vi.fn()): any {
+    const listeners: Record<string, (event: any) => void> = {};
     const workerSelf = {
-        addEventListener: vi.fn(),
+        addEventListener: vi.fn((event: string, listener: (payload: any) => void) => {
+            listeners[event] = listener;
+        }),
         postMessage,
+        __whisperTestListeners: listeners,
     };
     new Function('self', __getWhisperWorkerCodeForTests(true))(workerSelf);
     return workerSelf;
@@ -126,13 +130,72 @@ describe('WhisperWorkerLoader', () => {
         expect(code).toContain("status: 'gpu-device-lost'");
     });
 
-    it('reports GPU inference failure without changing the selected backend', () => {
+    it('does not misclassify a generic WASM OrtRun rejection as a GPU failure', () => {
+        const emitted: any[] = [];
+        const pipe: any = vi.fn();
+        pipe.tokenizer = {};
+        const workerSelf = createTestWorker(message => emitted.push(message));
+        workerSelf.__whisperTestSetPipeline(pipe, {
+            model: TIMESTAMPED_TINY_MODEL,
+            backend: 'wasm',
+        });
+        const event = {
+            reason: new Error('OrtRun failed while executing the selected WASM model'),
+            preventDefault: vi.fn(),
+        };
+
+        workerSelf.__whisperTestListeners.unhandledrejection(event);
+
+        expect(event.preventDefault).not.toHaveBeenCalled();
+        expect(emitted).toContainEqual({
+            status: 'error',
+            data: { message: 'OrtRun failed while executing the selected WASM model' },
+        });
+    });
+
+    it('poisons GPU inference failures without changing the selected backend', () => {
         const code = __getWhisperWorkerCodeForTests();
 
-        expect(code).toContain('postChunkError(chunkId, retryMsg, true)');
-        expect(code).toContain('postChunkError(chunkId, initialMsg, true)');
+        expect(code).toContain('poisonInferenceWorker(chunkId, retryMsg, true)');
+        expect(code).toContain('poisonInferenceWorker(chunkId, initialMsg, true)');
+        expect(code).toContain('failed to download data from buffer|buffer unmapped');
         expect(code).not.toContain('GPU inference failed, falling back to WASM');
         expect(code).not.toContain("status: 'gpu-degraded'");
+    });
+
+    it('poisons Firefox ORT Buffer unmapped before reporting the failed chunk', async () => {
+        const emitted: any[] = [];
+        const pipe: any = vi.fn(async () => {
+            throw new Error(
+                'OrtRun failed: MapAsyncStatus::Success was false. '
+                + 'Failed to download data from buffer: Buffer unmapped',
+            );
+        });
+        pipe.tokenizer = {};
+        const workerSelf = createTestWorker(message => emitted.push(message));
+        workerSelf.__whisperTestSetPipeline(pipe, {
+            model: TIMESTAMPED_TINY_MODEL,
+            backend: 'webgpu',
+        });
+
+        await transcribeTestChunk(workerSelf, 7);
+
+        const poisonedIndex = emitted.findIndex(message => message.status === 'worker-poisoned');
+        const errorIndex = emitted.findIndex(message => message.status === 'error');
+        expect(poisonedIndex).toBeGreaterThanOrEqual(0);
+        expect(errorIndex).toBeGreaterThan(poisonedIndex);
+        expect(emitted[poisonedIndex]).toMatchObject({
+            status: 'worker-poisoned',
+            data: {
+                reason: 'inference-runtime-error',
+                gpuFailure: true,
+            },
+        });
+        expect(emitted[errorIndex]).toMatchObject({
+            status: 'error',
+            chunkId: 7,
+            data: { gpuFailure: true },
+        });
     });
 
     it('uses q4 decoder as primary WebGPU dtype (per HF official example)', () => {

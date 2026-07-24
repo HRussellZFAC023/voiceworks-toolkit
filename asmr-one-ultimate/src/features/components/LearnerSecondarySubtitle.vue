@@ -18,6 +18,7 @@ defineEmits<{ toggle: [] }>();
         :lang="language"
         :aria-label="ariaLabel"
         :aria-pressed="!blurred"
+        :title="blurred ? undefined : text || undefined"
         @click.stop="$emit('toggle')"
     >{{ text }}</button>
 </template>

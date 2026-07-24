@@ -18,13 +18,13 @@ function getWorkerCode(enableTestHooks = false): string {
     const inferencePolicySource = createWhisperInferencePolicyWorkerSource();
     return `
 let gpuDeviceLost = false;
-const GPU_ERROR_RE = /WebGPU Context Provider|context.*provider|device lost|GPUDevice|createComputePipeline|createShaderModule|createBuffer|mapAsync|mapping webgpu buffer|invalid buffer|Instance reference|AbortError|release session|invalid session|reading 'destroy'|reading 'dispose'/i;
+const GPU_ERROR_RE = /WebGPU Context Provider|context.*provider|device lost|GPUDevice|createComputePipeline|createShaderModule|createBuffer|mapAsync|MapAsyncStatus|mapping webgpu buffer|failed to download data from buffer|buffer unmapped|invalid buffer|OrtRun|Instance reference|AbortError|release session|invalid session|reading 'destroy'|reading 'dispose'/i;
 const EXPLICIT_DEVICE_LOSS_RE = /device lost|Instance reference|release session|invalid session|reading 'destroy'|reading 'dispose'/i;
 
 self.addEventListener('unhandledrejection', (event) => {
     const reason = event.reason;
     const message = reason && reason.message ? reason.message : String(reason || 'Unknown error');
-    if (GPU_ERROR_RE.test(message)) {
+    if (currentBackend === 'webgpu' && GPU_ERROR_RE.test(message)) {
         event.preventDefault();
         if (EXPLICIT_DEVICE_LOSS_RE.test(message)) {
             if (!gpuDeviceLost) {
@@ -82,7 +82,7 @@ async function loadTransformers() {
     throw new Error('Failed to load transformers.js from all CDNs');
 }
 
-const POISONED_RUNTIME_LOAD_RE = /WebGPU Context Provider|context.*provider|device lost|GPUDevice|createComputePipeline|createShaderModule|createBuffer|mapAsync|mapping webgpu buffer|invalid buffer|allocation|out of memory|OOM|RangeError|onnxruntime|ORT session|session (?:creation|initialization)|invalid graph|protobuf|operator|kernel|memory access out of bounds|index out of bounds|reading 'destroy'|reading 'dispose'/i;
+const POISONED_RUNTIME_LOAD_RE = /WebGPU Context Provider|context.*provider|device lost|GPUDevice|createComputePipeline|createShaderModule|createBuffer|mapAsync|MapAsyncStatus|mapping webgpu buffer|failed to download data from buffer|buffer unmapped|invalid buffer|OrtRun|allocation|out of memory|OOM|RangeError|onnxruntime|ORT session|session (?:creation|initialization)|invalid graph|protobuf|operator|kernel|memory access out of bounds|index out of bounds|reading 'destroy'|reading 'dispose'/i;
 const RETRYABLE_HUB_TRANSPORT_RE = /Unauthorized access to file|AccessDenied|Failed to fetch|fetch failed|NetworkError|network request failed|ERR_(?:NETWORK|CONNECTION|INTERNET)|ECONN(?:RESET|REFUSED|ABORTED)|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|socket hang up|TLS handshake|certificate|fetch.*(?:aborted|timed out)|network.*timed out|request to https?:\\/\\/.*timed out/i;
 const RETRYABLE_HUB_STATUS_RE = /(?:HTTP(?:\\/[\\d.]+)?|status(?: code)?|response status)\\s*[:=]?\\s*(?:401|403|408|429|500|502|503|504)\\b|(?:401 Unauthorized|403 Forbidden|408 Request Timeout|429 Too Many Requests|500 Internal Server Error|502 Bad Gateway|503 Service Unavailable|504 Gateway Timeout)/i;
 
@@ -306,7 +306,7 @@ function configureWebGpuRuntime(adapter) {
 // Inference timeout. The controller embeds this exact same typed policy and
 // waits beyond it before treating an inference as unresponsive.
 ${inferencePolicySource}
-const GPU_INFERENCE_ERROR_RE = /createBuffer|RangeError|out of memory|OOM|allocation|device lost|GPUDevice|createComputePipeline|createShaderModule|mapAsync|mapping webgpu buffer|invalid buffer|Instance reference|AbortError|release session|invalid session|index out of bounds|timed out|reading 'destroy'|reading 'dispose'/i;
+const GPU_INFERENCE_ERROR_RE = /createBuffer|RangeError|out of memory|OOM|allocation|device lost|GPUDevice|createComputePipeline|createShaderModule|mapAsync|MapAsyncStatus|mapping webgpu buffer|failed to download data from buffer|buffer unmapped|invalid buffer|OrtRun|Instance reference|AbortError|release session|invalid session|index out of bounds|timed out|reading 'destroy'|reading 'dispose'/i;
 
 function toErrorMessage(error) {
     return error && error.message ? error.message : String(error || 'Unknown error');
@@ -649,7 +649,7 @@ async function transcribe(msg) {
                 if (currentBackend !== 'wasm' && GPU_INFERENCE_ERROR_RE.test(retryMsg)) {
                     // The selected WebGPU plan failed. Report it without
                     // changing execution providers.
-                    postChunkError(chunkId, retryMsg, true);
+                    poisonInferenceWorker(chunkId, retryMsg, true);
                     return null;
                 } else {
                     postChunkError(chunkId, retryMsg);
@@ -657,7 +657,7 @@ async function transcribe(msg) {
                 }
             }
         } else if (currentBackend !== 'wasm' && GPU_INFERENCE_ERROR_RE.test(initialMsg)) {
-            postChunkError(chunkId, initialMsg, true);
+            poisonInferenceWorker(chunkId, initialMsg, true);
             return null;
         } else {
             postChunkError(chunkId, initialMsg);
@@ -678,6 +678,7 @@ async function transcribe(msg) {
         text: (result.text || '').trim(),
         rawChunks,
         inputRms: msg.inputRms,
+        wordTimestamps: pipeOpts.return_timestamps === 'word',
     };
 }
 
@@ -753,6 +754,22 @@ function haltTimedOutWorker(chunkId, message, gpuFailure) {
     self.postMessage({
         status: 'worker-poisoned',
         data: { reason: 'inference-timeout', message, gpuFailure: gpuFailure === true },
+    });
+    postChunkError(chunkId, message, gpuFailure);
+    const queuedJobs = jobQueue;
+    jobQueue = [];
+    for (const queued of queuedJobs) postDropped(queued, 'worker-poisoned');
+}
+
+function poisonInferenceWorker(chunkId, message, gpuFailure) {
+    // ORT WebGPU mapping/runtime failures (notably Firefox "Buffer unmapped")
+    // can leave the session unusable even when the adapter itself survives.
+    // Poison before reporting the chunk error so the controller replaces this
+    // worker and resumes on the same pinned plan instead of reusing the session.
+    workerPoisoned = true;
+    self.postMessage({
+        status: 'worker-poisoned',
+        data: { reason: 'inference-runtime-error', message, gpuFailure: gpuFailure === true },
     });
     postChunkError(chunkId, message, gpuFailure);
     const queuedJobs = jobQueue;

@@ -21,7 +21,14 @@ import type { RawChunk, ProcessedSegment } from './whisperProcessing';
 import { getAudioElement, isChinese } from '../core/DomUtils';
 import { SharedCache, CacheKeys } from '../core/Cache';
 import { MLCrashGuard } from '../core/MLCrashGuard';
-import type { WhisperSegment, WhisperWord, KikoeruStoreState, PlayerTrack, TranslationSourceHint } from '../types';
+import type {
+    WhisperSegment,
+    WhisperWord,
+    WhisperState,
+    KikoeruStoreState,
+    PlayerTrack,
+    TranslationSourceHint,
+} from '../types';
 import { AppStore } from '../store/AppStore';
 import { TranslationService } from '../services/TranslationService';
 import { AudioCache } from '../infrastructure/AudioCache';
@@ -38,6 +45,26 @@ import { correctWhisperText } from '../data/nsfw-glossary';
 import { connectAudioPcmTap, hasSharedSourceNode } from '../core/AudioAnalysis';
 import { resolveLearnerSecondaryLanguage } from './learnerSubtitleMode';
 import { getWhisperStallWatchdogMs } from './whisperInferencePolicy';
+import {
+    addWhisperCoverage,
+    getWhisperContiguousEnd,
+    normalizeWhisperCoverage,
+    subtractWhisperCoverage,
+    summarizeWhisperCoverage,
+} from './whisperCoverage';
+import type { WhisperCoverageRange } from './whisperCoverage';
+import {
+    buildWhisperCacheCheckpoint,
+    sanitizeWhisperCachedTranscript,
+} from './whisperCachePolicy';
+import type { WhisperCachedTranscript as CachedTranscript } from './whisperCachePolicy';
+import {
+    buildWhisperCompletionState,
+    buildWhisperPartialState,
+    buildWhisperProgressDispatch,
+    buildWhisperRuntimeProgress,
+} from './whisperProgressPolicy';
+import type { WhisperProgressPhase } from './whisperProgressPolicy';
 
 // ============================================================================
 // Constants
@@ -81,6 +108,7 @@ export function resolveWhisperModelPreset(preset: string, configuredModel: strin
 
 const MODEL_LOAD_STALL_TIMEOUT_MS = 120_000;
 const CACHE_TTL_MS = 1000 * 60 * 60 * 24 * 90; // 90 days
+const CACHE_CHECKPOINT_INTERVAL_MS = 10_000;
 const MODEL_READY_TTL_MS = 1000 * 60 * 60 * 24 * 30; // 30 days
 // No lookahead limit — transcribe the entire audio from start to finish.
 // DEFAULT_MAX_PENDING_CHUNKS provides natural backpressure (one active + one queued).
@@ -107,7 +135,7 @@ const WHISPER_DTYPE_POLICY = {
     wasm: 'q8',
 } as const;
 const GPU_ERROR_PATTERN =
-    /createBuffer|RangeError|out of memory|OOM|allocation|device lost|GPUDevice|createComputePipeline|createShaderModule|mapAsync|mapping webgpu buffer|invalid buffer|Instance reference|AbortError|release session|invalid session|index out of bounds|reading 'destroy'|reading 'dispose'/i;
+    /createBuffer|RangeError|out of memory|OOM|allocation|device lost|GPUDevice|createComputePipeline|createShaderModule|mapAsync|MapAsyncStatus|mapping webgpu buffer|failed to download data from buffer|buffer unmapped|invalid buffer|Instance reference|AbortError|release session|invalid session|index out of bounds|reading 'destroy'|reading 'dispose'/i;
 const EXPLICIT_DEVICE_LOSS_PATTERN = /device lost|Instance reference|release session|invalid session|reading 'destroy'|reading 'dispose'/i;
 
 function normalizeLanguageCode(language: string): 'ja' | 'zh' | 'en' | '' {
@@ -193,7 +221,12 @@ type ChunkEntry = {
 
 type WorkerCompleteMessage = {
     status: 'complete';
-    data: { text?: string; rawChunks?: RawChunk[]; inputRms?: number };
+    data: {
+        text?: string;
+        rawChunks?: RawChunk[];
+        inputRms?: number;
+        wordTimestamps?: boolean;
+    };
     chunkId?: number;
 };
 
@@ -319,6 +352,39 @@ interface WhisperTranslationPlan {
     targetLang: string;
 }
 
+interface PoisonedWorkerRecoveryPlan {
+    reason: string;
+    terminal: boolean;
+    terminalReason: string;
+    requestedResume: number;
+    resumeFrom: number;
+    droppedSeconds: number;
+}
+
+function buildPoisonedWorkerRecoveryPlan(input: {
+    reason: string;
+    queuedOffsets: number[];
+    transcribedUpTo: number;
+    pcmBufferStartTime: number;
+    consecutiveTimeouts: number;
+    maximumTimeouts: number;
+}): PoisonedWorkerRecoveryPlan {
+    const requestedResume = input.queuedOffsets.length > 0
+        ? Math.min(...input.queuedOffsets)
+        : Math.max(input.pcmBufferStartTime, input.transcribedUpTo - SEEK_BACKFILL_SEC);
+    const terminal = input.consecutiveTimeouts >= input.maximumTimeouts;
+    return {
+        reason: input.reason,
+        terminal,
+        terminalReason: input.reason === 'inference-timeout'
+            ? 'inference-timeout-terminal'
+            : `${input.reason}-terminal`,
+        requestedResume,
+        resumeFrom: Math.max(requestedResume, input.pcmBufferStartTime),
+        droppedSeconds: Math.max(0, input.pcmBufferStartTime - requestedResume),
+    };
+}
+
 function resolveWorkerModel(model: string, multilingual: boolean): string {
     if (multilingual || model.startsWith('distil-whisper/')) return model;
     if (model.endsWith('_timestamped')) {
@@ -372,9 +438,10 @@ function firstNonBlankString(...values: unknown[]): string {
     return '';
 }
 
-function displayModelName(model: string): string {
-    const segments = model.split('/');
-    return segments.at(-1) ?? model;
+function displayModelName(model: string | null | undefined): string {
+    const value = String(model || 'Whisper');
+    const segments = value.split('/');
+    return segments.at(-1) ?? value;
 }
 
 function displayDiagnosticValue(value: string): string {
@@ -389,26 +456,36 @@ function getWhisperSourceLanguageHint(language: string): TranslationSourceHint {
     return normalizeLanguageCode(language) || 'auto';
 }
 
+function getWhisperTimingLabel(timingQuality: WhisperState['timingQuality']): string {
+    if (timingQuality === 'word') return I18n.t('whisperTimingWord');
+    if (timingQuality === 'segment') return I18n.t('whisperTimingSegment');
+    return I18n.t('whisperTimingPending');
+}
+
+function readWhisperAudioClock(audio: HTMLAudioElement | null): {
+    playbackSeconds: number;
+    knownDuration: number;
+} {
+    const playbackSeconds = Number(audio?.currentTime);
+    const knownDuration = Number(audio?.duration);
+    return {
+        playbackSeconds: Number.isFinite(playbackSeconds) ? Math.max(0, playbackSeconds) : 0,
+        knownDuration: Number.isFinite(knownDuration) ? Math.max(0, knownDuration) : 0,
+    };
+}
+
+function resolveProgressBackend(
+    settingsBackend: WhisperSettings['backend'] | undefined,
+    loadedPlan: Readonly<WhisperLoadedPlan> | null,
+): WhisperSettings['backend'] {
+    return settingsBackend || loadedPlan?.backend || 'webgpu';
+}
+
 interface WhisperAudioFallbackSource {
     url: string;
     knownSizeBytes: number | null;
     allowUnknownSize: boolean;
     preferBoundedStreaming: boolean;
-}
-
-interface CachedTranscript {
-    text: string;
-    segments: WhisperSegment[];
-    model: string;
-    subtask: string;
-    language: string;
-    createdAt: number;
-    lrc?: string;
-    vtt?: string;
-    complete?: boolean;
-    translations?: Record<string, { text: string; lrc: string; vtt?: string }>;
-    /** Original identity string (pre-hash) for collision detection. Added Feb 2026. */
-    sourceIdentity?: string;
 }
 
 interface TranscriptIndexEntry {
@@ -464,8 +541,11 @@ export class Whisper {
     private chunkStartedAt = new Map<number, number>();
     private chunkLastActivity = new Map<number, number>();
     private provisionalChunkText = new Map<number, { generation: number; text: string }>();
-    private completedUpTo = 0;
+    private processedRanges: WhisperCoverageRange[] = [];
+    private unavailableRanges: WhisperCoverageRange[] = [];
+    private coverageOrigin = 0;
     private droppedBufferSeconds = 0;
+    private timingQuality: 'word' | 'segment' | null = null;
 
     private statusEl: HTMLElement | null = null;
     private errorDismissTimer: number | null = null;
@@ -486,6 +566,7 @@ export class Whisper {
     private activeTranslationQueueKeys = new Set<string>();
     private lastTranscribeProgressAt = 0;
     private lastPersistAt = 0;
+    private cacheCheckpointTimer: number | null = null;
     private transcriptionGeneration = 0;
     private workerInitGeneration = 0;
     private workerInitPending: WhisperWorkerInit | null = null;
@@ -600,6 +681,17 @@ export class Whisper {
             progress: 0,
             progressMessage: '',
             currentTrackSrc: null,
+            stage: 'idle',
+            model: null,
+            backend: null,
+            processedSeconds: 0,
+            processedThroughSeconds: 0,
+            skippedSeconds: 0,
+            totalSeconds: 0,
+            playbackSeconds: 0,
+            backlogSeconds: 0,
+            pendingChunks: 0,
+            timingQuality: null,
         });
     }
 
@@ -717,13 +809,14 @@ export class Whisper {
                 // Settings panel still held a 100% ready state for the old
                 // model. A model-affecting change always invalidates that UI.
                 this.modelReady = false;
-                AppStore.setWhisperState({
-                    isTranscribing: false,
-                    isLoadingModel: false,
-                    progress: 0,
-                    progressMessage: '',
-                });
             }
+            AppStore.setWhisperState({
+                isTranscribing: false,
+                isLoadingModel: false,
+                progress: 0,
+                progressMessage: '',
+                stage: 'idle',
+            });
 
             if (wasTranscribing) {
                 const audio = getAudioElement();
@@ -738,6 +831,19 @@ export class Whisper {
                 }
             }
         }));
+
+        const flushCheckpoint = () => {
+            if (this.transcribing) this.flushCacheCheckpoint(false);
+        };
+        const flushHiddenCheckpoint = () => {
+            if (document.visibilityState === 'hidden') flushCheckpoint();
+        };
+        window.addEventListener('pagehide', flushCheckpoint);
+        document.addEventListener('visibilitychange', flushHiddenCheckpoint);
+        this.eventCleanups.push(() => {
+            window.removeEventListener('pagehide', flushCheckpoint);
+            document.removeEventListener('visibilitychange', flushHiddenCheckpoint);
+        });
     }
 
     private handleTrackChange(newSrc: string): void {
@@ -824,7 +930,7 @@ export class Whisper {
     }
 
     private isGpuErrorMessage(message: string): boolean {
-        return GPU_ERROR_PATTERN.test(message);
+        return this.getEffectiveBackend() === 'webgpu' && GPU_ERROR_PATTERN.test(message);
     }
 
     private isExplicitDeviceLossMessage(message: string): boolean {
@@ -859,6 +965,8 @@ export class Whisper {
             isLoadingModel: false,
             progress: 0,
             progressMessage: message,
+            stage: 'error',
+            pendingChunks: 0,
         });
         this.showStatus(`<span class="whisper-error-indicator">${this.escapeHtml(message)}</span>`);
     }
@@ -904,6 +1012,7 @@ export class Whisper {
             this.dispatchError(I18n.t('whisperNoAudioSource'));
             return;
         }
+        const settings = Object.freeze({ ...this.getWhisperSettings() });
 
         // Each start owns a unique generation. A superseded download or decode
         // may still settle after abort (not every userscript transport can be
@@ -919,7 +1028,21 @@ export class Whisper {
         this.audio = audio;
         const workId = this.bridge.currentWorkId;
         this.autoTranscribeWorkId = workId || null;
-        AppStore.setWhisperState({ currentTrackSrc: src, isTranscribing: true });
+        AppStore.setWhisperState({
+            currentTrackSrc: src,
+            isTranscribing: true,
+            stage: 'loading',
+            model: displayModelName(settings.model),
+            backend: settings.backend,
+            processedSeconds: 0,
+            processedThroughSeconds: 0,
+            skippedSeconds: 0,
+            totalSeconds: Number.isFinite(audio.duration) ? audio.duration : 0,
+            playbackSeconds: audio.currentTime || 0,
+            backlogSeconds: audio.currentTime || 0,
+            pendingChunks: 0,
+            timingQuality: null,
+        });
         this.segments = [];
         this.loggedTranscriptKeys.clear();
         this.lastSegmentEnd = 0;
@@ -934,20 +1057,25 @@ export class Whisper {
         this.pcmSampleLength = 0;
         this.liveCaptureEnded = false;
         this.transcribedUpTo = 0;
-        this.completedUpTo = 0;
+        this.processedRanges = [];
+        this.unavailableRanges = [];
+        this.coverageOrigin = 0;
+        this.lastPersistAt = 0;
         this.droppedBufferSeconds = 0;
+        this.timingQuality = null;
 
-        const settings = Object.freeze({ ...this.getWhisperSettings() });
         this.activeRunSettings = settings;
         this.currentCacheSource = src;
         this.currentCacheIdentity = this.buildCacheIdentity(src, settings);
         this.currentCacheKey = this.buildCacheKey(src, settings);
 
+        let hasCachedCheckpoint = false;
         if (settings.cacheTranscripts) {
             const cached = this.sanitizeCachedTranscript(
                 SharedCache.get<CachedTranscript>(this.currentCacheKey),
+                this.currentCacheKey,
             );
-            if (cached && cached.segments?.length) {
+            if (cached) {
                 // Verify the cached transcript's source identity matches ours.
                 // hashString is 32-bit, so collisions are theoretically possible.
                 // Old cache entries (pre-Feb 2026) won't have sourceIdentity — accept them.
@@ -957,30 +1085,28 @@ export class Whisper {
                         cached: cached.sourceIdentity,
                     });
                 } else {
+                    hasCachedCheckpoint = true;
                     Logger.debug('[Whisper] Using cached transcript:', { segments: cached.segments.length, complete: !!cached.complete });
-                    this.segments = cached.segments;
-                    this.logNewTranscriptSegments('cache');
-                    this.lastSegmentEnd = cached.segments[cached.segments.length - 1]?.end || 0;
-                    this.updateTranscriptIndex(this.currentCacheKey, cached);
-                    const latest = cached.segments[cached.segments.length - 1];
-                    EventBus.emit('whisper:update', {
-                        text: latest?.text || cached.text,
-                        segments: cached.segments,
-                        final: !!cached.complete,
-                        sourceLanguageHint: getWhisperSourceLanguageHint(settings.language),
-                        fromCache: true,
-                        live: false,
-                        source: 'cache',
-                    });
+                    this.hydrateCachedTranscript(cached);
+                    if (cached.segments.length > 0) {
+                        this.logNewTranscriptSegments('cache');
+                        this.updateTranscriptIndex(this.currentCacheKey, cached);
+                        this.emitCachedTranscriptUpdate(cached, settings.language);
+                    }
                     if (cached.complete) {
                         EventBus.emit('whisper:complete', { text: cached.text });
                         this.stopTranscription('cache-hit');
                         return;
                     }
-                    // Incomplete cache — continue transcription from where we left off
-                    Logger.debug('[Whisper] Cache incomplete, continuing transcription from', this.lastSegmentEnd.toFixed(1) + 's');
-                    this.transcribedUpTo = Math.max(0, this.lastSegmentEnd - 2);
-                    this.completedUpTo = this.lastSegmentEnd;
+                    // Durable cache continuation always fills the first
+                    // whole-track gap. coverageOrigin remains a session-only
+                    // progress anchor and must not make a mid-track run final.
+                    const resumeAt = getWhisperContiguousEnd(
+                        this.processedRanges,
+                        0,
+                    );
+                    Logger.debug('[Whisper] Cache incomplete, continuing transcription from', resumeAt.toFixed(1) + 's');
+                    this.transcribedUpTo = Math.max(0, resumeAt - 2);
                     this.lastTranslatedSegmentCount = this.segments.length;
                     this.translateAheadUpTo = this.lastSegmentEnd;
                 }
@@ -1003,7 +1129,12 @@ export class Whisper {
         // second download entirely and begins transcription after the first short
         // chunk is captured. Cross-origin elements without an existing CORS-safe
         // Web Audio route are intentionally excluded so playback is never silenced.
-        if (this.startLiveAudioCapture(audio, startGeneration, cacheTranscribedUpTo)) {
+        if (this.startLiveAudioCapture(
+            audio,
+            startGeneration,
+            cacheTranscribedUpTo,
+            hasCachedCheckpoint,
+        )) {
             this.startProcessingLoop();
             this.dispatchProgress(I18n.t('whisperTranscribing'), 0, 'transcribing');
             Logger.debug('[Whisper] Live transcription started.', { src, settings });
@@ -1047,13 +1178,18 @@ export class Whisper {
             this.pcmBufferStartTime = 0;
             this.pcmSampleLength = pcmBuffer.length;
             this.pcmDuration = this.pcmBuffer.length / TARGET_SAMPLE_RATE;
-            // Backfill a small window so model load latency does not drop opening lines.
-            this.transcribedUpTo = Math.max(0, Math.min(this.pcmDuration, audio.currentTime - INITIAL_BACKFILL_SEC));
-
-            // Preserve cache continuation point if it's further along
-            if (cacheTranscribedUpTo > this.transcribedUpTo) {
-                this.transcribedUpTo = cacheTranscribedUpTo;
+            if (hasCachedCheckpoint) {
+                // A partial checkpoint resumes contiguously even when playback
+                // has moved far ahead while the page was closed.
+                this.transcribedUpTo = Math.min(this.pcmDuration, cacheTranscribedUpTo);
                 Logger.debug('[Whisper] Restored cache continuation point:', cacheTranscribedUpTo.toFixed(1) + 's');
+            } else {
+                // Without a checkpoint, backfill a bounded opening window so
+                // model load latency does not drop the current conversation.
+                this.transcribedUpTo = Math.max(
+                    0,
+                    Math.min(this.pcmDuration, audio.currentTime - INITIAL_BACKFILL_SEC),
+                );
             }
 
             Logger.debug('[Whisper] Audio decoded:', {
@@ -1070,6 +1206,16 @@ export class Whisper {
             if (err instanceof DOMException && err.name === 'AbortError') {
                 Logger.debug('[Whisper] Audio fetch aborted (track changed)');
                 this.stopTranscription('fetch-aborted');
+                return;
+            }
+            if (hasCachedCheckpoint
+                && this.resumeLiveCaptureWithExplicitGap(
+                    audio,
+                    startGeneration,
+                    cacheTranscribedUpTo,
+                )) {
+                Logger.warn('[Whisper] Contiguous decode resume was unavailable; continuing live with an explicit gap', err);
+                this.startProcessingLoop();
                 return;
             }
             Logger.error('[Whisper] Failed to fetch and decode audio:', err);
@@ -1100,47 +1246,66 @@ export class Whisper {
         this.clearModelLoadTimer();
         this.clearAutoStartTimer();
         this.abortFetch();
-        // Keep buttons active if auto-transcribe is still enabled (track change or cache hit within work)
-        const keepActive = this.autoTranscribeWorkId && (reason === 'track-change' || reason === 'cache-hit');
-        if (!keepActive) {
-            this.setButtonsActive(false);
-        }
+        this.updateButtonsAfterStop(reason);
         this.clearStatus();
-        // A Web Worker cannot cancel an already-running Transformers.js
-        // pipeline call. Terminate it when a user stop/track change happens
-        // during model load or inference so a slow WASM job cannot keep the
-        // CPU busy and block the next transcription forever.
+        this.cancelActiveWorker(reason);
+        this.clearChunkTracking({ resetRecovery: true, resetChunkCounter: false });
+        this.loggedTranscriptKeys.clear();
+        AppStore.setWhisperState({
+            isTranscribing: false,
+            isLoadingModel: false,
+            progress: 0,
+            progressMessage: '',
+            currentTrackSrc: this.currentTrackSrc,
+            stage: reason === 'cache-hit' ? 'complete' : 'idle',
+            pendingChunks: 0,
+        });
+
+        this.detachAudioListeners();
+        this.clearSeekTimers();
+        this.stopProcessingLoop();
+        this.stopLiveAudioCapture();
+        this.flushCacheCheckpoint(shouldFinalize);
+        this.resetPcmRuntime();
+        this.processedRanges = [];
+        this.unavailableRanges = [];
+        this.coverageOrigin = 0;
+        this.activeRunSettings = null;
+        this.scheduleIdleUnload();
+    }
+
+    private updateButtonsAfterStop(reason: string): void {
+        const keepActive = this.autoTranscribeWorkId
+            && (reason === 'track-change' || reason === 'cache-hit');
+        if (!keepActive) this.setButtonsActive(false);
+    }
+
+    private cancelActiveWorker(reason: string): void {
+        // Transformers inference cannot be cancelled inside a running Worker.
         if (this.workerInitPending || this.pendingChunks > 0) {
             this.resetWorker(`cancel-active-${reason}`);
         }
-        this.clearChunkTracking({ resetRecovery: true, resetChunkCounter: false });
-        this.loggedTranscriptKeys.clear();
-        AppStore.setWhisperState({ isTranscribing: false, isLoadingModel: false, progress: 0, progressMessage: '', currentTrackSrc: this.currentTrackSrc });
+    }
 
-        this.detachAudioListeners();
+    private clearSeekTimers(): void {
+        if (this.seekDebounceTimer) clearTimeout(this.seekDebounceTimer);
+        if (this.seekingRafId) cancelAnimationFrame(this.seekingRafId);
+        this.seekDebounceTimer = null;
+        this.seekingRafId = 0;
+    }
 
-        if (this.seekDebounceTimer) {
-            clearTimeout(this.seekDebounceTimer);
-            this.seekDebounceTimer = null;
-        }
-        if (this.seekingRafId) {
-            cancelAnimationFrame(this.seekingRafId);
-            this.seekingRafId = 0;
-        }
-        this.stopProcessingLoop();
-        this.stopLiveAudioCapture();
+    private releasePcmBuffer(): void {
         this.pcmBuffer = null;
         this.pcmSourceUrl = null;
         this.pcmDuration = 0;
         this.pcmBufferStartTime = 0;
         this.pcmSampleLength = 0;
-        this.transcribedUpTo = 0;
-        this.completedUpTo = 0;
-        this.droppedBufferSeconds = 0;
+    }
 
-        this.persistCache(shouldFinalize);
-        this.activeRunSettings = null;
-        this.scheduleIdleUnload();
+    private resetPcmRuntime(): void {
+        this.releasePcmBuffer();
+        this.transcribedUpTo = 0;
+        this.droppedBufferSeconds = 0;
     }
 
     private isCurrentFetch(generation: number, controller: AbortController): boolean {
@@ -1195,7 +1360,6 @@ export class Whisper {
         }
         if (resetChunkCounter) {
             this.nextChunkId = 0;
-            this.completedUpTo = this.pcmBufferStartTime;
             this.droppedBufferSeconds = 0;
         }
     }
@@ -1272,12 +1436,14 @@ export class Whisper {
             chunkIndex: chunkId,
             live: true,
             source: 'heartbeat',
+            timingQuality: this.timingQuality || 'segment',
         });
     }
 
     private resetState(reason: string): void {
         Logger.debug('[Whisper] Reset state:', reason);
         this.transcriptionGeneration++;
+        this.clearCacheCheckpointTimer();
         this.clearChunkTracking({ resetRecovery: true, resetChunkCounter: true });
         this.lastSegmentEnd = 0;
         this.segments = [];
@@ -1296,8 +1462,11 @@ export class Whisper {
         this.pcmBufferStartTime = 0;
         this.pcmSampleLength = 0;
         this.transcribedUpTo = 0;
-        this.completedUpTo = 0;
+        this.processedRanges = [];
+        this.unavailableRanges = [];
+        this.coverageOrigin = 0;
         this.droppedBufferSeconds = 0;
+        this.timingQuality = null;
         this.stopProcessingLoop();
         this.clearStatus();
     }
@@ -1381,11 +1550,19 @@ export class Whisper {
         audio: HTMLAudioElement,
         generation: number,
         cacheContinuationTime: number,
+        hasCachedCheckpoint = false,
     ): boolean {
         this.stopLiveAudioCapture();
         if (!this.canUseLiveAudioCapture(audio)) return false;
 
         const startTime = Math.max(0, Number.isFinite(audio.currentTime) ? audio.currentTime : 0);
+        if (hasCachedCheckpoint && cacheContinuationTime < startTime - 1) {
+            Logger.debug('[Whisper] Partial cache is behind playback; using decoded audio for contiguous resume', {
+                cacheContinuationTime,
+                playbackTime: startTime,
+            });
+            return false;
+        }
         this.liveCaptureActive = true;
         this.liveCaptureEnded = audio.ended;
         this.resetLivePcmBuffer(startTime, Math.max(startTime, cacheContinuationTime));
@@ -1410,6 +1587,28 @@ export class Whisper {
             sampleRate: TARGET_SAMPLE_RATE,
             maxBufferedSeconds: MAX_LIVE_PCM_SECONDS,
         });
+        return true;
+    }
+
+    private resumeLiveCaptureWithExplicitGap(
+        audio: HTMLAudioElement,
+        generation: number,
+        cacheContinuationTime: number,
+    ): boolean {
+        if (!this.canUseLiveAudioCapture(audio)) return false;
+        const gapStart = Math.max(0, cacheContinuationTime);
+        if (!this.startLiveAudioCapture(audio, generation, 0)) return false;
+
+        const droppedSeconds = Math.max(0, audio.currentTime - gapStart);
+        if (droppedSeconds > 0) {
+            this.unavailableRanges = addWhisperCoverage(
+                this.unavailableRanges,
+                gapStart,
+                audio.currentTime,
+            );
+            this.droppedBufferSeconds += droppedSeconds;
+            this.reportLiveLag('capture-buffer-trim', droppedSeconds);
+        }
         return true;
     }
 
@@ -1441,7 +1640,9 @@ export class Whisper {
         this.pcmBuffer = new Float32Array(INITIAL_LIVE_PCM_SECONDS * TARGET_SAMPLE_RATE);
         this.pcmSourceUrl = null;
         this.transcribedUpTo = Math.max(this.pcmBufferStartTime, cursorTime);
-        this.completedUpTo = this.transcribedUpTo;
+        if (this.processedRanges.length === 0) {
+            this.coverageOrigin = this.pcmBufferStartTime;
+        }
         this.droppedBufferSeconds = 0;
         this.finalizeOnIdle = false;
         this.liveCaptureEnded = false;
@@ -1485,6 +1686,11 @@ export class Whisper {
         this.pcmSampleLength += incoming.length;
         this.pcmDuration = this.pcmBufferStartTime + this.pcmSampleLength / TARGET_SAMPLE_RATE;
         if (unqueuedDropSeconds > 0) {
+            this.unavailableRanges = addWhisperCoverage(
+                this.unavailableRanges,
+                this.pcmBufferStartTime - unqueuedDropSeconds,
+                this.pcmBufferStartTime,
+            );
             this.droppedBufferSeconds += unqueuedDropSeconds;
             this.reportLiveLag('capture-buffer-trim', unqueuedDropSeconds);
         }
@@ -1492,28 +1698,40 @@ export class Whisper {
 
     private reportLiveLag(reason: string, droppedSeconds = 0): void {
         const total = Math.max(this.pcmDuration, this.audio?.currentTime || 0);
-        const current = Math.max(0, Math.min(total, this.completedUpTo));
+        const playback = this.audio?.currentTime || 0;
+        const coverage = summarizeWhisperCoverage({
+            origin: this.coverageOrigin,
+            processed: this.processedRanges,
+            unavailable: this.unavailableRanges,
+        }, playback, total);
         const message = reason === 'capture-buffer-trim' && droppedSeconds > 0
             ? I18n.format('whisperLagDropped', {
                 seconds: Math.max(1, Math.ceil(droppedSeconds)),
             })
             : I18n.format('whisperChunkProgress', {
-                current: Math.round(current),
+                current: Math.round(coverage.processedSeconds),
                 total: Math.round(total),
             });
         Logger.warn('[Whisper] Live transcription is behind playback', {
             reason,
             droppedSeconds: Math.round(droppedSeconds * 100) / 100,
             droppedBufferSeconds: Math.round(this.droppedBufferSeconds * 100) / 100,
-            completedUpTo: this.completedUpTo,
+            processedThrough: coverage.processedThroughSeconds,
             availableUpTo: this.pcmDuration,
         });
-        EventBus.emit('whisper:progress', { percent: 0, message, stage: 'transcribing' });
-        AppStore.setWhisperState({
-            isTranscribing: this.transcribing,
-            isLoadingModel: false,
-            progress: 0,
-            progressMessage: message,
+        const settings = this.getExecutionSettings();
+        this.dispatchProgress(message, 0, 'transcribing', {
+            stage: 'behind',
+            model: displayModelName(settings.model),
+            backend: settings.backend,
+            processedSeconds: coverage.processedSeconds,
+            processedThroughSeconds: coverage.processedThroughSeconds,
+            skippedSeconds: coverage.skippedSeconds,
+            totalSeconds: total,
+            playbackSeconds: playback,
+            backlogSeconds: coverage.backlogSeconds,
+            pendingChunks: this.pendingChunks,
+            timingQuality: this.timingQuality,
         });
     }
 
@@ -1532,6 +1750,11 @@ export class Whisper {
             : this.pcmBufferStartTime;
         const droppedSeconds = Math.max(0, this.pcmBufferStartTime - normalizedResume);
         if (droppedSeconds > 0) {
+            this.unavailableRanges = addWhisperCoverage(
+                this.unavailableRanges,
+                normalizedResume,
+                this.pcmBufferStartTime,
+            );
             this.droppedBufferSeconds += droppedSeconds;
             this.reportLiveLag('capture-buffer-trim', droppedSeconds);
         }
@@ -1999,8 +2222,10 @@ export class Whisper {
         // to wake transcription. maybeProcessNextChunk() is itself guarded on
         // transcribing/pcmBuffer/modelReady, so an early call is a safe no-op.
         this.maybeProcessNextChunk();
+        if (this.modelReady) this.updateTranscribingProgress();
         this.processingLoopId = window.setInterval(() => {
             this.maybeProcessNextChunk();
+            if (this.modelReady) this.updateTranscribingProgress();
         }, settings.pollIntervalMs);
     }
 
@@ -2015,19 +2240,19 @@ export class Whisper {
         if (!this.transcribing || !this.pcmBuffer) return;
         if (!this.modelReady) return;
 
-        // Guard: if the cursor is below lastSegmentEnd AND within the contiguous
-        // segment range, clamp it forward to avoid re-processing already-transcribed
-        // regions. But if it's before the first segment, the cursor was intentionally
-        // placed there to fill an untranscribed gap — leave it alone.
-        if (this.transcribedUpTo < this.lastSegmentEnd && this.segments.length > 0) {
-            const coverageStart = this.segments[0].start;
-            if (this.transcribedUpTo >= coverageStart - 2) {
-                Logger.debug('[Whisper] transcribedUpTo regression detected, clamping', {
-                    was: this.transcribedUpTo.toFixed(2),
-                    clampTo: this.lastSegmentEnd.toFixed(2),
-                });
-                this.transcribedUpTo = this.lastSegmentEnd;
-            }
+        // Skip only ranges proven to have completed inference. Transcript text
+        // is sparse by nature (silence and filtered hallucinations create no
+        // segment), so first/last subtitle bounds cannot represent coverage.
+        const nextMissingCursor = getWhisperContiguousEnd(
+            this.processedRanges,
+            this.transcribedUpTo,
+        );
+        if (nextMissingCursor > this.transcribedUpTo + 0.01) {
+            Logger.debug('[Whisper] Advancing cursor past analyzed coverage', {
+                was: this.transcribedUpTo.toFixed(2),
+                advancedTo: nextMissingCursor.toFixed(2),
+            });
+            this.transcribedUpTo = nextMissingCursor;
         }
 
         // Sentinel: detect track changes that EventBus missed
@@ -2156,29 +2381,35 @@ export class Whisper {
             recoveries: this.chunkStallRecoveryCount,
             resumeFrom,
         });
-        this.dispatchProgress(I18n.t('whisperRecovering'), 0, 'transcribing');
+        this.dispatchProgress(
+            I18n.t('whisperRecovering'),
+            0,
+            'transcribing',
+            { stage: 'recovering' },
+        );
 
         if (this.chunkStallRecoveryCount > Whisper.MAX_CHUNK_STALL_RECOVERIES) {
             const message = I18n.t('whisperProcessingStalled');
-            this.resetWorker('chunk-stall-terminal');
+            this.resetWorker('chunk-stall-terminal', true);
             this.stopTranscription('chunk-stall-terminal');
             AppStore.setWhisperState({
                 isTranscribing: false,
                 isLoadingModel: false,
                 progress: 0,
                 progressMessage: message,
+                stage: 'error',
             });
             this.showStatus(`<span class="whisper-error-indicator">${this.escapeHtml(message)}</span>`);
             return;
         }
 
-        this.resetWorker('chunk-stall-timeout');
+        this.resetWorker('chunk-stall-timeout', true);
         this.clearChunkTracking({ resetRecovery: false, resetChunkCounter: false });
-        // Don't rewind into regions we've already transcribed — existing segments
-        // are still valid and re-processing creates duplicates.
-        this.transcribedUpTo = this.clampResumeToAvailablePcm(
-            Math.max(resumeFrom, this.lastSegmentEnd),
-        ).resumeFrom;
+        // Retry the earliest stalled range. Existing processed coverage remains
+        // authoritative, so maybeProcessNextChunk() will skip only audio that
+        // actually completed inference instead of jumping over a sparse gap
+        // because a later subtitle happened to exist.
+        this.transcribedUpTo = this.clampResumeToAvailablePcm(resumeFrom).resumeFrom;
         this.modelReady = false;
         this.initWorker(settings);
     }
@@ -2187,44 +2418,79 @@ export class Whisper {
         const reason = message.data?.reason || 'worker-poisoned';
         if (!this.worker) return;
         if (!this.transcribing) {
-            this.resetWorker(reason);
+            this.resetWorker(reason, true);
             return;
         }
 
         this.consecutiveInferenceTimeouts += 1;
-        const queuedOffsets = Array.from(this.chunkOffsets.values());
-        const requestedResume = queuedOffsets.length > 0
-            ? Math.min(...queuedOffsets)
-            : Math.max(this.pcmBufferStartTime, this.transcribedUpTo - SEEK_BACKFILL_SEC);
-        const { resumeFrom, droppedSeconds } = this.clampResumeToAvailablePcm(requestedResume);
+        const recovery = buildPoisonedWorkerRecoveryPlan({
+            reason,
+            queuedOffsets: Array.from(this.chunkOffsets.values()),
+            transcribedUpTo: this.transcribedUpTo,
+            pcmBufferStartTime: this.pcmBufferStartTime,
+            consecutiveTimeouts: this.consecutiveInferenceTimeouts,
+            maximumTimeouts: Whisper.MAX_CONSECUTIVE_INFERENCE_TIMEOUTS,
+        });
         Logger.warn('[Whisper] Replacing poisoned inference worker without stopping the live run', {
             reason,
             pendingChunks: this.pendingChunks,
-            resumeFrom,
+            resumeFrom: recovery.resumeFrom,
             consecutiveTimeouts: this.consecutiveInferenceTimeouts,
         });
+        // A poisoned ORT/WebGPU session must be gone before any replacement can
+        // acquire a device or allocate a second copy of the model.
+        this.resetWorker(recovery.terminal ? recovery.terminalReason : reason, true);
 
-        if (this.consecutiveInferenceTimeouts >= Whisper.MAX_CONSECUTIVE_INFERENCE_TIMEOUTS) {
-            const stalledMessage = I18n.t('whisperProcessingStalled');
-            this.resetWorker('inference-timeout-terminal');
-            this.stopTranscription('inference-timeout-terminal');
-            AppStore.setWhisperState({
-                isTranscribing: false,
-                isLoadingModel: false,
-                progress: 0,
-                progressMessage: stalledMessage,
-            });
-            this.showStatus(`<span class="whisper-error-indicator">${this.escapeHtml(stalledMessage)}</span>`);
+        if (recovery.terminal) {
+            this.stopAfterPoisonedWorker(message, recovery.terminalReason);
             return;
         }
 
-        this.resetWorker(reason);
-        this.transcribedUpTo = resumeFrom;
+        this.resumeAfterPoisonedWorker(recovery);
+    }
+
+    private stopAfterPoisonedWorker(
+        message: WorkerPoisonedMessage,
+        terminalReason: string,
+    ): void {
+        const stalledMessage = message.data?.gpuFailure
+            ? I18n.t('whisperGpuCrashed')
+            : I18n.t('whisperProcessingStalled');
+        this.stopTranscription(terminalReason);
+        AppStore.setWhisperState({
+            isTranscribing: false,
+            isLoadingModel: false,
+            progress: 0,
+            progressMessage: stalledMessage,
+            stage: 'error',
+        });
+        this.showStatus(`<span class="whisper-error-indicator">${this.escapeHtml(stalledMessage)}</span>`);
+    }
+
+    private resumeAfterPoisonedWorker(recovery: PoisonedWorkerRecoveryPlan): void {
+        // A forced checkpoint makes refresh recovery include every finalized
+        // segment even when the regular trailing throttle has not elapsed.
+        this.flushCacheCheckpoint(false);
+        this.transcribedUpTo = recovery.resumeFrom;
         this.modelReady = false;
         // Preserve the explicit dropped-audio notice when the requested retry
         // range has already aged out of the bounded capture buffer.
-        if (droppedSeconds === 0) {
-            this.dispatchProgress(I18n.t('whisperRecovering'), 0, 'transcribing');
+        if (recovery.droppedSeconds > 0) {
+            this.unavailableRanges = addWhisperCoverage(
+                this.unavailableRanges,
+                recovery.requestedResume,
+                this.pcmBufferStartTime,
+            );
+            this.droppedBufferSeconds += recovery.droppedSeconds;
+            this.reportLiveLag('capture-buffer-trim', recovery.droppedSeconds);
+            AppStore.setWhisperState({ stage: 'recovering' });
+        } else {
+            this.dispatchProgress(
+                I18n.t('whisperRecovering'),
+                0,
+                'transcribing',
+                { stage: 'recovering' },
+            );
         }
         this.initWorker(this.getExecutionSettings());
     }
@@ -2323,11 +2589,11 @@ export class Whisper {
             let cursorChanged = false;
             if (seekTime < this.transcribedUpTo - 0.25) {
                 const newTarget = Math.max(0, seekTime - SEEK_BACKFILL_SEC);
-                // Check if the seek lands in an untranscribed gap before the first segment.
-                // If segments start at, say, 270s but user seeks to 10s, we must rewind
-                // transcribedUpTo so the processing loop fills the 0-270s gap.
-                const coverageStart = this.segments.length > 0 ? this.segments[0].start : Infinity;
-                const isWithinCoverage = newTarget >= coverageStart - 2 && newTarget < this.lastSegmentEnd;
+                const coveredThrough = getWhisperContiguousEnd(
+                    this.processedRanges,
+                    newTarget,
+                );
+                const isWithinCoverage = coveredThrough > newTarget + 0.01;
                 if (isWithinCoverage) {
                     // Seek is within existing transcription coverage — no cursor change,
                     // no flush needed. Ahead-of-playhead chunks are still useful for LRC.
@@ -2342,8 +2608,7 @@ export class Whisper {
                     Logger.debug('[Whisper] Seek to untranscribed gap, rewinding cursor', {
                         seekTime: seekTime.toFixed(2),
                         newTarget: newTarget.toFixed(2),
-                        coverageStart: coverageStart.toFixed(2),
-                        lastSegmentEnd: this.lastSegmentEnd.toFixed(2),
+                        nextCoveredThrough: coveredThrough.toFixed(2),
                     });
                 }
             } else if (seekTime > this.transcribedUpTo) {
@@ -2392,6 +2657,7 @@ export class Whisper {
             sourceLanguageHint: getWhisperSourceLanguageHint(this.getExecutionSettings().language),
             live: true,
             source,
+            timingQuality: this.timingQuality || 'segment',
         });
     }
 
@@ -2484,12 +2750,6 @@ export class Whisper {
         this.modelReady = false;
         this.loadedPlan = null;
         this.clearChunkTracking({ resetRecovery: false, resetChunkCounter: false });
-        AppStore.setWhisperState({
-            isTranscribing: this.transcribing,
-            isLoadingModel: false,
-            progress: 0,
-            progressMessage: '',
-        });
         Logger.warn('[Whisper] Worker reset:', reason);
     }
 
@@ -2702,7 +2962,15 @@ export class Whisper {
                     this.dispatchProgress(I18n.t('whisperTranscribing'), 0, 'transcribing');
                 } else {
                     this.clearStatus();
-                    AppStore.setWhisperState({ isTranscribing: this.transcribing, progress: 100, progressMessage: '', isLoadingModel: false });
+                    AppStore.setWhisperState({
+                        isTranscribing: false,
+                        progress: 100,
+                        progressMessage: '',
+                        isLoadingModel: false,
+                        stage: 'idle',
+                        model: displayModelName(this.loadedPlan?.model || ''),
+                        backend: this.loadedPlan?.backend || null,
+                    });
                 }
                 if (this.transcribing && this.pcmBuffer) {
                     this.maybeProcessNextChunk();
@@ -2744,6 +3012,7 @@ export class Whisper {
                 if (!this.transcribing || !this.isCurrentChunkMessage(message.chunkId)) return;
                 this.markChunkStarted(message.chunkId);
                 this.markChunkActivity(message.chunkId);
+                this.updateTranscribingProgress();
                 // Once one inference is genuinely active, keep at most one
                 // replaceable look-ahead window queued behind it.
                 this.maybeProcessNextChunk();
@@ -2753,8 +3022,8 @@ export class Whisper {
             case 'heartbeat': {
                 if (!this.transcribing || !this.isCurrentChunkMessage(message.chunkId)) return;
                 this.markChunkActivity(message.chunkId);
+                this.updateTranscribingProgress();
                 if (message.data?.partialText) {
-                    this.updateTranscribingProgress();
                     this.emitProvisionalChunkUpdate(message.chunkId, message.data.partialText);
                 }
                 break;
@@ -2781,7 +3050,7 @@ export class Whisper {
                 if (typeof offset === 'number') {
                     // Requeue the unprocessed range on the next scheduler pass.
                     const requestedResume = Math.max(
-                        this.lastSegmentEnd,
+                        0,
                         Math.min(this.transcribedUpTo, offset),
                     );
                     const clamped = this.clampResumeToAvailablePcm(requestedResume);
@@ -2825,17 +3094,33 @@ export class Whisper {
                 this.chunkStallRecoveryCount = 0;
                 this.consecutiveInferenceTimeouts = 0;
                 if (typeof completeOffset === 'number' && typeof completeAdvance === 'number') {
-                    this.completedUpTo = Math.max(
-                        this.completedUpTo,
-                        Math.min(this.pcmDuration, completeOffset + completeAdvance),
+                    const completedEnd = Math.min(
+                        this.pcmDuration,
+                        completeOffset + completeAdvance,
+                    );
+                    this.processedRanges = addWhisperCoverage(
+                        this.processedRanges,
+                        completeOffset,
+                        completedEnd,
+                    );
+                    this.unavailableRanges = subtractWhisperCoverage(
+                        this.unavailableRanges,
+                        completeOffset,
+                        completedEnd,
                     );
                 }
                 this.markChunkActivity();
                 // Worker sends raw chunks + fullText; host processes
                 const fullText = this.cleanText(complete.data?.text || '');
                 const safeFullText = isWhisperHallucinationText(fullText) ? '' : fullText;
-                const processed = processRawChunks(complete.data?.rawChunks, fullText);
-                const segments = this.parseSegments(processed);
+                const timingQuality: 'word' | 'segment' = complete.data?.wordTimestamps === true
+                    ? 'word'
+                    : 'segment';
+                const processed = processRawChunks(complete.data?.rawChunks, fullText, timingQuality);
+                if (this.timingQuality !== 'segment') {
+                    this.timingQuality = timingQuality;
+                }
+                const segments = this.parseSegments(processed, timingQuality);
                 Logger.debug(`[Whisper] Complete chunk ${complete.chunkId}: ${segments.length} segments, text="${fullText?.slice(0, 50)}"`);
                 const chunkText = safeFullText;
                 if (chunkText) {
@@ -2853,12 +3138,15 @@ export class Whisper {
                     chunkIndex: complete.chunkId,
                     live: true,
                     source: 'complete',
+                    timingQuality: this.timingQuality || 'segment',
                 });
 
-                // Cache after each chunk to preserve progress
-                if (this.segments.length > 0) {
-                    this.persistCache();
-                    void this.translateAhead();
+                // Persist on the normal trailing throttle. Forced checkpoints
+                // are reserved for stop/recovery/finalization so long tracks do
+                // not rewrite the cumulative transcript on every short chunk.
+                if (this.processedRanges.length > 0) {
+                    this.queueCacheCheckpoint();
+                    if (this.segments.length > 0) void this.translateAhead();
                 }
                 this.maybeFinalizeTranscript();
                 break;
@@ -2868,9 +3156,20 @@ export class Whisper {
                 this.releaseLoadLease();
                 const deviceLostMsg = message.data?.message || 'GPU device lost';
                 Logger.error('[Whisper] Fatal GPU device loss:', deviceLostMsg);
-                this.gpuCrashed = true;
                 EventBus.emit('gpu:device-lost', { worker: 'whisper' as const });
-                this.failPinnedSelection(I18n.t('whisperGpuCrashed'), 'gpu-device-lost');
+                if (this.transcribing && this.worker) {
+                    this.recoverFromPoisonedWorker({
+                        status: 'worker-poisoned',
+                        data: {
+                            reason: 'gpu-device-lost',
+                            message: deviceLostMsg,
+                            gpuFailure: true,
+                        },
+                    });
+                } else {
+                    this.gpuCrashed = true;
+                    this.failPinnedSelection(I18n.t('whisperGpuCrashed'), 'gpu-device-lost');
+                }
                 break;
             }
 
@@ -2913,16 +3212,63 @@ export class Whisper {
     private maybeFinalizeTranscript(): void {
         if (!this.finalizeOnIdle || this.pendingChunks > 0) return;
         this.finalizeOnIdle = false;
-        this.persistCache(true);
+        const totalSeconds = Math.max(this.pcmDuration, this.audio?.duration || 0);
+        const playbackSeconds = this.audio?.currentTime || 0;
+        const coverage = summarizeWhisperCoverage({
+            origin: this.coverageOrigin,
+            processed: this.processedRanges,
+            unavailable: this.unavailableRanges,
+        }, playbackSeconds, totalSeconds);
+        const fullyCovered = coverage.complete;
+        const text = this.segments.map((segment) => segment.text).join(' ');
+
+        this.transcribing = false;
+        EventBus.emit('whisper:transcribing', { active: false });
+        this.stopProcessingLoop();
+        this.stopLiveAudioCapture();
+        this.detachAudioListeners();
+        this.clearChunkTracking({ resetRecovery: true, resetChunkCounter: false });
+        this.flushCacheCheckpoint(fullyCovered);
         this.logNewTranscriptSegments('final');
-        EventBus.emit('whisper:complete', { text: this.segments.map((s) => s.text).join(' ') });
-        AppStore.setWhisperState({
-            isTranscribing: this.transcribing,
-            isLoadingModel: false,
-            progress: 100,
-            progressMessage: I18n.t('whisperComplete'),
-            currentTrackSrc: this.currentTrackSrc,
-        });
+        let statusMessage: string;
+        if (fullyCovered) {
+            statusMessage = I18n.t('whisperComplete');
+            EventBus.emit('whisper:complete', { text });
+            AppStore.setWhisperState(buildWhisperCompletionState({
+                completeMessage: statusMessage,
+                currentTrackSrc: this.currentTrackSrc,
+                playbackSeconds,
+                totalSeconds,
+                coverageOrigin: this.coverageOrigin,
+                processedRanges: this.processedRanges,
+                unavailableRanges: this.unavailableRanges,
+                timingQuality: this.timingQuality,
+            }));
+        } else {
+            statusMessage = I18n.format('whisperPartialProgress', {
+                processed: Math.round(coverage.processedSeconds),
+                through: Math.round(coverage.processedThroughSeconds),
+                total: Math.round(totalSeconds),
+                missing: Math.round(coverage.missingSeconds),
+            });
+            AppStore.setWhisperState(buildWhisperPartialState({
+                partialMessage: statusMessage,
+                currentTrackSrc: this.currentTrackSrc,
+                playbackSeconds,
+                totalSeconds,
+                coverageOrigin: this.coverageOrigin,
+                processedRanges: this.processedRanges,
+                unavailableRanges: this.unavailableRanges,
+                timingQuality: this.timingQuality,
+            }));
+        }
+        if (!this.autoTranscribeWorkId) this.setButtonsActive(false);
+        this.showStatus(
+            `<span class="whisper-loading-indicator">${this.escapeHtml(statusMessage)}</span>`,
+        );
+        this.releasePcmBuffer();
+        this.activeRunSettings = null;
+        this.scheduleIdleUnload();
     }
 
     private isSignificantUpdate(oldText: string, newText: string): boolean {
@@ -3180,11 +3526,13 @@ export class Whisper {
         return correctWhisperText(text);
     }
 
-    private parseSegments(raw: ChunkEntry[] | ProcessedSegment[] | undefined): WhisperSegment[] {
+    private parseSegments(
+        raw: ChunkEntry[] | ProcessedSegment[] | undefined,
+        timingQuality: 'word' | 'segment' = 'segment',
+    ): WhisperSegment[] {
         if (!raw) return [];
         const segments: WhisperSegment[] = [];
         let realWordCount = 0;
-        let fallbackWordCount = 0;
         for (const item of raw) {
             const text = this.applyLanguageAwareCorrections(this.cleanText(item.text || ''));
             const ts = item.timestamp || [null, null];
@@ -3203,8 +3551,10 @@ export class Whisper {
 
             // Prefer real word timestamps from the worker (cross-attention aligned)
             let words: WhisperWord[] | undefined;
-            const rawWords = item.words as ChunkWordEntry[] | undefined;
-            if (rawWords && rawWords.length > 0) {
+            const rawWords = timingQuality === 'word'
+                ? item.words as ChunkWordEntry[] | undefined
+                : undefined;
+            if (rawWords?.length) {
                 words = rawWords
                     .filter(w => w.text && w.start != null)
                     .map(w => ({
@@ -3216,18 +3566,16 @@ export class Whisper {
                 if (words.length === 0) words = undefined;
                 else realWordCount++;
             }
-            // Fallback: linear interpolation when no real word timestamps
-            if (!words) {
-                fallbackWordCount++;
-                const fallback = this.buildWordTimings(text, safeStart, safeEnd);
-                words = fallback.length ? fallback : undefined;
-            }
 
             segments.push({ start: safeStart, end: safeEnd, text, words });
         }
         if (!this.wordTimestampDiagLogged && segments.length > 0) {
             this.wordTimestampDiagLogged = true;
-            Logger.log(`[Whisper] Word timestamps: ${realWordCount} real, ${fallbackWordCount} fallback (of ${segments.length} segments)`);
+            Logger.log(
+                timingQuality === 'word'
+                    ? `[Whisper] Word timestamps: ${realWordCount} exact (of ${segments.length} segments)`
+                    : `[Whisper] Segment timestamps only (${segments.length} segments); exact word karaoke disabled`,
+            );
             if (realWordCount > 0) {
                 const sample = segments.find(s => s.words && s.words.length > 1);
                 if (sample) {
@@ -3236,27 +3584,6 @@ export class Whisper {
             }
         }
         return segments;
-    }
-
-    private buildWordTimings(text: string, start: number, end: number): Array<{ start: number; end: number; text: string }> {
-        const cleaned = this.cleanText(text);
-        if (!cleaned) return [];
-        const duration = Math.max(0.01, end - start);
-
-        const tokens = /\s/.test(cleaned)
-            ? cleaned.split(/\s+/).filter(Boolean)
-            : Array.from(cleaned);
-
-        if (tokens.length === 0) return [];
-
-        const step = duration / tokens.length;
-        const words: Array<{ start: number; end: number; text: string }> = [];
-        for (let i = 0; i < tokens.length; i++) {
-            const wStart = start + step * i;
-            const wEnd = i === tokens.length - 1 ? end : Math.max(wStart + 0.01, start + step * (i + 1));
-            words.push({ start: wStart, end: wEnd, text: tokens[i] });
-        }
-        return words;
     }
 
     // ------------------------------------------------------------------------
@@ -3283,39 +3610,45 @@ export class Whisper {
      * can re-enter learner UI. Returns a detached copy so reads do not mutate a
      * shared 90-day cache object in place.
      */
-    private sanitizeCachedTranscript(cached: CachedTranscript | null | undefined): CachedTranscript | null {
-        if (!cached?.segments?.length) return null;
-        let changed = false;
-        const segments: WhisperSegment[] = [];
-        for (const segment of cached.segments) {
-            const cleaned = this.cleanText(segment.text);
-            const corrected = this.applyLanguageAwareCorrections(cleaned);
-            if (!corrected || this.isNoiseOnly(corrected)) {
-                changed = true;
-                continue;
-            }
-            const words = segment.words
-                ?.map(word => ({ ...word, text: this.cleanText(word.text) }))
-                .filter(word => !!word.text);
-            if (corrected !== segment.text || words?.length !== segment.words?.length) {
-                changed = true;
-                segments.push({ ...segment, text: corrected, words });
-            } else {
-                segments.push({ ...segment, words });
-            }
+    private sanitizeCachedTranscript(
+        cached: CachedTranscript | null | undefined,
+        cacheKey?: string,
+    ): CachedTranscript | null {
+        const { transcript, changed } = sanitizeWhisperCachedTranscript(cached, {
+            cleanText: text => this.cleanText(text),
+            correctText: text => this.applyLanguageAwareCorrections(text),
+            isNoiseOnly: text => this.isNoiseOnly(text),
+        });
+        if (cacheKey && !transcript) {
+            SharedCache.delete(cacheKey);
+            Logger.debug('[Whisper] Removed an unusable cached transcript');
+        } else if (changed && transcript && cacheKey) {
+            SharedCache.set(cacheKey, transcript, CACHE_TTL_MS);
+            Logger.debug('[Whisper] Migrated cached transcript to current timing/coverage metadata');
         }
-        if (segments.length === 0) return null;
+        return transcript;
+    }
 
-        const text = segments.map(segment => segment.text).join(' ');
-        if (text !== cached.text) changed = true;
-        return {
-            ...cached,
-            text,
-            segments,
-            lrc: changed ? buildLrcFromSegments(segments) : cached.lrc,
-            vtt: changed ? buildVttFromSegments(segments) : cached.vtt,
-            translations: changed ? undefined : cached.translations,
-        };
+    private hydrateCachedTranscript(cached: CachedTranscript): void {
+        this.segments = cached.segments;
+        this.lastSegmentEnd = cached.segments.at(-1)?.end || 0;
+        this.timingQuality = cached.timingQuality || 'segment';
+        this.processedRanges = normalizeWhisperCoverage(cached.processedRanges);
+        this.unavailableRanges = normalizeWhisperCoverage(cached.unavailableRanges);
+        this.coverageOrigin = Math.max(0, cached.coverageOrigin || 0);
+    }
+
+    private emitCachedTranscriptUpdate(cached: CachedTranscript, language: string): void {
+        EventBus.emit('whisper:update', {
+            text: cached.segments.at(-1)?.text || cached.text,
+            segments: cached.segments,
+            final: !!cached.complete,
+            sourceLanguageHint: getWhisperSourceLanguageHint(language),
+            fromCache: true,
+            live: false,
+            source: 'cache',
+            timingQuality: cached.timingQuality || 'segment',
+        });
     }
 
     /**
@@ -3329,30 +3662,27 @@ export class Whisper {
 
         const identity = this.buildCacheIdentity(src, settings);
         const key = this.buildCacheKey(src, settings);
-        const cached = this.sanitizeCachedTranscript(SharedCache.get<CachedTranscript>(key));
+        const cached = this.sanitizeCachedTranscript(
+            SharedCache.get<CachedTranscript>(key),
+            key,
+        );
         if (!cached) return;
 
         // Verify identity (collision check) — old entries without sourceIdentity are accepted
         if (cached.sourceIdentity && cached.sourceIdentity !== identity) return;
 
-        // Pre-populate Whisper state so startTranscription() finds segments ready
-        this.segments = cached.segments;
-        this.lastSegmentEnd = cached.segments[cached.segments.length - 1]?.end || 0;
+        // Pre-populate Whisper state so startTranscription() finds segments ready.
+        this.hydrateCachedTranscript(cached);
         this.currentCacheSource = src;
         this.currentCacheKey = key;
         this.currentCacheIdentity = identity;
 
-        const latest = cached.segments[cached.segments.length - 1];
-        EventBus.emit('whisper:update', {
-            text: latest?.text || cached.text,
-            segments: cached.segments,
-            final: !!cached.complete,
-            sourceLanguageHint: getWhisperSourceLanguageHint(settings.language),
-            fromCache: true,
-            live: false,
-            source: 'cache',
-        });
-        Logger.debug('[Whisper] Emitted cached snapshot immediately on track change');
+        if (cached.segments.length > 0) {
+            this.emitCachedTranscriptUpdate(cached, settings.language);
+            Logger.debug('[Whisper] Emitted cached snapshot immediately on track change');
+        } else {
+            Logger.debug('[Whisper] Hydrated coverage-only checkpoint for resume');
+        }
     }
 
     /** Build the identity string (pre-hash) for a transcript cache entry. */
@@ -3376,51 +3706,85 @@ export class Whisper {
         return CacheKeys.whisperTranscript(this.buildCacheIdentity(src, settings));
     }
 
-    private persistCache(complete = false): void {
-        if (!this.currentCacheKey || !this.segments.length) return;
-        // Throttle non-final writes to every 30 seconds to reduce I/O
-        const now = Date.now();
-        if (!complete && now - this.lastPersistAt < 30_000) return;
-        this.lastPersistAt = now;
+    private clearCacheCheckpointTimer(): void {
+        if (this.cacheCheckpointTimer === null) return;
+        clearTimeout(this.cacheCheckpointTimer);
+        this.cacheCheckpointTimer = null;
+    }
+
+    private queueCacheCheckpoint(): void {
+        if (!this.currentCacheKey || this.processedRanges.length === 0) return;
+        const remaining = CACHE_CHECKPOINT_INTERVAL_MS - (Date.now() - this.lastPersistAt);
+        if (remaining <= 0) {
+            this.persistCache();
+            return;
+        }
+        if (this.cacheCheckpointTimer !== null) return;
+        this.cacheCheckpointTimer = window.setTimeout(() => {
+            this.cacheCheckpointTimer = null;
+            this.persistCache();
+        }, remaining);
+    }
+
+    private flushCacheCheckpoint(complete: boolean): void {
+        this.clearCacheCheckpointTimer();
+        this.persistCache(complete, true);
+    }
+
+    private persistCache(complete = false, force = false): void {
+        const cacheKey = this.currentCacheKey;
+        if (!cacheKey || this.processedRanges.length === 0) return;
         const settings = this.getExecutionSettings();
         if (!settings.cacheTranscripts) return;
 
-        const existing = SharedCache.get<CachedTranscript>(this.currentCacheKey);
-        const currentText = this.segments.map((s) => s.text).join(' ');
-        const currentCoverageEnd = this.segments.reduce((max, segment) => Math.max(max, segment.end || 0), 0);
-        const existingCoverageEnd = existing?.segments?.reduce(
-            (max, segment) => Math.max(max, segment.end || 0),
-            0,
-        ) || 0;
-        if (existing && (
-            (existing.complete && !complete)
-            || existingCoverageEnd > currentCoverageEnd + 1
-        )) {
-            Logger.warn('[Whisper] Preserving a more complete transcript at the effective-model cache key', {
-                existingComplete: !!existing.complete,
-                existingCoverageEnd,
-                currentCoverageEnd,
-            });
-            return;
-        }
-        const canReuseExistingMetadata = existing?.text === currentText;
-        const payload: CachedTranscript = {
-            text: currentText,
+        // Throttle trailing non-final writes. Recovery,
+        // stop, and finalization may force a checkpoint.
+        const now = Date.now();
+        if (!complete && !force && now - this.lastPersistAt < CACHE_CHECKPOINT_INTERVAL_MS) return;
+
+        const audioDuration = this.audio && Number.isFinite(this.audio.duration)
+            ? Math.max(0, this.audio.duration)
+            : 0;
+        const cached = this.sanitizeCachedTranscript(
+            SharedCache.get<CachedTranscript>(cacheKey),
+            cacheKey,
+        );
+        const existing = cached?.sourceIdentity
+            && cached.sourceIdentity !== this.currentCacheIdentity
+            ? null
+            : cached;
+        const decision = buildWhisperCacheCheckpoint({
+            existing,
             segments: this.segments,
             model: this.getEffectiveModelId(),
             subtask: settings.subtask,
             language: settings.language,
-            createdAt: Date.now(),
-            lrc: buildLrcFromSegments(this.segments),
-            vtt: buildVttFromSegments(this.segments),
-            complete,
-            translations: canReuseExistingMetadata ? existing?.translations : undefined,
+            createdAt: now,
+            requestedComplete: complete,
+            timingQuality: this.timingQuality,
+            processedRanges: this.processedRanges,
+            unavailableRanges: this.unavailableRanges,
+            coverageOrigin: this.coverageOrigin,
+            playbackSeconds: this.audio?.currentTime || 0,
+            expectedDuration: Math.max(this.pcmDuration, audioDuration),
             sourceIdentity: this.currentCacheIdentity || undefined,
-        };
+        });
+        if (decision.action === 'preserve-existing') {
+            Logger.warn('[Whisper] Preserving a more complete transcript at the effective-model cache key', {
+                existingComplete: decision.existingComplete,
+                existingCoverageEnd: decision.existingCoverageEnd,
+                currentCoverageEnd: decision.currentCoverageEnd,
+            });
+            return;
+        }
 
-        SharedCache.set(this.currentCacheKey, payload, CACHE_TTL_MS);
-        this.updateTranscriptIndex(this.currentCacheKey, payload);
-        void this.ensureTranslatedTranscript(payload, settings);
+        const payload = decision.payload;
+        SharedCache.set(cacheKey, payload, CACHE_TTL_MS);
+        this.lastPersistAt = now;
+        if (payload.segments.length > 0) {
+            this.updateTranscriptIndex(cacheKey, payload);
+            void this.ensureTranslatedTranscript(payload, settings);
+        }
         Logger.debug('[Whisper] Cached transcript:', { segments: this.segments.length });
     }
 
@@ -3850,19 +4214,28 @@ export class Whisper {
         if (now - this.lastTranscribeProgressAt < 400) return;
         this.lastTranscribeProgressAt = now;
 
-        const audio = this.audio || getAudioElement();
-        const duration = audio?.duration || 0;
-        const current = audio?.currentTime || 0;
-        const percent = duration > 0 ? Math.min(99, (current / duration) * 100) : 0;
-        const segmentsText = this.segments.length
-            ? I18n.format('whisperSegmentCount', { count: this.segments.length })
-            : '';
-        const message = I18n.format('whisperTranscribingElapsed', {
-            elapsed: Math.round(current),
-            segments: segmentsText,
+        const audioClock = readWhisperAudioClock(this.audio || getAudioElement());
+        const settings = this.getExecutionSettings();
+        const progress = buildWhisperRuntimeProgress({
+            model: displayModelName(settings.model),
+            backend: resolveProgressBackend(settings.backend, this.loadedPlan),
+            chunkLengthSeconds: settings.chunkLengthS,
+            timingLabel: getWhisperTimingLabel(this.timingQuality),
+            timingQuality: this.timingQuality,
+            pendingChunks: this.pendingChunks,
+            playbackSeconds: audioClock.playbackSeconds,
+            knownDuration: audioClock.knownDuration,
+            pcmDuration: this.pcmDuration,
+            coverageOrigin: this.coverageOrigin,
+            processedRanges: this.processedRanges,
+            unavailableRanges: this.unavailableRanges,
         });
-
-        this.dispatchProgress(message, percent, 'transcribing');
+        this.dispatchProgress(
+            I18n.format(progress.messageKey, progress.messageValues),
+            progress.percent,
+            'transcribing',
+            progress.state,
+        );
     }
 
     private normalizeModelProgress(message: WorkerProgressMessage): number {
@@ -3886,31 +4259,57 @@ export class Whisper {
         return Math.round(Math.max(0, Math.min(100, progress)));
     }
 
-    private dispatchProgress(message: string, percent: number, stage: 'loading' | 'model' | 'transcribing'): void {
-        const displayMessage = message || (
-            ['loading', 'model'].includes(stage) ? I18n.t('whisperLoading') : I18n.t('whisperTranscribing')
-        );
-        // Only append percentStr if message doesn't already contain a percentage
-        const hasPercent = /\(\d+%\)/.test(displayMessage);
-        const percentStr = !hasPercent && percent > 0 && percent < 100 ? ` (${Math.round(percent)}%)` : '';
-        EventBus.emit('whisper:progress', { percent: Math.round(percent), message: displayMessage, stage });
-        AppStore.setWhisperState({ isTranscribing: this.transcribing, progress: percent, progressMessage: displayMessage, isLoadingModel: stage !== 'transcribing' });
+    private dispatchProgress(
+        message: string,
+        percent: number,
+        phase: WhisperProgressPhase,
+        runtime: Partial<WhisperState> = {},
+    ): void {
+        const progress = buildWhisperProgressDispatch({
+            message,
+            loadingFallback: I18n.t('whisperLoading'),
+            transcribingFallback: I18n.t('whisperTranscribing'),
+            percent,
+            phase,
+            runtime,
+            transcribing: this.transcribing,
+            currentStage: AppStore.state.whisper.stage,
+        });
+        EventBus.emit('whisper:progress', {
+            percent: Math.round(percent),
+            message: progress.displayMessage,
+            stage: progress.stage,
+            processedSeconds: progress.state.processedSeconds,
+            processedThroughSeconds: progress.state.processedThroughSeconds,
+            skippedSeconds: progress.state.skippedSeconds,
+            totalSeconds: progress.state.totalSeconds,
+            playbackSeconds: progress.state.playbackSeconds,
+            backlogSeconds: progress.state.backlogSeconds,
+            pendingChunks: progress.state.pendingChunks,
+            model: progress.state.model || undefined,
+            backend: progress.state.backend || undefined,
+            timingQuality: progress.state.timingQuality,
+        });
+        AppStore.setWhisperState(progress.state);
         if (!this.transcribing) return;
 
-        // USER REQUEST: Hide status when transcribing starts
-        if (stage === 'transcribing') {
-            this.clearStatus();
-            return;
-        }
-
+        // This class is two-line clamped inside the no-flow cover overlay.
         const klass = 'whisper-loading-indicator';
-        this.showStatus(`<span class="${klass}" aria-label="${this.escapeHtml(displayMessage)}${percentStr}">${this.escapeHtml(displayMessage)}${percentStr}</span>`);
+        const status = `${this.escapeHtml(progress.displayMessage)}${progress.percentSuffix}`;
+        this.showStatus(`<span class="${klass}" aria-label="${status}">${status}</span>`);
     }
 
     private dispatchError(message: string): void {
         const displayMessage = I18n.format('whisperError', { message });
         EventBus.emit('whisper:error', { message });
-        AppStore.setWhisperState({ isTranscribing: false, isLoadingModel: false, progress: 0, progressMessage: displayMessage });
+        AppStore.setWhisperState({
+            isTranscribing: false,
+            isLoadingModel: false,
+            progress: 0,
+            progressMessage: displayMessage,
+            stage: 'error',
+            pendingChunks: 0,
+        });
         if (!this.enabled) return;
         this.showStatus(`<span class="whisper-error-indicator" aria-label="${this.escapeHtml(displayMessage)}">${this.escapeHtml(displayMessage)}</span>`);
 
@@ -3975,6 +4374,7 @@ export class Whisper {
         const el = this.ensureStatusEl();
         if (el.innerHTML === html) return;
         el.innerHTML = html;
+        el.title = el.textContent?.trim() || '';
         el.style.display = '';
         el.style.visibility = 'visible';
     }
@@ -3986,6 +4386,7 @@ export class Whisper {
             this.statusEl.style.display = this.statusEl.classList.contains('whisper-status--overlay') ? 'none' : '';
             this.statusEl.style.visibility = 'hidden';
             this.statusEl.innerHTML = '';
+            this.statusEl.removeAttribute('title');
         }
     }
 

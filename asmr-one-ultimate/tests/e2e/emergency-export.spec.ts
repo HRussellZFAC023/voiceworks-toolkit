@@ -116,6 +116,58 @@ async function readDownload(download: Download): Promise<string> {
     return fs.readFileSync((await download.path())!, 'utf8');
 }
 
+async function readDownloadCenterThemeAndScroll(page: Page) {
+    return page.evaluate(() => {
+        const required = {
+            dialog: document.querySelector<HTMLElement>('.backup-downloader'),
+            body: document.querySelector<HTMLElement>('.dialog-body'),
+            picker: document.querySelector<HTMLElement>('.work-picker'),
+            list: document.querySelector<HTMLElement>('.playlist-list'),
+            sidebar: document.querySelector<HTMLElement>('.download-sidebar'),
+            title: document.querySelector<HTMLElement>('#backup-downloader-title'),
+            start: document.querySelector<HTMLElement>('[data-testid="start"]'),
+            cancel: document.querySelector<HTMLElement>('[data-testid="cancel"]'),
+            footer: document.querySelector<HTMLElement>('.dialog-footer'),
+        };
+        if (Object.values(required).some(element => !element)) {
+            throw new Error('Download Center layout is incomplete');
+        }
+
+        const elements = required as Record<keyof typeof required, HTMLElement>;
+        const colors = (element: HTMLElement) => {
+            const style = getComputedStyle(element);
+            return { color: style.color, background: style.backgroundColor, border: style.borderColor };
+        };
+        return {
+            dialog: colors(elements.dialog),
+            title: colors(elements.title),
+            start: colors(elements.start),
+            cancel: colors(elements.cancel),
+            bodyOverflowY: getComputedStyle(elements.body).overflowY,
+            pickerOverflowY: getComputedStyle(elements.picker).overflowY,
+            sidebarOverflowY: getComputedStyle(elements.sidebar).overflowY,
+            bodyScrollable: elements.body.scrollHeight > elements.body.clientHeight + 1,
+            pickerNestedScroll: elements.picker.scrollHeight > elements.picker.clientHeight + 1,
+            listNestedScroll: elements.list.scrollHeight > elements.list.clientHeight + 1,
+            sidebarNestedScroll: elements.sidebar.scrollHeight > elements.sidebar.clientHeight + 1,
+            footer: elements.footer.getBoundingClientRect().toJSON(),
+        };
+    });
+}
+
+function contrastRatio(foreground: string, background: string): number {
+    const rgb = (value: string): number[] => value.match(/\d+(?:\.\d+)?/g)?.slice(0, 3).map(Number) ?? [];
+    const luminance = (value: string): number => {
+        const channels = rgb(value).map(channel => {
+            const normalized = channel / 255;
+            return normalized <= 0.04045 ? normalized / 12.92 : ((normalized + 0.055) / 1.055) ** 2.4;
+        });
+        return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2];
+    };
+    const [lighter, darker] = [luminance(foreground), luminance(background)].sort((a, b) => b - a);
+    return (lighter + 0.05) / (darker + 0.05);
+}
+
 test.describe('Emergency export and Download Center', () => {
     test.beforeEach(async ({ injectedPage }) => { await mockPlaylistApis(injectedPage); });
 
@@ -245,6 +297,46 @@ test.describe('Emergency export and Download Center', () => {
         expect(layout.artwork.top).toBeGreaterThan(layout.metadata.bottom);
         expect(layout.artworkHint.top).toBeGreaterThanOrEqual(layout.artworkLabel.bottom);
         expect(await injectedPage.getByTestId('backup-downloader').evaluate(el => el.scrollWidth <= window.innerWidth + 1)).toBe(true);
+
+        await injectedPage.evaluate(() => {
+            document.body.classList.remove('body--dark', 'q-dark');
+            document.body.style.setProperty('--q-primary', '#7c4dff');
+        });
+        await expect(injectedPage.locator('.backup-downloader')).not.toHaveClass(/theme-dark/);
+        const light = await readDownloadCenterThemeAndScroll(injectedPage);
+        expect(light.start.border).toBe('rgb(124, 77, 255)');
+        expect(contrastRatio(light.start.color, light.start.background)).toBeGreaterThanOrEqual(4.5);
+        expect(contrastRatio(light.title.color, light.dialog.background)).toBeGreaterThanOrEqual(4.5);
+        expect(light.bodyOverflowY).toBe('auto');
+        expect(light.pickerOverflowY).toBe('visible');
+        expect(light.sidebarOverflowY).toBe('visible');
+        expect(light.bodyScrollable).toBe(true);
+        expect(light.pickerNestedScroll).toBe(false);
+        expect(light.listNestedScroll).toBe(false);
+        expect(light.sidebarNestedScroll).toBe(false);
+        expect(light.footer.bottom).toBeLessThanOrEqual(844);
+
+        await injectedPage.evaluate(() => document.body.classList.add('body--dark'));
+        await expect(injectedPage.locator('.backup-downloader')).toHaveClass(/theme-dark/);
+        const dark = await readDownloadCenterThemeAndScroll(injectedPage);
+        expect(dark.start.background).toBe(light.start.background);
+        expect(dark.start.border).toBe(light.start.border);
+        expect(contrastRatio(dark.start.color, dark.start.background)).toBeGreaterThanOrEqual(4.5);
+        expect(contrastRatio(dark.title.color, dark.dialog.background)).toBeGreaterThanOrEqual(4.5);
+        expect(contrastRatio(dark.cancel.color, dark.dialog.background)).toBeGreaterThanOrEqual(4.5);
+
+        await injectedPage.locator('.backup-downloader').evaluate(element => {
+            (element as HTMLElement).style.setProperty('--asmr-accent', '#fff59d');
+        });
+        const paleAccent = await readDownloadCenterThemeAndScroll(injectedPage);
+        expect(paleAccent.start.border).toBe('rgb(255, 245, 157)');
+        expect(paleAccent.start.background).not.toBe(dark.start.background);
+        expect(contrastRatio(paleAccent.start.color, paleAccent.start.background)).toBeGreaterThanOrEqual(4.5);
+
+        const footerTop = dark.footer.top;
+        await injectedPage.locator('.dialog-body').evaluate(element => { element.scrollTop = element.scrollHeight; });
+        const footerAfterScroll = await injectedPage.locator('.dialog-footer').evaluate(element => element.getBoundingClientRect().top);
+        expect(Math.abs(footerAfterScroll - footerTop)).toBeLessThanOrEqual(1);
     });
 
     test('downloads a complete selected work folder while keeping progress in the modal', async ({ injectedPage, isScriptLoaded }) => {

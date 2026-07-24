@@ -277,6 +277,21 @@ describe('BackupWorkDownloader', () => {
         expect(wrapper.find('[data-testid="download-center-import-input"]').exists()).toBe(false);
     });
 
+    it('keeps dark-theme contrast local to the dialog and follows host theme changes', async () => {
+        document.body.classList.add('body--dark');
+        const wrapper = mount(BackupWorkDownloader, { props: { playlists, works, profile: profile() } });
+        try {
+            await vi.waitFor(() => expect(wrapper.get('.backup-downloader').classes()).toContain('theme-dark'));
+            expect(document.body.classList).not.toContain('theme-dark');
+
+            document.body.classList.remove('body--dark');
+            await vi.waitFor(() => expect(wrapper.get('.backup-downloader').classes()).not.toContain('theme-dark'));
+        } finally {
+            wrapper.unmount();
+            document.body.classList.remove('body--dark');
+        }
+    });
+
     it('emits the safe download options and never closes itself on start', async () => {
         const wrapper = mount(BackupWorkDownloader, { props: { playlists, works, profile: profile({ selectedWorkIds: [1] }) } });
         await wrapper.get('[data-testid="opus-toggle"]').setValue(true);

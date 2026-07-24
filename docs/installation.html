@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Installation - Voiceworks Toolkit</title>
-  <meta name="description" content="Install Voiceworks Toolkit in one click from Greasyfork. Just add Tampermonkey and start studying Japanese.">
+  <meta name="description" content="Install Voiceworks Toolkit in one click from SleazyFork. Just add Tampermonkey and start studying Japanese.">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -35,7 +35,7 @@
     <section class="content" style="padding-top: calc(var(--nav-height) + 48px);">
       <div class="container">
         <h1>Installation</h1>
-        <p class="lead">Get up and running in under a minute. Just install Tampermonkey and add the script from Greasyfork.</p>
+        <p class="lead">Get up and running in under a minute. Just install Tampermonkey and add the script from SleazyFork.</p>
 
         <h2>Prerequisites</h2>
 
@@ -95,7 +95,7 @@ npm run build</code></pre>
         </div>
 
         <div class="callout">
-          <p><strong>Chromium note:</strong> If installing a locally-built script, go to your browser's extension management page, click on Tampermonkey's details, and toggle on <strong>"Allow access to file URLs"</strong>. This is not needed when installing from Greasyfork.</p>
+          <p><strong>Chromium note:</strong> If installing a locally-built script, go to your browser's extension management page, click on Tampermonkey's details, and toggle on <strong>"Allow access to file URLs"</strong>. This is not needed when installing from SleazyFork.</p>
         </div>
 
         <h2>AI Model Downloads</h2>
@@ -105,7 +105,7 @@ npm run build</code></pre>
         <div class="feature-list">
           <div class="feature-item">
             <h3>Whisper (Transcription)</h3>
-            <p>Downloads the Whisper model (~150 MB) when you first enable live transcription. The model is cached in the browser and reused across sessions. You can choose the model size and quantization in Settings.</p>
+            <p>Downloads the selected Whisper model when you first enable live transcription. Downloads range from a few hundred megabytes to several gigabytes depending on model and precision, then remain cached in the browser. You can choose the model and runtime in Settings.</p>
           </div>
           <div class="feature-item">
             <h3>Web Translation</h3>
@@ -140,7 +140,7 @@ npm run test:e2e:debug</code></pre>
 
         <h2>Updating</h2>
 
-        <p><strong>Greasyfork installs</strong> update automatically. Tampermonkey checks for new versions periodically and applies them.</p>
+        <p><strong>SleazyFork installs</strong> update automatically. Tampermonkey checks for new versions periodically and applies them.</p>
 
         <p><strong>Source builds:</strong> pull the latest changes and rebuild:</p>
 
@@ -161,7 +161,7 @@ npm run build</code></pre>
           </div>
           <div class="feature-item">
             <h3>WebGPU not available</h3>
-            <p>WebGPU requires a compatible browser and GPU drivers. If WebGPU is unavailable, the toolkit automatically falls back to WASM for on-device features like Whisper transcription. Performance will be slower but functional.</p>
+            <p>WebGPU requires a compatible browser and GPU drivers. The runtime selected for a transcription run is never silently changed after a failure. If WebGPU is unavailable, enable <strong>Force Whisper WASM</strong> in Settings and retry; WASM is slower but works on more devices.</p>
           </div>
           <div class="feature-item">
             <h3>Build errors</h3>

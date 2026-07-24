@@ -9,7 +9,7 @@
 <h3>📚 Language Learning</h3>
 <ul>
 <li><strong>Learner Mode</strong>: Real-time dual-language subtitles. Japanese stays on top with furigana, and English can stay blurred until you hover or press <kbd>B</kbd>. Karaoke-style highlighting follows the spoken line as audio plays.</li>
-<li><strong>Live Transcription</strong>: On-device Whisper speech-to-text. Turn any track into study material directly from the player with no manual uploads. WebGPU acceleration is used when available, with WASM fallback. Transcripts are cached for 90 days and can be exported as LRC, VTT, or SRT.</li>
+<li><strong>Live Transcription</strong>: On-device Whisper speech-to-text. Turn any track into study material directly from the player with no manual uploads. The selected model and backend stay pinned; choose <em>Force Whisper WASM</em> explicitly when WebGPU is unsuitable. Transcripts are cached for 90 days and can be exported as LRC, VTT, or TXT.</li>
 <li><strong>Neural Translation</strong>: Web translation pipeline for JA/CN to EN with retry logic, host rotation, and shared caching. Subtitles, tags, titles, and key UI text are translated in real time.</li>
 <li><strong>Interface Translation</strong>: Translates core Chinese and Japanese interface text to English, including menus, sort options, and dynamic labels.</li>
 <li><strong>JPDB Integration</strong>: Vocabulary mining via <a href="https://jpdb.io">jpdb.io</a>. Look up words from subtitles and keep your Japanese study progress in one flow.</li>
@@ -76,7 +76,7 @@
 <summary><strong>🛠️ Technical Details</strong></summary>
 <ul>
 <li>Runs as a Tampermonkey/Violentmonkey userscript, so no standalone app is required</li>
-<li>Whisper transcription runs in dedicated Web Workers with WebGPU acceleration and WASM fallback</li>
+<li>Whisper transcription runs in dedicated Web Workers using the backend selected in settings; WebGPU is the accelerated option and WASM can be forced explicitly</li>
 <li>Translation and semantic embedding requests use web APIs with retry/backoff and local caching</li>
 <li>Transcripts, translations, vectors, and media cache are stored locally in IndexedDB</li>
 <li>Built with TypeScript, Vue 3, Vite, and Transformers.js</li>
@@ -91,7 +91,7 @@
 
 <ul>
 <li><strong>学习模式</strong>：双语字幕（日语主行 + 可模糊英语翻译）、假名注音、卡拉OK逐词高亮</li>
-<li><strong>实时转录</strong>：本地 Whisper 语音转文字，WebGPU 加速，支持导出 LRC/VTT/SRT</li>
+<li><strong>实时转录</strong>：本地 Whisper 语音转文字；模型与后端选择保持固定，可在设置中明确启用 WASM，支持导出 LRC/VTT/TXT</li>
 <li><strong>神经翻译</strong>：日/中到英文的在线翻译管线，内置重试与缓存</li>
 <li><strong>语义搜索</strong>：基于向量嵌入的语义检索，多语言查询，结果本地缓存</li>
 <li><strong>电台模式</strong>：连续随机播放，自动恢复，状态持久化</li>

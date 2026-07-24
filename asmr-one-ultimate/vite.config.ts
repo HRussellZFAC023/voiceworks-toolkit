@@ -7,7 +7,7 @@ import pkg from './package.json' with { type: 'json' };
 export default defineConfig({
     build: {
         // vite-plugin-monkey otherwise keeps the SystemJS payload readable,
-        // pushing the userscript over Greasy Fork's 2 MiB code limit.
+        // pushing the userscript over the script host's 2 MiB code limit.
         minify: 'esbuild',
     },
     plugins: [

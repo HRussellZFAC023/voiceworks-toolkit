@@ -123,6 +123,23 @@ describe('LearnerSubtitles Chinese Whisper rendering', () => {
         return mounted;
     }
 
+    async function markPrimaryLaneClamped(): Promise<void> {
+        const panel = document.querySelector<HTMLElement>('.learner-subs-expanded:not(.hidden)');
+        const primary = panel?.querySelector<HTMLElement>('.learner-jp');
+        if (!panel || !primary) throw new Error('Visible learner subtitle panel was unavailable');
+        Object.defineProperty(panel, 'getClientRects', {
+            configurable: true,
+            value: () => ({ length: 1 }) as DOMRectList,
+        });
+        Object.defineProperties(primary, {
+            clientHeight: { configurable: true, value: 40 },
+            scrollHeight: { configurable: true, value: 120 },
+        });
+        window.dispatchEvent(new Event('resize'));
+        await nextTick();
+        await nextTick();
+    }
+
     it.each([
         ['transcribing', { isTranscribing: true, isLoadingModel: false }],
         ['loading', { isTranscribing: false, isLoadingModel: true }],
@@ -280,6 +297,103 @@ describe('LearnerSubtitles Chinese Whisper rendering', () => {
 
         expect(primary.text()).toBe('こんばんは');
         expect(secondary.text()).toBe('今晚好');
+        wrapper.unmount();
+    });
+
+    it('renders segment-only Whisper as a stable line instead of fake word karaoke', async () => {
+        setConfig('karaokeMode', true);
+        const { wrapper, eventBus } = mountLearner();
+
+        eventBus.emit('whisper:update', {
+            text: 'お邪魔します',
+            segments: [{ start: 0, end: 4, text: 'お邪魔します' }],
+            final: false,
+            live: true,
+            sourceLanguageHint: 'ja',
+            timingQuality: 'segment',
+        });
+        await nextTick();
+
+        const primary = wrapper.get('.learner-subs-expanded .learner-jp');
+        expect(primary.text()).toBe('お邪魔します');
+        expect(primary.find('.karaoke-spoken').exists()).toBe(false);
+        expect(primary.find('.karaoke-upcoming').exists()).toBe(false);
+        wrapper.unmount();
+    });
+
+    it('clears provisional text when the finalized Whisper window is empty', async () => {
+        const { wrapper, eventBus } = mountLearner();
+
+        eventBus.emit('whisper:update', {
+            text: '暫定テキスト',
+            segments: [{ start: 0, end: 4, text: '暫定テキスト' }],
+            final: false,
+            live: true,
+            source: 'heartbeat',
+            sourceLanguageHint: 'ja',
+        });
+        await nextTick();
+        expect(wrapper.get('.learner-subs-expanded .learner-jp').text()).toBe('暫定テキスト');
+
+        eventBus.emit('whisper:update', {
+            text: '',
+            segments: [],
+            final: true,
+            live: true,
+            source: 'complete',
+            sourceLanguageHint: 'ja',
+        });
+        await nextTick();
+
+        expect(wrapper.get('.learner-subs-expanded .learner-jp').text()).toBe('');
+        expect(wrapper.text()).not.toContain('暫定テキスト');
+        wrapper.unmount();
+    });
+
+    it('opens the complete subtitle in a keyboard-accessible dialog without changing the player lane', async () => {
+        const longJapanese = 'これはタッチ操作でも全文を読めるようにするための長い日本語字幕です。'.repeat(4);
+        const { wrapper } = await showNonWhisperLrc(longJapanese);
+        await markPrimaryLaneClamped();
+
+        const trigger = wrapper.get('.learner-subs-expanded .learner-subtitle-expand');
+        expect(trigger.attributes('aria-label')).toBe('showFullSubtitles');
+        expect(trigger.attributes('aria-haspopup')).toBe('dialog');
+        await trigger.trigger('click');
+        await nextTick();
+
+        const dialog = document.querySelector<HTMLElement>('.learner-subtitle-dialog');
+        expect(dialog?.getAttribute('role')).toBe('dialog');
+        expect(dialog?.getAttribute('aria-modal')).toBe('true');
+        expect(dialog?.querySelector('.learner-subtitle-dialog-primary')?.textContent).toBe(longJapanese);
+
+        dialog?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+        await nextTick();
+        expect(document.querySelector('.learner-subtitle-dialog')).toBeNull();
+        wrapper.unmount();
+    });
+
+    it('never exposes a blurred translation in the full-text dialog before an explicit reveal', async () => {
+        setConfig('learnerSubtitleMode', 'jp-en');
+        setConfig('learnerBlur', true);
+        const translated = 'The complete translated subtitle remains hidden until the learner asks to reveal it.';
+        vi.spyOn(TranslationService, 'translate').mockResolvedValue(translated);
+
+        const { wrapper } = await showNonWhisperLrc('翻訳を隠したまま全文表示を開きます。');
+        await flushPromises();
+        await nextTick();
+        await markPrimaryLaneClamped();
+
+        await wrapper.get('.learner-subs-expanded .learner-subtitle-expand').trigger('click');
+        await nextTick();
+        const dialog = document.querySelector<HTMLElement>('.learner-subtitle-dialog');
+        expect(dialog?.querySelector('.learner-subtitle-dialog-secondary')).toBeNull();
+        expect(dialog?.textContent).not.toContain(translated);
+
+        const reveal = dialog?.querySelector<HTMLButtonElement>('.learner-subtitle-dialog-reveal');
+        expect(reveal?.textContent?.trim()).toBe('revealTranslation');
+        reveal?.click();
+        await nextTick();
+        expect(dialog?.querySelector('.learner-subtitle-dialog-secondary')?.textContent?.trim()).toBe(translated);
         wrapper.unmount();
     });
 });

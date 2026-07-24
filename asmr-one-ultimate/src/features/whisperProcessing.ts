@@ -156,20 +156,6 @@ export function truncateRepetitionLoop<T extends { text?: string }>(words: T[]):
     return words;
 }
 
-// ── Word-level detection ───────────────────────────────────────────────
-
-/** True when chunks appear to be word-level (avg duration < 1.5s). */
-export function isWordLevelChunks(chunks: RawChunk[]): boolean {
-    if (!chunks || chunks.length < 3) return false;
-    let totalDur = 0;
-    for (const c of chunks) {
-        const s = c.timestamp?.[0] ?? 0;
-        const e = c.timestamp?.[1] ?? s;
-        totalDur += Math.max(0, e - s);
-    }
-    return (totalDur / chunks.length) < 1.5;
-}
-
 // ── Segment building ───────────────────────────────────────────────────
 
 function buildSegmentFromWords(words: RawChunk[]): ProcessedSegment {
@@ -282,18 +268,20 @@ export function restoreMissingBrackets(segments: ProcessedSegment[], fullText: s
  *
  * Steps:
  * 1. Filter hallucinated non-speech chunks
- * 2. Detect word-level vs segment-level output
+ * 2. Use the worker-reported timestamp granularity
  * 3. Group words into segments (with repetition truncation + char cap)
  *    — or format segment-level chunks directly
  * 4. Restore missing brackets from the full model text
  *
  * @param rawChunks  Chunks from the worker (offset already applied)
  * @param fullText   Optional full model text (for bracket restoration on final results)
+ * @param granularity Exact capability reported by the worker for this result
  * @returns Processed segments ready for `parseSegments()` in Whisper.ts
  */
 export function processRawChunks(
     rawChunks: RawChunk[] | undefined,
     fullText?: string,
+    granularity: 'word' | 'segment' = 'segment',
 ): ProcessedSegment[] {
     if (!rawChunks || rawChunks.length === 0) return [];
     // Word timestamps may split a known hallucination across several chunks.
@@ -304,10 +292,9 @@ export function processRawChunks(
     const cleaned = cleanHallucinatedChunks(rawChunks);
     if (cleaned.length === 0) return [];
 
-    const wordLevel = isWordLevelChunks(cleaned);
     let segments: ProcessedSegment[];
 
-    if (wordLevel) {
+    if (granularity === 'word') {
         segments = groupWordsToSegments(cleaned);
         if (fullText) {
             restoreMissingBrackets(segments, fullText);

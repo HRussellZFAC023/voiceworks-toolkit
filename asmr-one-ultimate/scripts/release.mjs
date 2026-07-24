@@ -229,4 +229,4 @@ run('gh', ['release', 'upload', releaseTag, storefrontArtifactPath, '--clobber']
 run('gh', ['release', 'edit', releaseTag, '--draft=false']);
 
 console.log(`\nDone! ${releaseTag} release created.`);
-console.log(`The verified userscript is attached. CI will independently rebuild it; Greasy Fork will sync automatically.`);
+console.log(`The verified userscript is attached. CI will independently rebuild it; SleazyFork will sync automatically.`);

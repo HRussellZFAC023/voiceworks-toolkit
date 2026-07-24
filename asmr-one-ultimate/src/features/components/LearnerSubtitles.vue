@@ -93,6 +93,8 @@ let lastJpdbText = '';  // Track which text was parsed to avoid re-parsing
 // Visibility
 const isPlayerMinimized = ref(false);
 const hasContent = ref(false);
+const hasClampedSubtitle = ref(false);
+const fullSubtitleOpen = ref(false);
 
 // Playback speed
 const playbackRate = ref(Number(Config.get('playbackRate')) || 1.0);
@@ -121,6 +123,7 @@ let whisperFromCache = false;
 let whisperLive = false;
 let whisperLeadSec = 0;
 let whisperSourceLanguageHint: TranslationSourceHint = 'auto';
+let whisperTimingQuality: 'word' | 'segment' = 'segment';
 let whisperTextGeneration = 0;
 let lastWhisperDisplayText = '';
 let whisperTickerId: number | null = null;
@@ -173,6 +176,7 @@ let drawerResizeObserver: ResizeObserver | null = null;
 // doesn't know about.
 let coverImgObserver: MutationObserver | null = null;
 let subsResizeObserver: ResizeObserver | null = null;
+let subtitleOverflowResizeObserver: ResizeObserver | null = null;
 let lastSetCoverMaxH = '';  // Track our last-set value to distinguish from host updates
 
 // rAF coalescing flags — prevent layout thrashing during window resize
@@ -274,7 +278,10 @@ const furiganaAll = computed(() =>
 
 const expandedRef = ref<HTMLElement | null>(null);
 const collapsedRef = ref<HTMLElement | null>(null);
+const fullSubtitleDialogRef = ref<HTMLElement | null>(null);
 const overflowToggleRef = ref<HTMLElement | null>(null);
+let fullSubtitleTrigger: HTMLElement | null = null;
+let subtitleOverflowMeasureGeneration = 0;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -291,6 +298,109 @@ function resetDedupState(options: { includeWhisperDisplay?: boolean; bumpTransla
     if (options.bumpTranslationToken) {
         translationToken += 1;
     }
+}
+
+function activeSubtitlePanels(): HTMLElement[] {
+    return [expandedRef.value, collapsedRef.value].filter((panel): panel is HTMLElement => {
+        if (!panel || panel.classList.contains('hidden')) return false;
+        return panel.getClientRects().length > 0;
+    });
+}
+
+function subtitleLaneIsClamped(lane: HTMLElement): boolean {
+    if (!lane.textContent?.trim()) return false;
+    if (lane.scrollHeight > lane.clientHeight + 1) return true;
+
+    // Some line-clamp implementations report the clipped height as
+    // scrollHeight. A DOM Range still spans the hidden line boxes and avoids
+    // a clone whose inherited host typography can differ across browsers.
+    if (lane.clientHeight <= 0) return false;
+    const contentRange = document.createRange();
+    contentRange.selectNodeContents(lane);
+    return contentRange.getBoundingClientRect().height > lane.clientHeight + 1;
+}
+
+function measureClampedSubtitles(): void {
+    hasClampedSubtitle.value = activeSubtitlePanels().some(panel => (
+        Array.from(panel.querySelectorAll<HTMLElement>('.learner-jp, .learner-en'))
+            .some(subtitleLaneIsClamped)
+    ));
+
+    if (!hasClampedSubtitle.value) closeFullSubtitles(false);
+}
+
+function scheduleSubtitleOverflowMeasure(): void {
+    const generation = ++subtitleOverflowMeasureGeneration;
+    void nextTick(() => {
+        if (generation === subtitleOverflowMeasureGeneration) measureClampedSubtitles();
+    });
+}
+
+function setupSubtitleOverflowObserver(): void {
+    if (typeof ResizeObserver === 'undefined') return;
+    subtitleOverflowResizeObserver ??= new ResizeObserver(
+        scheduleSubtitleOverflowMeasure,
+    );
+    for (const panel of [expandedRef.value, collapsedRef.value]) {
+        if (panel) subtitleOverflowResizeObserver.observe(panel);
+    }
+}
+
+function openFullSubtitles(event: MouseEvent): void {
+    fullSubtitleTrigger = event.currentTarget as HTMLElement;
+    fullSubtitleOpen.value = true;
+    void nextTick(() => fullSubtitleDialogRef.value?.focus());
+}
+
+function closeFullSubtitles(restoreFocus = true): void {
+    if (!fullSubtitleOpen.value) return;
+    fullSubtitleOpen.value = false;
+    if (!restoreFocus) {
+        fullSubtitleTrigger = null;
+        return;
+    }
+    void nextTick(() => {
+        const visibleTrigger = fullSubtitleTrigger?.isConnected
+            && fullSubtitleTrigger.getClientRects().length > 0
+            ? fullSubtitleTrigger
+            : Array.from(document.querySelectorAll<HTMLElement>('.learner-subtitle-expand'))
+                .find(element => element.getClientRects().length > 0);
+        visibleTrigger?.focus();
+        fullSubtitleTrigger = null;
+    });
+}
+
+function trapFullSubtitleDialogFocus(event: KeyboardEvent): void {
+    const dialog = fullSubtitleDialogRef.value;
+    if (!dialog) return;
+
+    const focusable = Array.from(dialog.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])',
+    )).filter(element => !element.hidden);
+    if (focusable.length === 0) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+    }
+
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    const active = document.activeElement;
+    const wrapsBackward = event.shiftKey && (active === first || active === dialog);
+    const wrapsForward = !event.shiftKey && active === last;
+    if (!wrapsBackward && !wrapsForward) return;
+
+    event.preventDefault();
+    (event.shiftKey ? last : first).focus();
+}
+
+function handleFullSubtitleDialogKeydown(event: KeyboardEvent): void {
+    if (event.key === 'Escape') {
+        event.preventDefault();
+        closeFullSubtitles();
+        return;
+    }
+    if (event.key === 'Tab') trapFullSubtitleDialogFocus(event);
 }
 
 // Karaoke rAF state — cached per active line for smooth 60fps updates
@@ -363,6 +473,29 @@ function setKaraokeLineState(
     karaokeTotalCharsCached = Array.from(fullText).length;
     startKaraokeRaf();
     return computeTimeFallbackKaraokeIndices(fullText, karaokeTotalCharsCached, lineTime, lineEndTime, now);
+}
+
+function getKaraokeLineIndices(
+    fullText: string,
+    display: SubtitleDisplayResult,
+    requireWordTiming = false,
+): { splitIdx: number; hlStart: number } | null {
+    const activeLine = display.activeLine;
+    const karaokeTime = display.audioTime ?? display.now;
+    if (!activeLine || karaokeTime == null) return null;
+    if (requireWordTiming && !activeLine.words?.length) return null;
+
+    const indices = setKaraokeLineState(
+        fullText,
+        activeLine.words,
+        activeLine.time,
+        activeLine.endTime,
+        karaokeTime,
+    );
+    return {
+        splitIdx: indices.splitIdx,
+        hlStart: segmentMode.value ? 0 : indices.hlStart,
+    };
 }
 
 function clearKaraokeState() {
@@ -1215,14 +1348,10 @@ function updateLyrics() {
     } else if (karaokeMode.value) {
         // Karaoke ON: always show full text, control visibility via CSS
         primary = fullText;
-        const karaokeTime = display.audioTime ?? display.now;
-        if (display.activeLine && karaokeTime != null) {
-            const indices = setKaraokeLineState(
-                fullText, display.activeLine.words, display.activeLine.time,
-                display.activeLine.endTime, karaokeTime,
-            );
+        const indices = getKaraokeLineIndices(fullText, display);
+        if (indices) {
             splitIdx = indices.splitIdx;
-            hlStart = segmentMode.value ? 0 : indices.hlStart;
+            hlStart = indices.hlStart;
         }
     } else {
         primary = progressiveText;
@@ -1429,16 +1558,19 @@ function _updateWhisperDisplay() {
                     }).catch(() => {});
                 }
             } else if (karaokeMode.value && fullText) {
-                // Karaoke ON: always show full text, control visibility via CSS
+                // Only exact worker-provided word timestamps may drive
+                // word/character karaoke. Segment-only Whisper output remains
+                // a stable full line instead of presenting uniform estimates
+                // as if they were aligned to speech.
                 prim = fullText;
-                const karaokeTime = display.audioTime ?? display.now;
-                if (display.activeLine && karaokeTime != null) {
-                    const indices = setKaraokeLineState(
-                        fullText, display.activeLine.words, display.activeLine.time,
-                        display.activeLine.endTime, karaokeTime,
-                    );
+                const indices = whisperTimingQuality === 'word'
+                    ? getKaraokeLineIndices(fullText, display, true)
+                    : null;
+                if (indices) {
                     splitIdx = indices.splitIdx;
-                    hlStart = segmentMode.value ? 0 : indices.hlStart;
+                    hlStart = indices.hlStart;
+                } else {
+                    clearKaraokeState();
                 }
             }
             updatePrimaryLine(prim, splitIdx, hlStart);
@@ -1446,21 +1578,21 @@ function _updateWhisperDisplay() {
         } else if (display.displayText && karaokeMode.value) {
             // Karaoke: same segment — rAF handles smooth 60fps inter-frame updates.
             // Also recompute on every tick for responsive scrubbing (even while paused).
-            if (display.activeLine) {
+            if (whisperTimingQuality === 'word') {
                 const ft = display.fullText || display.displayText;
-                const karaokeTime = display.audioTime ?? display.now;
-                if (karaokeTime != null) {
-                    const indices = setKaraokeLineState(
-                        ft, display.activeLine.words, display.activeLine.time,
-                        display.activeLine.endTime, karaokeTime,
-                    );
+                const indices = getKaraokeLineIndices(ft, display, true);
+                if (indices) {
                     const newSplit = indices.splitIdx;
-                    const newHl = segmentMode.value ? 0 : indices.hlStart;
+                    const newHl = indices.hlStart;
                     if (newSplit !== karaokeSplitIndex.value) karaokeSplitIndex.value = newSplit;
                     if (newHl !== karaokeHighlightStart.value) karaokeHighlightStart.value = newHl;
                     // Ensure rAF is running for smooth playback updates
                     startKaraokeRaf();
                 }
+            } else {
+                clearKaraokeState();
+                karaokeSplitIndex.value = -1;
+                karaokeHighlightStart.value = -1;
             }
         } else if (!display.displayText) {
             // Between segments (gap/silence) — hold previous text visible.
@@ -1589,24 +1721,44 @@ function _updateWhisperDisplay() {
 // Whisper event handlers
 // ---------------------------------------------------------------------------
 
+function applyWhisperRuntimeMetadata(payload: WhisperUpdatePayload) {
+    whisperFromCache = !!payload.fromCache;
+    whisperLive = typeof payload.live === 'boolean' ? payload.live : false;
+    if (typeof payload.leadSec === 'number') {
+        whisperLeadSec = Math.max(0, payload.leadSec);
+    }
+    whisperSourceLanguageHint = payload.sourceLanguageHint || 'auto';
+    whisperTimingQuality = payload.timingQuality || 'segment';
+    whisperText = sanitizeWhisperText(payload.text);
+}
+
+function applyWhisperSegments(payload: WhisperUpdatePayload) {
+    const segments = Array.isArray(payload.segments) ? payload.segments : [];
+    if (segments.length === 0) {
+        if (payload.source === 'complete' || payload.final) {
+            whisperLines = [];
+            resetDedupState({ includeWhisperDisplay: true, bumpTranslationToken: true });
+            clearDisplay();
+        }
+        return;
+    }
+    const newLines = normalizeWhisperSubtitleLines(segments);
+    if (newLines.length > 0) {
+        schedulePreTranslation(newLines, 20, whisperSourceLanguageHint);
+    }
+    whisperLines = newLines;
+}
+
 function handleWhisperUpdate(payload: WhisperUpdatePayload) {
     if (!payload) return;
     whisperTextGeneration++;
     whisperActive = true;
-    whisperFromCache = !!payload.fromCache;
-    whisperLive = typeof payload.live === 'boolean' ? !!payload.live : false;
-    whisperLeadSec = typeof payload.leadSec === 'number' ? Math.max(0, payload.leadSec) : whisperLeadSec;
-    whisperSourceLanguageHint = payload.sourceLanguageHint || 'auto';
-    whisperText = sanitizeWhisperText(payload.text);
+    applyWhisperRuntimeMetadata(payload);
     ensureWhisperTicker(whisperLive ? 80 : 200);
-    if (Array.isArray(payload.segments) && payload.segments.length > 0) {
-        const newLines = normalizeWhisperSubtitleLines(payload.segments);
-        if (newLines.length > 0) schedulePreTranslation(newLines, 20, whisperSourceLanguageHint);
-        whisperLines = newLines;
-        // Don't reset lastWhisperDisplayText here — let _updateWhisperDisplay()
-        // naturally detect changes. Resetting forces re-renders that cause flashing
-        // when paused and whisper reprocesses the same audio with slightly different output.
-    }
+    applyWhisperSegments(payload);
+    // Don't reset lastWhisperDisplayText here — let _updateWhisperDisplay()
+    // naturally detect changes. Resetting forces re-renders that cause flashing
+    // when paused and whisper reprocesses the same audio with slightly different output.
     // Don't reset lastText either — let the natural dedup comparison handle it.
     // This prevents unnecessary re-translation and secondary line flicker.
     updateLyrics();
@@ -1621,6 +1773,7 @@ function handleWhisperClear() {
     whisperLive = false;
     whisperLeadSec = 0;
     whisperSourceLanguageHint = 'auto';
+    whisperTimingQuality = 'segment';
     resetDedupState({ includeWhisperDisplay: true });
     clearWhisperTicker();
     resetLearnerTranslationQueues();
@@ -1659,6 +1812,7 @@ function onTrackOrWorkChange() {
     whisperFromCache = false;
     whisperLeadSec = 0;
     whisperSourceLanguageHint = 'auto';
+    whisperTimingQuality = 'segment';
     clearWhisperTicker();
     resetLearnerTranslationQueues();
     lastPreTranslatedKey = null;
@@ -1842,13 +1996,19 @@ function setupCoverAdjustment() {
     }
 
     // Observe our subtitle container for size changes — coalesce via rAF
-    const subsRoot = player.querySelector('#asmr-learner-subs-root') as HTMLElement;
-    if (subsRoot && !subsResizeObserver && typeof ResizeObserver !== 'undefined') {
-        subsResizeObserver = new ResizeObserver(() => {
+    const subsRoot = player.querySelector('#asmr-learner-subs-root') as HTMLElement | null;
+    if (typeof ResizeObserver !== 'undefined') {
+        subsResizeObserver ??= new ResizeObserver(() => {
+            scheduleSubtitleOverflowMeasure();
             if (rafCoverAdjust) return;
             rafCoverAdjust = requestAnimationFrame(() => { rafCoverAdjust = 0; adjustCoverForSubtitles(); });
         });
-        subsResizeObserver.observe(subsRoot);
+        // Observe the rendered panel itself as well as its mount root. The host
+        // can move the same Vue root between player shells without resizing the
+        // root synchronously, while the panel width changes immediately.
+        for (const target of [player, subsRoot, expandedRef.value, collapsedRef.value]) {
+            if (target) subsResizeObserver.observe(target);
+        }
     }
 
     adjustCoverForSubtitles();
@@ -2385,6 +2545,9 @@ onMounted(() => {
 
     // Outside-click listener for overflow
     document.addEventListener('click', closeOverflowOnOutsideClick, true);
+    window.addEventListener('resize', scheduleSubtitleOverflowMeasure);
+    void nextTick(setupSubtitleOverflowObserver);
+    scheduleSubtitleOverflowMeasure();
 });
 
 onUnmounted(() => {
@@ -2405,6 +2568,8 @@ onUnmounted(() => {
     playerObserver = null;
     drawerResizeObserver?.disconnect();
     drawerResizeObserver = null;
+    subtitleOverflowResizeObserver?.disconnect();
+    subtitleOverflowResizeObserver = null;
     document.documentElement.style.removeProperty('--asmr-player-bar-z-index');
     teardownCoverAdjustment();
     restoreControls();
@@ -2418,6 +2583,9 @@ onUnmounted(() => {
 
     document.removeEventListener('click', closeOverflowOnOutsideClick, true);
     document.removeEventListener('jpdb:card-graded', onJpdbCardGraded);
+    window.removeEventListener('resize', scheduleSubtitleOverflowMeasure);
+    fullSubtitleOpen.value = false;
+    fullSubtitleTrigger = null;
 });
 
 // Watch showJP to sync the translate button active state
@@ -2430,6 +2598,12 @@ watch(primaryText, (val) => {
     }
     prevPrimaryForFade = val;
 });
+
+watch(
+    [primaryText, secondaryText, showJP, enablePlayerTranslator, showExpanded, showCollapsed],
+    scheduleSubtitleOverflowMeasure,
+    { flush: 'post' },
+);
 </script>
 
 <template>
@@ -2441,7 +2615,7 @@ watch(primaryText, (val) => {
         :data-subtitle-layout="subtitleLayout"
         aria-live="polite"
     >
-        <div v-show="showJP" class="learner-jp" :class="{ 'segment-fade': segmentFading }" @animationend="segmentFading = false" lang="ja" role="status">
+        <div v-show="showJP" class="learner-jp" :class="{ 'segment-fade': segmentFading }" :title="primaryText || undefined" @animationend="segmentFading = false" lang="ja" role="status">
             <SubtitleContent
                 :karaoke-highlight-start="karaokeHighlightStart"
                 :karaoke-split-index="karaokeSplitIndex"
@@ -2467,6 +2641,18 @@ watch(primaryText, (val) => {
             :aria-label="isBlurred ? t('revealTranslation') : t('hideTranslation')"
             @toggle="toggleBlur"
         />
+        <button
+            v-if="hasClampedSubtitle"
+            type="button"
+            class="learner-subtitle-expand"
+            :aria-label="t('showFullSubtitles')"
+            aria-haspopup="dialog"
+            :aria-expanded="fullSubtitleOpen"
+            :title="t('showFullSubtitles')"
+            @click.stop="openFullSubtitles"
+        >
+            <span class="material-icons" aria-hidden="true">open_in_full</span>
+        </button>
     </div>
 
     <!-- Collapsed subtitle bar (teleported to body for fixed positioning) -->
@@ -2479,7 +2665,7 @@ watch(primaryText, (val) => {
             :style="{ display: showCollapsed ? 'flex' : 'none !important' }"
             aria-live="polite"
         >
-            <div v-show="showJP" class="learner-jp" :class="{ 'segment-fade': segmentFading }" @animationend="segmentFading = false" lang="ja" role="status">
+            <div v-show="showJP" class="learner-jp" :class="{ 'segment-fade': segmentFading }" :title="primaryText || undefined" @animationend="segmentFading = false" lang="ja" role="status">
                 <SubtitleContent
                     :karaoke-highlight-start="karaokeHighlightStart"
                     :karaoke-split-index="karaokeSplitIndex"
@@ -2505,6 +2691,69 @@ watch(primaryText, (val) => {
                 :aria-label="isBlurred ? t('revealTranslation') : t('hideTranslation')"
                 @toggle="toggleBlur"
             />
+            <button
+                v-if="hasClampedSubtitle"
+                type="button"
+                class="learner-subtitle-expand"
+                :aria-label="t('showFullSubtitles')"
+                aria-haspopup="dialog"
+                :aria-expanded="fullSubtitleOpen"
+                :title="t('showFullSubtitles')"
+                @click.stop="openFullSubtitles"
+            >
+                <span class="material-icons" aria-hidden="true">open_in_full</span>
+            </button>
+        </div>
+    </Teleport>
+
+    <Teleport to="body">
+        <div
+            v-if="fullSubtitleOpen"
+            class="learner-subtitle-dialog-backdrop"
+            @click.self="closeFullSubtitles()"
+        >
+            <section
+                ref="fullSubtitleDialogRef"
+                class="learner-subtitle-dialog"
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="asmr-full-subtitle-title"
+                tabindex="-1"
+                @keydown="handleFullSubtitleDialogKeydown"
+            >
+                <header class="learner-subtitle-dialog-header">
+                    <h2 id="asmr-full-subtitle-title">{{ t('fullSubtitles') }}</h2>
+                    <button
+                        type="button"
+                        class="learner-subtitle-dialog-close"
+                        :aria-label="t('closeFullSubtitles')"
+                        :title="t('closeFullSubtitles')"
+                        @click="closeFullSubtitles()"
+                    >
+                        <span class="material-icons" aria-hidden="true">close</span>
+                    </button>
+                </header>
+                <div class="learner-subtitle-dialog-content" aria-live="polite">
+                    <p v-if="showJP && primaryText" class="learner-subtitle-dialog-primary" lang="ja">
+                        {{ primaryText }}
+                    </p>
+                    <p
+                        v-if="enablePlayerTranslator && secondaryText && !isBlurred"
+                        class="learner-subtitle-dialog-secondary"
+                        :lang="secondaryLangAttribute"
+                    >
+                        {{ secondaryText }}
+                    </p>
+                    <button
+                        v-else-if="enablePlayerTranslator && secondaryText"
+                        type="button"
+                        class="learner-subtitle-dialog-reveal"
+                        @click="toggleBlur"
+                    >
+                        {{ t('revealTranslation') }}
+                    </button>
+                </div>
+            </section>
         </div>
     </Teleport>
 </template>

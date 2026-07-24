@@ -1,4 +1,4 @@
-import { GM_getValue, GM_setValue } from '$';
+import { GM_deleteValue, GM_getValue, GM_setValue } from '$';
 
 type CacheEnvelope<T> = {
     expiresAt: number;
@@ -64,6 +64,16 @@ export class CacheStore {
         this.evictIfOverSize();
         try {
             GM_setValue(key, JSON.stringify(entry));
+        } catch {
+            // Ignore storage errors.
+        }
+    }
+
+    public delete(key: string): void {
+        this.memory.delete(key);
+        this.inflight.delete(key);
+        try {
+            GM_deleteValue(key);
         } catch {
             // Ignore storage errors.
         }

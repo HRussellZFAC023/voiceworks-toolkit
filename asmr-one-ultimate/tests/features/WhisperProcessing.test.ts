@@ -28,6 +28,29 @@ describe('whisperProcessing decoder control tokens', () => {
 
         expect(processRawChunks([], '<|0.00|>聞こえています<|2.00|>')).toEqual([]);
     });
+
+    it('uses explicit timestamp granularity instead of a duration heuristic', () => {
+        const shortChunks = [
+            { text: 'お', timestamp: [0, 0.2] as [number, number] },
+            { text: 'は', timestamp: [0.2, 0.4] as [number, number] },
+            { text: 'よ', timestamp: [0.4, 0.6] as [number, number] },
+        ];
+
+        expect(processRawChunks(shortChunks, 'おはよ', 'segment')).toEqual([
+            { text: 'お', timestamp: [0, 0.2] },
+            { text: 'は', timestamp: [0.2, 0.4] },
+            { text: 'よ', timestamp: [0.4, 0.6] },
+        ]);
+        expect(processRawChunks(shortChunks, 'おはよ', 'word')).toEqual([{
+            text: 'おはよ',
+            timestamp: [0, 0.6],
+            words: [
+                { text: 'お', start: 0, end: 0.2 },
+                { text: 'は', start: 0.2, end: 0.4 },
+                { text: 'よ', start: 0.4, end: 0.6 },
+            ],
+        }]);
+    });
 });
 
 describe('whisperProcessing Chinese filtering', () => {

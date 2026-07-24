@@ -381,6 +381,17 @@ export interface WhisperState {
     progress: number;
     progressMessage: string;
     currentTrackSrc: string | null;
+    stage: 'idle' | 'loading' | 'transcribing' | 'caught-up' | 'behind' | 'recovering' | 'partial' | 'complete' | 'error';
+    model: string | null;
+    backend: 'webgpu' | 'wasm' | null;
+    processedSeconds: number;
+    processedThroughSeconds: number;
+    skippedSeconds: number;
+    totalSeconds: number;
+    playbackSeconds: number;
+    backlogSeconds: number;
+    pendingChunks: number;
+    timingQuality: 'word' | 'segment' | null;
 }
 
 export interface PlaylistModeState {
@@ -418,7 +429,21 @@ export interface AppEvents {
     'radio:state': { state: RadioState; currentWorkId: string | null; recentWorkIds: string[] };
     'radio:skip': { fromWorkId: string; toWorkId: string };
     'whisper:toggle': void;
-    'whisper:progress': { percent: number; message: string; stage: string };
+    'whisper:progress': {
+        percent: number;
+        message: string;
+        stage: string;
+        processedSeconds?: number;
+        processedThroughSeconds?: number;
+        skippedSeconds?: number;
+        totalSeconds?: number;
+        playbackSeconds?: number;
+        backlogSeconds?: number;
+        pendingChunks?: number;
+        model?: string;
+        backend?: 'webgpu' | 'wasm';
+        timingQuality?: 'word' | 'segment' | null;
+    };
     'whisper:update': {
         text: string;
         segments: Array<{ start: number; end: number; text: string; words?: Array<{ start: number; end: number; text: string }> }>;
@@ -429,6 +454,7 @@ export interface AppEvents {
         live?: boolean;
         source?: string;
         leadSec?: number;
+        timingQuality?: 'word' | 'segment';
     };
     'whisper:complete': { text: string };
     'whisper:error': { message: string; isHlsWarning?: boolean };

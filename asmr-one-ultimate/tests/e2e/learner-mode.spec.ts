@@ -338,6 +338,129 @@ test.describe('Learner Mode Layout', () => {
       expect(Math.abs(current.playerHeight - baseline.playerHeight)).toBeLessThanOrEqual(1);
       expect(current.coverMaxHeight).toBe(baseline.coverMaxHeight);
     }
+
+    const laneContainment = await injectedPage.evaluate(() => {
+      const panel = document.querySelector(
+        '[data-testid="learner-layout-fixture"] .learner-subs-expanded',
+      ) as HTMLElement | null;
+      const primary = panel?.querySelector('.learner-jp') as HTMLElement | null;
+      const secondary = panel?.querySelector('.learner-en') as HTMLElement | null;
+      if (!primary || !secondary) throw new Error('Subtitle slots were not available');
+      const snapshot = (element: HTMLElement) => {
+        const style = getComputedStyle(element);
+        return {
+          overflowY: style.overflowY,
+          lineClamp: style.getPropertyValue('-webkit-line-clamp'),
+          clientHeight: element.clientHeight,
+          scrollHeight: element.scrollHeight,
+        };
+      };
+      return {
+        primary: snapshot(primary),
+        secondary: snapshot(secondary),
+      };
+    });
+
+    for (const lane of [laneContainment.primary, laneContainment.secondary]) {
+      expect(lane.overflowY).toBe('hidden');
+      expect(lane.lineClamp).toBe('2');
+      // The source text can be taller, but the player exposes no nested
+      // scrolling surface and keeps the visual lane at exactly two lines.
+      expect(lane.scrollHeight).toBeGreaterThanOrEqual(lane.clientHeight);
+    }
+  });
+
+  test('opens clamped subtitles in a body-level dialog without shifting the player', async ({ injectedPage, isScriptLoaded }) => {
+    await injectedPage.addInitScript(() => {
+      localStorage.setItem('GM_enablePlayerTranslator', 'false');
+      localStorage.setItem('GM_whisperAutoWarmup', 'false');
+    });
+    await helpers.gotoHome(injectedPage);
+    await isScriptLoaded();
+    await injectedPage.evaluate(() => {
+      document.querySelector('[data-testid="learner-disclosure-fixture"]')?.remove();
+      const fixture = document.createElement('div');
+      fixture.dataset.testid = 'learner-disclosure-fixture';
+      fixture.className = 'audio-player';
+      fixture.style.cssText = [
+        'position:fixed',
+        'inset:80px auto auto 80px',
+        'display:flex',
+        'flex-direction:column',
+        'width:220px',
+        'height:520px',
+        'background:var(--asmr-bg-primary)',
+        'z-index:2147483640',
+      ].join(';');
+      fixture.innerHTML = [
+        '<div class="albumart" style="flex:0 0 260px">',
+        '<div class="q-img" style="height:260px"></div>',
+        '</div>',
+        '<audio></audio>',
+      ].join('');
+      document.body.appendChild(fixture);
+    });
+    await expect(injectedPage.locator('#asmr-learner-subs-root')).toBeAttached({ timeout: 10000 });
+
+    const longJapanese = 'タッチ操作とキーボード操作のどちらでも長い字幕全文を読めるようにします。';
+    await injectedPage.evaluate((text) => {
+      const runtime = window as typeof window & {
+        __ASMR_EVENT_BUS__?: {
+          emit(event: 'whisper:update', payload: {
+            text: string;
+            segments: Array<{ start: number; end: number; text: string }>;
+            final: boolean;
+            live: boolean;
+            sourceLanguageHint: 'ja';
+            timingQuality: 'segment';
+          }): void;
+        };
+      };
+      const audio = document.querySelector<HTMLAudioElement>(
+        '[data-testid="learner-disclosure-fixture"] audio',
+      );
+      const now = audio?.currentTime || 0;
+      runtime.__ASMR_EVENT_BUS__?.emit('whisper:update', {
+        text,
+        segments: [{ start: Math.max(0, now - 1), end: now + 120, text }],
+        final: false,
+        live: true,
+        sourceLanguageHint: 'ja',
+        timingQuality: 'segment',
+      });
+    }, longJapanese);
+
+    const panel = injectedPage.locator(
+      '[data-testid="learner-disclosure-fixture"] .learner-subs-expanded:not(.hidden)',
+    ).first();
+    const primaryLane = panel.locator('.learner-jp');
+    await expect(primaryLane).toContainText('タッチ操作とキーボード操作');
+    const displayedSubtitle = (await primaryLane.textContent())?.trim();
+    expect(displayedSubtitle).toBeTruthy();
+    const trigger = panel.locator('.learner-subtitle-expand');
+    await expect(trigger).toBeVisible({ timeout: 10000 });
+    await injectedPage.locator('[data-testid="learner-disclosure-fixture"]').evaluate((element) => {
+      (element as HTMLElement).style.width = 'min(900px, calc(100vw - 100px))';
+    });
+    await expect(trigger).toBeHidden({ timeout: 10000 });
+    await injectedPage.locator('[data-testid="learner-disclosure-fixture"]').evaluate((element) => {
+      (element as HTMLElement).style.width = '220px';
+    });
+    await expect(trigger).toBeVisible({ timeout: 10000 });
+    const panelHeightBefore = await panel.evaluate(element => element.getBoundingClientRect().height);
+
+    await trigger.click();
+    const dialog = injectedPage.getByRole('dialog', { name: 'Full subtitles' });
+    await expect(dialog).toBeVisible();
+    await expect(dialog.locator('.learner-subtitle-dialog-primary')).toHaveText(displayedSubtitle!);
+    await expect(injectedPage.locator('body > .learner-subtitle-dialog-backdrop')).toHaveCount(1);
+    expect(Math.abs(await panel.evaluate(element => element.getBoundingClientRect().height) - panelHeightBefore))
+      .toBeLessThanOrEqual(1);
+
+    await injectedPage.keyboard.press('Escape');
+    await expect(dialog).toBeHidden();
+    await expect(trigger).toBeFocused();
+    await injectedPage.locator('[data-testid="learner-disclosure-fixture"]').evaluate(element => element.remove());
   });
 
   test('contains both bilingual subtitle lanes on mobile', async ({ injectedPage, isScriptLoaded }) => {
@@ -375,10 +498,18 @@ test.describe('Learner Mode Layout', () => {
         secondary: secondary.getBoundingClientRect().toJSON(),
         clientHeight: panel.clientHeight,
         scrollHeight: panel.scrollHeight,
+        primaryOverflowY: getComputedStyle(primary).overflowY,
+        secondaryOverflowY: getComputedStyle(secondary).overflowY,
+        primaryLineClamp: getComputedStyle(primary).getPropertyValue('-webkit-line-clamp'),
+        secondaryLineClamp: getComputedStyle(secondary).getPropertyValue('-webkit-line-clamp'),
       };
     });
 
     expect(geometry.scrollHeight).toBeLessThanOrEqual(geometry.clientHeight);
+    expect(geometry.primaryOverflowY).toBe('hidden');
+    expect(geometry.secondaryOverflowY).toBe('hidden');
+    expect(geometry.primaryLineClamp).toBe('2');
+    expect(geometry.secondaryLineClamp).toBe('2');
     expect(geometry.primary.top).toBeGreaterThanOrEqual(geometry.panel.top - 1);
     expect(geometry.secondary.bottom).toBeLessThanOrEqual(geometry.panel.bottom + 1);
   });

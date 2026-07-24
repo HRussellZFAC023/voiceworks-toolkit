@@ -53,6 +53,53 @@ describe('Whisper', () => {
             ))?.[1];
     }
 
+    function stubTranscriptionRuntime(
+        whisper: Whisper,
+        settings: Record<string, unknown>,
+        liveCapture?: boolean,
+    ): void {
+        vi.spyOn(whisper as any, 'getWhisperSettings').mockReturnValue(settings);
+        vi.spyOn(whisper as any, 'initWorker').mockImplementation(() => {});
+        vi.spyOn(whisper as any, 'startProcessingLoop').mockImplementation(() => {});
+        vi.spyOn(whisper as any, 'scheduleIdleUnload').mockImplementation(() => {});
+        vi.spyOn(whisper as any, 'persistCache').mockImplementation(() => {});
+        if (typeof liveCapture === 'boolean') {
+            vi.spyOn(whisper as any, 'startLiveAudioCapture').mockReturnValue(liveCapture);
+        }
+        (whisper as any).enabled = true;
+    }
+
+    function createMockWhisperWorker() {
+        return {
+            postMessage: vi.fn(),
+            terminate: vi.fn(),
+            onmessage: null,
+            onerror: null,
+        };
+    }
+
+    function createCompatibilityWhisperSettings(overrides: Record<string, unknown> = {}) {
+        return {
+            model: 'onnx-community/whisper-tiny',
+            subtask: 'transcribe',
+            language: 'ja',
+            multilingual: true,
+            chunkLengthS: 29,
+            strideLengthS: 5,
+            cacheTranscripts: false,
+            autoWarmup: false,
+            silenceThreshold: 0,
+            maxPendingChunks: 1,
+            pollIntervalMs: 500,
+            workerUpdateIntervalMs: 350,
+            idleUnloadMs: 120_000,
+            forceWasm: true,
+            preferLowPowerAdapter: true,
+            minWebgpuBufferBytes: 256 * 1024 * 1024,
+            ...overrides,
+        };
+    }
+
     describe('spoken-language policy', () => {
         it('is Japanese-first for auto, using catalogue language only for original works', () => {
             expect(resolveWhisperLanguage('auto')).toBe('japanese');
@@ -277,31 +324,9 @@ describe('Whisper', () => {
                 size: 500 * 1024 * 1024,
             });
             vi.spyOn((whisper as any).bridge, 'currentWorkId', 'get').mockReturnValue('RJ000001');
-            vi.spyOn(whisper as any, 'getWhisperSettings').mockReturnValue({
-                model: 'onnx-community/whisper-tiny',
-                subtask: 'transcribe',
-                language: 'ja',
-                multilingual: true,
-                chunkLengthS: 29,
-                strideLengthS: 5,
-                cacheTranscripts: false,
-                autoWarmup: false,
-                silenceThreshold: 0,
-                maxPendingChunks: 1,
-                pollIntervalMs: 500,
-                workerUpdateIntervalMs: 350,
-                idleUnloadMs: 120_000,
-                forceWasm: true,
-                preferLowPowerAdapter: true,
-                minWebgpuBufferBytes: 256 * 1024 * 1024,
-            });
-            vi.spyOn(whisper as any, 'initWorker').mockImplementation(() => {});
-            vi.spyOn(whisper as any, 'startProcessingLoop').mockImplementation(() => {});
-            vi.spyOn(whisper as any, 'scheduleIdleUnload').mockImplementation(() => {});
-            vi.spyOn(whisper as any, 'persistCache').mockImplementation(() => {});
-            vi.spyOn(whisper as any, 'startLiveAudioCapture').mockReturnValue(true);
+            const settings = createCompatibilityWhisperSettings();
+            stubTranscriptionRuntime(whisper, settings, true);
             const fetchAudio = vi.spyOn(whisper as any, 'fetchAndDecodeAudio');
-            (whisper as any).enabled = true;
 
             await (whisper as any).startTranscription();
 
@@ -328,32 +353,10 @@ describe('Whisper', () => {
                 size: 39_762_038,
             });
             vi.spyOn((whisper as any).bridge, 'currentWorkId', 'get').mockReturnValue('RJ01503719');
-            vi.spyOn(whisper as any, 'getWhisperSettings').mockReturnValue({
-                model: 'onnx-community/whisper-tiny',
-                subtask: 'transcribe',
-                language: 'ja',
-                multilingual: true,
-                chunkLengthS: 29,
-                strideLengthS: 5,
-                cacheTranscripts: false,
-                autoWarmup: false,
-                silenceThreshold: 0,
-                maxPendingChunks: 1,
-                pollIntervalMs: 500,
-                workerUpdateIntervalMs: 350,
-                idleUnloadMs: 120_000,
-                forceWasm: true,
-                preferLowPowerAdapter: true,
-                minWebgpuBufferBytes: 256 * 1024 * 1024,
-            });
-            vi.spyOn(whisper as any, 'initWorker').mockImplementation(() => {});
-            vi.spyOn(whisper as any, 'startProcessingLoop').mockImplementation(() => {});
-            vi.spyOn(whisper as any, 'scheduleIdleUnload').mockImplementation(() => {});
-            vi.spyOn(whisper as any, 'persistCache').mockImplementation(() => {});
-            vi.spyOn(whisper as any, 'startLiveAudioCapture').mockReturnValue(false);
+            const settings = createCompatibilityWhisperSettings();
+            stubTranscriptionRuntime(whisper, settings, false);
             const fetchAudio = vi.spyOn(whisper as any, 'fetchAndDecodeAudio')
                 .mockResolvedValue(new Float32Array(6 * 16_000));
-            (whisper as any).enabled = true;
 
             await (whisper as any).startTranscription();
 
@@ -372,6 +375,69 @@ describe('Whisper', () => {
                 expect.anything(),
             );
             (whisper as any).stopTranscription('test');
+        });
+
+        it('resumes a partial cache contiguously instead of skipping to playback backfill', async () => {
+            const whisper = new Whisper();
+            const audio = document.createElement('audio');
+            const trackUrl = `${window.location.origin}/api/media/stream/partial-track`;
+            audio.src = trackUrl;
+            Object.defineProperty(audio, 'currentTime', { value: 100, writable: true });
+            Object.defineProperty(audio, 'duration', { value: 120, configurable: true });
+            document.body.appendChild(audio);
+            const track = {
+                type: 'audio',
+                hash: 'partial-track',
+                title: 'Partial Track',
+                mediaStreamUrl: trackUrl,
+                size: 8 * 1024 * 1024,
+            };
+            const settings = createCompatibilityWhisperSettings({
+                backend: 'wasm',
+                cacheTranscripts: true,
+            });
+            vi.spyOn((whisper as any).bridge, 'currentTrack', 'get').mockReturnValue(track);
+            vi.spyOn((whisper as any).bridge, 'currentWorkId', 'get').mockReturnValue('RJ000002');
+            stubTranscriptionRuntime(whisper, settings, false);
+            vi.spyOn(whisper as any, 'fetchAndDecodeAudio')
+                .mockResolvedValue(new Float32Array(120 * 16_000));
+
+            const identity = (whisper as any).buildCacheIdentity(trackUrl, settings);
+            const key = (whisper as any).buildCacheKey(trackUrl, settings);
+            SharedCache.set(key, {
+                text: '保存済み',
+                segments: [{ start: 0, end: 20, text: '保存済み' }],
+                model: settings.model,
+                subtask: settings.subtask,
+                language: settings.language,
+                createdAt: Date.now(),
+                complete: false,
+                timingQuality: 'segment',
+                processedRanges: [{ start: 0, end: 20 }],
+                unavailableRanges: [],
+                coverageOrigin: 0,
+                sourceIdentity: identity,
+            }, 60_000);
+
+            await (whisper as any).startTranscription();
+
+            expect((whisper as any).transcribedUpTo).toBe(18);
+            expect((whisper as any).processedRanges).toEqual([{ start: 0, end: 20 }]);
+            expect((whisper as any).fetchAndDecodeAudio).toHaveBeenCalled();
+            (whisper as any).stopTranscription('test');
+        });
+
+        it('records an explicit unavailable gap when contiguous decode cannot resume', () => {
+            const whisper = new Whisper();
+            const audio = { currentTime: 100 } as HTMLAudioElement;
+            vi.spyOn(whisper as any, 'canUseLiveAudioCapture').mockReturnValue(true);
+            vi.spyOn(whisper as any, 'startLiveAudioCapture').mockReturnValue(true);
+            const lag = vi.spyOn(whisper as any, 'reportLiveLag').mockImplementation(() => {});
+
+            expect((whisper as any).resumeLiveCaptureWithExplicitGap(audio, 1, 20)).toBe(true);
+            expect((whisper as any).unavailableRanges).toEqual([{ start: 20, end: 100 }]);
+            expect((whisper as any).droppedBufferSeconds).toBe(80);
+            expect(lag).toHaveBeenCalledWith('capture-buffer-trim', 80);
         });
 
         it('binds listeners once, disposes them, and rebinds once', () => {
@@ -470,6 +536,101 @@ describe('Whisper', () => {
             whisper.disable();
             expect(status.isConnected).toBe(false);
         });
+
+        it('coalesces trailing transcript checkpoints into one delayed write', () => {
+            vi.useFakeTimers();
+            try {
+                vi.setSystemTime(100_000);
+                const whisper = new Whisper();
+                const persist = vi.spyOn(whisper as any, 'persistCache').mockImplementation(() => {});
+                (whisper as any).currentCacheKey = 'checkpoint-track';
+                (whisper as any).segments = [{ start: 0, end: 5, text: '保存対象' }];
+                (whisper as any).processedRanges = [{ start: 0, end: 5 }];
+                (whisper as any).lastPersistAt = 95_000;
+
+                (whisper as any).queueCacheCheckpoint();
+                (whisper as any).queueCacheCheckpoint();
+                vi.advanceTimersByTime(4_999);
+                expect(persist).not.toHaveBeenCalled();
+
+                vi.advanceTimersByTime(1);
+                expect(persist).toHaveBeenCalledTimes(1);
+                expect((whisper as any).cacheCheckpointTimer).toBeNull();
+            } finally {
+                vi.useRealTimers();
+            }
+        });
+
+        it('persists coverage-only progress for silent audio without creating a transcript badge', () => {
+            const whisper = new Whisper();
+            const settings = createCompatibilityWhisperSettings({ cacheTranscripts: true });
+            const cacheKey = 'whisper:coverage-only';
+            const updateIndex = vi.spyOn(whisper as any, 'updateTranscriptIndex');
+            const translate = vi.spyOn(whisper as any, 'ensureTranslatedTranscript');
+            (whisper as any).currentCacheKey = cacheKey;
+            (whisper as any).currentCacheIdentity = 'silent-track';
+            (whisper as any).activeRunSettings = Object.freeze(settings);
+            (whisper as any).processedRanges = [{ start: 0, end: 10 }];
+            (whisper as any).coverageOrigin = 0;
+            (whisper as any).pcmDuration = 10;
+            (whisper as any).timingQuality = 'segment';
+
+            (whisper as any).persistCache(true, true);
+
+            expect(SharedCache.get(cacheKey)).toMatchObject({
+                text: '',
+                segments: [],
+                complete: true,
+                processedRanges: [{ start: 0, end: 10 }],
+            });
+            expect(updateIndex).not.toHaveBeenCalled();
+            expect(translate).not.toHaveBeenCalled();
+        });
+
+        it('replaces an unusable legacy complete entry with resumable silent coverage', () => {
+            const whisper = new Whisper();
+            const settings = createCompatibilityWhisperSettings({ cacheTranscripts: true });
+            const cacheKey = 'whisper:invalid-legacy-complete';
+            SharedCache.set(cacheKey, {
+                text: '<|0.00|><|10.00|>',
+                segments: [{ start: 0, end: 10, text: '<|0.00|><|10.00|>' }],
+                model: settings.model,
+                subtask: settings.subtask,
+                language: settings.language,
+                createdAt: Date.now() - 1_000,
+                complete: true,
+            }, 60_000);
+            (whisper as any).currentCacheKey = cacheKey;
+            (whisper as any).currentCacheIdentity = 'silent-track';
+            (whisper as any).activeRunSettings = Object.freeze(settings);
+            (whisper as any).processedRanges = [{ start: 0, end: 5 }];
+            (whisper as any).coverageOrigin = 0;
+            (whisper as any).pcmDuration = 10;
+
+            (whisper as any).persistCache(false, true);
+
+            expect(SharedCache.get(cacheKey)).toMatchObject({
+                text: '',
+                segments: [],
+                complete: false,
+                processedRanges: [{ start: 0, end: 5 }],
+                sourceIdentity: 'silent-track',
+            });
+        });
+
+        it('flushes an active trailing checkpoint on pagehide', () => {
+            const whisper = new Whisper();
+            const flush = vi.spyOn(whisper as any, 'flushCacheCheckpoint').mockImplementation(() => {});
+            (whisper as any).transcribing = true;
+            (whisper as any).setupEventListeners();
+
+            try {
+                window.dispatchEvent(new Event('pagehide'));
+                expect(flush).toHaveBeenCalledWith(false);
+            } finally {
+                (whisper as any).eventCleanups.splice(0).forEach((cleanup: () => void) => cleanup());
+            }
+        });
     });
 
     describe('transcription restart races', () => {
@@ -516,12 +677,7 @@ describe('Whisper', () => {
                 mediaStreamUrl: trackUrl,
             }));
             vi.spyOn((whisper as any).bridge, 'currentWorkId', 'get').mockReturnValue('RJ000001');
-            vi.spyOn(whisper as any, 'getWhisperSettings').mockReturnValue(settings);
-            vi.spyOn(whisper as any, 'initWorker').mockImplementation(() => {});
-            vi.spyOn(whisper as any, 'startProcessingLoop').mockImplementation(() => {});
-            vi.spyOn(whisper as any, 'scheduleIdleUnload').mockImplementation(() => {});
-            vi.spyOn(whisper as any, 'persistCache').mockImplementation(() => {});
-            (whisper as any).enabled = true;
+            stubTranscriptionRuntime(whisper, settings);
 
             const first = deferred<Float32Array>();
             const second = deferred<Float32Array>();
@@ -720,12 +876,7 @@ describe('Whisper', () => {
 
         it('treats a WASM load failure as terminal without consuming inference retries', () => {
             const whisper = new Whisper();
-            const worker = {
-                postMessage: vi.fn(),
-                terminate: vi.fn(),
-                onmessage: null,
-                onerror: null,
-            };
+            const worker = createMockWhisperWorker();
             const initSpy = vi.spyOn(whisper as any, 'initWorker').mockImplementation(() => {});
             const stopSpy = vi.spyOn(whisper as any, 'stopTranscription').mockImplementation(() => {
                 (whisper as any).transcribing = false;
@@ -764,12 +915,7 @@ describe('Whisper', () => {
 
         it('deduplicates warmup and transcription init on the same worker', async () => {
             const whisper = new Whisper();
-            const worker = {
-                postMessage: vi.fn(),
-                terminate: vi.fn(),
-                onmessage: null,
-                onerror: null,
-            };
+            const worker = createMockWhisperWorker();
             const release = vi.fn();
             let resolveLease!: (release: () => void) => void;
             const lease = new Promise<() => void>(resolve => { resolveLease = resolve; });
@@ -822,18 +968,8 @@ describe('Whisper', () => {
         });
 
         it('recreates a ready worker when model, backend, or multilingual identity changes', async () => {
-            const oldWorker = {
-                postMessage: vi.fn(),
-                terminate: vi.fn(),
-                onmessage: null,
-                onerror: null,
-            };
-            const replacementWorker = {
-                postMessage: vi.fn(),
-                terminate: vi.fn(),
-                onmessage: null,
-                onerror: null,
-            };
+            const oldWorker = createMockWhisperWorker();
+            const replacementWorker = createMockWhisperWorker();
             vi.spyOn(GpuScheduler, 'acquireLoadLease').mockResolvedValue(vi.fn());
             const whisper = new Whisper();
             (whisper as any).enabled = true;
@@ -1498,8 +1634,16 @@ describe('Whisper', () => {
     describe('gpu error detection', () => {
         it('treats WebGPU invalid buffer mapping as recoverable GPU error', () => {
             const whisper = new Whisper();
+            (whisper as any).activeRunSettings = { backend: 'webgpu' };
             const isGpuError = (whisper as any).isGpuErrorMessage('Mapping WebGPU buffer failed: Invalid buffer');
             expect(isGpuError).toBe(true);
+        });
+
+        it('does not mislabel a WASM OrtRun failure as a GPU crash', () => {
+            const whisper = new Whisper();
+            (whisper as any).activeRunSettings = { backend: 'wasm' };
+
+            expect((whisper as any).isGpuErrorMessage('OrtRun failed during inference')).toBe(false);
         });
     });
 
@@ -1557,6 +1701,26 @@ describe('Whisper', () => {
                     data: { reason: 'inference-timeout', gpuFailure: false },
                 },
             } as any);
+        }
+
+        function stubPoisonRecovery(whisper: Whisper) {
+            return {
+                resetWorkerSpy: vi.spyOn(whisper as any, 'resetWorker').mockImplementation(() => {}),
+                initSpy: vi.spyOn(whisper as any, 'initWorker').mockImplementation(() => {}),
+            };
+        }
+
+        function setupTerminalPoisonRecovery() {
+            const whisper = new Whisper();
+            const recovery = stubPoisonRecovery(whisper);
+            const stopSpy = vi.spyOn(whisper as any, 'stopTranscription').mockImplementation(() => {
+                (whisper as any).transcribing = false;
+            });
+            vi.spyOn(whisper as any, 'dispatchProgress').mockImplementation(() => {});
+            vi.spyOn(whisper as any, 'showStatus').mockImplementation(() => {});
+            (whisper as any).transcribing = true;
+            (whisper as any).worker = { postMessage: vi.fn() };
+            return { whisper, stopSpy, ...recovery };
         }
 
         it('terminates an inference error without silently changing the execution plan', () => {
@@ -1637,7 +1801,7 @@ describe('Whisper', () => {
             // live run, replace the worker, and resume the post-seek range.
             (whisper as any).chunkOffsets.set(100, 42);
             signalPoisonedWorker(whisper);
-            expect(resetWorkerSpy).toHaveBeenCalledWith('inference-timeout');
+            expect(resetWorkerSpy).toHaveBeenCalledWith('inference-timeout', true);
             expect(initSpy).toHaveBeenCalled();
             expect(stopSpy).not.toHaveBeenCalled();
             expect((whisper as any).transcribedUpTo).toBe(42);
@@ -1645,8 +1809,7 @@ describe('Whisper', () => {
 
         it('surfaces audio that expired before a poisoned worker can retry it', () => {
             const whisper = new Whisper();
-            const resetWorkerSpy = vi.spyOn(whisper as any, 'resetWorker').mockImplementation(() => {});
-            const initSpy = vi.spyOn(whisper as any, 'initWorker').mockImplementation(() => {});
+            const { resetWorkerSpy, initSpy } = stubPoisonRecovery(whisper);
             const progressSpy = vi.spyOn(whisper as any, 'dispatchProgress').mockImplementation(() => {});
             const lagSpy = vi.spyOn(whisper as any, 'reportLiveLag').mockImplementation(() => {});
             (whisper as any).transcribing = true;
@@ -1656,7 +1819,7 @@ describe('Whisper', () => {
 
             signalPoisonedWorker(whisper);
 
-            expect(resetWorkerSpy).toHaveBeenCalledWith('inference-timeout');
+            expect(resetWorkerSpy).toHaveBeenCalledWith('inference-timeout', true);
             expect(initSpy).toHaveBeenCalled();
             expect((whisper as any).transcribedUpTo).toBe(50);
             expect((whisper as any).droppedBufferSeconds).toBe(8);
@@ -1664,17 +1827,136 @@ describe('Whisper', () => {
             expect(progressSpy).not.toHaveBeenCalled();
         });
 
-        it('stops after repeated bounded-backend inference timeouts', () => {
+        it('resumes Firefox Buffer unmapped from the earliest unfinished cursor on the exact plan', () => {
             const whisper = new Whisper();
-            const resetWorkerSpy = vi.spyOn(whisper as any, 'resetWorker').mockImplementation(() => {});
-            const stopSpy = vi.spyOn(whisper as any, 'stopTranscription').mockImplementation(() => {
-                (whisper as any).transcribing = false;
-            });
-            const initSpy = vi.spyOn(whisper as any, 'initWorker').mockImplementation(() => {});
+            const { resetWorkerSpy, initSpy } = stubPoisonRecovery(whisper);
+            const stopSpy = vi.spyOn(whisper as any, 'stopTranscription').mockImplementation(() => {});
+            const persistSpy = vi.spyOn(whisper as any, 'persistCache').mockImplementation(() => {});
             vi.spyOn(whisper as any, 'dispatchProgress').mockImplementation(() => {});
-            vi.spyOn(whisper as any, 'showStatus').mockImplementation(() => {});
+            (whisper as any).activeRunSettings = Object.freeze({
+                model: 'onnx-community/whisper-small_timestamped',
+                backend: 'webgpu',
+                multilingual: true,
+            });
             (whisper as any).transcribing = true;
             (whisper as any).worker = { postMessage: vi.fn() };
+            (whisper as any).segments = [{ start: 0, end: 28, text: '完成済み' }];
+            (whisper as any).lastSegmentEnd = 28;
+            (whisper as any).transcribedUpTo = 59;
+            (whisper as any).pcmBufferStartTime = 0;
+            (whisper as any).chunkOffsets.set(9, 30);
+
+            (whisper as any).handleWorkerMessage({
+                data: {
+                    status: 'worker-poisoned',
+                    data: {
+                        reason: 'inference-runtime-error',
+                        message: 'Failed to download data from buffer: Buffer unmapped',
+                        gpuFailure: true,
+                    },
+                },
+            } as any);
+
+            expect(resetWorkerSpy).toHaveBeenCalledWith('inference-runtime-error', true);
+            expect(initSpy).toHaveBeenCalledWith(expect.objectContaining({
+                model: 'onnx-community/whisper-small_timestamped',
+                backend: 'webgpu',
+            }));
+            expect((whisper as any).transcribedUpTo).toBe(30);
+            expect((whisper as any).segments).toEqual([{ start: 0, end: 28, text: '完成済み' }]);
+            expect(persistSpy).toHaveBeenCalledWith(false, true);
+            expect(stopSpy).not.toHaveBeenCalled();
+        });
+
+        it('terminates a poisoned session before checkpointing and reinitializing the exact plan', () => {
+            const whisper = new Whisper();
+            const exactSettings = Object.freeze({
+                preset: 'small',
+                model: 'onnx-community/whisper-small_timestamped',
+                backend: 'webgpu',
+                subtask: 'transcribe',
+                language: 'japanese',
+                multilingual: true,
+                chunkLengthS: 29,
+                strideLengthS: 5,
+                cacheTranscripts: true,
+                autoWarmup: false,
+                maxPendingChunks: 2,
+                pollIntervalMs: 250,
+                workerUpdateIntervalMs: 200,
+                idleUnloadMs: 600_000,
+                forceWasm: false,
+                preferLowPowerAdapter: false,
+                minWebgpuBufferBytes: 256 * 1024 * 1024,
+            });
+            const worker = createMockWhisperWorker();
+            const { terminate } = worker;
+            const cacheSet = vi.spyOn(SharedCache, 'set');
+            const init = vi.spyOn(whisper as any, 'initWorker').mockImplementation(() => {});
+            vi.spyOn(whisper as any, 'updateTranscriptIndex').mockImplementation(() => {});
+            vi.spyOn(whisper as any, 'ensureTranslatedTranscript').mockResolvedValue(undefined);
+            vi.spyOn(whisper as any, 'showStatus').mockImplementation(() => {});
+
+            (whisper as any).activeRunSettings = exactSettings;
+            (whisper as any).transcribing = true;
+            (whisper as any).worker = worker;
+            (whisper as any).audio = { duration: 60, currentTime: 30 };
+            (whisper as any).pcmDuration = 60;
+            (whisper as any).segments = [{ start: 0, end: 28, text: '完成済み' }];
+            (whisper as any).processedRanges = [{ start: 0, end: 28 }];
+            (whisper as any).currentCacheKey = 'poison-ordering';
+            (whisper as any).currentCacheIdentity = 'exact-webgpu-plan';
+            (whisper as any).chunkOffsets.set(9, 30);
+
+            signalPoisonedWorker(whisper);
+
+            const terminateOrder = terminate.mock.invocationCallOrder[0];
+            const checkpointOrder = cacheSet.mock.invocationCallOrder[0];
+            const reinitOrder = init.mock.invocationCallOrder[0];
+            expect(terminateOrder).toBeLessThan(checkpointOrder);
+            expect(checkpointOrder).toBeLessThan(reinitOrder);
+            expect(init).toHaveBeenCalledWith(exactSettings);
+            expect(AppStore.state.whisper.stage).toBe('recovering');
+            expect(SharedCache.get('poison-ordering')).toMatchObject({
+                text: '完成済み',
+                complete: false,
+                sourceIdentity: 'exact-webgpu-plan',
+            });
+        });
+
+        it('retries one explicit GPU device loss on the pinned plan, then stops visibly', () => {
+            const { whisper, resetWorkerSpy, initSpy, stopSpy } = setupTerminalPoisonRecovery();
+            vi.spyOn(whisper as any, 'persistCache').mockImplementation(() => {});
+            (whisper as any).activeRunSettings = Object.freeze({
+                model: 'onnx-community/whisper-tiny',
+                backend: 'webgpu',
+                multilingual: true,
+            });
+
+            const loseDevice = () => (whisper as any).handleWorkerMessage({
+                data: {
+                    status: 'gpu-device-lost',
+                    data: { message: 'GPU device lost during OrtRun' },
+                },
+            } as any);
+
+            loseDevice();
+            expect(initSpy).toHaveBeenCalledWith(expect.objectContaining({
+                model: 'onnx-community/whisper-tiny',
+                backend: 'webgpu',
+            }));
+            expect(stopSpy).not.toHaveBeenCalled();
+
+            (whisper as any).worker = { postMessage: vi.fn() };
+            loseDevice();
+
+            expect(resetWorkerSpy).toHaveBeenLastCalledWith('gpu-device-lost-terminal', true);
+            expect(stopSpy).toHaveBeenCalledWith('gpu-device-lost-terminal');
+            expect(initSpy).toHaveBeenCalledTimes(1);
+        });
+
+        it('stops after repeated bounded-backend inference timeouts', () => {
+            const { whisper, resetWorkerSpy, initSpy, stopSpy } = setupTerminalPoisonRecovery();
 
             signalPoisonedWorker(whisper);
             expect(initSpy).toHaveBeenCalledTimes(1);
@@ -1686,10 +1968,11 @@ describe('Whisper', () => {
             (whisper as any).markChunkActivity();
             signalPoisonedWorker(whisper);
 
-            expect(resetWorkerSpy).toHaveBeenLastCalledWith('inference-timeout-terminal');
+            expect(resetWorkerSpy).toHaveBeenLastCalledWith('inference-timeout-terminal', true);
             expect(stopSpy).toHaveBeenCalledWith('inference-timeout-terminal');
             expect(initSpy).toHaveBeenCalledTimes(1);
             expect((whisper as any).transcribing).toBe(false);
+            expect(AppStore.state.whisper.stage).toBe('error');
         });
 
         it('ignores a stale chunk-scoped ready lifecycle after a seek flush', () => {
@@ -1820,8 +2103,193 @@ describe('Whisper', () => {
             vi.spyOn(whisper as any, 'logNewTranscriptSegments').mockImplementation(() => {});
             vi.spyOn(whisper as any, 'translateAhead').mockResolvedValue(undefined);
             vi.spyOn(whisper as any, 'maybeFinalizeTranscript').mockImplementation(() => {});
-            return vi.spyOn(whisper as any, 'persistCache').mockImplementation(() => {});
+            return vi.spyOn(whisper as any, 'queueCacheCheckpoint').mockImplementation(() => {});
         }
+
+        function setupRuntimeProgress(input: {
+            duration: number;
+            playback: number;
+            pcmDuration: number;
+            processedRanges: Array<{ start: number; end: number }>;
+            pendingChunks?: number;
+            timingQuality?: 'word' | 'segment';
+        }): Whisper {
+            const whisper = new Whisper();
+            (whisper as any).transcribing = true;
+            (whisper as any).audio = {
+                duration: input.duration,
+                currentTime: input.playback,
+            };
+            (whisper as any).pcmDuration = input.pcmDuration;
+            (whisper as any).processedRanges = input.processedRanges;
+            (whisper as any).coverageOrigin = 0;
+            (whisper as any).pendingChunks = input.pendingChunks || 0;
+            (whisper as any).timingQuality = input.timingQuality || null;
+            (whisper as any).activeRunSettings = Object.freeze({
+                model: 'onnx-community/whisper-tiny',
+                backend: 'webgpu',
+                chunkLengthS: 6,
+            });
+            vi.spyOn(whisper as any, 'showStatus').mockImplementation(() => {});
+            return whisper;
+        }
+
+        it('refreshes visible progress for started and empty decoding heartbeats', () => {
+            const whisper = new Whisper();
+            let now = 1_000;
+            vi.spyOn(Date, 'now').mockImplementation(() => now);
+            vi.spyOn(whisper as any, 'showStatus').mockImplementation(() => {});
+            const emit = vi.spyOn(EventBus, 'emit');
+            (whisper as any).audio = { duration: 60, currentTime: 12 };
+            (whisper as any).processedRanges = [{ start: 0, end: 6 }];
+            (whisper as any).pcmDuration = 12;
+            (whisper as any).activeRunSettings = Object.freeze({
+                model: 'onnx-community/whisper-tiny',
+                backend: 'webgpu',
+                chunkLengthS: 6,
+            });
+            ownChunk(whisper, 3, 0, 6);
+
+            (whisper as any).handleWorkerMessage({
+                data: { status: 'started', chunkId: 3, data: { queueDepth: 0 } },
+            });
+            expect(AppStore.state.whisper.playbackSeconds).toBe(12);
+
+            now = 1_500;
+            (whisper as any).audio.currentTime = 18;
+            (whisper as any).handleWorkerMessage({
+                data: {
+                    status: 'heartbeat',
+                    chunkId: 3,
+                    data: { phase: 'decoding', partialText: '' },
+                },
+            });
+
+            expect(AppStore.state.whisper).toMatchObject({
+                stage: 'behind',
+                playbackSeconds: 18,
+                processedSeconds: 6,
+                backlogSeconds: 12,
+                pendingChunks: 1,
+            });
+            expect(emit).toHaveBeenCalledWith(
+                'whisper:progress',
+                expect.objectContaining({ playbackSeconds: 18, processedSeconds: 6 }),
+            );
+        });
+
+        it('reports processed timeline, playback backlog, queue, model, and backend truthfully', () => {
+            const whisper = setupRuntimeProgress({
+                duration: 100,
+                playback: 50,
+                pcmDuration: 55,
+                processedRanges: [{ start: 0, end: 20 }],
+                pendingChunks: 1,
+                timingQuality: 'segment',
+            });
+
+            (whisper as any).updateTranscribingProgress();
+
+            expect(AppStore.state.whisper).toMatchObject({
+                stage: 'behind',
+                model: 'whisper-tiny',
+                backend: 'webgpu',
+                processedSeconds: 20,
+                totalSeconds: 100,
+                playbackSeconds: 50,
+                backlogSeconds: 30,
+                pendingChunks: 1,
+                timingQuality: 'segment',
+                progress: 20,
+            });
+            expect(AppStore.state.whisper.progressMessage).toContain('whisper-tiny');
+            expect(AppStore.state.whisper.progressMessage).toContain('WEBGPU');
+            expect(AppStore.state.whisper.progressMessage).toMatch(/^30s behind/);
+        });
+
+        it('counts discontiguous analyzed ranges without presenting the furthest cursor as work done', () => {
+            const whisper = setupRuntimeProgress({
+                duration: 100,
+                playback: 100,
+                pcmDuration: 100,
+                processedRanges: [
+                    { start: 0, end: 20 },
+                    { start: 70, end: 80 },
+                ],
+            });
+
+            (whisper as any).updateTranscribingProgress();
+
+            expect(AppStore.state.whisper).toMatchObject({
+                processedSeconds: 30,
+                processedThroughSeconds: 80,
+                backlogSeconds: 80,
+                progress: 30,
+            });
+            expect(AppStore.state.whisper.progressMessage).toContain('30s analyzed');
+            expect(AppStore.state.whisper.progressMessage).toContain('timeline 80/100s');
+        });
+
+        it('publishes natural completion exactly once and leaves no active processing loop', () => {
+            const whisper = new Whisper();
+            const emit = vi.spyOn(EventBus, 'emit');
+            vi.spyOn(whisper as any, 'flushCacheCheckpoint').mockImplementation(() => {});
+            vi.spyOn(whisper as any, 'logNewTranscriptSegments').mockImplementation(() => {});
+            vi.spyOn(whisper as any, 'showStatus').mockImplementation(() => {});
+            vi.spyOn(whisper as any, 'scheduleIdleUnload').mockImplementation(() => {});
+            (whisper as any).transcribing = true;
+            (whisper as any).finalizeOnIdle = true;
+            (whisper as any).pendingChunks = 0;
+            const audio = document.createElement('audio');
+            Object.defineProperty(audio, 'duration', { value: 10, configurable: true });
+            audio.currentTime = 10;
+            (whisper as any).audio = audio;
+            (whisper as any).pcmDuration = 10;
+            (whisper as any).segments = [{ start: 0, end: 10, text: '完了' }];
+            (whisper as any).processedRanges = [{ start: 0, end: 10 }];
+            (whisper as any).processingLoopId = window.setInterval(() => {}, 1_000);
+
+            (whisper as any).maybeFinalizeTranscript();
+            (whisper as any).maybeFinalizeTranscript();
+
+            expect(emit.mock.calls.filter(([event]) => event === 'whisper:complete')).toHaveLength(1);
+            expect((whisper as any).processingLoopId).toBeNull();
+            expect((whisper as any).transcribing).toBe(false);
+            expect(AppStore.state.whisper.stage).toBe('complete');
+        });
+
+        it('finishes an incomplete mid-track run as partial without emitting completion', () => {
+            const whisper = new Whisper();
+            const emit = vi.spyOn(EventBus, 'emit');
+            const flush = vi.spyOn(whisper as any, 'flushCacheCheckpoint').mockImplementation(() => {});
+            vi.spyOn(whisper as any, 'logNewTranscriptSegments').mockImplementation(() => {});
+            vi.spyOn(whisper as any, 'showStatus').mockImplementation(() => {});
+            vi.spyOn(whisper as any, 'scheduleIdleUnload').mockImplementation(() => {});
+            (whisper as any).transcribing = true;
+            (whisper as any).finalizeOnIdle = true;
+            (whisper as any).pendingChunks = 0;
+            const audio = document.createElement('audio');
+            Object.defineProperty(audio, 'duration', { value: 130, configurable: true });
+            audio.currentTime = 130;
+            (whisper as any).audio = audio;
+            (whisper as any).pcmDuration = 130;
+            (whisper as any).segments = [{ start: 120, end: 130, text: '途中から' }];
+            (whisper as any).processedRanges = [{ start: 120, end: 130 }];
+            (whisper as any).coverageOrigin = 120;
+
+            (whisper as any).maybeFinalizeTranscript();
+
+            expect(emit.mock.calls.filter(([event]) => event === 'whisper:complete')).toHaveLength(0);
+            expect(flush).toHaveBeenCalledWith(false);
+            expect(AppStore.state.whisper).toMatchObject({
+                stage: 'partial',
+                processedSeconds: 10,
+                processedThroughSeconds: 130,
+                totalSeconds: 130,
+                backlogSeconds: 120,
+            });
+            expect(AppStore.state.whisper.progress).toBeLessThan(100);
+        });
 
         it('emits finalized history plus a safe non-persisted provisional segment', () => {
             const { whisper, emit } = setupProgressiveWhisper(25);
@@ -1930,7 +2398,8 @@ describe('Whisper', () => {
             const update = findWhisperUpdate(emit, 'complete');
             expect(update).toMatchObject({ text: '', segments: [], source: 'complete' });
             expect((whisper as any).segments).toEqual([]);
-            expect(persist).not.toHaveBeenCalled();
+            expect((whisper as any).processedRanges).toEqual([{ start: 0, end: 2 }]);
+            expect(persist).toHaveBeenCalledOnce();
         });
 
         it('strips complete and split timestamp tokens from provisional heartbeat text', () => {
@@ -2135,6 +2604,40 @@ describe('Whisper', () => {
                 vi.useRealTimers();
             }
         });
+
+        it('rewinds into a real processed-coverage gap instead of trusting subtitle bounds', () => {
+            vi.useFakeTimers();
+            try {
+                const whisper = new Whisper();
+                const audio = document.createElement('audio');
+                audio.currentTime = 35;
+                const worker = { postMessage: vi.fn() };
+                (whisper as any).audio = audio;
+                (whisper as any).worker = worker;
+                (whisper as any).transcribing = true;
+                (whisper as any).transcribedUpTo = 80;
+                (whisper as any).processedRanges = [
+                    { start: 0, end: 20 },
+                    { start: 70, end: 80 },
+                ];
+                (whisper as any).segments = [
+                    { start: 2, end: 18, text: '前半' },
+                    { start: 72, end: 78, text: '後半' },
+                ];
+                (whisper as any).lastSegmentEnd = 78;
+                vi.spyOn(window, 'requestAnimationFrame').mockImplementation(() => 1);
+                vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => {});
+                vi.spyOn(whisper as any, 'maybeProcessNextChunk').mockImplementation(() => {});
+
+                (whisper as any).handleSeek();
+                vi.advanceTimersByTime(101);
+
+                expect((whisper as any).transcribedUpTo).toBe(20);
+                expect(worker.postMessage).toHaveBeenCalledWith({ type: 'flush-queue' });
+            } finally {
+                vi.useRealTimers();
+            }
+        });
     });
 
     describe('chunk stall watchdog', () => {
@@ -2250,6 +2753,11 @@ describe('Whisper', () => {
             (whisper as any).transcribing = true;
             (whisper as any).pendingChunks = 1;
             (whisper as any).transcribedUpTo = 40;
+            (whisper as any).lastSegmentEnd = 78;
+            (whisper as any).processedRanges = [
+                { start: 0, end: 20 },
+                { start: 70, end: 80 },
+            ];
             (whisper as any).chunkSendTimes.set(10, performance.now());
             (whisper as any).chunkGenerations.set(10, (whisper as any).transcriptionGeneration);
             (whisper as any).chunkOffsets.set(10, 18);
@@ -2303,12 +2811,17 @@ describe('Whisper', () => {
             (whisper as any).chunkLastActivity.set(1, performance.now() - 150_000);
             (whisper as any).chunkLastActivity.set(2, performance.now() - 120_000);
             (whisper as any).transcribedUpTo = 120;
+            (whisper as any).lastSegmentEnd = 110;
+            (whisper as any).processedRanges = [
+                { start: 0, end: 70 },
+                { start: 100, end: 110 },
+            ];
             (whisper as any).modelReady = true;
             (whisper as any).lastChunkStallRecoveryAt = -1_000_000;
 
             (whisper as any).recoverFromStalledChunks(settings, 1, 150_000);
 
-            expect(resetSpy).toHaveBeenCalledWith('chunk-stall-timeout');
+            expect(resetSpy).toHaveBeenCalledWith('chunk-stall-timeout', true);
             expect(initSpy).toHaveBeenCalledWith(settings);
             expect(progressSpy).toHaveBeenCalled();
             expect((whisper as any).pendingChunks).toBe(0);
@@ -2344,6 +2857,23 @@ describe('Whisper', () => {
 
             expect(sendChunk).toHaveBeenCalledTimes(1);
             expect(sendChunk.mock.calls[0]?.[4]).toBe(6);
+        });
+
+        it('queues every missing window between discontiguous analyzed ranges', () => {
+            const { whisper, sendChunk } = setupReadyChunkPipeline(0);
+            (whisper as any).transcribedUpTo = 20;
+            (whisper as any).processedRanges = [
+                { start: 0, end: 20 },
+                { start: 70, end: 80 },
+            ];
+
+            for (let index = 0; index < 10; index++) {
+                (whisper as any).maybeProcessNextChunk();
+            }
+
+            expect(sendChunk.mock.calls.map(call => call[1])).toEqual([
+                20, 26, 32, 38, 44, 50, 56, 62, 68, 80,
+            ]);
         });
 
         it('uses the same bootstrap chunk size on WebGPU', () => {
@@ -2539,28 +3069,36 @@ describe('Whisper', () => {
         });
     });
 
-    describe('buildWordTimings', () => {
-        it('splits text into word timings for whitespace languages', () => {
+    describe('timestamp granularity', () => {
+        it('does not synthesize word timings from segment-only output', () => {
             const whisper = new Whisper();
-            const words = (whisper as any).buildWordTimings('hello world', 0, 2);
-            expect(words).toHaveLength(2);
-            expect(words[0].text).toBe('hello');
-            expect(words[1].text).toBe('world');
-            expect(words[0].start).toBe(0);
-            expect(words[1].end).toBe(2);
+            const segments = (whisper as any).parseSegments([{
+                text: 'hello world',
+                timestamp: [0, 2],
+                words: [
+                    { text: 'hello', start: 0, end: 1 },
+                    { text: 'world', start: 1, end: 2 },
+                ],
+            }], 'segment');
+
+            expect(segments).toEqual([{ start: 0, end: 2, text: 'hello world', words: undefined }]);
         });
 
-        it('splits Japanese text into characters', () => {
+        it('preserves worker-provided words only when capability is exact', () => {
             const whisper = new Whisper();
-            const words = (whisper as any).buildWordTimings('こんにちは', 0, 1);
-            expect(words).toHaveLength(5);
-            expect(words[0].text).toBe('こ');
-            expect(words[4].text).toBe('は');
-        });
+            const segments = (whisper as any).parseSegments([{
+                text: 'お邪魔します',
+                timestamp: [0, 2],
+                words: [
+                    { text: 'お邪魔', start: 0, end: 1 },
+                    { text: 'します', start: 1, end: 2 },
+                ],
+            }], 'word');
 
-        it('returns empty array for empty text', () => {
-            const whisper = new Whisper();
-            expect((whisper as any).buildWordTimings('', 0, 1)).toEqual([]);
+            expect(segments[0].words).toEqual([
+                { text: 'お邪魔', start: 0, end: 1 },
+                { text: 'します', start: 1, end: 2 },
+            ]);
         });
     });
 
@@ -2738,7 +3276,11 @@ describe('Whisper', () => {
         function storeCachedSnapshot(
             whisper: Whisper,
             source: string,
-            snapshot: { text: string; segments: Array<Record<string, unknown>> },
+            snapshot: {
+                text: string;
+                segments: Array<Record<string, unknown>>;
+                timingQuality?: 'word' | 'segment';
+            },
         ): void {
             const key = (whisper as any).buildCacheKey(source, cachedSettings);
             SharedCache.set(key, {
@@ -2807,6 +3349,7 @@ describe('Whisper', () => {
             const source = 'https://example.test/cached-timestamp-token.mp3';
             storeCachedSnapshot(whisper, source, {
                 text: '<|0.00|>お邪魔します<|2.00|>',
+                timingQuality: 'word',
                 segments: [{
                     start: 0,
                     end: 2,
@@ -2846,6 +3389,52 @@ describe('Whisper', () => {
             });
 
             expectNoCachedSnapshot(whisper, source);
+        });
+
+        it('migrates a legacy partial cache to durable whole-track resume', () => {
+            const whisper = new Whisper();
+            const cached = (whisper as any).sanitizeCachedTranscript({
+                text: '保存済み',
+                segments: [{ start: 10, end: 20, text: '保存済み' }],
+                model: cachedSettings.model,
+                subtask: cachedSettings.subtask,
+                language: cachedSettings.language,
+                createdAt: Date.now(),
+                complete: false,
+            });
+
+            expect(cached).toMatchObject({
+                coverageOrigin: 0,
+                processedRanges: [],
+                unavailableRanges: [],
+                complete: false,
+            });
+        });
+
+        it('hydrates a coverage-only checkpoint without emitting a subtitle row', () => {
+            const whisper = new Whisper();
+            vi.spyOn(whisper as any, 'getWhisperSettings').mockReturnValue(cachedSettings);
+            const source = 'https://example.test/cached-silence-coverage.mp3';
+            const key = (whisper as any).buildCacheKey(source, cachedSettings);
+            SharedCache.set(key, {
+                text: '',
+                segments: [],
+                model: cachedSettings.model,
+                subtask: cachedSettings.subtask,
+                language: cachedSettings.language,
+                createdAt: Date.now(),
+                complete: false,
+                timingQuality: 'segment',
+                processedRanges: [{ start: 0, end: 20 }],
+                unavailableRanges: [],
+                coverageOrigin: 0,
+            }, 60_000);
+            const emit = vi.spyOn(EventBus, 'emit');
+
+            (whisper as any).emitCachedSnapshotIfAvailable(source);
+
+            expect((whisper as any).processedRanges).toEqual([{ start: 0, end: 20 }]);
+            expect(emit.mock.calls.some(([event]) => event === 'whisper:update')).toBe(false);
         });
     });
 
@@ -3036,12 +3625,7 @@ describe('Whisper', () => {
             });
             mockDevice(fullProfile, true);
             const whisper = new Whisper();
-            const worker = {
-                postMessage: vi.fn(),
-                terminate: vi.fn(),
-                onmessage: null,
-                onerror: null,
-            };
+            const worker = createMockWhisperWorker();
             (whisper as any).worker = worker;
             (whisper as any).modelReady = true;
             AppStore.setWhisperState({

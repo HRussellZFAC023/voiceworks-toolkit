@@ -33,10 +33,28 @@ interface CachedTranscript {
     lrc?: string;
     vtt?: string;
     complete?: boolean;
+    timingQuality?: 'word' | 'segment';
     translations?: Record<string, { text: string; lrc: string; vtt?: string }>;
 }
 
 const BADGE_ATTR = 'data-asmr-transcript';
+const VTT_WORD_TIMESTAMP_RE = /<\d{2}:\d{2}:\d{2}\.\d{3}>/g;
+
+/**
+ * v169 and older caches may contain linearly synthesized `segment.words`.
+ * Treat cached word timing as exact only when the producer explicitly recorded
+ * that capability; legacy/missing metadata must remain line-timed.
+ */
+function cachedSegmentsForExport(cached: CachedTranscript): WhisperSegment[] {
+    if (cached.timingQuality === 'word') return cached.segments;
+    return cached.segments.map(segment => ({ ...segment, words: undefined }));
+}
+
+function cachedVttForExport(cached: CachedTranscript, vtt: string): string {
+    return cached.timingQuality === 'word'
+        ? vtt
+        : vtt.replace(VTT_WORD_TIMESTAMP_RE, '');
+}
 
 export class TranscriptFileInjector {
     private bridge = KikoeruBridge.getInstance();
@@ -263,12 +281,12 @@ export class TranscriptFileInjector {
         wrap.dataset.asmrTranscriptKey = `${entry.cacheKey}:${hasTranslation ? targetLang : ''}`;
 
         // LRC download
-        const lrc = cached.lrc || buildLrcFromSegments(cached.segments);
+        const lrc = cached.lrc || buildLrcFromSegments(cachedSegmentsForExport(cached));
         if (lrc) {
             wrap.appendChild(this.createButton(I18n.t('whisperTranscriptDownload'), () => {
                 const fresh = SharedCache.get<CachedTranscript>(entry.cacheKey);
-                const segs = fresh?.segments || cached.segments;
-                const content = fresh?.lrc || buildLrcFromSegments(segs);
+                const source = fresh || cached;
+                const content = source.lrc || buildLrcFromSegments(cachedSegmentsForExport(source));
                 if (content) this.download(buildTranscriptFileName(entry.trackTitle, entry.model, cached.language, 'lrc'), content);
             }));
         }
@@ -277,16 +295,16 @@ export class TranscriptFileInjector {
         // an external translation workflow.
         wrap.appendChild(this.createButton(I18n.t('whisperTranscriptDownloadTxt'), () => {
             const fresh = SharedCache.get<CachedTranscript>(entry.cacheKey);
-            const segs = fresh?.segments || cached.segments;
-            const text = buildPlainTextFromSegments(segs) || fresh?.text || cached.text;
+            const source = fresh || cached;
+            const text = buildPlainTextFromSegments(cachedSegmentsForExport(source)) || source.text;
             if (text) this.download(buildTranscriptFileName(entry.trackTitle, entry.model, cached.language, 'txt'), text);
         }, true));
 
         // VTT download
         wrap.appendChild(this.createButton(I18n.t('vttDownload'), () => {
             const fresh = SharedCache.get<CachedTranscript>(entry.cacheKey);
-            const segs = fresh?.segments || cached.segments;
-            const vtt = buildVttFromSegments(segs);
+            const source = fresh || cached;
+            const vtt = buildVttFromSegments(cachedSegmentsForExport(source));
             if (vtt) this.download(buildTranscriptFileName(entry.trackTitle, entry.model, cached.language, 'vtt'), vtt);
         }));
 
@@ -307,8 +325,15 @@ export class TranscriptFileInjector {
             if (translated.vtt) {
                 wrap.appendChild(this.createButton(I18n.t('vttDownloadTranslated'), () => {
                     const fresh = SharedCache.get<CachedTranscript>(entry.cacheKey);
-                    const tr = fresh?.translations?.[targetLang] || translated;
-                    if (tr.vtt) this.download(buildTranscriptFileName(entry.trackTitle, entry.model, targetLang, 'vtt'), tr.vtt);
+                    const freshTranslation = fresh?.translations?.[targetLang];
+                    const tr = freshTranslation || translated;
+                    const source = freshTranslation && fresh ? fresh : cached;
+                    if (tr.vtt) {
+                        this.download(
+                            buildTranscriptFileName(entry.trackTitle, entry.model, targetLang, 'vtt'),
+                            cachedVttForExport(source, tr.vtt),
+                        );
+                    }
                 }, true));
             }
         }
