@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
     classifyDeviceTier,
+    getWhisperMinWebGpuBufferBytes,
     isAppleM1CompatibilityGpu,
     isIntelMac,
     shouldUseTinyWhisperModel,
@@ -67,6 +68,13 @@ describe('DeviceCapabilities', () => {
     });
 
     describe('Whisper model policy', () => {
+        it('uses the WebGPU core per-buffer baseline without treating it as total VRAM', () => {
+            expect(getWhisperMinWebGpuBufferBytes('onnx-community/whisper-tiny')).toBe(256 * 1024 * 1024);
+            expect(getWhisperMinWebGpuBufferBytes('onnx-community/whisper-small_timestamped')).toBe(256 * 1024 * 1024);
+            expect(getWhisperMinWebGpuBufferBytes('onnx-community/whisper-medium_timestamped')).toBe(256 * 1024 * 1024);
+            expect(getWhisperMinWebGpuBufferBytes('onnx-community/whisper-large-v3-turbo_timestamped')).toBe(256 * 1024 * 1024);
+        });
+
         it('recognizes the exact privacy-preserving Firefox M1 renderer', () => {
             expect(isAppleM1CompatibilityGpu('mozilla apple m1, or similar')).toBe(true);
             expect(isAppleM1CompatibilityGpu('apple m1 gpu')).toBe(true);

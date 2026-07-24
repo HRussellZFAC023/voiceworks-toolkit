@@ -3,7 +3,7 @@
  *
  * - Captures bounded live audio directly from the <audio> element
  * - Uses a size-capped compatibility decode only when live capture is unavailable
- * - Uses Transformers.js in a Web Worker (WebGPU required)
+ * - Uses Transformers.js in a Web Worker (WebGPU preferred, bounded WASM fallback)
  * - Emits live segments to Learner Mode + mini player
  * - Caches transcripts per track for near-instant reloads
  */
@@ -12,7 +12,7 @@ import { KikoeruBridge } from '../infrastructure/KikoeruBridge';
 import { Logger, Config, I18n } from '../core/Utils';
 import { EventBus } from '../core/EventBus';
 import { createWhisperWorker } from './WhisperWorkerLoader';
-import { processRawChunks } from './whisperProcessing';
+import { isWhisperHallucinationText, processRawChunks } from './whisperProcessing';
 import type { RawChunk, ProcessedSegment } from './whisperProcessing';
 import { getAudioElement, isChinese } from '../core/DomUtils';
 import { SharedCache, CacheKeys } from '../core/Cache';
@@ -23,7 +23,11 @@ import { TranslationService } from '../services/TranslationService';
 import { AudioCache } from '../infrastructure/AudioCache';
 import { gmRequest } from '../infrastructure/HttpClient';
 import { GpuScheduler, Priority } from '../core/GpuScheduler';
-import { DeviceCapabilities, shouldUseTinyWhisperModel } from '../core/DeviceCapabilities';
+import {
+    DeviceCapabilities,
+    getWhisperMinWebGpuBufferBytes,
+    shouldUseTinyWhisperModel,
+} from '../core/DeviceCapabilities';
 import { CentralObserver } from '../core/CentralObserver';
 import { buildLrcFromSegments, buildVttFromSegments } from './transcriptFileUtils';
 import { correctWhisperText } from '../data/nsfw-glossary';
@@ -75,7 +79,6 @@ const INITIAL_BACKFILL_SEC = 30;
 const SEEK_BACKFILL_SEC = 15;
 const DEFAULT_POLL_INTERVAL_MS = 250;
 const DEFAULT_WORKER_UPDATE_INTERVAL_MS = 200;
-const DEFAULT_MIN_WEBGPU_BUFFER_BYTES = 256 * 1024 * 1024;
 const CHUNK_STALL_TIMEOUT_FLOOR_MS = 25_000;
 const CHUNK_STALL_TIMEOUT_MULTIPLIER = 3;
 const AUDIO_DECODE_TIMEOUT_MIN_MS = 90_000;
@@ -92,6 +95,7 @@ const TRANSLATE_AHEAD_MAX_SEGMENTS_PER_RUN = 50;
 const GPU_ERROR_PATTERN =
     /createBuffer|RangeError|out of memory|OOM|allocation|device lost|GPUDevice|createComputePipeline|createShaderModule|mapAsync|mapping webgpu buffer|invalid buffer|Instance reference|AbortError|release session|invalid session|index out of bounds|reading 'destroy'|reading 'dispose'/i;
 const EXPLICIT_DEVICE_LOSS_PATTERN = /device lost|Instance reference|release session|invalid session|reading 'destroy'|reading 'dispose'/i;
+const DEFINITE_WEBGPU_DEVICE_LOSS_PATTERN = /\bdevice (?:is )?lost\b|GPUDevice.{0,40}\blost\b|context.{0,40}\blost\b/i;
 
 function normalizeLanguageCode(language: string): 'ja' | 'zh' | 'en' | '' {
     const normalized = String(language || '').trim().toLowerCase().split('-')[0];
@@ -195,7 +199,13 @@ type WorkerReadyMessage = {
     chunkId?: number;
 };
 
-type WorkerInitMessage = { status: 'initiate'; backend?: string; vendor?: string; chunkId?: number };
+type WorkerInitMessage = {
+    status: 'initiate';
+    backend?: string;
+    vendor?: string;
+    reason?: string;
+    chunkId?: number;
+};
 
 type WorkerErrorMessage = { status: 'error'; data?: { message?: string; gpuFallback?: boolean }; chunkId?: number };
 
@@ -208,6 +218,7 @@ type WorkerFallbackMessage = {
     originalModel: string;
     fallbackModel: string;
     reason?: string;
+    reasonCode?: 'webgpu-buffer-limit' | 'wasm-bounded-model';
     backend?: string;
     dtype?: string;
     chunkId?: number;
@@ -762,6 +773,10 @@ export class Whisper {
         return EXPLICIT_DEVICE_LOSS_PATTERN.test(message);
     }
 
+    private isDefiniteWebgpuDeviceLossMessage(message: string): boolean {
+        return DEFINITE_WEBGPU_DEVICE_LOSS_PATTERN.test(message);
+    }
+
     private getWasmPolicyReason(): string | null {
         if (Config.get('forceWhisperWasm') === true) return 'forceWhisperWasm';
         return null;
@@ -877,7 +892,9 @@ export class Whisper {
         this.currentCacheKey = this.buildCacheKey(src, settings);
 
         if (settings.cacheTranscripts) {
-            const cached = SharedCache.get<CachedTranscript>(this.currentCacheKey);
+            const cached = this.sanitizeCachedTranscript(
+                SharedCache.get<CachedTranscript>(this.currentCacheKey),
+            );
             if (cached && cached.segments?.length) {
                 // Verify the cached transcript's source identity matches ours.
                 // hashString is 32-bit, so collisions are theoretically possible.
@@ -889,11 +906,6 @@ export class Whisper {
                     });
                 } else {
                     Logger.debug('[Whisper] Using cached transcript:', { segments: cached.segments.length, complete: !!cached.complete });
-                    // Apply hallucination corrections to cached segments (new corrections retroactively fix old caches)
-                    for (const seg of cached.segments) {
-                        const corrected = this.applyLanguageAwareCorrections(seg.text);
-                        if (corrected !== seg.text) seg.text = corrected;
-                    }
                     this.segments = cached.segments;
                     this.logNewTranscriptSegments('cache');
                     this.lastSegmentEnd = cached.segments[cached.segments.length - 1]?.end || 0;
@@ -2207,14 +2219,39 @@ export class Whisper {
         });
 
         if (backend === 'webgpu') {
+            const attemptedPortableModel = attemptedModel === FALLBACK_MODEL;
+            const explicitDeviceLoss = this.isDefiniteWebgpuDeviceLossMessage(errorMessage);
+
+            // maxBufferSize is a per-allocation limit, not a VRAM estimate.
+            // Give every selected model one honest WebGPU session attempt, then
+            // retry tiny in a fresh worker before disabling WebGPU globally.
+            if (!attemptedPortableModel && !explicitDeviceLoss) {
+                this.modelOverride = FALLBACK_MODEL;
+                EventBus.emit('whisper:fallback', {
+                    originalModel: attemptedModel,
+                    fallbackModel: FALLBACK_MODEL,
+                    reason: I18n.t('whisperFallbackWebGpuModel'),
+                });
+                this.resetWorker('webgpu-model-load-retry-tiny', true);
+                this.dispatchProgress(I18n.format('whisperFallbackModel', {
+                    model: FALLBACK_MODEL.split('/').pop() || FALLBACK_MODEL,
+                }), 10, 'model');
+                this.initWorker(this.getWhisperSettings());
+                return;
+            }
+
             const firstFailure = !Whisper.webgpuFailed;
-            this.markWebgpuFailed('model-load-failed');
+            this.markWebgpuFailed(explicitDeviceLoss
+                ? 'model-load-device-lost'
+                : 'portable-model-load-failed');
             this.modelOverride = FALLBACK_MODEL;
             if (firstFailure) EventBus.emit('webgpu:failed', { source: 'whisper' });
             EventBus.emit('whisper:fallback', {
                 originalModel: attemptedModel,
                 fallbackModel: FALLBACK_MODEL,
-                reason: errorMessage,
+                reason: explicitDeviceLoss
+                    ? I18n.t('whisperGpuCrashed')
+                    : I18n.t('whisperFallbackCpuModel'),
             });
 
             // Transformers.js serializes browser session creation through a
@@ -2728,7 +2765,8 @@ export class Whisper {
                     this.armModelLoadTimer(this.getWhisperSettings());
                     Logger.debug(`[Whisper] Worker backend: ${message.backend}${message.vendor ? ` (${message.vendor})` : ''}`);
                     if (message.backend === 'wasm') {
-                        Logger.warn('[Whisper] Worker using WASM backend (WebGPU unavailable on this device)');
+                        Logger.warn('[Whisper] Worker using WASM backend:', message.reason || 'WebGPU unavailable');
+                        this.dispatchProgress(I18n.t('whisperCpuBackend'), 6, 'model');
                     }
                 }
                 break;
@@ -2796,13 +2834,18 @@ export class Whisper {
                 this.armModelLoadTimer(this.getWhisperSettings());
                 const fallbackModelShort = fallback.fallbackModel.split('/').pop() || fallback.fallbackModel;
                 Logger.warn('[Whisper] Falling back from', fallback.originalModel, 'to', fallback.fallbackModel, '- reason:', fallback.reason);
+                const localizedReason = fallback.reasonCode === 'webgpu-buffer-limit'
+                    ? I18n.t('whisperFallbackWebGpuCapacity')
+                    : fallback.reasonCode === 'wasm-bounded-model'
+                        ? I18n.t('whisperFallbackCpuModel')
+                        : fallback.reason;
                 // Notify user that a different model is being loaded
                 const fallbackMsg = I18n.format('whisperFallbackModel', { model: fallbackModelShort });
                 this.dispatchProgress(fallbackMsg, 10, 'model');
                 EventBus.emit('whisper:fallback', {
                     originalModel: fallback.originalModel,
                     fallbackModel: fallback.fallbackModel,
-                    reason: fallback.reason
+                    reason: localizedReason,
                 });
                 break;
             }
@@ -2943,6 +2986,7 @@ export class Whisper {
                 this.markChunkActivity();
                 // Worker sends raw chunks + fullText; host processes
                 const fullText = complete.data?.text;
+                const safeFullText = isWhisperHallucinationText(fullText) ? '' : (fullText || '');
                 const processed = processRawChunks(complete.data?.rawChunks, fullText);
                 const segments = this.parseSegments(processed);
                 Logger.debug(`[Whisper] Complete chunk ${complete.chunkId}: ${segments.length} segments, text="${fullText?.slice(0, 50)}"`);
@@ -2955,7 +2999,7 @@ export class Whisper {
                 this.updateTranscribingProgress();
                 const latest = this.segments[this.segments.length - 1];
                 EventBus.emit('whisper:update', {
-                    text: latest?.text || fullText || '',
+                    text: latest?.text || safeFullText,
                     segments: [...this.segments],
                     final: this.pendingChunks === 0,
                     sourceLanguageHint: getWhisperSourceLanguageHint(this.getWhisperSettings().language),
@@ -3528,15 +3572,51 @@ export class Whisper {
     }
 
     /** Whisper-generated non-speech annotations that should be dropped. */
-    private static readonly NOISE_RE = /^\s*[\[\]()（）「」]*\s*(?:音楽|音乐|音樂|拍手|掌声|掌聲|笑声|笑聲|哭声|哭聲|叹气|嘆氣|静音|靜音|効果音|music|laughter|applause|silence|inaudible|noise|ドラゴンの音|スタッフ|谢谢观看|謝謝觀看|请订阅|請訂閱|下次见|下次見)\s*[\[\]()（）「」.!。！]*\s*$/i;
+    private static readonly NOISE_RE = /^\s*[\[\]()（）「」]*\s*(?:音楽|音乐|音樂|拍手|掌声|掌聲|笑声|笑聲|哭声|哭聲|叹气|嘆氣|静音|靜音|効果音|music|laughter|applause|silence|inaudible|noise|ドラゴンの音|スタッフ)\s*[\[\]()（）「」.!。！]*\s*$/i;
 
     private isNoiseOnly(text: string): boolean {
-        return Whisper.NOISE_RE.test(text);
+        return Whisper.NOISE_RE.test(text) || isWhisperHallucinationText(text);
     }
 
     // ------------------------------------------------------------------------
     // Cache handling
     // ------------------------------------------------------------------------
+
+    /**
+     * Apply current correction/noise policy to old cache entries before they
+     * can re-enter learner UI. Returns a detached copy so reads do not mutate a
+     * shared 90-day cache object in place.
+     */
+    private sanitizeCachedTranscript(cached: CachedTranscript | null | undefined): CachedTranscript | null {
+        if (!cached?.segments?.length) return null;
+        let changed = false;
+        const segments: WhisperSegment[] = [];
+        for (const segment of cached.segments) {
+            const corrected = this.applyLanguageAwareCorrections(segment.text);
+            if (this.isNoiseOnly(corrected)) {
+                changed = true;
+                continue;
+            }
+            if (corrected !== segment.text) {
+                changed = true;
+                segments.push({ ...segment, text: corrected });
+            } else {
+                segments.push({ ...segment });
+            }
+        }
+        if (segments.length === 0) return null;
+
+        const text = segments.map(segment => segment.text).join(' ');
+        if (text !== cached.text) changed = true;
+        return {
+            ...cached,
+            text,
+            segments,
+            lrc: changed ? buildLrcFromSegments(segments) : cached.lrc,
+            vtt: changed ? buildVttFromSegments(segments) : cached.vtt,
+            translations: changed ? undefined : cached.translations,
+        };
+    }
 
     /**
      * Check cache for a track and emit whisper:update immediately if found.
@@ -3549,17 +3629,11 @@ export class Whisper {
 
         const identity = this.buildCacheIdentity(src, settings);
         const key = this.buildCacheKey(src, settings);
-        const cached = SharedCache.get<CachedTranscript>(key);
-        if (!cached?.segments?.length) return;
+        const cached = this.sanitizeCachedTranscript(SharedCache.get<CachedTranscript>(key));
+        if (!cached) return;
 
         // Verify identity (collision check) — old entries without sourceIdentity are accepted
         if (cached.sourceIdentity && cached.sourceIdentity !== identity) return;
-
-        // Apply hallucination corrections (same as startTranscription cache path)
-        for (const seg of cached.segments) {
-            const corrected = this.applyLanguageAwareCorrections(seg.text);
-            if (corrected !== seg.text) seg.text = corrected;
-        }
 
         // Pre-populate Whisper state so startTranscription() finds segments ready
         this.segments = cached.segments;
@@ -3969,24 +4043,21 @@ export class Whisper {
         let pollIntervalMs = DEFAULT_POLL_INTERVAL_MS;
         let workerUpdateIntervalMs = DEFAULT_WORKER_UPDATE_INTERVAL_MS;
         let preferLowPowerAdapter = false;
-        let minWebgpuBufferBytes = DEFAULT_MIN_WEBGPU_BUFFER_BYTES;
-
-        const isIntelMacProfile = /\bintel-mac\b/i.test(profile.reason || '');
+        let minWebgpuBufferBytes: number;
 
         if (profile.tier === 'limited') {
             maxPendingChunks = 4;
             pollIntervalMs = 325;
             workerUpdateIntervalMs = 260;
-            // Limited-tier mobile and Intel-mac profiles perform better with
-            // low-power adapters for sustained real-time Whisper.
-            preferLowPowerAdapter = profile.isMobile || isIntelMacProfile;
-            minWebgpuBufferBytes = 384 * 1024 * 1024;
+            // Mobile devices favour sustained efficiency. Desktop Intel Macs
+            // should still request the discrete/high-performance GPU when one
+            // is available.
+            preferLowPowerAdapter = profile.isMobile;
         } else if (profile.tier === 'constrained') {
             maxPendingChunks = 2;
             pollIntervalMs = 450;
             workerUpdateIntervalMs = 320;
             preferLowPowerAdapter = true;
-            minWebgpuBufferBytes = 512 * 1024 * 1024;
         }
 
         if (memoryPressure === 'high') {
@@ -4040,6 +4111,7 @@ export class Whisper {
             model = autoConservative ? FALLBACK_MODEL : requestedModel;
             this.clearPresetSafetyFallbackNotice();
         }
+        minWebgpuBufferBytes = getWhisperMinWebGpuBufferBytes(model);
         const configuredLanguage = String(Config.get('whisperLanguage') || 'auto');
         let currentWork: WhisperWorkLanguageContext;
         try {

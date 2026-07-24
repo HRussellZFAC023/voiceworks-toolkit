@@ -1,27 +1,38 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 
 const RUNTIME_TIMEOUT_MS = 5 * 60 * 1000;
 
-test.describe('Whisper worker real runtime', () => {
-    test.skip(!process.env.WHISPER_E2E, 'Downloads and runs the real Whisper model');
-    test.setTimeout(RUNTIME_TIMEOUT_MS);
+type RuntimeResult = {
+    backend: string;
+    dtype: string;
+    model: string;
+    loadMs: number;
+    inferenceMs: number;
+    events: Array<{
+        status: string;
+        model?: string;
+        backend?: string;
+        dtype?: string;
+        message?: string;
+    }>;
+};
 
-    test('loads the bounded WASM model and completes one quiet-audio inference', async ({ page }) => {
-        page.on('console', message => {
-            if (message.text().includes('[Whisper Worker]')) {
-                console.log(`[runtime] ${message.type()}: ${message.text()}`);
-            }
-        });
+async function runWhisperRuntime(page: Page, forceWasm: boolean): Promise<RuntimeResult> {
+    page.on('console', message => {
+        if (message.text().includes('[Whisper Worker]')) {
+            console.log(`[runtime] ${message.type()}: ${message.text()}`);
+        }
+    });
 
-        await page.route('http://localhost:5173/whisper-runtime-host', route => {
-            route.fulfill({
-                status: 200,
-                contentType: 'text/html',
-                body: '<!doctype html><title>Whisper runtime host</title>',
-            });
+    await page.route('http://localhost:5173/whisper-runtime-host', route => {
+        route.fulfill({
+            status: 200,
+            contentType: 'text/html',
+            body: '<!doctype html><title>Whisper runtime host</title>',
         });
-        await page.goto('http://localhost:5173/whisper-runtime-host');
-        const result = await page.evaluate(async ({ timeoutMs }) => {
+    });
+    await page.goto('http://localhost:5173/whisper-runtime-host');
+    return page.evaluate(async ({ timeoutMs, useWasm }) => {
             const moduleUrl = new URL('/src/features/WhisperWorkerLoader.ts', location.origin).href;
             const loader = await import(moduleUrl);
             const worker = loader.createWhisperWorker();
@@ -101,7 +112,7 @@ test.describe('Whisper worker real runtime', () => {
                     }
                 };
 
-                worker.postMessage({ type: 'skip-webgpu' });
+                if (useWasm) worker.postMessage({ type: 'skip-webgpu' });
                 worker.postMessage({
                     type: 'init',
                     model: 'onnx-community/whisper-tiny',
@@ -110,14 +121,39 @@ test.describe('Whisper worker real runtime', () => {
                     language: 'ja',
                     chunkLengthS: 2,
                     strideLengthS: 0,
+                    minWebgpuBufferBytes: 256 * 1024 * 1024,
                 });
             });
-        }, { timeoutMs: RUNTIME_TIMEOUT_MS });
+        }, { timeoutMs: RUNTIME_TIMEOUT_MS, useWasm: forceWasm });
+}
+
+test.describe('Whisper worker real runtime', () => {
+    test.setTimeout(RUNTIME_TIMEOUT_MS);
+
+    test('loads the bounded WASM model and completes one quiet-audio inference', async ({ page }) => {
+        test.skip(!process.env.WHISPER_E2E, 'Downloads and runs the real Whisper WASM model');
+        const result = await runWhisperRuntime(page, true);
 
         console.log(`[runtime] result ${JSON.stringify(result)}`);
         expect(result.backend).toBe('wasm');
         expect(result.model).toBe('onnx-community/whisper-tiny');
         expect(result.dtype).toBeTruthy();
+        expect(result.events.some(event => event.status === 'started')).toBe(true);
+        expect(result.events.some(event => event.status === 'complete')).toBe(true);
+    });
+
+    test('loads the real WebGPU model and completes one quiet-audio inference', async ({ page }) => {
+        test.skip(
+            !process.env.WHISPER_WEBGPU_E2E,
+            'Requires a browser/OS with a real WebGPU adapter and downloads the model',
+        );
+        const result = await runWhisperRuntime(page, false);
+
+        console.log(`[runtime:webgpu] result ${JSON.stringify(result)}`);
+        expect(result.backend).toBe('webgpu');
+        expect(result.model).toBe('onnx-community/whisper-tiny');
+        expect(result.dtype).toContain('decoder_model_merged');
+        expect(result.events.some(event => event.status === 'fallback')).toBe(false);
         expect(result.events.some(event => event.status === 'started')).toBe(true);
         expect(result.events.some(event => event.status === 'complete')).toBe(true);
     });

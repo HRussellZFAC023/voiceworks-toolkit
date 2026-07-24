@@ -56,7 +56,7 @@ const HALLUCINATION_RE =
 
 /** Common YouTube/subtitle hallucinations from Whisper's training data. */
 const SUBTITLE_HALLUCINATION_RE =
-    /^\s*(thank you(\s+for\s+watching)?|thanks for watching|please subscribe|like and subscribe|see you next time|ご視聴ありがとうございます|チャンネル登録|谢谢观看|謝謝觀看|请订阅|請訂閱|下次见|下次見)\s*[.!。！]*\s*$/i;
+    /^\s*(thank you(\s+for\s+watching)?|thanks for watching|please subscribe|like and subscribe|see you next time|ご視聴ありがとう(?:ございます|ございました)|チャンネル登録|谢谢观看|謝謝觀看|请订阅|請訂閱|下次见|下次見)\s*[.!。！]*\s*$/i;
 
 /** Bracket/paren openers for `restoreMissingBrackets`. */
 const OPEN_BRACKET_RE = /^([\[（「『【〈《〔(]+)/;
@@ -71,6 +71,13 @@ function isCJKText(text: string): boolean {
 
 // ── Hallucination filtering ────────────────────────────────────────────
 
+/** True when the complete text is a known non-speech/subtitle hallucination. */
+export function isWhisperHallucinationText(text: string | null | undefined): boolean {
+    const normalized = String(text || '').trim();
+    if (!normalized) return false;
+    return HALLUCINATION_RE.test(normalized) || SUBTITLE_HALLUCINATION_RE.test(normalized);
+}
+
 /**
  * Remove chunks that are known non-speech hallucinations.
  * Returns a filtered copy (does not mutate the input).
@@ -80,9 +87,7 @@ export function cleanHallucinatedChunks<T extends { text?: string }>(chunks: T[]
     return chunks.filter(c => {
         const text = (c.text || '').trim();
         if (!text) return false;
-        if (HALLUCINATION_RE.test(text)) return false;
-        if (SUBTITLE_HALLUCINATION_RE.test(text)) return false;
-        return true;
+        return !isWhisperHallucinationText(text);
     });
 }
 
@@ -254,6 +259,10 @@ export function processRawChunks(
     fullText?: string,
 ): ProcessedSegment[] {
     if (!rawChunks || rawChunks.length === 0) return [];
+    // Word timestamps may split a known hallucination across several chunks.
+    // Drop it when the model's complete output is only that phrase, while the
+    // anchored pattern preserves real speech that merely surrounds the phrase.
+    if (isWhisperHallucinationText(fullText)) return [];
 
     const cleaned = cleanHallucinatedChunks(rawChunks);
     if (cleaned.length === 0) return [];

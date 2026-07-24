@@ -92,6 +92,7 @@ describe('DownloadCenter', () => {
     });
 
     afterEach(() => {
+        vi.useRealTimers();
         document.body.innerHTML = '';
         delete (window as Window & { showDirectoryPicker?: unknown }).showDirectoryPicker;
     });
@@ -439,6 +440,148 @@ describe('DownloadCenter', () => {
 
         expect(document.querySelector('[data-testid="search-work-RJ000045"]')).not.toBeNull();
         expect(document.querySelector('[data-testid="all-work-search-error"]')).toBeNull();
+        wrapper.unmount();
+    });
+
+    it('does not leave live site results blocked behind a stalled semantic model load', async () => {
+        mocks.fetchOwn.mockResolvedValue([]);
+        mocks.semanticSearch.mockReturnValue(new Promise(() => {}));
+        mocks.searchWorks.mockResolvedValue({
+            works: [{ id: 46, title: 'Live result while model loads' }],
+            pagination: { currentPage: 1, pageSize: 20, totalCount: 1 },
+        });
+        const wrapper = mount(DownloadCenter, { attachTo: document.body });
+        await wrapper.get('[data-testid="download-center-open"]').trigger('click');
+        await flushPromises();
+        const input = document.querySelector('[data-testid="search"]') as HTMLInputElement;
+        input.value = 'quiet whisper';
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        await flushPromises();
+        (document.querySelector('[data-testid="search-all-works"]') as HTMLButtonElement).click();
+        await flushPromises();
+
+        expect(document.querySelector('[data-testid="search-work-RJ000046"]')).not.toBeNull();
+        expect(document.querySelector('[data-testid="all-work-search-error"]')).toBeNull();
+        wrapper.unmount();
+    });
+
+    it('renders live results first and merges a slower semantic answer for the active query', async () => {
+        const semantic = deferred<any[]>();
+        mocks.fetchOwn.mockResolvedValue([]);
+        mocks.semanticSearch.mockReturnValue(semantic.promise);
+        mocks.searchWorks.mockResolvedValue({
+            works: [{ id: 46, title: 'Immediate live result' }],
+            pagination: { currentPage: 1, pageSize: 20, totalCount: 1 },
+        });
+        const wrapper = mount(DownloadCenter, { attachTo: document.body });
+        await wrapper.get('[data-testid="download-center-open"]').trigger('click');
+        await flushPromises();
+        const input = document.querySelector('[data-testid="search"]') as HTMLInputElement;
+        input.value = 'comfort';
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        await flushPromises();
+        (document.querySelector('[data-testid="search-all-works"]') as HTMLButtonElement).click();
+        await flushPromises();
+
+        expect(document.querySelector('[data-testid="search-work-RJ000046"]')).not.toBeNull();
+        expect(document.querySelector('[data-testid="search-work-RJ000044"]')).toBeNull();
+        semantic.resolve([{ id: '44', title: 'Later semantic result', score: 0.8 }]);
+        await flushPromises();
+
+        expect(document.querySelector('[data-testid="search-work-RJ000046"]')).not.toBeNull();
+        expect(document.querySelector('[data-testid="search-work-RJ000044"]')).not.toBeNull();
+        wrapper.unmount();
+    });
+
+    it('keeps searching when an empty live response arrives before a useful semantic answer', async () => {
+        const semantic = deferred<any[]>();
+        mocks.fetchOwn.mockResolvedValue([]);
+        mocks.semanticSearch.mockReturnValue(semantic.promise);
+        mocks.searchWorks.mockResolvedValue({
+            works: [],
+            pagination: { currentPage: 1, pageSize: 20, totalCount: 0 },
+        });
+        const wrapper = mount(DownloadCenter, { attachTo: document.body });
+        await wrapper.get('[data-testid="download-center-open"]').trigger('click');
+        await flushPromises();
+        const input = document.querySelector('[data-testid="search"]') as HTMLInputElement;
+        input.value = 'meaning-based query';
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        await flushPromises();
+        (document.querySelector('[data-testid="search-all-works"]') as HTMLButtonElement).click();
+        await flushPromises();
+
+        expect((document.querySelector('[data-testid="search-all-works"]') as HTMLButtonElement).disabled).toBe(true);
+        expect(document.querySelector('[data-testid="search-work-RJ000044"]')).toBeNull();
+        semantic.resolve([{ id: '44', title: 'Semantic-only result', score: 0.8 }]);
+        await flushPromises();
+
+        expect(document.querySelector('[data-testid="search-work-RJ000044"]')).not.toBeNull();
+        expect((document.querySelector('[data-testid="search-all-works"]') as HTMLButtonElement).disabled).toBe(false);
+        wrapper.unmount();
+    });
+
+    it('ignores a late semantic answer after a newer site query starts', async () => {
+        const firstSemantic = deferred<any[]>();
+        mocks.fetchOwn.mockResolvedValue([]);
+        mocks.semanticSearch
+            .mockReturnValueOnce(firstSemantic.promise)
+            .mockResolvedValueOnce([]);
+        mocks.searchWorks
+            .mockResolvedValueOnce({
+                works: [{ id: 46, title: 'First live result' }],
+                pagination: { currentPage: 1, pageSize: 20, totalCount: 1 },
+            })
+            .mockResolvedValueOnce({
+                works: [{ id: 47, title: 'Second live result' }],
+                pagination: { currentPage: 1, pageSize: 20, totalCount: 1 },
+            });
+        const wrapper = mount(DownloadCenter, { attachTo: document.body });
+        await wrapper.get('[data-testid="download-center-open"]').trigger('click');
+        await flushPromises();
+        const input = document.querySelector('[data-testid="search"]') as HTMLInputElement;
+        input.value = 'first';
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        await flushPromises();
+        (document.querySelector('[data-testid="search-all-works"]') as HTMLButtonElement).click();
+        await flushPromises();
+        expect(document.querySelector('[data-testid="search-work-RJ000046"]')).not.toBeNull();
+
+        input.value = 'second';
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        await flushPromises();
+        (document.querySelector('[data-testid="search-all-works"]') as HTMLButtonElement).click();
+        await flushPromises();
+        expect(document.querySelector('[data-testid="search-work-RJ000047"]')).not.toBeNull();
+
+        firstSemantic.resolve([{ id: '99', title: 'Stale semantic result', score: 0.9 }]);
+        await flushPromises();
+
+        expect(document.querySelector('[data-testid="search-work-RJ000099"]')).toBeNull();
+        expect(document.querySelector('[data-testid="search-work-RJ000047"]')).not.toBeNull();
+        wrapper.unmount();
+    });
+
+    it('ends a search with an error when both the live catalogue and semantic model are unavailable', async () => {
+        vi.useFakeTimers();
+        mocks.fetchOwn.mockResolvedValue([]);
+        mocks.semanticSearch.mockReturnValue(new Promise(() => {}));
+        mocks.searchWorks.mockRejectedValue(new Error('live site unavailable'));
+        const wrapper = mount(DownloadCenter, { attachTo: document.body });
+        await wrapper.get('[data-testid="download-center-open"]').trigger('click');
+        await flushPromises();
+        const input = document.querySelector('[data-testid="search"]') as HTMLInputElement;
+        input.value = 'offline query';
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        await flushPromises();
+        (document.querySelector('[data-testid="search-all-works"]') as HTMLButtonElement).click();
+        await flushPromises();
+
+        expect(document.querySelector('[data-testid="all-work-search-error"]')).toBeNull();
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushPromises();
+
+        expect(document.querySelector('[data-testid="all-work-search-error"]')).not.toBeNull();
         wrapper.unmount();
     });
 

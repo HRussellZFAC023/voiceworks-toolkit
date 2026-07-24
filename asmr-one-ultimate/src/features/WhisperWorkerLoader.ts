@@ -121,6 +121,7 @@ let currentDtype = '';
 let skipWebgpu = false;
 let preferLowPowerAdapter = false;
 let minWebgpuBufferBytes = 268435456;
+let adapterProbeTimeoutMs = 8000;
 const WASM_DTYPE = 'q8';
 
 function postReady(context) {
@@ -134,57 +135,111 @@ function postReady(context) {
     });
 }
 
-async function detectWebGPU() {
-    if (typeof navigator === 'undefined' || !('gpu' in navigator)) return null;
+function inspectWebGpuAdapter(adapter, requiredBufferBytes) {
+    let info = {};
     try {
-        const powerPreference = preferLowPowerAdapter ? 'low-power' : 'high-performance';
-        let adapter = null;
-        try {
-            adapter = await navigator.gpu.requestAdapter({ powerPreference });
-        } catch (err) {
-            console.warn('[Whisper Worker] requestAdapter failed for', powerPreference, err);
-        }
-        // Fall back to opposite power class if preferred adapter unavailable
-        if (!adapter) {
-            const fallback = preferLowPowerAdapter ? 'high-performance' : 'low-power';
-            try {
-                adapter = await navigator.gpu.requestAdapter({ powerPreference: fallback });
-            } catch (err) {
-                console.warn('[Whisper Worker] requestAdapter failed for', fallback, err);
-            }
-        }
-        if (!adapter) {
-            console.warn('[Whisper Worker] No usable WebGPU adapter found');
-            return null;
-        }
-        const info = adapter.info || {};
-        let vendor = [info.vendor, info.description, info.architecture].filter(Boolean).join(' ').toLowerCase();
-        if (!vendor && gpuVendorHint) {
-            vendor = gpuVendorHint;
-            console.log('[Whisper Worker] Using host GPU vendor hint:', vendor);
-        }
-        if (/swiftshader|llvmpipe|software|softpipe/i.test(vendor)) {
-            console.warn('[Whisper Worker] Rejected software WebGPU adapter:', vendor);
-            return null;
-        }
-        const maxBuf = adapter.limits?.maxBufferSize || 0;
-        if (maxBuf > 0 && maxBuf < minWebgpuBufferBytes) {
-            console.warn('[Whisper Worker] Rejected adapter — maxBufferSize too small:', maxBuf);
-            return null;
-        }
-        console.log('[Whisper Worker] WebGPU adapter:', (vendor || 'unknown'), Math.round(maxBuf / 1048576) + 'MB');
-        return { device: 'webgpu', vendor, maxBuf };
-    } catch {
-        return null;
+        info = adapter.info || {};
+    } catch (err) {
+        // Firefox may withhold adapter info for fingerprinting protection.
+        console.debug('[Whisper Worker] GPU adapter info unavailable:', err);
     }
+    let vendor = [info.vendor, info.description, info.architecture].filter(Boolean).join(' ').toLowerCase();
+    if (!vendor && gpuVendorHint) {
+        vendor = gpuVendorHint;
+        console.log('[Whisper Worker] Using host GPU vendor hint:', vendor);
+    }
+    let isFallbackAdapter = false;
+    try {
+        isFallbackAdapter = adapter.isFallbackAdapter === true;
+    } catch (err) {
+        console.debug('[Whisper Worker] GPU fallback flag unavailable:', err);
+    }
+    if (isFallbackAdapter || /swiftshader|llvmpipe|software|softpipe/i.test(vendor)) {
+        console.warn('[Whisper Worker] Rejected software/fallback WebGPU adapter:', vendor || 'hidden');
+        return { backend: null, reason: 'software/fallback WebGPU adapter rejected' };
+    }
+    const maxBuf = adapter.limits?.maxBufferSize || 0;
+    if (maxBuf > 0 && maxBuf < requiredBufferBytes) {
+        console.warn('[Whisper Worker] Adapter too small for selected model:', maxBuf);
+        return {
+            backend: null,
+            reason: 'adapter maxBufferSize ' + maxBuf + ' is below model requirement ' + requiredBufferBytes,
+            capacityFallback: maxBuf >= 268435456,
+        };
+    }
+    console.log('[Whisper Worker] WebGPU adapter:', (vendor || 'unknown'), Math.round(maxBuf / 1048576) + 'MB');
+    return { backend: { device: 'webgpu', vendor, maxBuf, adapter }, reason: '' };
 }
 
-async function detectBackend() {
-    if (!skipWebgpu) {
-        const webgpu = await detectWebGPU();
-        if (webgpu) return webgpu;
+async function detectWebGPU(requiredBufferBytes = minWebgpuBufferBytes) {
+    if (typeof navigator === 'undefined' || !navigator.gpu) {
+        return { backend: null, reason: 'navigator.gpu is unavailable' };
     }
-    return { device: 'wasm', vendor: '', maxBuf: 0 };
+    const powerPreference = preferLowPowerAdapter ? 'low-power' : 'high-performance';
+    const probeDeadline = Date.now() + adapterProbeTimeoutMs;
+    const requestAdapter = async (options, label) => {
+        const remainingMs = probeDeadline - Date.now();
+        if (remainingMs <= 0) {
+            throw new Error('requestAdapter time budget exhausted before ' + label);
+        }
+        let timer;
+        try {
+            return await Promise.race([
+                navigator.gpu.requestAdapter(options),
+                new Promise((_, reject) => {
+                    timer = setTimeout(
+                        () => reject(new Error('requestAdapter timed out for ' + label)),
+                        remainingMs,
+                    );
+                }),
+            ]);
+        } finally {
+            if (timer) clearTimeout(timer);
+        }
+    };
+
+    // Firefox/driver combinations can return null or a fallback adapter for an
+    // explicit power preference. Inspect both candidates under one total time
+    // budget and let the browser-default candidate recover either case.
+    const attempts = [
+        { options: { powerPreference }, label: powerPreference },
+        { options: {}, label: 'browser-default' },
+    ];
+    let rejectedResult = null;
+    let lastFailureReason = 'requestAdapter returned no usable adapter';
+    for (const attempt of attempts) {
+        if (Date.now() >= probeDeadline) break;
+        let adapter = null;
+        try {
+            adapter = await requestAdapter(attempt.options, attempt.label);
+        } catch (err) {
+            lastFailureReason = err instanceof Error ? err.message : String(err || 'requestAdapter failed');
+            console.warn('[Whisper Worker] requestAdapter failed for', attempt.label, err);
+            continue;
+        }
+        if (!adapter) continue;
+        const inspected = inspectWebGpuAdapter(adapter, requiredBufferBytes);
+        if (inspected.backend) return inspected;
+        rejectedResult = inspected;
+    }
+
+    console.warn('[Whisper Worker] No usable WebGPU adapter found');
+    return rejectedResult || { backend: null, reason: lastFailureReason };
+}
+
+async function detectBackend(requiredBufferBytes = minWebgpuBufferBytes) {
+    if (!skipWebgpu) {
+        const result = await detectWebGPU(requiredBufferBytes);
+        if (result.backend) return result.backend;
+        return {
+            device: 'wasm',
+            vendor: '',
+            maxBuf: 0,
+            reason: result.reason,
+            capacityFallback: result.capacityFallback === true,
+        };
+    }
+    return { device: 'wasm', vendor: '', maxBuf: 0, reason: 'WebGPU disabled by host policy' };
 }
 
 function getDtypeCandidates(device) {
@@ -204,6 +259,18 @@ function resolveModelName(model, multilingual) {
 async function releaseGpuResources() {
     await new Promise(r => setTimeout(r, 250));
     await new Promise(r => setTimeout(r, 250));
+}
+
+function configureWebGpuRuntime(adapter) {
+    const webgpu = env?.backends?.onnx?.webgpu;
+    if (!webgpu || !adapter) return false;
+    // Transformers.js defaults this to high-performance at module import time.
+    // Apply the device policy to the actual ORT adapter selection and reuse the
+    // adapter that passed our capability/limit checks.
+    webgpu.powerPreference = preferLowPowerAdapter ? 'low-power' : 'high-performance';
+    webgpu.forceFallbackAdapter = false;
+    webgpu.adapter = adapter;
+    return true;
 }
 
 // Inference timeout
@@ -258,7 +325,33 @@ async function loadPipelineForModel(settings, progressCb) {
         currentDtype = '';
     }
 
-    const backend = await detectBackend();
+    const requestedMinBuffer = Number(settings.minWebgpuBufferBytes);
+    const requiredBufferBytes = Number.isFinite(requestedMinBuffer) && requestedMinBuffer > 0
+        ? requestedMinBuffer
+        : minWebgpuBufferBytes;
+    const backend = await detectBackend(requiredBufferBytes);
+
+    // Capacity rejection happens before ORT creates a session, so this worker
+    // is still healthy. Retry the portable tiny model on the same GPU instead
+    // of unnecessarily falling all the way back to slow CPU/WASM.
+    if (backend.capacityFallback && settings.model !== FALLBACK_MODEL) {
+        fallbackModelOverride = FALLBACK_MODEL;
+        self.postMessage({
+            status: 'fallback',
+            originalModel: settings.model,
+            fallbackModel: FALLBACK_MODEL,
+            reason: backend.reason || 'Selected model exceeds this WebGPU adapter limit',
+            reasonCode: 'webgpu-buffer-limit',
+            backend: 'webgpu',
+            chunkId: typeof settings.chunkId === 'number' ? settings.chunkId : undefined,
+        });
+        return loadPipelineForModel({
+            ...settings,
+            model: FALLBACK_MODEL,
+            minWebgpuBufferBytes: 268435456,
+        }, progressCb);
+    }
+
     currentBackend = backend.device;
     currentVendor = backend.vendor || '';
 
@@ -266,6 +359,7 @@ async function loadPipelineForModel(settings, progressCb) {
         status: 'initiate',
         backend: currentBackend,
         vendor: currentVendor,
+        reason: backend.reason || '',
         chunkId: typeof settings.chunkId === 'number' ? settings.chunkId : undefined,
     });
 
@@ -278,6 +372,7 @@ async function loadPipelineForModel(settings, progressCb) {
             originalModel: settings.model,
             fallbackModel: FALLBACK_MODEL,
             reason: 'WASM backend requires the bounded tiny model',
+            reasonCode: 'wasm-bounded-model',
             backend: currentBackend,
             dtype: WASM_DTYPE,
             chunkId: typeof settings.chunkId === 'number' ? settings.chunkId : undefined,
@@ -289,6 +384,7 @@ async function loadPipelineForModel(settings, progressCb) {
 
     // --- WebGPU path ---
     if (currentBackend === 'webgpu') {
+        configureWebGpuRuntime(backend.adapter);
         const dtypeCandidates = getDtypeCandidates(currentBackend);
         if (dtypeCandidates) {
             for (const dtype of dtypeCandidates) {
@@ -639,7 +735,21 @@ function haltTimedOutWorker(chunkId, message, gpuFallback) {
     jobQueue = [];
     for (const queued of queuedJobs) postDropped(queued, 'worker-poisoned');
 }
-${enableTestHooks ? "self.__whisperTestHalt = haltTimedOutWorker;" : ''}
+${enableTestHooks ? `
+self.__whisperTestHalt = haltTimedOutWorker;
+self.__whisperTestConfigureBackend = (options = {}) => {
+    skipWebgpu = options.skipWebgpu === true;
+    preferLowPowerAdapter = options.preferLowPowerAdapter === true;
+    minWebgpuBufferBytes = Number(options.minWebgpuBufferBytes) || 268435456;
+    adapterProbeTimeoutMs = Number(options.adapterProbeTimeoutMs) || 8000;
+    gpuVendorHint = String(options.gpuVendorHint || '');
+};
+self.__whisperTestDetectBackend = detectBackend;
+self.__whisperTestConfigureWebGpuRuntime = (testEnv, adapter) => {
+    env = testEnv;
+    return configureWebGpuRuntime(adapter);
+};
+` : ''}
 
 function enqueueJob(msg) {
     if (workerPoisoned) {

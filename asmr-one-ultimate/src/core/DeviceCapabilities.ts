@@ -124,6 +124,18 @@ export function shouldUseTinyWhisperModel(profile: Pick<
         && (isAppleM1CompatibilityGpu(profile.gpuVendor) || isUnknownMemoryFirefoxMac);
 }
 
+const WEBGPU_CORE_MIN_BUFFER_BYTES = 256 * 1024 * 1024;
+
+/**
+ * WebGPU guarantees a 256 MiB `maxBufferSize` on every core adapter. That
+ * limit describes one allocation, not total GPU memory, so it must not be used
+ * as a proxy for whether a medium/large model fits. Let ORT's real session
+ * allocations decide and retain the fresh-worker tiny recovery if they fail.
+ */
+export function getWhisperMinWebGpuBufferBytes(_model: string): number {
+    return WEBGPU_CORE_MIN_BUFFER_BYTES;
+}
+
 /** Keep optional background ML from competing with live Whisper on weak profiles. */
 export function shouldRunBackgroundMl(
     profile: Pick<DeviceProfile, 'tier' | 'hasGpu' | 'memory' | 'isMobile' | 'gpuVendor'>,

@@ -186,15 +186,179 @@ describe('WhisperWorkerLoader', () => {
 
         expect(code).toContain('navigator.gpu.requestAdapter(');
         expect(code).toContain('powerPreference');
+        expect(code).toContain("{ options: {}, label: 'browser-default' }");
         // Scoring removed — simplified to preferred + fallback
         expect(code).not.toContain('scoreAdapter');
+    });
+
+    it('accepts a portable 256 MiB adapter and retries without power preference for Firefox', async () => {
+        const adapter = {
+            get info() {
+                throw new Error('adapter info hidden');
+            },
+            limits: { maxBufferSize: 256 * 1024 * 1024 },
+        };
+        const requestAdapter = vi.fn()
+            .mockResolvedValueOnce(null)
+            .mockResolvedValueOnce(adapter);
+        vi.stubGlobal('navigator', { gpu: { requestAdapter } });
+        const workerSelf: any = {
+            addEventListener: vi.fn(),
+            postMessage: vi.fn(),
+        };
+        new Function('self', __getWhisperWorkerCodeForTests(true))(workerSelf);
+        workerSelf.__whisperTestConfigureBackend({
+            minWebgpuBufferBytes: 256 * 1024 * 1024,
+        });
+
+        const backend = await workerSelf.__whisperTestDetectBackend();
+
+        expect(requestAdapter).toHaveBeenNthCalledWith(1, { powerPreference: 'high-performance' });
+        expect(requestAdapter).toHaveBeenNthCalledWith(2, {});
+        expect(backend.device).toBe('webgpu');
+        expect(backend.maxBuf).toBe(256 * 1024 * 1024);
+        expect(backend.adapter).toBe(adapter);
+    });
+
+    it('marks a large-model capacity miss so tiny can retry on the same WebGPU adapter', async () => {
+        const requestAdapter = vi.fn().mockResolvedValue({
+            info: { vendor: 'Mozilla Apple M1, or Similar' },
+            limits: { maxBufferSize: 256 * 1024 * 1024 },
+        });
+        vi.stubGlobal('navigator', { gpu: { requestAdapter } });
+        const workerSelf: any = {
+            addEventListener: vi.fn(),
+            postMessage: vi.fn(),
+        };
+        new Function('self', __getWhisperWorkerCodeForTests(true))(workerSelf);
+        workerSelf.__whisperTestConfigureBackend({
+            minWebgpuBufferBytes: 512 * 1024 * 1024,
+        });
+
+        const backend = await workerSelf.__whisperTestDetectBackend();
+
+        expect(backend.device).toBe('wasm');
+        expect(backend.capacityFallback).toBe(true);
+        expect(backend.reason).toContain('below model requirement');
+
+        const portableBackend = await workerSelf.__whisperTestDetectBackend(256 * 1024 * 1024);
+        expect(portableBackend.device).toBe('webgpu');
+        expect(portableBackend.maxBuf).toBe(256 * 1024 * 1024);
+        expect(__getWhisperWorkerCodeForTests()).toContain(
+            'Retry the portable tiny model on the same GPU',
+        );
+        expect(__getWhisperWorkerCodeForTests()).toContain(
+            'minWebgpuBufferBytes: 268435456',
+        );
+    });
+
+    it('rejects a hidden-info fallback adapter and accepts the browser-default hardware adapter', async () => {
+        const fallbackAdapter = {
+            isFallbackAdapter: true,
+            get info() {
+                throw new Error('adapter info hidden');
+            },
+            limits: { maxBufferSize: 256 * 1024 * 1024 },
+        };
+        const hardwareAdapter = {
+            isFallbackAdapter: false,
+            info: { vendor: 'Apple' },
+            limits: { maxBufferSize: 1024 * 1024 * 1024 },
+        };
+        const requestAdapter = vi.fn()
+            .mockResolvedValueOnce(fallbackAdapter)
+            .mockResolvedValueOnce(hardwareAdapter);
+        vi.stubGlobal('navigator', { gpu: { requestAdapter } });
+        const workerSelf: any = {
+            addEventListener: vi.fn(),
+            postMessage: vi.fn(),
+        };
+        new Function('self', __getWhisperWorkerCodeForTests(true))(workerSelf);
+        workerSelf.__whisperTestConfigureBackend({
+            gpuVendorHint: 'apple m1',
+        });
+
+        const backend = await workerSelf.__whisperTestDetectBackend();
+
+        expect(requestAdapter).toHaveBeenNthCalledWith(1, { powerPreference: 'high-performance' });
+        expect(requestAdapter).toHaveBeenNthCalledWith(2, {});
+        expect(backend.device).toBe('webgpu');
+        expect(backend.adapter).toBe(hardwareAdapter);
+    });
+
+    it('falls back to WASM only after both preferred and browser-default adapters are fallback devices', async () => {
+        const fallbackAdapter = {
+            isFallbackAdapter: true,
+            info: { vendor: 'Hidden' },
+            limits: { maxBufferSize: 256 * 1024 * 1024 },
+        };
+        const requestAdapter = vi.fn().mockResolvedValue(fallbackAdapter);
+        vi.stubGlobal('navigator', { gpu: { requestAdapter } });
+        const workerSelf: any = {
+            addEventListener: vi.fn(),
+            postMessage: vi.fn(),
+        };
+        new Function('self', __getWhisperWorkerCodeForTests(true))(workerSelf);
+
+        const backend = await workerSelf.__whisperTestDetectBackend();
+
+        expect(requestAdapter).toHaveBeenCalledTimes(2);
+        expect(backend).toMatchObject({
+            device: 'wasm',
+            reason: 'software/fallback WebGPU adapter rejected',
+        });
+    });
+
+    it('bounds a hung adapter probe and falls back to WASM', async () => {
+        vi.useFakeTimers();
+        try {
+            const requestAdapter = vi.fn(() => new Promise(() => {}));
+            vi.stubGlobal('navigator', { gpu: { requestAdapter } });
+            const workerSelf: any = {
+                addEventListener: vi.fn(),
+                postMessage: vi.fn(),
+            };
+            new Function('self', __getWhisperWorkerCodeForTests(true))(workerSelf);
+            workerSelf.__whisperTestConfigureBackend({ adapterProbeTimeoutMs: 5 });
+
+            const pending = workerSelf.__whisperTestDetectBackend();
+            await vi.advanceTimersByTimeAsync(5);
+            const backend = await pending;
+
+            expect(requestAdapter).toHaveBeenCalledTimes(1);
+            expect(backend).toMatchObject({
+                device: 'wasm',
+                reason: 'requestAdapter timed out for high-performance',
+            });
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it('applies the validated adapter and power policy to the actual ORT runtime', () => {
+        vi.stubGlobal('navigator', {});
+        const workerSelf: any = {
+            addEventListener: vi.fn(),
+            postMessage: vi.fn(),
+        };
+        new Function('self', __getWhisperWorkerCodeForTests(true))(workerSelf);
+        workerSelf.__whisperTestConfigureBackend({ preferLowPowerAdapter: true });
+        const adapter = { limits: { maxBufferSize: 256 * 1024 * 1024 } };
+        const testEnv = { backends: { onnx: { webgpu: {} as Record<string, unknown> } } };
+
+        expect(workerSelf.__whisperTestConfigureWebGpuRuntime(testEnv, adapter)).toBe(true);
+        expect(testEnv.backends.onnx.webgpu).toEqual({
+            powerPreference: 'low-power',
+            forceFallbackAdapter: false,
+            adapter,
+        });
     });
 
     it('rejects software WebGPU adapters and bounds WASM to tiny', () => {
         const code = __getWhisperWorkerCodeForTests();
 
         expect(code).toContain('swiftshader|llvmpipe|software|softpipe');
-        expect(code).toContain('Rejected software WebGPU adapter');
+        expect(code).toContain('Rejected software/fallback WebGPU adapter');
         expect(code).toContain("currentBackend === 'wasm' && settings.model !== FALLBACK_MODEL");
         expect(code).toContain('WASM backend requires the bounded tiny model');
     });

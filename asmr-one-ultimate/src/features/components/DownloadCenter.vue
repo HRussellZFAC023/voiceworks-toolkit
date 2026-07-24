@@ -53,6 +53,44 @@ const resolving = new Map<string, Promise<void>>();
 const enrichingWorks = new Map<string, Promise<void>>();
 let unsubscribeRunner: (() => void) | undefined;
 let enrichmentGeneration = 0;
+const DOWNLOAD_CENTER_LIVE_SEARCH_WAIT_MS = 30_000;
+const DOWNLOAD_CENTER_SEMANTIC_SEARCH_WAIT_MS = 30_000;
+
+function withSearchDeadline<T>(request: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+        let settled = false;
+        const timer = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            reject(new Error(`${label} timed out`));
+        }, timeoutMs);
+        void request.then(
+            value => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                resolve(value);
+            },
+            error => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                reject(error);
+            },
+        );
+    });
+}
+
+type SearchOutcome<T> =
+    | { status: 'fulfilled'; value: T }
+    | { status: 'rejected'; reason: unknown };
+
+function settleSearch<T>(request: Promise<T>): Promise<SearchOutcome<T>> {
+    return request.then(
+        value => ({ status: 'fulfilled', value }),
+        reason => ({ status: 'rejected', reason }),
+    );
+}
 
 const options = ref<Omit<BackupDownloadProfile, 'labels'>>({
     selectedWorkIds: [],
@@ -465,41 +503,110 @@ async function searchAllWorks(query: string): Promise<void> {
     const retainedWorks = works.value
         .filter(work => !work.directSearchResult || (work.playlistIds?.length ?? 0) > 0)
         .map(work => ({ ...work, directSearchResult: false }));
-    const merged = new Map(retainedWorks.map(work => [String(work.id), work]));
+    works.value = retainedWorks;
+    const retainedIds = new Set(retainedWorks.map(work => String(work.id)));
+    const retainedSelectedWorkIds = options.value.selectedWorkIds.filter(id => retainedIds.has(String(id)));
+    if (retainedSelectedWorkIds.length !== options.value.selectedWorkIds.length) {
+        options.value = { ...options.value, selectedWorkIds: retainedSelectedWorkIds };
+    }
+
+    const applyResults = (
+        source: 'semantic' | 'live',
+        results: readonly Record<string, unknown>[],
+    ): void => {
+        if (!visible.value || generation !== enrichmentGeneration) return;
+        const merged = new Map(works.value.map(work => [normalizeWorkId(work.id), work]));
+        for (const result of results) {
+            mergeDirectWork(
+                merged,
+                result,
+                source === 'semantic' && typeof result.title === 'string' ? result.title : '',
+                previousWorks,
+            );
+        }
+        const mergedWorks = [...merged.values()];
+        const retained = mergedWorks.filter(work => !work.directSearchResult);
+        const directWorks = mergedWorks.filter(work => work.directSearchResult).slice(0, 30);
+        works.value = [...retained, ...directWorks];
+        const availableIds = new Set(works.value.map(work => String(work.id)));
+        const selectedWorkIds = options.value.selectedWorkIds.filter(id => availableIds.has(String(id)));
+        if (selectedWorkIds.length !== options.value.selectedWorkIds.length) {
+            options.value = { ...options.value, selectedWorkIds };
+        }
+        const resultIds = results
+            .map(result => normalizeWorkId(result.source_id ?? result.sourceId ?? result.id))
+            .filter(Boolean);
+        void enrichWorkItems(resultIds, generation);
+    };
+
     const exactRj = /^[A-Za-z]{2}\d+$/.test(query.trim());
-    const [semantic, live] = await Promise.allSettled([
-        exactRj ? Promise.resolve([]) : semanticWorkSearch(query, 20),
+    const liveRequest = settleSearch(withSearchDeadline(
         WorksApi.searchWorks(query, { page: 1 }),
+        DOWNLOAD_CENTER_LIVE_SEARCH_WAIT_MS,
+        'Live site search',
+    ));
+    if (exactRj) {
+        const live = await liveRequest;
+        if (live.status === 'rejected') {
+            Logger.warn('[DownloadCenter] Live work search unavailable', live.reason);
+            throw live.reason;
+        }
+        applyResults('live', live.value.works as unknown as Record<string, unknown>[]);
+        return;
+    }
+
+    const semanticRequest = settleSearch(withSearchDeadline(
+        semanticWorkSearch(query, 20),
+        DOWNLOAD_CENTER_SEMANTIC_SEARCH_WAIT_MS,
+        'Hosted semantic search',
+    ));
+    // Return as soon as either the live catalogue succeeds or semantic search
+    // has a non-empty answer. The slower source continues in the background and
+    // is merged only if this is still the active query.
+    const primary = await Promise.race([
+        liveRequest.then(async live => {
+            if (live.status === 'fulfilled' && live.value.works.length > 0) {
+                return { source: 'live' as const, results: live.value.works };
+            }
+            const semantic = await semanticRequest;
+            if (semantic.status === 'fulfilled') return { source: 'semantic' as const, results: semantic.value };
+            if (live.status === 'fulfilled') return { source: 'live' as const, results: live.value.works };
+            Logger.warn('[DownloadCenter] Live work search unavailable', live.reason);
+            Logger.warn('[DownloadCenter] Hosted semantic work search unavailable', semantic.reason);
+            throw live.reason;
+        }),
+        semanticRequest.then(async semantic => {
+            if (semantic.status === 'fulfilled' && semantic.value.length > 0) {
+                return { source: 'semantic' as const, results: semantic.value };
+            }
+            const live = await liveRequest;
+            if (live.status === 'fulfilled') return { source: 'live' as const, results: live.value.works };
+            if (semantic.status === 'fulfilled') return { source: 'semantic' as const, results: semantic.value };
+            Logger.warn('[DownloadCenter] Live work search unavailable', live.reason);
+            Logger.warn('[DownloadCenter] Hosted semantic work search unavailable', semantic.reason);
+            throw live.reason;
+        }),
     ]);
-    if (semantic.status === 'fulfilled') {
-        for (const result of semantic.value) {
-            mergeDirectWork(merged, result as unknown as Record<string, unknown>, result.title, previousWorks);
-        }
-    } else {
-        Logger.warn('[DownloadCenter] Hosted semantic work search unavailable', semantic.reason);
+    applyResults(primary.source, primary.results as unknown as Record<string, unknown>[]);
+
+    if (primary.source !== 'semantic') {
+        void semanticRequest.then(semantic => {
+            if (semantic.status === 'fulfilled') {
+                applyResults('semantic', semantic.value as unknown as Record<string, unknown>[]);
+            } else {
+                Logger.warn('[DownloadCenter] Hosted semantic work search unavailable', semantic.reason);
+            }
+        });
     }
-    if (live.status === 'fulfilled') {
-        for (const result of live.value.works) {
-            mergeDirectWork(merged, result as unknown as Record<string, unknown>, '', previousWorks);
-        }
-    } else {
-        Logger.warn('[DownloadCenter] Live work search unavailable', live.reason);
+    if (primary.source !== 'live') {
+        void liveRequest.then(live => {
+            if (live.status === 'fulfilled') {
+                applyResults('live', live.value.works as unknown as Record<string, unknown>[]);
+            } else {
+                Logger.warn('[DownloadCenter] Live work search unavailable', live.reason);
+            }
+        });
     }
-    if ((exactRj && live.status === 'rejected') || (semantic.status === 'rejected' && live.status === 'rejected')) {
-        throw live.status === 'rejected' ? live.reason : semantic.reason;
-    }
-    if (!visible.value || generation !== enrichmentGeneration) return;
-    const mergedWorks = [...merged.values()];
-    const retained = mergedWorks.filter(work => !work.directSearchResult);
-    const directWorks = mergedWorks.filter(work => work.directSearchResult).slice(0, 30);
-    works.value = [...retained, ...directWorks];
-    const availableIds = new Set(works.value.map(work => String(work.id)));
-    const selectedWorkIds = options.value.selectedWorkIds.filter(id => availableIds.has(String(id)));
-    if (selectedWorkIds.length !== options.value.selectedWorkIds.length) {
-        options.value = { ...options.value, selectedWorkIds };
-    }
-    const resultIds = works.value.filter(work => work.directSearchResult).map(work => String(work.id));
-    void enrichWorkItems(resultIds, generation);
 }
 
 function setRunnerProgress(next: BackupDownloadProgress & { jobId?: string }): void {
