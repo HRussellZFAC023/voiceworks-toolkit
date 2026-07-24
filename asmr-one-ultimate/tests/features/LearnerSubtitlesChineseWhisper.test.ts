@@ -4,6 +4,7 @@ import { nextTick } from 'vue';
 import LearnerSubtitles from '../../src/features/components/LearnerSubtitles.vue';
 import { INJECT_KEYS } from '../../src/core/MountApp';
 import { TranslationService } from '../../src/services/TranslationService';
+import { AppStore } from '../../src/store/AppStore';
 
 type Handler = (payload: unknown) => void;
 
@@ -58,6 +59,13 @@ describe('LearnerSubtitles Chinese Whisper rendering', () => {
         setConfig('jpdbSubtitleFurigana', false);
         setConfig('jpdbShowFurigana', false);
         setConfig('playbackRate', 1);
+        AppStore.setWhisperState({
+            isTranscribing: false,
+            isLoadingModel: false,
+            progress: 0,
+            progressMessage: '',
+            currentTrackSrc: null,
+        });
 
         vi.spyOn(TranslationService, 'peekCached').mockReturnValue(null);
         vi.spyOn(TranslationService, 'canPrefetch').mockReturnValue(true);
@@ -67,6 +75,13 @@ describe('LearnerSubtitles Chinese Whisper rendering', () => {
         vi.restoreAllMocks();
         vi.useRealTimers();
         document.body.innerHTML = '';
+        AppStore.setWhisperState({
+            isTranscribing: false,
+            isLoadingModel: false,
+            progress: 0,
+            progressMessage: '',
+            currentTrackSrc: null,
+        });
     });
 
     function mountLearner(lrcLines?: Array<{ time: number; endTime: number; text: string }>) {
@@ -107,6 +122,44 @@ describe('LearnerSubtitles Chinese Whisper rendering', () => {
         await nextTick();
         return mounted;
     }
+
+    it.each([
+        ['transcribing', { isTranscribing: true, isLoadingModel: false }],
+        ['loading', { isTranscribing: false, isLoadingModel: true }],
+    ])('reserves the subtitle panel across a remount while Whisper is %s', async (_state, whisperState) => {
+        AppStore.setWhisperState(whisperState);
+
+        const first = mountLearner();
+        await nextTick();
+        expect(first.wrapper.get('.learner-subs-expanded').classes()).not.toContain('hidden');
+        first.wrapper.unmount();
+
+        const remounted = mountLearner();
+        await nextTick();
+        expect(remounted.wrapper.get('.learner-subs-expanded').classes()).not.toContain('hidden');
+        remounted.wrapper.unmount();
+    });
+
+    it('releases a loading-only reservation when canonical model state becomes ready', async () => {
+        const { wrapper } = mountLearner();
+
+        AppStore.setWhisperState({
+            isLoadingModel: true,
+            progress: 25,
+            progressMessage: 'loading',
+        });
+        await nextTick();
+        expect(wrapper.get('.learner-subs-expanded').classes()).not.toContain('hidden');
+
+        AppStore.setWhisperState({
+            isLoadingModel: false,
+            progress: 100,
+            progressMessage: '',
+        });
+        await nextTick();
+        expect(wrapper.get('.learner-subs-expanded').classes()).toContain('hidden');
+        wrapper.unmount();
+    });
 
     it('keeps LRC Chinese in the ZH lane and leaves JA blank until CN-to-JA succeeds', async () => {
         const ja = deferred<string>();
@@ -205,8 +258,8 @@ describe('LearnerSubtitles Chinese Whisper rendering', () => {
         const { wrapper, eventBus } = mountLearner();
 
         eventBus.emit('whisper:update', {
-            text: '今晚好',
-            segments: [],
+            text: '<|0.00|>今晚好<|2.00|>',
+            segments: [{ start: 0, end: 2, text: '<|0.00|>今晚好<|2.00|>' }],
             final: false,
             fromCache: false,
             live: true,

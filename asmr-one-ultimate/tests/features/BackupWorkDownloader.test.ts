@@ -9,12 +9,12 @@ const labels: BackupDownloaderLabels = {
     playlistSource: 'Playlist source', sourceAll: 'All', sourceOwn: 'My playlists', sourcePublic: 'Community playlists',
     selectAll: 'Select all shown', clearAll: 'Clear all', filterTags: 'Tags', allTags: 'All tags',
     playlistOwner: 'by {owner}', playlistWorks: '{count} works', loading: 'Loading', loadFailed: 'Unavailable',
-    options: 'Options', progress: 'Progress', pause: 'Pause', resume: 'Resume', alreadyRunning: 'Already running', resumableDownloads: 'Resume jobs',
+    options: 'Options', progress: 'Progress', pause: 'Pause', resume: 'Resume', resumeWithoutOpus: 'Resume without Opus', alreadyRunning: 'Already running', resumableDownloads: 'Resume jobs',
     expandPlaylist: 'Expand', collapsePlaylist: 'Collapse', selectedSummary: '{count} selected · {bytes}',
     unknownSize: 'size unavailable', partialSize: 'at least {size}', estimatedOpusSize: 'about {size} after Opus', noResults: 'No results', fileTypes: 'Files', audio: 'Audio', video: 'Video',
     images: 'Images', text: 'Text', other: 'Other', filenameTitle: 'Titles', titleOriginal: 'Original',
     titleTranslated: 'Translated', titleOriginalTranslated: 'Original [Translated]', titleNone: 'No title changes',
-    convertToOpus: 'Convert to Opus', opusBitrate: 'Bitrate', metadata: 'Metadata', metadataAdditive: 'Additive',
+    convertToOpus: 'Convert to Opus', convertToOpusMemoryWarning: 'Large sources stay original.', opusBitrate: 'Bitrate', metadata: 'Metadata', metadataAdditive: 'Additive',
     metadataOverwrite: 'Overwrite', metadataAdditiveHint: 'Keep existing values.', metadataOverwriteHint: 'Replace values.',
     includeArtwork: 'Add missing artwork', includeArtworkHint: 'Existing artwork remains.', cancel: 'Cancel', start: 'Start',
 };
@@ -195,6 +195,22 @@ describe('BackupWorkDownloader', () => {
         expect(wrapper.emitted('close')).toHaveLength(1);
     });
 
+    it('offers an explicit original-audio resume for interrupted Opus jobs', async () => {
+        const wrapper = mount(BackupWorkDownloader, {
+            props: {
+                playlists,
+                works,
+                profile: profile({ selectedWorkIds: [1] }),
+                resumableJobs: [{ id: 'job-opus', title: 'Interrupted', convertToOpus: true }],
+            },
+        });
+
+        await wrapper.get('[data-testid="resume-without-opus-job-opus"]').trigger('click');
+
+        expect(wrapper.emitted('resumeWithoutOpus')).toEqual([['job-opus']]);
+        expect(wrapper.get('[data-testid="resume-without-opus-job-opus"]').text()).toBe('Resume without Opus');
+    });
+
     it('shows incremental Opus conversion progress and keeps pause available', () => {
         const wrapper = mount(BackupWorkDownloader, {
             props: {
@@ -256,6 +272,7 @@ describe('BackupWorkDownloader', () => {
 
         expect(wrapper.find('.download-options-content').exists()).toBe(true);
         expect(wrapper.get('[data-testid="opus-option"]').classes()).toContain('option-row');
+        expect(wrapper.get('[data-testid="opus-memory-warning"]').text()).toBe('Large sources stay original.');
         expect(wrapper.get('[data-testid="artwork-option"]').classes()).toContain('hinted-option');
         expect(wrapper.find('[data-testid="download-center-import-input"]').exists()).toBe(false);
     });

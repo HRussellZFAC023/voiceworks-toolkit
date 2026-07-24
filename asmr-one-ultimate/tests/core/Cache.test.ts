@@ -314,6 +314,14 @@ describe('CacheKeys', () => {
         expect(key).toMatch(/^asmr-ult:whisper:/);
     });
 
+    it('separates Whisper model-ready state by execution backend', () => {
+        const webgpu = CacheKeys.whisperModelReady('onnx-community/whisper-tiny', 'webgpu');
+        const wasm = CacheKeys.whisperModelReady('onnx-community/whisper-tiny', 'wasm');
+
+        expect(webgpu).toMatch(/^asmr-ult:whisper:model:v3:/);
+        expect(webgpu).not.toBe(wasm);
+    });
+
     it('should generate whisper index key', () => {
         expect(CacheKeys.whisperIndex()).toBe('asmr-ult:whisper-index');
     });

@@ -198,7 +198,7 @@ export interface PluginConfig {
 
     // AI Features
     whisperModel: string;
-    /** Discoverable model preset: 'auto' | 'tiny' | 'small' | 'medium' | 'large-v3-turbo'. */
+    /** Discoverable model preset: 'auto' | 'tiny' | 'base' | 'small' | 'medium' | 'large-v3-turbo'. */
     whisperModelPreset: string;
     /** Pre-inference silence skipping: 'off' (recommended for ASMR) | 'conservative'. */
     whisperVadMode: string;
@@ -458,7 +458,6 @@ export interface AppEvents {
     'joi:trigger': { state: string; keyword: string; source: string };
     'viz:toggle': void;
     // Whisper supplementary events
-    'whisper:fallback': { originalModel: string; fallbackModel: string; reason?: string };
     'whisper:cache-updated': { trackKey: string; cacheKey: string };
     'whisper:segment-translated': { count: number };
     // Embedding progress

@@ -3,10 +3,11 @@ import { AppStore } from '../store/AppStore';
 import { TranslationService } from '../services/TranslationService';
 import { EventBus } from '../core/EventBus';
 import type { WhisperUpdatePayload, VueRoute, PlayerTrack, AudioPlayerState, TranslationSourceHint } from '../types';
-import { splitSubtitleSegments } from './subtitleSegmentSplitter';
 import { resolveLearnerSecondaryLanguage, subtitleLanguageAttribute } from './learnerSubtitleMode';
+import { sanitizeWhisperText } from './whisperProcessing';
 import {
     findLyricsSource as findLyricsSourceUtil,
+    normalizeWhisperSubtitleLines,
     normalizeLyricLines,
     parseLrcContent,
     parseSubtitleContent,
@@ -41,6 +42,7 @@ export class LearnerMode {
     private whisperLines: LyricLine[] = [];
     private whisperText = '';
     private whisperActive = false;
+    private whisperRunning = false;
     private whisperFromCache = false;
     private whisperLive = false;
     private whisperLeadSec = 0;
@@ -106,6 +108,8 @@ export class LearnerMode {
     public async enable(): Promise<void> {
         this.playbackRate = Number(Config.get('playbackRate')) || 1.0;
         this.isBlurEnabled = !!Config.get('learnerBlur');
+        const whisperState = AppStore.state.whisper;
+        this.whisperRunning = whisperState.isTranscribing || whisperState.isLoadingModel;
 
         // Set active state in store
         AppStore.setLearnerState({ isActive: true });
@@ -123,6 +127,10 @@ export class LearnerMode {
             // Whisper update events (live transcription text)
             this.eventCleanups.push(EventBus.on('whisper:update', (payload) => {
                 this.handleWhisperUpdate(payload);
+            }));
+            this.eventCleanups.push(AppStore.subscribeWhisperState((state) => {
+                this.whisperRunning = state.isTranscribing || state.isLoadingModel;
+                this.updateVisibility();
             }));
 
             // Whisper segment-translated events (live translation completed)
@@ -251,6 +259,7 @@ export class LearnerMode {
         this.whisperLines = [];
         this.whisperText = '';
         this.whisperActive = false;
+        this.whisperRunning = false;
 
         // Clear originalParents (controls reparenting map)
         this.originalParents.clear();
@@ -1477,18 +1486,10 @@ export class LearnerMode {
             ? Math.max(0, (payload as { leadSec?: number }).leadSec as number)
             : this.whisperLeadSec;
         this.whisperSourceLanguageHint = payload.sourceLanguageHint || 'auto';
-        this.whisperText = payload.text || '';
+        this.whisperText = sanitizeWhisperText(payload.text);
         this.ensureWhisperTicker(this.whisperLive ? 80 : 200);
         if (Array.isArray(payload.segments) && payload.segments.length > 0) {
-            const mapped = payload.segments
-                .map((segment) => ({
-                    time: segment.start,
-                    endTime: segment.end,
-                    text: segment.text,
-                    words: segment.words,
-                }))
-                .sort((a, b) => a.time - b.time);
-            const newWhisperLines = splitSubtitleSegments(mapped);
+            const newWhisperLines = normalizeWhisperSubtitleLines(payload.segments);
 
             // Pre-translate whisper segments in background.
             // For cached loads, all segments are available immediately.
@@ -1833,7 +1834,10 @@ export class LearnerMode {
     private updateVisibility() {
         // Toggle visibility based on player state (expanded/minimized) and content availability
         const isPlayerMinimized = !!this.bridge.store?.state?.AudioPlayer?.hide;
-        const hasContent = !!this.lastDisplayedText || this.currentLyrics.length > 0 || this.whisperActive;
+        const hasContent = !!this.lastDisplayedText
+            || this.currentLyrics.length > 0
+            || this.whisperActive
+            || this.whisperRunning;
 
         // Expanded subs: Show ONLY if player is expanded (not hidden) AND we have content
         if (this.expanded) {

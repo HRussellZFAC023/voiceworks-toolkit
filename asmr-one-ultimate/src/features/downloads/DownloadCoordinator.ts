@@ -1,3 +1,4 @@
+import { I18n } from '../../core/Config';
 import { DirectoryDownloadSink, DirectoryPermissionError, ResumeOffsetMismatchError, type DownloadWriter } from './DirectoryDownloadSink';
 import { DownloadJobRepository, type DownloadFile } from './DownloadJobRepository';
 import {
@@ -6,7 +7,7 @@ import {
     DownloadTransport,
     RangeRestartRequiredError,
 } from './DownloadTransport';
-import type { OpusFileTransformer } from './OpusFileTransformer';
+import { OpusConversionMemoryLimitError, type OpusFileTransformer } from './OpusFileTransformer';
 
 export interface DownloadCoordinatorProgress {
     jobId: string;
@@ -80,6 +81,15 @@ function isSourceEstablishmentFailure(error: unknown): boolean {
 }
 
 function sanitizeFailureReason(error: unknown): string {
+    if (error instanceof OpusConversionMemoryLimitError) {
+        if (error.sourceBytes == null) return I18n.t('backupDownloaderOpusSizeUnknown');
+        const sourceMiB = Math.ceil((error.sourceBytes / (1024 * 1024)) * 10) / 10;
+        const limitMiB = Math.floor(error.maxSourceBytes / (1024 * 1024));
+        return I18n.format('backupDownloaderOpusMemoryLimit', {
+            size: sourceMiB,
+            limit: limitMiB,
+        });
+    }
     if (error instanceof DownloadBodyRetriesExhaustedError) {
         const suffix = ` after ${error.attempts} attempts`;
         if (error.originalError instanceof DownloadStallError) return `Download stalled${suffix}`;

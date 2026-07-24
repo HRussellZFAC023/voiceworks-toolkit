@@ -219,6 +219,26 @@ describe('AppStore', () => {
             expect(AppStore.state.whisper.isTranscribing).toBe(true);
             expect(AppStore.state.whisper.progress).toBe(50);
         });
+
+        it('synchronously publishes the current and subsequent Whisper state', () => {
+            const listener = vi.fn();
+            const unsubscribe = AppStore.subscribeWhisperState(listener);
+
+            expect(listener).toHaveBeenLastCalledWith(expect.objectContaining({
+                isTranscribing: false,
+                isLoadingModel: false,
+            }));
+
+            AppStore.setWhisperState({ isLoadingModel: true });
+            expect(listener).toHaveBeenLastCalledWith(expect.objectContaining({
+                isTranscribing: false,
+                isLoadingModel: true,
+            }));
+
+            unsubscribe();
+            AppStore.setWhisperState({ isLoadingModel: false });
+            expect(listener).toHaveBeenCalledTimes(2);
+        });
     });
 
     describe('Host Store', () => {

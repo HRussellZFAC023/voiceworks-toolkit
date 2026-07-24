@@ -97,6 +97,20 @@ describe('DownloadCenter', () => {
         delete (window as Window & { showDirectoryPicker?: unknown }).showDirectoryPicker;
     });
 
+    it('selects every file category by default for complete-work downloads', async () => {
+        const wrapper = mount(DownloadCenter, { attachTo: document.body });
+
+        await wrapper.get('[data-testid="download-center-open"]').trigger('click');
+
+        for (const category of ['audio', 'video', 'image', 'text', 'other']) {
+            const checkbox = document.querySelector(
+                `[data-testid="file-filter-${category}"]`,
+            ) as HTMLInputElement;
+            expect(checkbox.checked).toBe(true);
+        }
+        wrapper.unmount();
+    });
+
     it('opens synchronously on Site and loads Yours only when selected', async () => {
         const own = deferred<any[]>();
         mocks.fetchOwn.mockReturnValue(own.promise);
@@ -653,6 +667,46 @@ describe('DownloadCenter', () => {
         expect(document.querySelector('[data-testid="source-load-error"]')).not.toBeNull();
         expect(document.querySelector('[data-testid="download-progress"]')).toBeNull();
         expect(document.querySelector('[data-testid="download-center-import-input"]')).toBeNull();
+        wrapper.unmount();
+    });
+
+    it('resumes an interrupted Opus job with original audio when requested', async () => {
+        const job = {
+            id: 'job-opus',
+            title: 'Interrupted Opus download',
+            status: 'failed',
+            options: {
+                state: {
+                    selectedWorkIds: ['RJ123456'],
+                    filters: { audio: true, video: true, image: true, text: true, other: true },
+                    titleMode: 'original',
+                    convertToOpus: true,
+                    opusBitrate: 96,
+                    metadataMode: 'additive',
+                    includeArtwork: true,
+                },
+                directory: {},
+                enrichment: {},
+            },
+            createdAt: 1,
+            updatedAt: 1,
+        };
+        mocks.recover.mockResolvedValue([job]);
+        mocks.runnerResume.mockResolvedValue({ jobId: job.id, skipped: 0 });
+        const wrapper = mount(DownloadCenter, { attachTo: document.body });
+        await flushPromises();
+        await wrapper.get('[data-testid="download-center-open"]').trigger('click');
+
+        (document.querySelector(
+            '[data-testid="resume-without-opus-job-opus"]',
+        ) as HTMLButtonElement).click();
+        await flushPromises();
+
+        expect(mocks.runnerResume).toHaveBeenCalledWith(
+            job,
+            expect.any(Function),
+            { disableOpus: true },
+        );
         wrapper.unmount();
     });
 

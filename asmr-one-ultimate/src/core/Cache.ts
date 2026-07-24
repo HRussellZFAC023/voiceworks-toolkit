@@ -28,7 +28,8 @@ export const CacheKeys = {
     dlsiteReviews: (rjCode: string) => `asmr-ult:dlsite-reviews:${rjCode}`,
     whisperTranscript: (identity: string) => `asmr-ult:whisper:${hashString(identity)}`,
     whisperIndex: () => 'asmr-ult:whisper-index',
-    whisperModelReady: (model: string) => `asmr-ult:whisper:model:v2:${hashString(model)}`,
+    whisperModelReady: (model: string, backend: 'webgpu' | 'wasm') =>
+        `asmr-ult:whisper:model:v3:${hashString(`${model}|${backend}`)}`,
     embeddingPreferredDtype: () => 'asmr-ult:embed:preferred-dtype',
 };
 

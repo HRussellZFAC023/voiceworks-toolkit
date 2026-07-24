@@ -29,6 +29,38 @@
     display: none !important;
 }
 
+/*
+ * Keep the host player geometry stable while Whisper, translation, furigana,
+ * and the next subtitle line update asynchronously. The host cover-height
+ * observer subtracts this block's height from the artwork, so allowing the
+ * block itself to grow/shrink makes the cover visibly pulse on every update.
+ */
+.audio-player:not(.asmr-player-fullscreen) .learner-subs-expanded {
+    --asmr-expanded-subs-height: 136px;
+    flex: 0 0 var(--asmr-expanded-subs-height);
+    block-size: var(--asmr-expanded-subs-height);
+    min-block-size: var(--asmr-expanded-subs-height);
+    max-block-size: var(--asmr-expanded-subs-height);
+    overflow: hidden;
+    contain: layout paint;
+}
+
+.audio-player:not(.asmr-player-fullscreen) .learner-subs-expanded .learner-jp {
+    flex: 0 0 3.1em;
+    min-block-size: 3.1em;
+    max-block-size: 3.1em;
+    overflow-y: auto;
+    scrollbar-width: thin;
+}
+
+.audio-player:not(.asmr-player-fullscreen) .learner-subs-expanded .learner-en {
+    flex: 0 0 2.6em;
+    min-block-size: 2.6em;
+    max-block-size: 2.6em;
+    overflow-y: auto;
+    scrollbar-width: thin;
+}
+
 .learner-subs-collapsed {
     position: fixed;
     bottom: calc(60px + var(--asmr-safe-bottom, 0px));
@@ -170,6 +202,10 @@ button.learner-en:focus-visible {
 /* Mobile: hidden upcoming text takes layout space → blank wrapped lines.
    Use display:none so only spoken text affects line wrapping. */
 @media (max-width: 600px) {
+    .audio-player:not(.asmr-player-fullscreen) .learner-subs-expanded {
+        --asmr-expanded-subs-height: 120px;
+    }
+
     .karaoke-upcoming.karaoke-hidden {
         display: none;
     }

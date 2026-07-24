@@ -34,6 +34,81 @@ const DB_VERSION = 2; // Bump version to fix schema
 const CACHE_TTL_MS = CACHE_TTL.TWENTY_FOUR_HOURS_MS;
 const TRACKS_TTL_MS = CACHE_TTL.TWENTY_FOUR_HOURS_MS;
 
+export type ValidatedTracksCacheFallback = 'none' | 'valid-non-empty';
+
+export interface ValidatedTracksRequest {
+    /**
+     * Download discovery normally requires a live response. Callers that can
+     * tolerate stale data may opt into a structurally valid, non-empty cache.
+     */
+    cacheFallback?: ValidatedTracksCacheFallback;
+}
+
+interface TrackFetchPolicy {
+    bypassInflight: boolean;
+    cacheFallback: ValidatedTracksCacheFallback;
+}
+
+const TRACK_CHILD_FIELDS = ['children', 'dirs', 'tracks'] as const;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function hasTrackIdentity(node: Record<string, unknown>): boolean {
+    return ['title', 'name', 'hash'].some(field =>
+        typeof node[field] === 'string' && node[field].trim().length > 0);
+}
+
+function readTrackChildren(
+    node: Record<string, unknown>,
+): { children: unknown[]; isContainer: boolean } | null {
+    const declaredType = typeof node.type === 'string' ? node.type.toLowerCase() : '';
+    let isContainer = declaredType === 'folder' || declaredType === 'directory';
+    const children: unknown[] = [];
+    for (const field of TRACK_CHILD_FIELDS) {
+        const group = node[field];
+        if (group === undefined) continue;
+        if (!Array.isArray(group)) return null;
+        if (group.length > 0) isContainer = true;
+        children.push(...group);
+    }
+    return { children, isContainer };
+}
+
+function countValidatedTrackLeaves(candidate: unknown, visited: Set<object>): number | null {
+    if (!isRecord(candidate) || visited.has(candidate) || !hasTrackIdentity(candidate)) return null;
+    visited.add(candidate);
+    const shape = readTrackChildren(candidate);
+    if (!shape) return null;
+    if (!shape.isContainer) return 1;
+
+    let leaves = 0;
+    for (const child of shape.children) {
+        const count = countValidatedTrackLeaves(child, visited);
+        if (count === null) return null;
+        leaves += count;
+    }
+    return leaves;
+}
+
+/**
+ * Rejects historical empty/malformed cache rows and HTML/error-shaped API
+ * payloads. URL completeness remains a caller concern because enabled file
+ * categories determine which leaves a download actually requires.
+ */
+function isValidatedTracksManifest(value: unknown): value is TracksResponse {
+    if (!Array.isArray(value) || value.length === 0) return false;
+    const visited = new Set<object>();
+    let leafCount = 0;
+    for (const node of value) {
+        const count = countValidatedTrackLeaves(node, visited);
+        if (count === null) return false;
+        leafCount += count;
+    }
+    return leafCount > 0;
+}
+
 export class WorkServiceImpl {
     private dbPromise: Promise<IDBPDatabase<WorkCacheDB>>;
     private inflightWork = new Map<number, Promise<Work>>();
@@ -175,12 +250,11 @@ export class WorkServiceImpl {
         if (!forceRefresh) {
             const cached = await this.getFromCache('tracks', workId);
             if (cached && this.isFresh(cached.timestamp, TRACKS_TTL_MS)) {
-                if (!Array.isArray(cached.data)) {
-                    Logger.warn(`[WorkService] Cached tracks invalid for ${workId}, ignoring`, typeof cached.data);
-                } else {
+                if (isValidatedTracksManifest(cached.data)) {
                     Logger.debug(`[WorkService] Cache hit for tracks ${workId}`);
                     return cached.data;
                 }
+                Logger.warn(`[WorkService] Cached tracks invalid for ${workId}, ignoring`);
             }
             Logger.debug(`[WorkService] Cache miss/stale for tracks ${workId}`);
         }
@@ -189,7 +263,10 @@ export class WorkServiceImpl {
         const inflight = this.inflightTracks.get(workId);
         if (inflight && !forceRefresh && !bypassInflight) return inflight;
 
-        const promise = this.fetchTracks(workId, bypassInflight);
+        const promise = this.fetchTracks(workId, {
+            bypassInflight,
+            cacheFallback: 'valid-non-empty',
+        });
         if (bypassInflight) return promise;
         this.inflightTracks.set(workId, promise);
         void promise.then(
@@ -199,19 +276,46 @@ export class WorkServiceImpl {
         return promise;
     }
 
-    private async fetchTracks(workId: number, bypassInflight = false): Promise<TracksResponse> {
+    /**
+     * Fetch a live, structurally validated manifest for completeness-sensitive
+     * operations such as whole-work downloads. It never consumes the normal
+     * cache-first path or a lower-priority in-flight request.
+     */
+    public async getValidatedLiveTracks(
+        id: number | string,
+        request: ValidatedTracksRequest = {},
+    ): Promise<TracksResponse> {
+        const stripped = String(id).replace(/^[A-Za-z]+/, '');
+        const workId = Number(stripped);
+        if (!workId) throw new Error('Invalid work ID');
+        return this.fetchTracks(workId, {
+            bypassInflight: true,
+            cacheFallback: request.cacheFallback ?? 'none',
+        });
+    }
+
+    private async fetchTracks(workId: number, policy: TrackFetchPolicy): Promise<TracksResponse> {
         try {
             const baseUrl = this.getApiBaseUrl();
             const response = await HttpClient.getJsonViaCors<TracksResponse>(`${baseUrl}/api/tracks/${workId}?v=2`, {
                 retry: RETRY.BLOB,
-                dedupe: !bypassInflight,
+                dedupe: !policy.bypassInflight,
             });
-            const data = Array.isArray(response.data) ? response.data : [];
-            await this.setCache('tracks', workId, data);
-            return data;
+            const data: unknown = response.data;
+            if (!isValidatedTracksManifest(data)) throw new Error('Invalid tracks manifest');
+            const tracks = data as TracksResponse;
+            await this.setCache('tracks', workId, tracks);
+            return tracks;
         } catch (error) {
+            if (policy.cacheFallback === 'none') {
+                throw new Error(`[WorkService] Failed for ${workId}: ${error instanceof Error ? error.message : String(error)}`);
+            }
             const cached = await this.getFromCache('tracks', workId);
-            if (cached) return cached.data;
+            const usableCache = isValidatedTracksManifest(cached?.data);
+            if (cached && usableCache) {
+                Logger.warn(`[WorkService] Live tracks failed for ${workId}, returning validated stale cache`, error);
+                return cached.data;
+            }
             throw new Error(`[WorkService] Failed for ${workId}: ${error instanceof Error ? error.message : String(error)}`);
         }
     }

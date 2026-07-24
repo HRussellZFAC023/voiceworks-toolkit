@@ -9,6 +9,7 @@
 
 import { GM_getValue, GM_setValue } from '$';
 import { EventBus } from '../core/EventBus';
+import { Logger } from '../core/Logger';
 import type {
     PluginConfig,
     ConfigKey,
@@ -260,6 +261,8 @@ const DEFAULT_APP_STATE: AppState = {
     isInitialized: false,
 };
 
+type WhisperStateListener = (state: Readonly<WhisperState>) => void;
+
 // ============================================================================
 // AppStore Implementation
 // ============================================================================
@@ -267,6 +270,7 @@ const DEFAULT_APP_STATE: AppState = {
 class AppStoreImpl {
     private _state: AppState = { ...DEFAULT_APP_STATE };
     private _hostStore: KikoeruStore | null = null;
+    private readonly whisperStateListeners = new Set<WhisperStateListener>();
 
     constructor() {
         this.migrateSplitModeSettings();
@@ -462,6 +466,20 @@ class AppStoreImpl {
             ...this._state,
             whisper: { ...this._state.whisper, ...updates },
         };
+        this.notifyWhisperState();
+    }
+
+    /**
+     * Observe canonical Whisper state. The immediate snapshot and subsequent
+     * updates share one synchronous channel, so remounted UI cannot miss a
+     * transition between reading state and subscribing.
+     */
+    subscribeWhisperState(listener: WhisperStateListener): () => void {
+        this.whisperStateListeners.add(listener);
+        this.notifyWhisperListener(listener);
+        return () => {
+            this.whisperStateListeners.delete(listener);
+        };
     }
 
     /**
@@ -543,6 +561,20 @@ class AppStoreImpl {
             throw new Error('Host store commit not available');
         }
         this._hostStore.commit(mutation, payload);
+    }
+
+    private notifyWhisperState(): void {
+        for (const listener of [...this.whisperStateListeners]) {
+            this.notifyWhisperListener(listener);
+        }
+    }
+
+    private notifyWhisperListener(listener: WhisperStateListener): void {
+        try {
+            listener(this._state.whisper);
+        } catch (error) {
+            Logger.warn('[AppStore] Whisper state listener failed', error);
+        }
     }
 
 }

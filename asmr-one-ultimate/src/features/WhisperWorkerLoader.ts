@@ -1,8 +1,9 @@
 /**
  * WhisperWorkerLoader - WebGPU Whisper worker (Transformers.js)
  *
- * Runs whisper models in a Web Worker. Prefers WebGPU with fp32+q4 dtype,
- * falls back to WASM. Dynamic import with CDN fallback for resilience.
+ * Runs Whisper models in a Web Worker on the backend selected by the host.
+ * Model/backend choices are exact: runtime failures are reported instead of
+ * silently substituting Tiny or WASM. Dynamic import retains CDN redundancy.
  * Supports word-level timestamps and real-time streaming.
  *
  * Post-processing (hallucination filtering, segment grouping, bracket
@@ -11,8 +12,10 @@
  */
 
 import { createInlineWorker } from './workerLoaderShared';
+import { createWhisperInferencePolicyWorkerSource } from './whisperInferencePolicy';
 
 function getWorkerCode(enableTestHooks = false): string {
+    const inferencePolicySource = createWhisperInferencePolicyWorkerSource();
     return `
 let gpuDeviceLost = false;
 const GPU_ERROR_RE = /WebGPU Context Provider|context.*provider|device lost|GPUDevice|createComputePipeline|createShaderModule|createBuffer|mapAsync|mapping webgpu buffer|invalid buffer|Instance reference|AbortError|release session|invalid session|reading 'destroy'|reading 'dispose'/i;
@@ -26,7 +29,6 @@ self.addEventListener('unhandledrejection', (event) => {
         if (EXPLICIT_DEVICE_LOSS_RE.test(message)) {
             if (!gpuDeviceLost) {
                 gpuDeviceLost = true;
-                skipWebgpu = true;
                 console.error('[Whisper Worker] Fatal GPU device loss:', message);
                 self.postMessage({ status: 'gpu-device-lost', data: { message } });
             }
@@ -41,6 +43,7 @@ self.addEventListener('unhandledrejection', (event) => {
 let pipeline;
 let env;
 let TextStreamer;
+let WhisperTextStreamer;
 
 const TRANSFORMER_URLS = [
     'https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.2.0',
@@ -64,6 +67,7 @@ async function loadTransformers() {
             pipeline = mod.pipeline;
             env = mod.env;
             TextStreamer = mod.TextStreamer;
+            WhisperTextStreamer = mod.WhisperTextStreamer;
             if (!pipeline || !env) throw new Error('Missing pipeline/env');
             env.allowLocalModels = false;
             env.allowRemoteModels = true;
@@ -78,9 +82,37 @@ async function loadTransformers() {
     throw new Error('Failed to load transformers.js from all CDNs');
 }
 
-function isUnauthorizedError(err) {
+const POISONED_RUNTIME_LOAD_RE = /WebGPU Context Provider|context.*provider|device lost|GPUDevice|createComputePipeline|createShaderModule|createBuffer|mapAsync|mapping webgpu buffer|invalid buffer|allocation|out of memory|OOM|RangeError|onnxruntime|ORT session|session (?:creation|initialization)|invalid graph|protobuf|operator|kernel|memory access out of bounds|index out of bounds|reading 'destroy'|reading 'dispose'/i;
+const RETRYABLE_HUB_TRANSPORT_RE = /Unauthorized access to file|AccessDenied|Failed to fetch|fetch failed|NetworkError|network request failed|ERR_(?:NETWORK|CONNECTION|INTERNET)|ECONN(?:RESET|REFUSED|ABORTED)|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|socket hang up|TLS handshake|certificate|fetch.*(?:aborted|timed out)|network.*timed out|request to https?:\\/\\/.*timed out/i;
+const RETRYABLE_HUB_STATUS_RE = /(?:HTTP(?:\\/[\\d.]+)?|status(?: code)?|response status)\\s*[:=]?\\s*(?:401|403|408|429|500|502|503|504)\\b|(?:401 Unauthorized|403 Forbidden|408 Request Timeout|429 Too Many Requests|500 Internal Server Error|502 Bad Gateway|503 Service Unavailable|504 Gateway Timeout)/i;
+
+function hubStatusCode(err) {
+    const candidates = [
+        err?.status,
+        err?.statusCode,
+        err?.response?.status,
+        err?.cause?.status,
+        err?.cause?.statusCode,
+    ];
+    for (const candidate of candidates) {
+        const status = Number(candidate);
+        if (Number.isInteger(status)) return status;
+    }
+    return null;
+}
+
+function isRetryableHubLoadError(err) {
     const msg = String(err && err.message ? err.message : err || '');
-    return /Unauthorized access to file|401|403|AccessDenied/i.test(msg);
+    // Session/GPU failures can leave ORT's module-level initialization chain
+    // poisoned. A mirror retry in the same worker would hide the real fault and
+    // can compound leaked GPU resources.
+    if (POISONED_RUNTIME_LOAD_RE.test(msg)) return false;
+    const status = hubStatusCode(err);
+    if (status !== null) {
+        return [401, 403, 408, 429, 500, 502, 503, 504].includes(status);
+    }
+    if (err?.name === 'TypeError' && /^Load failed$/i.test(msg.trim())) return true;
+    return RETRYABLE_HUB_STATUS_RE.test(msg) || RETRYABLE_HUB_TRANSPORT_RE.test(msg);
 }
 
 function toLoadFailure(error, model, backend, dtype) {
@@ -118,7 +150,10 @@ let gpuVendorHint = '';
 let currentBackend = 'wasm';
 let currentVendor = '';
 let currentDtype = '';
-let skipWebgpu = false;
+// null = not probed for the current model, true = supported, false = the
+// current export does not expose cross-attention tensors.
+let wordTimestampsSupported = null;
+let wordTimestampsEnabled = false;
 let preferLowPowerAdapter = false;
 let minWebgpuBufferBytes = 268435456;
 let adapterProbeTimeoutMs = 8000;
@@ -228,22 +263,22 @@ async function detectWebGPU(requiredBufferBytes = minWebgpuBufferBytes) {
 }
 
 async function detectBackend(requiredBufferBytes = minWebgpuBufferBytes) {
-    if (!skipWebgpu) {
-        const result = await detectWebGPU(requiredBufferBytes);
-        if (result.backend) return result.backend;
-        return {
-            device: 'wasm',
-            vendor: '',
-            maxBuf: 0,
-            reason: result.reason,
-            capacityFallback: result.capacityFallback === true,
-        };
-    }
-    return { device: 'wasm', vendor: '', maxBuf: 0, reason: 'WebGPU disabled by host policy' };
+    const result = await detectWebGPU(requiredBufferBytes);
+    if (result.backend) return result.backend;
+    return {
+        device: null,
+        vendor: '',
+        maxBuf: 0,
+        reason: result.reason,
+    };
 }
 
 function getDtypeCandidates(device) {
     if (device !== 'webgpu') return null;
+    // Keep the acoustically sensitive encoder at full precision. Firefox/M1
+    // profiling showed that fp16 could complete quickly while collapsing a
+    // 29-second Japanese sample to one junk token; fp32 produced the full
+    // transcript and also retains compatibility with Intel Arc-class devices.
     return [{ encoder_model: 'fp32', decoder_model_merged: 'q4' }];
 }
 
@@ -254,11 +289,6 @@ function resolveModelName(model, multilingual) {
         return model.slice(0, -'_timestamped'.length) + '.en_timestamped';
     }
     return model + '.en';
-}
-
-async function releaseGpuResources() {
-    await new Promise(r => setTimeout(r, 250));
-    await new Promise(r => setTimeout(r, 250));
 }
 
 function configureWebGpuRuntime(adapter) {
@@ -273,17 +303,17 @@ function configureWebGpuRuntime(adapter) {
     return true;
 }
 
-// Inference timeout
-const INFERENCE_TIMEOUT_MS = 45_000;
-const FAST_BOOTSTRAP_TIMEOUT_MS = 30_000;
+// Inference timeout. The controller embeds this exact same typed policy and
+// waits beyond it before treating an inference as unresponsive.
+${inferencePolicySource}
 const GPU_INFERENCE_ERROR_RE = /createBuffer|RangeError|out of memory|OOM|allocation|device lost|GPUDevice|createComputePipeline|createShaderModule|mapAsync|mapping webgpu buffer|invalid buffer|Instance reference|AbortError|release session|invalid session|index out of bounds|timed out|reading 'destroy'|reading 'dispose'/i;
 
 function toErrorMessage(error) {
     return error && error.message ? error.message : String(error || 'Unknown error');
 }
 
-function postChunkError(chunkId, message, gpuFallback = false) {
-    const data = gpuFallback ? { message, gpuFallback: true } : { message };
+function postChunkError(chunkId, message, gpuFailure = false) {
+    const data = gpuFailure ? { message, gpuFailure: true } : { message };
     self.postMessage({ status: 'error', data, chunkId });
 }
 
@@ -295,12 +325,6 @@ function withInferenceTimeout(promise, ms, backendName) {
     return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
-function getInferenceTimeoutMs(currentBackend, chunkLengthS) {
-    const chunkS = Number(chunkLengthS) || 30;
-    if (currentBackend === 'webgpu') return Math.max(INFERENCE_TIMEOUT_MS, chunkS * 5 * 1000);
-    return Math.min(180_000, Math.max(90_000, chunkS * 4 * 1000));
-}
-
 // ------------------------------------------------------------
 // Pipeline management
 // ------------------------------------------------------------
@@ -309,12 +333,34 @@ let pipelinePromise = null;
 let currentModel = null;
 let currentMultilingual = null;
 
+function initializeTimestampCapability(modelName) {
+    // "_timestamped" exports advertise alignment heads and are eligible for a
+    // real word-alignment probe. Capability begins unknown for each loaded
+    // model and becomes false only after the pipeline reports that its actual
+    // graph lacks cross-attention outputs.
+    wordTimestampsEnabled = /_timestamped$/i.test(String(modelName || ''));
+    wordTimestampsSupported = null;
+}
+
 async function loadPipelineForModel(settings, progressCb) {
+    const modelName = resolveModelName(settings.model, settings.multilingual);
+    const requestedBackend = settings.backend;
+    if (requestedBackend !== 'webgpu' && requestedBackend !== 'wasm') {
+        throw toLoadFailure(
+            new Error('Whisper backend must be explicitly selected as webgpu or wasm'),
+            modelName,
+            String(requestedBackend || 'invalid'),
+            '',
+        );
+    }
     await loadTransformers();
 
-    const modelName = resolveModelName(settings.model, settings.multilingual);
-
-    if (pipelinePromise && currentModel === modelName && currentMultilingual === settings.multilingual) {
+    if (
+        pipelinePromise
+        && currentModel === modelName
+        && currentMultilingual === settings.multilingual
+        && currentBackend === requestedBackend
+    ) {
         return pipelinePromise;
     }
 
@@ -323,33 +369,24 @@ async function loadPipelineForModel(settings, progressCb) {
         pipelinePromise = null;
         currentModel = null;
         currentDtype = '';
+        wordTimestampsSupported = null;
+        wordTimestampsEnabled = false;
     }
 
     const requestedMinBuffer = Number(settings.minWebgpuBufferBytes);
     const requiredBufferBytes = Number.isFinite(requestedMinBuffer) && requestedMinBuffer > 0
         ? requestedMinBuffer
         : minWebgpuBufferBytes;
-    const backend = await detectBackend(requiredBufferBytes);
-
-    // Capacity rejection happens before ORT creates a session, so this worker
-    // is still healthy. Retry the portable tiny model on the same GPU instead
-    // of unnecessarily falling all the way back to slow CPU/WASM.
-    if (backend.capacityFallback && settings.model !== FALLBACK_MODEL) {
-        fallbackModelOverride = FALLBACK_MODEL;
-        self.postMessage({
-            status: 'fallback',
-            originalModel: settings.model,
-            fallbackModel: FALLBACK_MODEL,
-            reason: backend.reason || 'Selected model exceeds this WebGPU adapter limit',
-            reasonCode: 'webgpu-buffer-limit',
-            backend: 'webgpu',
-            chunkId: typeof settings.chunkId === 'number' ? settings.chunkId : undefined,
-        });
-        return loadPipelineForModel({
-            ...settings,
-            model: FALLBACK_MODEL,
-            minWebgpuBufferBytes: 268435456,
-        }, progressCb);
+    const backend = requestedBackend === 'wasm'
+        ? { device: 'wasm', vendor: '', maxBuf: 0, reason: 'CPU/WASM selected by user or device profile' }
+        : await detectBackend(requiredBufferBytes);
+    if (backend.device !== requestedBackend) {
+        throw toLoadFailure(
+            new Error('Requested WebGPU backend is unavailable: ' + (backend.reason || 'no usable hardware adapter')),
+            modelName,
+            requestedBackend,
+            '',
+        );
     }
 
     currentBackend = backend.device;
@@ -362,23 +399,6 @@ async function loadPipelineForModel(settings, progressCb) {
         reason: backend.reason || '',
         chunkId: typeof settings.chunkId === 'number' ? settings.chunkId : undefined,
     });
-
-    // A host-level GPU probe can succeed while the worker ultimately lands on
-    // WASM. Keep that backend bounded instead of loading a large model first.
-    if (currentBackend === 'wasm' && settings.model !== FALLBACK_MODEL) {
-        fallbackModelOverride = FALLBACK_MODEL;
-        self.postMessage({
-            status: 'fallback',
-            originalModel: settings.model,
-            fallbackModel: FALLBACK_MODEL,
-            reason: 'WASM backend requires the bounded tiny model',
-            reasonCode: 'wasm-bounded-model',
-            backend: currentBackend,
-            dtype: WASM_DTYPE,
-            chunkId: typeof settings.chunkId === 'number' ? settings.chunkId : undefined,
-        });
-        return loadPipelineForModel({ ...settings, model: FALLBACK_MODEL }, progressCb);
-    }
 
     const revision = 'main';
 
@@ -402,20 +422,18 @@ async function loadPipelineForModel(settings, progressCb) {
                         currentModel = modelName;
                         currentMultilingual = settings.multilingual;
                         currentDtype = JSON.stringify(dtype);
+                        initializeTimestampCapability(modelName);
                         console.log('[Whisper Worker] Model loaded on webgpu [' + currentDtype + ']:', modelName);
                         return pipelinePromise;
                     } catch (err) {
                         pipelinePromise = null;
                         const msg = String(err?.message || err || '');
-                        const isContextErr = /WebGPU Context Provider|context.*provider|device lost|GPUDevice|createComputePipeline|createShaderModule|mapping webgpu buffer|invalid buffer/i.test(msg);
-                        const isGpuErr = isContextErr || /allocation|out of memory|OOM|RangeError|createbuffer|timed out/i.test(msg);
-
                         console.warn('[Whisper Worker] WebGPU load error:', JSON.stringify(dtype), msg);
 
-                        if (isUnauthorizedError(err) && hubIdx + 1 < HUB_BASE_URLS.length) {
+                        if (isRetryableHubLoadError(err) && hubIdx + 1 < HUB_BASE_URLS.length) {
+                            console.warn('[Whisper Worker] Hub transport/auth failure, retrying the exact model on the next mirror...');
                             continue;
                         }
-                        if (isContextErr || isGpuErr) await releaseGpuResources();
                         // A rejected ORT session creation poisons the module's
                         // session-init chain. Recovery must happen in a fresh
                         // worker; never try another dtype/backend in this one.
@@ -456,38 +474,34 @@ async function loadPipelineForModel(settings, progressCb) {
             currentModel = modelName;
             currentMultilingual = settings.multilingual;
             currentDtype = WASM_DTYPE;
+            initializeTimestampCapability(modelName);
             console.log('[Whisper Worker] Model loaded on wasm [' + currentDtype + ']:', modelName);
             return pipelinePromise;
         } catch (err) {
             lastErr = err;
             pipelinePromise = null;
-            if (!isUnauthorizedError(err)) {
+            if (!isRetryableHubLoadError(err)) {
                 throw toLoadFailure(err, modelName, 'wasm', WASM_DTYPE);
             }
             if (hubIdx + 1 >= HUB_BASE_URLS.length) break;
-            console.warn('[Whisper Worker] Unauthorized model fetch, retrying with next hub base...');
+            console.warn('[Whisper Worker] Hub transport/auth failure, retrying the exact model on the next mirror...');
         }
     }
 
     throw toLoadFailure(lastErr || new Error('Failed to load model'), modelName, 'wasm', WASM_DTYPE);
 }
 
-const FALLBACK_MODEL = 'onnx-community/whisper-tiny';
-let fallbackModelOverride = null;
 let pipelineLoadPromise = null;
 let pipelineLoadKey = '';
 
 async function ensurePipeline(settings, progressCb) {
-    const effective = fallbackModelOverride
-        ? { ...settings, model: fallbackModelOverride }
-        : settings;
-    const loadingKey = effective.model + '|' + String(effective.multilingual);
+    const loadingKey = settings.model + '|' + String(settings.multilingual) + '|' + String(settings.backend);
     if (pipelineLoadPromise && pipelineLoadKey === loadingKey) {
         return pipelineLoadPromise;
     }
 
     const loadTask = (async () => {
-        return await loadPipelineForModel(effective, progressCb);
+        return await loadPipelineForModel(settings, progressCb);
     })();
     pipelineLoadPromise = loadTask;
     pipelineLoadKey = loadingKey;
@@ -521,7 +535,8 @@ async function transcribe(msg) {
     let lastHeartbeatAt = 0;
     const emitHeartbeat = (phase, partialText = '') => {
         const now = Date.now();
-        if (now - lastHeartbeatAt < 500 && phase !== 'started') return;
+        const force = phase === 'started' || phase === 'retrying';
+        if (!force && now - lastHeartbeatAt < 500) return;
         lastHeartbeatAt = now;
         self.postMessage({
             status: 'heartbeat',
@@ -537,9 +552,7 @@ async function transcribe(msg) {
 
     const timeOffset = msg.timeOffset || 0;
     const chunkId = msg.chunkId;
-    // The bounded WASM export does not expose cross-attention tensors, so word
-    // timestamps always fail after a full decode and force a duplicate pass.
-    const useWordTimestamps = currentBackend !== 'wasm';
+    const useWordTimestamps = wordTimestampsEnabled && wordTimestampsSupported !== false;
     let partialText = '';
 
     const basePipeOpts = {
@@ -561,8 +574,12 @@ async function transcribe(msg) {
 
         // A streamer owns token-cache and prompt state. Every retry gets a
         // fresh instance, and callbacks from a failed attempt are epoch-guarded.
-        if (TextStreamer && targetPipe?.tokenizer) {
-            opts.streamer = new TextStreamer(targetPipe.tokenizer, {
+        const Streamer = WhisperTextStreamer || TextStreamer;
+        if (Streamer && targetPipe?.tokenizer) {
+            // Whisper timestamp tokens are not classified as generic "special"
+            // tokens. WhisperTextStreamer understands tokenizer.timestamp_begin
+            // and prevents tokens such as <|0.00|> from reaching callbacks.
+            opts.streamer = new Streamer(targetPipe.tokenizer, {
                 skip_prompt: true,
                 skip_special_tokens: true,
                 callback_function: (text) => {
@@ -582,7 +599,7 @@ async function transcribe(msg) {
     let pipeOpts = createAttemptOptions(useWordTimestamps ? 'word' : true);
 
     let inferenceStarted = false;
-    const runInference = async (targetPipe, opts, backendName, timeoutOverrideMs) => {
+    const runInference = async (targetPipe, opts, backendName) => {
         if (!inferenceStarted) {
             inferenceStarted = true;
             self.postMessage({
@@ -592,7 +609,7 @@ async function transcribe(msg) {
             });
             emitHeartbeat('started');
         }
-        const timeoutMs = timeoutOverrideMs ?? getInferenceTimeoutMs(backendName, msg.chunkLengthS);
+        const timeoutMs = getInferenceTimeoutMs(backendName, msg.chunkLengthS);
         console.log('[Whisper Worker] Starting inference on ' + backendName + ' (timeout=' + timeoutMs / 1000 + 's)');
         return withInferenceTimeout(targetPipe(msg.audio, opts), timeoutMs, backendName);
     };
@@ -610,14 +627,19 @@ async function transcribe(msg) {
             haltTimedOutWorker(chunkId, initialMsg, currentBackend !== 'wasm');
             return null;
         }
-        const canRetryWithoutWords = pipeOpts.return_timestamps === 'word';
+        const isWordTimestampCapabilityError = pipeOpts.return_timestamps === 'word'
+            && /cross[- ]attentions?|output_attentions/i.test(initialMsg);
 
-        if (canRetryWithoutWords) {
+        if (isWordTimestampCapabilityError) {
             console.warn('[Whisper Worker] Word-level timestamps failed (' + initialMsg + '), retrying with segment timestamps');
+            // Remember this export's observed capability. Retrying the same
+            // unsupported word-timestamp decode on every audio window
+            // otherwise doubles inference work and makes live ASMR lag.
+            wordTimestampsSupported = false;
             pipeOpts = createAttemptOptions(true);
             try {
-                const retryTimeoutMs = Math.max(getInferenceTimeoutMs(currentBackend, msg.chunkLengthS), FAST_BOOTSTRAP_TIMEOUT_MS);
-                result = await runInference(pipe, pipeOpts, currentBackend, retryTimeoutMs);
+                emitHeartbeat('retrying');
+                result = await runInference(pipe, pipeOpts, currentBackend);
             } catch (retryError) {
                 const retryMsg = toErrorMessage(retryError);
                 if (/inference timed out/i.test(retryMsg)) {
@@ -625,9 +647,8 @@ async function transcribe(msg) {
                     return null;
                 }
                 if (currentBackend !== 'wasm' && GPU_INFERENCE_ERROR_RE.test(retryMsg)) {
-                    // Switching execution providers in this worker can inherit
-                    // poisoned ORT session state. The host will terminate it
-                    // and retry the bounded model in a fresh WASM worker.
+                    // The selected WebGPU plan failed. Report it without
+                    // changing execution providers.
                     postChunkError(chunkId, retryMsg, true);
                     return null;
                 } else {
@@ -645,6 +666,9 @@ async function transcribe(msg) {
     }
 
     if (!result) return null;
+    if (pipeOpts.return_timestamps === 'word') {
+        wordTimestampsSupported = true;
+    }
 
     // Apply time offset to raw chunks and send to host for processing
     const rawChunks = applyOffset(result.chunks || [], timeOffset);
@@ -719,7 +743,7 @@ function postLoadFailed(error, chunkId) {
     for (const queued of queuedJobs) postDropped(queued, 'worker-poisoned');
 }
 
-function haltTimedOutWorker(chunkId, message, gpuFallback) {
+function haltTimedOutWorker(chunkId, message, gpuFailure) {
     // Promise.race cannot cancel model.generate(). Once it times out, this
     // worker may still be executing the old inference. Poison it so no queued
     // job can overlap. Report poison before the chunk error: replacing the
@@ -728,9 +752,9 @@ function haltTimedOutWorker(chunkId, message, gpuFallback) {
     workerPoisoned = true;
     self.postMessage({
         status: 'worker-poisoned',
-        data: { reason: 'inference-timeout', message, gpuFallback: gpuFallback === true },
+        data: { reason: 'inference-timeout', message, gpuFailure: gpuFailure === true },
     });
-    postChunkError(chunkId, message, gpuFallback);
+    postChunkError(chunkId, message, gpuFailure);
     const queuedJobs = jobQueue;
     jobQueue = [];
     for (const queued of queuedJobs) postDropped(queued, 'worker-poisoned');
@@ -738,7 +762,6 @@ function haltTimedOutWorker(chunkId, message, gpuFallback) {
 ${enableTestHooks ? `
 self.__whisperTestHalt = haltTimedOutWorker;
 self.__whisperTestConfigureBackend = (options = {}) => {
-    skipWebgpu = options.skipWebgpu === true;
     preferLowPowerAdapter = options.preferLowPowerAdapter === true;
     minWebgpuBufferBytes = Number(options.minWebgpuBufferBytes) || 268435456;
     adapterProbeTimeoutMs = Number(options.adapterProbeTimeoutMs) || 8000;
@@ -749,6 +772,29 @@ self.__whisperTestConfigureWebGpuRuntime = (testEnv, adapter) => {
     env = testEnv;
     return configureWebGpuRuntime(adapter);
 };
+self.__whisperTestIsRetryableHubLoadError = isRetryableHubLoadError;
+self.__whisperTestSetTransformers = (testPipeline, testEnv = {}) => {
+    pipeline = testPipeline;
+    env = testEnv;
+    transformersLoaded = true;
+};
+self.__whisperTestLoadPipelineForModel = loadPipelineForModel;
+self.__whisperTestGetTimestampCapability = () => ({
+    enabled: wordTimestampsEnabled,
+    supported: wordTimestampsSupported,
+});
+self.__whisperTestSetPipeline = (testPipe, options = {}) => {
+    pipelinePromise = Promise.resolve(testPipe);
+    currentModel = String(options.model || 'onnx-community/whisper-small_timestamped');
+    currentMultilingual = options.multilingual !== false;
+    currentBackend = String(options.backend || 'webgpu');
+    TextStreamer = options.TextStreamer || class { constructor() {} };
+    WhisperTextStreamer = options.WhisperTextStreamer || TextStreamer;
+    transformersLoaded = true;
+    pipelineLoadPromise = null;
+    initializeTimestampCapability(currentModel);
+};
+self.__whisperTestTranscribeDirect = transcribe;
 ` : ''}
 
 function enqueueJob(msg) {
@@ -832,12 +878,6 @@ async function processNextJob() {
 self.addEventListener('message', async (event) => {
     const msg = event.data;
 
-    if (msg.type === 'skip-webgpu') {
-        skipWebgpu = true;
-        console.log('[Whisper Worker] WebGPU disabled by host');
-        return;
-    }
-
     if (msg.type === 'flush-queue') {
         const flushed = jobQueue.length;
         for (const queued of jobQueue) postDropped(queued, 'queue-flushed');
@@ -855,7 +895,8 @@ self.addEventListener('message', async (event) => {
         }
         currentModel = null;
         currentMultilingual = null;
-        fallbackModelOverride = null;
+        wordTimestampsSupported = null;
+        wordTimestampsEnabled = false;
         pipelineLoadPromise = null;
         pipelineLoadKey = '';
         return;

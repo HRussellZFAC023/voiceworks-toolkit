@@ -25,6 +25,7 @@ const mocks = vi.hoisted(() => ({
         currentTrackSrc: null,
     },
     effectiveModel: 'onnx-community/whisper-small_timestamped',
+    effectiveBackend: 'webgpu' as 'webgpu' | 'wasm',
     warmupModel: vi.fn(),
 }));
 
@@ -57,7 +58,10 @@ vi.mock('../../src/store/AppStore', () => ({
 }));
 
 vi.mock('../../src/core/Cache', () => ({
-    CacheKeys: { whisperModelReady: (model: string) => `whisper:${model}` },
+    CacheKeys: {
+        whisperModelReady: (model: string, backend: 'webgpu' | 'wasm') =>
+            `whisper:${model}:${backend}`,
+    },
     SharedCache: { get: vi.fn(() => undefined) },
 }));
 
@@ -65,6 +69,7 @@ vi.mock('../../src/features/Whisper', () => ({
     Whisper: {
         getInstance: () => ({
             getEffectiveModelId: () => mocks.effectiveModel,
+            getEffectiveBackend: () => mocks.effectiveBackend,
             warmupModel: mocks.warmupModel,
         }),
     },
@@ -90,6 +95,7 @@ describe('SettingsPanel Whisper download status', () => {
         mocks.configs.whisperModel = 'onnx-community/whisper-small_timestamped';
         mocks.configs.whisperAutoWarmup = false;
         mocks.effectiveModel = 'onnx-community/whisper-small_timestamped';
+        mocks.effectiveBackend = 'webgpu';
         Object.assign(mocks.whisperState, {
             isTranscribing: false,
             isLoadingModel: false,
@@ -102,6 +108,16 @@ describe('SettingsPanel Whisper download status', () => {
     afterEach(() => {
         wrapper?.unmount();
         wrapper = undefined;
+    });
+
+    it('warns that Base may need a shorter live context on integrated GPUs', () => {
+        mocks.configs.whisperModelPreset = 'base';
+        wrapper = shallowMount(SettingsPanel);
+
+        const modelControl = wrapper
+            .findAllComponents({ name: 'SettingsRangeSelect' })
+            .find(control => control.props('configKey') === 'whisperModelPreset');
+        expect(modelControl?.props('hint')).toBe('whisperPresetBaseWarning');
     });
 
     it.each([

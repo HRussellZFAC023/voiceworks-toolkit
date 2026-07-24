@@ -69,11 +69,44 @@ function isCJKText(text: string): boolean {
     return /[\u3040-\u30ff\u4e00-\u9fff]/.test(text);
 }
 
+/**
+ * Remove Whisper decoder control tokens from user-visible text.
+ *
+ * Whisper timestamp tokens are deliberately not marked as "special" by the
+ * tokenizer, so a generic TextStreamer can surface them even when
+ * `skip_special_tokens` is enabled. Streaming callbacks may also begin in the
+ * middle of a token (for example `00|>`), hence the anchored fragment cleanup.
+ */
+export function sanitizeWhisperText(text: string | null | undefined): string {
+    let cleaned = String(text || '')
+        // Complete Whisper control tokens: timestamps, language/task markers,
+        // start/end markers, and no-timestamps markers.
+        .replace(/<\|[^<>|]{0,64}\|>/g, '');
+
+    // A streaming callback can start after the `<|` part was consumed. Remove
+    // one or more timestamp suffixes only at the beginning so ordinary numeric
+    // text elsewhere is preserved.
+    let previous = '';
+    while (cleaned !== previous) {
+        previous = cleaned;
+        cleaned = cleaned.replace(
+            /^\s*(?:(?:<\|)?\d{1,5}(?:\.\d{0,3})?\|>|\|>)\s*/,
+            '',
+        );
+    }
+
+    // Do not render an incomplete control token while the next streamer
+    // callback is still pending.
+    cleaned = cleaned.replace(/\s*<\|[^<>|]{0,64}$/, '');
+
+    return cleaned.replace(/\s+/g, ' ').trim();
+}
+
 // ── Hallucination filtering ────────────────────────────────────────────
 
 /** True when the complete text is a known non-speech/subtitle hallucination. */
 export function isWhisperHallucinationText(text: string | null | undefined): boolean {
-    const normalized = String(text || '').trim();
+    const normalized = sanitizeWhisperText(text);
     if (!normalized) return false;
     return HALLUCINATION_RE.test(normalized) || SUBTITLE_HALLUCINATION_RE.test(normalized);
 }
@@ -84,11 +117,13 @@ export function isWhisperHallucinationText(text: string | null | undefined): boo
  */
 export function cleanHallucinatedChunks<T extends { text?: string }>(chunks: T[]): T[] {
     if (!chunks) return chunks;
-    return chunks.filter(c => {
-        const text = (c.text || '').trim();
-        if (!text) return false;
-        return !isWhisperHallucinationText(text);
-    });
+    return chunks
+        .map(c => ({ ...c, text: sanitizeWhisperText(c.text) }) as T)
+        .filter(c => {
+            const text = c.text || '';
+            if (!text) return false;
+            return !isWhisperHallucinationText(text);
+        });
 }
 
 // ── Repetition truncation ──────────────────────────────────────────────
@@ -138,7 +173,7 @@ export function isWordLevelChunks(chunks: RawChunk[]): boolean {
 // ── Segment building ───────────────────────────────────────────────────
 
 function buildSegmentFromWords(words: RawChunk[]): ProcessedSegment {
-    const texts = words.map(w => (w.text || '').trim()).filter(Boolean);
+    const texts = words.map(w => sanitizeWhisperText(w.text)).filter(Boolean);
     const joinChar = texts.some(t => isCJKText(t)) ? '' : ' ';
     const text = texts.join(joinChar).trim();
     const first = words[0];
@@ -149,10 +184,10 @@ function buildSegmentFromWords(words: RawChunk[]): ProcessedSegment {
         text,
         timestamp: [startRaw ?? null, endRaw ?? null],
         words: words.map(w => ({
-            text: (w.text || '').trim(),
+            text: sanitizeWhisperText(w.text),
             start: w.timestamp?.[0] ?? null,
             end: (w.timestamp?.[1] ?? w.timestamp?.[0]) ?? null,
-        })),
+        })).filter(w => !!w.text),
     };
 }
 
@@ -193,10 +228,12 @@ export function groupWordsToSegments(words: RawChunk[]): ProcessedSegment[] {
 
 /** Convert segment-level chunks to ProcessedSegment (no word timestamps). */
 export function formatSegmentChunks(chunks: RawChunk[]): ProcessedSegment[] {
-    return chunks.map(c => ({
-        text: (c.text || '').trim(),
-        timestamp: [c.timestamp?.[0] ?? null, c.timestamp?.[1] ?? null],
-    }));
+    return chunks
+        .map(c => ({
+            text: sanitizeWhisperText(c.text),
+            timestamp: [c.timestamp?.[0] ?? null, c.timestamp?.[1] ?? null] as [number | null, number | null],
+        }))
+        .filter(segment => !!segment.text);
 }
 
 // ── Bracket restoration ────────────────────────────────────────────────
@@ -209,7 +246,7 @@ export function formatSegmentChunks(chunks: RawChunk[]): ProcessedSegment[] {
  */
 export function restoreMissingBrackets(segments: ProcessedSegment[], fullText: string | undefined): void {
     if (!segments.length || !fullText) return;
-    const ft = fullText.trim();
+    const ft = sanitizeWhisperText(fullText);
     if (!ft) return;
 
     const leadM = ft.match(OPEN_BRACKET_RE);

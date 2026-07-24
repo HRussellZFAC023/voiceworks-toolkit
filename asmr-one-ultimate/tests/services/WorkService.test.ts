@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { HttpClient } from '../../src/infrastructure/HttpClient';
 import { WorkServiceImpl } from '../../src/services/WorkService';
+import type { TracksResponse } from '../../src/types/api';
 
 // Mock HttpClient to prevent real network calls
 vi.mock('../../src/infrastructure/HttpClient', () => ({
@@ -25,8 +27,12 @@ vi.mock('../../src/infrastructure/KikoeruBridge', () => ({
 
 describe('WorkService', () => {
     let svc: WorkServiceImpl;
+    type CacheAccess = {
+        setCache(store: 'tracks', key: number, data: TracksResponse): Promise<void>;
+    };
 
     beforeEach(() => {
+        vi.mocked(HttpClient.getJsonViaCors).mockReset().mockRejectedValue(new Error('network mock'));
         mockGetInstance.mockReturnValue({
             axios: { defaults: { baseURL: 'https://api.asmr-200.com' } },
         });
@@ -114,7 +120,10 @@ describe('WorkService', () => {
 
             await expect(svc.getTracks('RJ123456', false, true)).resolves.toEqual(fresh);
 
-            expect(fetchTracks).toHaveBeenCalledWith(123456, true);
+            expect(fetchTracks).toHaveBeenCalledWith(123456, {
+                bypassInflight: true,
+                cacheFallback: 'valid-non-empty',
+            });
         });
 
         it('propagates foreground priority through the shared HTTP client', async () => {
@@ -130,6 +139,94 @@ describe('WorkService', () => {
                 'https://api.asmr-200.com/api/tracks/123456?v=2',
                 expect.objectContaining({ dedupe: false }),
             );
+        });
+
+        it('accepts media leaves that carry empty serializer child arrays', async () => {
+            const leaf: TracksResponse = [{
+                type: 'audio',
+                hash: 'leaf',
+                title: 'leaf.mp3',
+                children: [],
+                mediaDownloadUrl: 'https://media.test/leaf.mp3',
+            }];
+            vi.mocked(HttpClient.getJsonViaCors).mockResolvedValueOnce({
+                data: leaf,
+                status: 200,
+                headers: {},
+                cached: false,
+            });
+
+            await expect(svc.getValidatedLiveTracks('RJ123456')).resolves.toEqual(leaf);
+        });
+
+        it.each([
+            ['empty', [] as TracksResponse],
+            ['malformed', [{ unexpected: true }] as unknown as TracksResponse],
+        ])('refetches a live validated manifest instead of trusting a fresh %s cache row', async (_label, cached) => {
+            const cache = svc as unknown as CacheAccess;
+            await cache.setCache('tracks', 223456, cached);
+            const live: TracksResponse = [{
+                type: 'audio',
+                hash: 'live',
+                title: 'live.wav',
+                mediaDownloadUrl: 'https://media.test/live.wav',
+            }];
+            vi.mocked(HttpClient.getJsonViaCors).mockResolvedValueOnce({
+                data: live,
+                status: 200,
+                headers: {},
+                cached: false,
+            });
+
+            await expect(svc.getValidatedLiveTracks('RJ223456')).resolves.toEqual(live);
+
+            expect(HttpClient.getJsonViaCors).toHaveBeenCalledWith(
+                'https://api.asmr-200.com/api/tracks/223456?v=2',
+                expect.objectContaining({ dedupe: false }),
+            );
+        });
+
+        it.each([
+            ['empty', [] as TracksResponse],
+            ['malformed', [{ unexpected: true }] as unknown as TracksResponse],
+        ])('refetches regular size-enrichment tracks instead of trusting a fresh %s cache row', async (_label, cached) => {
+            const cache = svc as unknown as CacheAccess;
+            await cache.setCache('tracks', 223457, cached);
+            const live: TracksResponse = [{
+                type: 'audio',
+                hash: 'live',
+                title: 'live.wav',
+                size: 1234,
+                mediaDownloadUrl: 'https://media.test/live.wav',
+            }];
+            vi.mocked(HttpClient.getJsonViaCors).mockResolvedValueOnce({
+                data: live,
+                status: 200,
+                headers: {},
+                cached: false,
+            });
+
+            await expect(svc.getTracks('RJ223457')).resolves.toEqual(live);
+        });
+
+        it('only permits an explicitly requested, valid non-empty cache fallback', async () => {
+            const cache = svc as unknown as CacheAccess;
+            const cached: TracksResponse = [{
+                type: 'audio',
+                hash: 'cached',
+                title: 'cached.wav',
+                mediaDownloadUrl: 'https://media.test/cached.wav',
+            }];
+            await cache.setCache('tracks', 323456, cached);
+
+            await expect(svc.getValidatedLiveTracks('RJ323456', {
+                cacheFallback: 'valid-non-empty',
+            })).resolves.toEqual(cached);
+            await cache.setCache('tracks', 323457, []);
+
+            await expect(svc.getValidatedLiveTracks('RJ323457', {
+                cacheFallback: 'valid-non-empty',
+            })).rejects.toThrow('network mock');
         });
     });
 

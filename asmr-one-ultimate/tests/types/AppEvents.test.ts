@@ -27,7 +27,6 @@ const EXPECTED_EVENTS = [
     'whisper:error',
     'whisper:hls-warning',
     'whisper:clear',
-    'whisper:fallback',
     'whisper:cache-updated',
     'whisper:segment-translated',
     // Cache events

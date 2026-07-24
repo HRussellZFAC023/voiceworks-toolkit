@@ -3,7 +3,32 @@ import {
     cleanHallucinatedChunks,
     isWhisperHallucinationText,
     processRawChunks,
+    sanitizeWhisperText,
 } from '../../src/features/whisperProcessing';
+
+describe('whisperProcessing decoder control tokens', () => {
+    it('removes complete Whisper timestamp/control tokens without changing ordinary decimals', () => {
+        expect(sanitizeWhisperText('<|0.00|>ちょっとだけ<|2.00|>')).toBe('ちょっとだけ');
+        expect(sanitizeWhisperText('<|ja|><|transcribe|>お邪魔します<|endoftext|>')).toBe('お邪魔します');
+        expect(sanitizeWhisperText('価格は0.00です')).toBe('価格は0.00です');
+    });
+
+    it('removes leading callback fragments and trailing incomplete control tokens', () => {
+        expect(sanitizeWhisperText('00|>ちょっとだけ')).toBe('ちょっとだけ');
+        expect(sanitizeWhisperText('|>ちょっとだけ')).toBe('ちょっとだけ');
+        expect(sanitizeWhisperText('<|0.00')).toBe('');
+    });
+
+    it('sanitizes segment chunks and a full-text-only fallback', () => {
+        expect(processRawChunks([
+            { text: '<|0.00|>お邪魔します<|2.00|>', timestamp: [0, 2] },
+        ], '<|0.00|>お邪魔します<|2.00|>')).toEqual([
+            { text: 'お邪魔します', timestamp: [0, 2] },
+        ]);
+
+        expect(processRawChunks([], '<|0.00|>聞こえています<|2.00|>')).toEqual([]);
+    });
+});
 
 describe('whisperProcessing Chinese filtering', () => {
     it('drops Simplified and Traditional Chinese non-speech annotations', () => {

@@ -72,6 +72,7 @@ export interface BackupDownloaderLabels {
     progress: string;
     pause: string;
     resume: string;
+    resumeWithoutOpus: string;
     alreadyRunning: string;
     resumableDownloads: string;
     expandPlaylist: string;
@@ -93,6 +94,7 @@ export interface BackupDownloaderLabels {
     titleOriginalTranslated: string;
     titleNone: string;
     convertToOpus: string;
+    convertToOpusMemoryWarning: string;
     opusBitrate: string;
     metadata: string;
     metadataAdditive: string;

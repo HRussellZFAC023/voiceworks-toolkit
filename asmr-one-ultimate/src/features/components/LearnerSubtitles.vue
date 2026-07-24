@@ -24,12 +24,18 @@ import { Logger, Config } from '../../core/Utils';
 import { Priority } from '../../core/GpuScheduler';
 import type { WhisperUpdatePayload, JPDBToken, AudioPlayerState, KikoeruStoreState, KikoeruApp, VueRoute, PlayerTrack, AvailableLyric, TranslationSourceHint } from '../../types';
 import { buildSegments, sliceSegments, type FuriganaSegment } from '../../lib/jpdb-segments';
-import { splitSubtitleSegments } from '../subtitleSegmentSplitter';
+import { sanitizeWhisperText } from '../whisperProcessing';
 import {
     isCurrentWhisperTextRequest,
     type WhisperTextRequestContext,
 } from '../learnerWhisperRequestUtils';
-import { findLyricsSource as findLyricsSourceUtil, normalizeLyricLines, parseLrcContent, parseSubtitleContent } from '../learnerLyricsUtils';
+import {
+    findLyricsSource as findLyricsSourceUtil,
+    normalizeLyricLines,
+    normalizeWhisperSubtitleLines,
+    parseLrcContent,
+    parseSubtitleContent,
+} from '../learnerLyricsUtils';
 import {
     buildKaraokeCharMap, computeWordKaraokeIndices, computeTimeFallbackKaraokeIndices,
     type KaraokeCharMap, type KaraokeWord,
@@ -110,6 +116,7 @@ let translationToken = 0;
 let whisperLines: Array<{ time: number; endTime?: number; text: string; words?: Array<{ start: number; end: number; text: string }> }> = [];
 let whisperText = '';
 let whisperActive = false;
+let whisperRunning = false;
 let whisperFromCache = false;
 let whisperLive = false;
 let whisperLeadSec = 0;
@@ -622,7 +629,7 @@ function clearDisplay() {
 
 function refreshVisibility() {
     isPlayerMinimized.value = !!bridge.store?.state?.AudioPlayer?.hide;
-    hasContent.value = !!lastDisplayedText || currentLyrics.length > 0 || whisperActive;
+    hasContent.value = !!lastDisplayedText || currentLyrics.length > 0 || whisperActive || whisperRunning;
 }
 
 // ---------------------------------------------------------------------------
@@ -1590,13 +1597,10 @@ function handleWhisperUpdate(payload: WhisperUpdatePayload) {
     whisperLive = typeof payload.live === 'boolean' ? !!payload.live : false;
     whisperLeadSec = typeof payload.leadSec === 'number' ? Math.max(0, payload.leadSec) : whisperLeadSec;
     whisperSourceLanguageHint = payload.sourceLanguageHint || 'auto';
-    whisperText = payload.text || '';
+    whisperText = sanitizeWhisperText(payload.text);
     ensureWhisperTicker(whisperLive ? 80 : 200);
     if (Array.isArray(payload.segments) && payload.segments.length > 0) {
-        const mapped = payload.segments
-            .map(s => ({ time: s.start, endTime: s.end, text: s.text, words: s.words }))
-            .sort((a, b) => a.time - b.time);
-        const newLines = splitSubtitleSegments(mapped);
+        const newLines = normalizeWhisperSubtitleLines(payload.segments);
         if (newLines.length > 0) schedulePreTranslation(newLines, 20, whisperSourceLanguageHint);
         whisperLines = newLines;
         // Don't reset lastWhisperDisplayText here — let _updateWhisperDisplay()
@@ -2271,6 +2275,11 @@ function setupStoreWatchers() {
 // ---------------------------------------------------------------------------
 
 onMounted(() => {
+    storeWatcherCleanups.push(AppStore.subscribeWhisperState((state) => {
+        whisperRunning = state.isTranscribing || state.isLoadingModel;
+        refreshVisibility();
+    }));
+
     AppStore.setLearnerState({ isActive: true });
 
     boundTimeHandler = () => updateLyrics();

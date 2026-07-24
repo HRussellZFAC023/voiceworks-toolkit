@@ -105,6 +105,12 @@ export class DirectoryDownloadSink {
         return new Uint8Array(await file.arrayBuffer());
     }
 
+    /** Inspect a source without materializing its contents in browser memory. */
+    async size(path: string[]): Promise<number> {
+        const { directory, filename } = await this.resolve(path);
+        return (await (await directory.getFileHandle(filename)).getFile()).size;
+    }
+
     async writeAll(path: string[], bytes: Uint8Array): Promise<void> {
         const writer = await this.open(path, 0);
         try { await writer.write(bytes, 0); await writer.close(); }

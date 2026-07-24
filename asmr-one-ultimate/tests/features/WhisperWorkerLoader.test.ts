@@ -1,6 +1,63 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { __getWhisperWorkerCodeForTests, createWhisperWorker } from '../../src/features/WhisperWorkerLoader';
 
+const TIMESTAMPED_TINY_MODEL = 'onnx-community/whisper-tiny_timestamped';
+
+function createTestWorker(postMessage: (message: any) => void = vi.fn()): any {
+    const workerSelf = {
+        addEventListener: vi.fn(),
+        postMessage,
+    };
+    new Function('self', __getWhisperWorkerCodeForTests(true))(workerSelf);
+    return workerSelf;
+}
+
+function setupPipelineLoader(pipeline: any) {
+    const testEnv: Record<string, unknown> = {};
+    const workerSelf = createTestWorker();
+    workerSelf.__whisperTestSetTransformers(pipeline, testEnv);
+    return { workerSelf, testEnv };
+}
+
+function loadTimestampedTinyOnWasm(workerSelf: any): Promise<unknown> {
+    return workerSelf.__whisperTestLoadPipelineForModel({
+        model: TIMESTAMPED_TINY_MODEL,
+        multilingual: true,
+        backend: 'wasm',
+    }, vi.fn());
+}
+
+function createSuccessfulTimestampPipe(timestampModes: unknown[]): any {
+    const pipe: any = vi.fn(async (_audio: Float32Array, options: any) => {
+        timestampModes.push(options.return_timestamps);
+        return {
+            text: 'お邪魔します',
+            chunks: [{ text: 'お邪魔します', timestamp: [0, 2] }],
+        };
+    });
+    pipe.tokenizer = {};
+    return pipe;
+}
+
+function transcribeTestChunk(
+    workerSelf: any,
+    chunkId: number,
+    overrides: Record<string, unknown> = {},
+): Promise<unknown> {
+    return workerSelf.__whisperTestTranscribeDirect({
+        audio: new Float32Array(32_000),
+        model: TIMESTAMPED_TINY_MODEL,
+        multilingual: true,
+        backend: 'webgpu',
+        subtask: 'transcribe',
+        language: 'japanese',
+        chunkLengthS: 2,
+        strideLengthS: 0,
+        chunkId,
+        ...overrides,
+    });
+}
+
 describe('WhisperWorkerLoader', () => {
     let capturedBlob: Blob | null = null;
     let workerCtor: any;
@@ -69,7 +126,7 @@ describe('WhisperWorkerLoader', () => {
         expect(code).toContain("status: 'gpu-device-lost'");
     });
 
-    it('delegates GPU inference fallback to a fresh host-created worker', () => {
+    it('reports GPU inference failure without changing the selected backend', () => {
         const code = __getWhisperWorkerCodeForTests();
 
         expect(code).toContain('postChunkError(chunkId, retryMsg, true)');
@@ -88,16 +145,19 @@ describe('WhisperWorkerLoader', () => {
     it('uses proportional inference timeout scaled to chunk length', () => {
         const code = __getWhisperWorkerCodeForTests();
 
-        expect(code).toContain('const INFERENCE_TIMEOUT_MS = 45_000;');
+        expect(code).toContain('"minimumMs":45000');
+        expect(code).toContain('"minimumMs":90000');
+        expect(code).toContain('"maximumMs":180000');
+        expect(code).toContain('calculateWhisperInferenceTimeoutMs');
         expect(code).toContain("backendName + ' inference timed out after '");
-        expect(code).toContain('chunkS * 5 * 1000');
-        expect(code).toContain("Math.min(180_000, Math.max(90_000, chunkS * 4 * 1000))");
+        expect(code).not.toContain('const INFERENCE_TIMEOUT_MS');
+        expect(code).not.toContain('FAST_BOOTSTRAP_TIMEOUT_MS');
     });
 
     it('does not retry on a pipeline whose uncancellable inference timed out', () => {
         const code = __getWhisperWorkerCodeForTests();
         const timeoutGuard = code.indexOf("if (/inference timed out/i.test(initialMsg))");
-        const wordRetry = code.indexOf('const canRetryWithoutWords');
+        const wordRetry = code.indexOf('const isWordTimestampCapabilityError');
 
         expect(timeoutGuard).toBeGreaterThan(0);
         expect(wordRetry).toBeGreaterThan(timeoutGuard);
@@ -108,11 +168,13 @@ describe('WhisperWorkerLoader', () => {
         expect(code).toContain('if (!workerPoisoned) processNextJob()');
     });
 
-    it('selects a bounded tiny multilingual model before loading on WASM', () => {
+    it('loads the requested multilingual model unchanged on WASM', () => {
         const code = __getWhisperWorkerCodeForTests();
-        expect(code).toContain("const FALLBACK_MODEL = 'onnx-community/whisper-tiny'");
-        expect(code).toContain("status: 'fallback'");
-        expect(code).toContain('loadPipelineForModel({ ...settings, model: FALLBACK_MODEL }');
+        expect(code).toContain('const requestedBackend = settings.backend;');
+        expect(code).toContain("requestedBackend !== 'webgpu' && requestedBackend !== 'wasm'");
+        expect(code).toContain("pipeline('automatic-speech-recognition', modelName, wasmOpts)");
+        expect(code).not.toContain("status: 'fallback'");
+        expect(code).not.toContain('FALLBACK_MODEL');
     });
 
     it('uses the compact q8 WASM model with safe basic graph optimization', () => {
@@ -129,6 +191,58 @@ describe('WhisperWorkerLoader', () => {
         expect(code).toContain("status: 'load-failed'");
         expect(code).toContain('sessionPoisoned: true');
         expect(code).not.toContain('All WebGPU candidates failed, falling through to WASM');
+    });
+
+    it('retries only transport, auth, and transient hub responses on the mirror', async () => {
+        const workerSelf = createTestWorker();
+        const retryable = workerSelf.__whisperTestIsRetryableHubLoadError;
+
+        expect(retryable(new TypeError('Failed to fetch decoder_model_merged.onnx'))).toBe(true);
+        expect(retryable(Object.assign(new Error('Service unavailable'), { status: 503 }))).toBe(true);
+        expect(retryable(new Error('Unauthorized access to file: generation_config.json'))).toBe(true);
+        expect(retryable(Object.assign(new Error('Missing model'), { status: 404 }))).toBe(false);
+        expect(retryable(new Error('WebGPU Context Provider: GPUDevice lost'))).toBe(false);
+        expect(retryable(new Error('RangeError while creating ORT session'))).toBe(false);
+        expect(retryable(new Error('requestAdapter timed out'))).toBe(false);
+        expect(retryable(new Error('tensor dimension 503 is invalid'))).toBe(false);
+        expect(retryable(new Error('Load failed'))).toBe(false);
+        expect(retryable(new TypeError('Load failed'))).toBe(true);
+    });
+
+    it('retries the exact WASM model on a network failure without changing its backend', async () => {
+        const loadedPipe = { dispose: vi.fn() };
+        const pipeline = vi.fn()
+            .mockRejectedValueOnce(new TypeError('Failed to fetch decoder_model_merged.onnx'))
+            .mockResolvedValueOnce(loadedPipe);
+        const { workerSelf, testEnv } = setupPipelineLoader(pipeline);
+
+        await expect(loadTimestampedTinyOnWasm(workerSelf)).resolves.toBe(loadedPipe);
+
+        expect(pipeline).toHaveBeenCalledTimes(2);
+        expect(pipeline.mock.calls.map(([, model, options]) => ({
+            model,
+            device: options.device,
+        }))).toEqual([
+            { model: TIMESTAMPED_TINY_MODEL, device: 'wasm' },
+            { model: TIMESTAMPED_TINY_MODEL, device: 'wasm' },
+        ]);
+        expect(testEnv.remoteHost).toBe('https://hf-mirror.com');
+    });
+
+    it('never retries a poisoned ORT load on another hub', async () => {
+        const pipeline = vi.fn()
+            .mockRejectedValue(new Error('WebGPU Context Provider failed while creating ORT session'));
+        const { workerSelf, testEnv } = setupPipelineLoader(pipeline);
+
+        await expect(loadTimestampedTinyOnWasm(workerSelf)).rejects.toMatchObject({
+            whisperLoadFailure: expect.objectContaining({
+                model: TIMESTAMPED_TINY_MODEL,
+                backend: 'wasm',
+            }),
+        });
+
+        expect(pipeline).toHaveBeenCalledTimes(1);
+        expect(testEnv.remoteHost).toBe('https://huggingface.co');
     });
 
     it('normalizes third-party model callbacks so only postReady emits ready', () => {
@@ -158,7 +272,9 @@ describe('WhisperWorkerLoader', () => {
 
         expect(code).toContain('chunk_length_s: msg.chunkLengthS');
         expect(code).toContain('stride_length_s: msg.strideLengthS');
-        expect(code).toContain('new TextStreamer(');
+        expect(code).toContain('WhisperTextStreamer = mod.WhisperTextStreamer');
+        expect(code).toContain('const Streamer = WhisperTextStreamer || TextStreamer');
+        expect(code).toContain('new Streamer(');
         expect(code).toContain("emitHeartbeat('decoding', partialText)");
         expect(code).toContain('const createAttemptOptions = (returnTimestamps, targetPipe = pipe)');
         expect(code).toContain('attempt !== activeAttempt || workerPoisoned');
@@ -175,10 +291,117 @@ describe('WhisperWorkerLoader', () => {
         expect(code).toContain('inputRms: msg.inputRms');
     });
 
-    it('avoids the guaranteed duplicate word-timestamp decode on WASM', () => {
+    it('enables word timestamps only for timestamped exports with an evidence-based capability cache', () => {
         const code = __getWhisperWorkerCodeForTests();
 
-        expect(code).toContain("const useWordTimestamps = currentBackend !== 'wasm'");
+        expect(code).toContain("wordTimestampsEnabled = /_timestamped$/i.test");
+        expect(code).toContain('const useWordTimestamps = wordTimestampsEnabled && wordTimestampsSupported !== false');
+        expect(code).toContain("wordTimestampsSupported = null");
+    });
+
+    it('remembers a missing cross-attention export and skips later word-timestamp retries', async () => {
+        const emitted: any[] = [];
+        const timestampModes: unknown[] = [];
+        let invocation = 0;
+        const pipe: any = vi.fn(async (_audio: Float32Array, options: any) => {
+            timestampModes.push(options.return_timestamps);
+            invocation += 1;
+            if (invocation === 1) {
+                throw new Error('Model outputs must contain cross attentions to extract timestamps');
+            }
+            return {
+                text: 'お邪魔します',
+                chunks: [{ text: 'お邪魔します', timestamp: [0, 2] }],
+            };
+        });
+        pipe.tokenizer = {};
+        const workerSelf = createTestWorker(message => emitted.push(message));
+        workerSelf.__whisperTestSetPipeline(pipe, {
+            model: 'custom/whisper-unknown-attention-export_timestamped',
+            backend: 'webgpu',
+            WhisperTextStreamer: class {
+                constructor() {}
+            },
+        });
+
+        await transcribeTestChunk(workerSelf, 1, {
+            model: 'custom/whisper-unknown-attention-export_timestamped',
+        });
+        await transcribeTestChunk(workerSelf, 2, {
+            model: 'custom/whisper-unknown-attention-export_timestamped',
+        });
+
+        expect(timestampModes).toEqual(['word', true, true]);
+        expect(workerSelf.__whisperTestGetTimestampCapability()).toEqual({
+            enabled: true,
+            supported: false,
+        });
+        expect(emitted.filter(message => message.status === 'error')).toEqual([]);
+    });
+
+    it('keeps word timestamps enabled after a successful timestamped-model probe', async () => {
+        const timestampModes: unknown[] = [];
+        const pipe = createSuccessfulTimestampPipe(timestampModes);
+        const workerSelf = createTestWorker();
+        workerSelf.__whisperTestSetPipeline(pipe, {
+            model: TIMESTAMPED_TINY_MODEL,
+            backend: 'wasm',
+        });
+
+        for (const chunkId of [1, 2]) {
+            await transcribeTestChunk(workerSelf, chunkId, {
+                backend: 'wasm',
+            });
+        }
+
+        expect(timestampModes).toEqual(['word', 'word']);
+        expect(workerSelf.__whisperTestGetTimestampCapability()).toEqual({
+            enabled: true,
+            supported: true,
+        });
+    });
+
+    it('uses segment timestamps directly for a non-timestamped export', async () => {
+        const timestampModes: unknown[] = [];
+        const pipe = createSuccessfulTimestampPipe(timestampModes);
+        const workerSelf = createTestWorker();
+        workerSelf.__whisperTestSetPipeline(pipe, {
+            model: 'custom/whisper-no-alignment-export',
+            backend: 'webgpu',
+        });
+
+        await transcribeTestChunk(workerSelf, 1, {
+            model: 'custom/whisper-no-alignment-export',
+        });
+
+        expect(timestampModes).toEqual([true]);
+        expect(workerSelf.__whisperTestGetTimestampCapability()).toEqual({
+            enabled: false,
+            supported: null,
+        });
+    });
+
+    it('does not retry or poison the timestamp capability cache for unrelated inference failures', async () => {
+        const pipe: any = vi.fn().mockRejectedValue(new Error('decoder input shape is invalid'));
+        pipe.tokenizer = {};
+        const emitted: any[] = [];
+        const workerSelf = createTestWorker(message => emitted.push(message));
+        workerSelf.__whisperTestSetPipeline(pipe, {
+            model: TIMESTAMPED_TINY_MODEL,
+            backend: 'webgpu',
+        });
+
+        await transcribeTestChunk(workerSelf, 1);
+
+        expect(pipe).toHaveBeenCalledTimes(1);
+        expect(workerSelf.__whisperTestGetTimestampCapability()).toEqual({
+            enabled: true,
+            supported: null,
+        });
+        expect(emitted).toContainEqual(expect.objectContaining({
+            status: 'error',
+            data: { message: 'decoder input shape is invalid' },
+        }));
     });
 
     it('detects WebGPU adapter with power preference', () => {
@@ -202,11 +425,7 @@ describe('WhisperWorkerLoader', () => {
             .mockResolvedValueOnce(null)
             .mockResolvedValueOnce(adapter);
         vi.stubGlobal('navigator', { gpu: { requestAdapter } });
-        const workerSelf: any = {
-            addEventListener: vi.fn(),
-            postMessage: vi.fn(),
-        };
-        new Function('self', __getWhisperWorkerCodeForTests(true))(workerSelf);
+        const workerSelf = createTestWorker();
         workerSelf.__whisperTestConfigureBackend({
             minWebgpuBufferBytes: 256 * 1024 * 1024,
         });
@@ -220,36 +439,27 @@ describe('WhisperWorkerLoader', () => {
         expect(backend.adapter).toBe(adapter);
     });
 
-    it('marks a large-model capacity miss so tiny can retry on the same WebGPU adapter', async () => {
+    it('reports a selected-model capacity miss without substituting a model or backend', async () => {
         const requestAdapter = vi.fn().mockResolvedValue({
             info: { vendor: 'Mozilla Apple M1, or Similar' },
             limits: { maxBufferSize: 256 * 1024 * 1024 },
         });
         vi.stubGlobal('navigator', { gpu: { requestAdapter } });
-        const workerSelf: any = {
-            addEventListener: vi.fn(),
-            postMessage: vi.fn(),
-        };
-        new Function('self', __getWhisperWorkerCodeForTests(true))(workerSelf);
+        const workerSelf = createTestWorker();
         workerSelf.__whisperTestConfigureBackend({
             minWebgpuBufferBytes: 512 * 1024 * 1024,
         });
 
         const backend = await workerSelf.__whisperTestDetectBackend();
 
-        expect(backend.device).toBe('wasm');
-        expect(backend.capacityFallback).toBe(true);
+        expect(backend.device).toBeNull();
         expect(backend.reason).toContain('below model requirement');
 
         const portableBackend = await workerSelf.__whisperTestDetectBackend(256 * 1024 * 1024);
         expect(portableBackend.device).toBe('webgpu');
         expect(portableBackend.maxBuf).toBe(256 * 1024 * 1024);
-        expect(__getWhisperWorkerCodeForTests()).toContain(
-            'Retry the portable tiny model on the same GPU',
-        );
-        expect(__getWhisperWorkerCodeForTests()).toContain(
-            'minWebgpuBufferBytes: 268435456',
-        );
+        expect(__getWhisperWorkerCodeForTests()).not.toContain('FALLBACK_MODEL');
+        expect(__getWhisperWorkerCodeForTests()).not.toContain("status: 'fallback'");
     });
 
     it('rejects a hidden-info fallback adapter and accepts the browser-default hardware adapter', async () => {
@@ -269,11 +479,7 @@ describe('WhisperWorkerLoader', () => {
             .mockResolvedValueOnce(fallbackAdapter)
             .mockResolvedValueOnce(hardwareAdapter);
         vi.stubGlobal('navigator', { gpu: { requestAdapter } });
-        const workerSelf: any = {
-            addEventListener: vi.fn(),
-            postMessage: vi.fn(),
-        };
-        new Function('self', __getWhisperWorkerCodeForTests(true))(workerSelf);
+        const workerSelf = createTestWorker();
         workerSelf.__whisperTestConfigureBackend({
             gpuVendorHint: 'apple m1',
         });
@@ -286,7 +492,7 @@ describe('WhisperWorkerLoader', () => {
         expect(backend.adapter).toBe(hardwareAdapter);
     });
 
-    it('falls back to WASM only after both preferred and browser-default adapters are fallback devices', async () => {
+    it('reports unavailable WebGPU after both adapter candidates are fallback devices', async () => {
         const fallbackAdapter = {
             isFallbackAdapter: true,
             info: { vendor: 'Hidden' },
@@ -294,31 +500,23 @@ describe('WhisperWorkerLoader', () => {
         };
         const requestAdapter = vi.fn().mockResolvedValue(fallbackAdapter);
         vi.stubGlobal('navigator', { gpu: { requestAdapter } });
-        const workerSelf: any = {
-            addEventListener: vi.fn(),
-            postMessage: vi.fn(),
-        };
-        new Function('self', __getWhisperWorkerCodeForTests(true))(workerSelf);
+        const workerSelf = createTestWorker();
 
         const backend = await workerSelf.__whisperTestDetectBackend();
 
         expect(requestAdapter).toHaveBeenCalledTimes(2);
         expect(backend).toMatchObject({
-            device: 'wasm',
+            device: null,
             reason: 'software/fallback WebGPU adapter rejected',
         });
     });
 
-    it('bounds a hung adapter probe and falls back to WASM', async () => {
+    it('bounds a hung adapter probe and reports WebGPU unavailable', async () => {
         vi.useFakeTimers();
         try {
             const requestAdapter = vi.fn(() => new Promise(() => {}));
             vi.stubGlobal('navigator', { gpu: { requestAdapter } });
-            const workerSelf: any = {
-                addEventListener: vi.fn(),
-                postMessage: vi.fn(),
-            };
-            new Function('self', __getWhisperWorkerCodeForTests(true))(workerSelf);
+            const workerSelf = createTestWorker();
             workerSelf.__whisperTestConfigureBackend({ adapterProbeTimeoutMs: 5 });
 
             const pending = workerSelf.__whisperTestDetectBackend();
@@ -327,7 +525,7 @@ describe('WhisperWorkerLoader', () => {
 
             expect(requestAdapter).toHaveBeenCalledTimes(1);
             expect(backend).toMatchObject({
-                device: 'wasm',
+                device: null,
                 reason: 'requestAdapter timed out for high-performance',
             });
         } finally {
@@ -337,11 +535,7 @@ describe('WhisperWorkerLoader', () => {
 
     it('applies the validated adapter and power policy to the actual ORT runtime', () => {
         vi.stubGlobal('navigator', {});
-        const workerSelf: any = {
-            addEventListener: vi.fn(),
-            postMessage: vi.fn(),
-        };
-        new Function('self', __getWhisperWorkerCodeForTests(true))(workerSelf);
+        const workerSelf = createTestWorker();
         workerSelf.__whisperTestConfigureBackend({ preferLowPowerAdapter: true });
         const adapter = { limits: { maxBufferSize: 256 * 1024 * 1024 } };
         const testEnv = { backends: { onnx: { webgpu: {} as Record<string, unknown> } } };
@@ -354,27 +548,63 @@ describe('WhisperWorkerLoader', () => {
         });
     });
 
-    it('rejects software WebGPU adapters and bounds WASM to tiny', () => {
+    it('rejects software WebGPU adapters without changing the requested model', () => {
         const code = __getWhisperWorkerCodeForTests();
 
         expect(code).toContain('swiftshader|llvmpipe|software|softpipe');
         expect(code).toContain('Rejected software/fallback WebGPU adapter');
-        expect(code).toContain("currentBackend === 'wasm' && settings.model !== FALLBACK_MODEL");
-        expect(code).toContain('WASM backend requires the bounded tiny model');
+        expect(code).not.toContain('FALLBACK_MODEL');
+        expect(code).not.toContain("status: 'fallback'");
     });
 
     it('reuses existing pipeline when model matches', () => {
         const code = __getWhisperWorkerCodeForTests();
 
-        expect(code).toContain('pipelinePromise && currentModel === modelName');
+        expect(code).toContain('pipelinePromise');
+        expect(code).toContain('currentModel === modelName');
+        expect(code).toContain('currentBackend === requestedBackend');
         expect(code).toContain('pipelineLoadPromise && pipelineLoadKey === loadingKey');
-        expect(code).toContain("const loadingKey = effective.model + '|' + String(effective.multilingual)");
+        expect(code).toContain("const loadingKey = settings.model + '|' + String(settings.multilingual)");
+        expect(code).toContain('String(settings.backend)');
+    });
+
+    it('rejects a missing or invalid backend instead of defaulting to WebGPU', async () => {
+        let messageHandler: ((event: MessageEvent) => Promise<void>) | null = null;
+        const workerSelf: any = {
+            addEventListener: vi.fn((type: string, handler: (event: MessageEvent) => Promise<void>) => {
+                if (type === 'message') messageHandler = handler;
+            }),
+            postMessage: vi.fn(),
+        };
+        new Function('self', __getWhisperWorkerCodeForTests(true))(workerSelf);
+
+        expect(messageHandler).not.toBeNull();
+        await messageHandler!({
+            data: {
+                type: 'init',
+                model: 'onnx-community/whisper-tiny',
+                multilingual: true,
+                backend: 'cuda',
+            },
+        } as MessageEvent);
+
+        expect(workerSelf.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+            status: 'load-failed',
+            backend: 'cuda',
+            model: 'onnx-community/whisper-tiny',
+            data: expect.objectContaining({
+                message: expect.stringContaining('must be explicitly selected'),
+            }),
+        }));
+        expect(__getWhisperWorkerCodeForTests()).not.toContain(
+            "settings.backend === 'wasm' ? 'wasm' : 'webgpu'",
+        );
     });
 
     it('supports host control messages for backend/queue lifecycle', () => {
         const code = __getWhisperWorkerCodeForTests();
 
-        expect(code).toContain("if (msg.type === 'skip-webgpu')");
+        expect(code).not.toContain("if (msg.type === 'skip-webgpu')");
         expect(code).toContain("if (msg.type === 'flush-queue')");
         expect(code).toContain("if (msg.type === 'reset')");
         expect(code).toContain('const queued = jobQueue[0]');

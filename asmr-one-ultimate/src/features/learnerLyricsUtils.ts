@@ -1,4 +1,6 @@
-import type { AudioPlayerState } from '../types';
+import type { AudioPlayerState, WhisperUpdatePayload } from '../types';
+import { sanitizeWhisperText } from './whisperProcessing';
+import { splitSubtitleSegments } from './subtitleSegmentSplitter';
 
 export interface LyricWord {
     start: number;
@@ -11,6 +13,23 @@ export interface LyricLine {
     endTime?: number;
     text: string;
     words?: LyricWord[];
+}
+
+export function normalizeWhisperSubtitleLines(
+    segments: WhisperUpdatePayload['segments'],
+): LyricLine[] {
+    const lines = segments
+        .map(segment => ({
+            time: segment.start,
+            endTime: segment.end,
+            text: sanitizeWhisperText(segment.text),
+            words: segment.words
+                ?.map(word => ({ ...word, text: sanitizeWhisperText(word.text) }))
+                .filter(word => Boolean(word.text)),
+        }))
+        .filter(segment => Boolean(segment.text))
+        .sort((left, right) => left.time - right.time);
+    return splitSubtitleSegments(lines);
 }
 
 export interface RawLyricLine {

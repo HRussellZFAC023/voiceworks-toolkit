@@ -17,7 +17,7 @@ type RuntimeResult = {
     }>;
 };
 
-async function runWhisperRuntime(page: Page, forceWasm: boolean): Promise<RuntimeResult> {
+async function runWhisperRuntime(page: Page, backend: 'webgpu' | 'wasm'): Promise<RuntimeResult> {
     page.on('console', message => {
         if (message.text().includes('[Whisper Worker]')) {
             console.log(`[runtime] ${message.type()}: ${message.text()}`);
@@ -32,7 +32,7 @@ async function runWhisperRuntime(page: Page, forceWasm: boolean): Promise<Runtim
         });
     });
     await page.goto('http://localhost:5173/whisper-runtime-host');
-    return page.evaluate(async ({ timeoutMs, useWasm }) => {
+    return page.evaluate(async ({ timeoutMs, selectedBackend }) => {
             const moduleUrl = new URL('/src/features/WhisperWorkerLoader.ts', location.origin).href;
             const loader = await import(moduleUrl);
             const worker = loader.createWhisperWorker();
@@ -82,6 +82,7 @@ async function runWhisperRuntime(page: Page, forceWasm: boolean): Promise<Runtim
                         inferenceSent = true;
                         worker.postMessage({
                             model: 'onnx-community/whisper-tiny',
+                            backend: selectedBackend,
                             multilingual: true,
                             subtask: 'transcribe',
                             language: 'ja',
@@ -112,10 +113,10 @@ async function runWhisperRuntime(page: Page, forceWasm: boolean): Promise<Runtim
                     }
                 };
 
-                if (useWasm) worker.postMessage({ type: 'skip-webgpu' });
                 worker.postMessage({
                     type: 'init',
                     model: 'onnx-community/whisper-tiny',
+                    backend: selectedBackend,
                     multilingual: true,
                     subtask: 'transcribe',
                     language: 'ja',
@@ -124,7 +125,7 @@ async function runWhisperRuntime(page: Page, forceWasm: boolean): Promise<Runtim
                     minWebgpuBufferBytes: 256 * 1024 * 1024,
                 });
             });
-        }, { timeoutMs: RUNTIME_TIMEOUT_MS, useWasm: forceWasm });
+        }, { timeoutMs: RUNTIME_TIMEOUT_MS, selectedBackend: backend });
 }
 
 test.describe('Whisper worker real runtime', () => {
@@ -132,7 +133,7 @@ test.describe('Whisper worker real runtime', () => {
 
     test('loads the bounded WASM model and completes one quiet-audio inference', async ({ page }) => {
         test.skip(!process.env.WHISPER_E2E, 'Downloads and runs the real Whisper WASM model');
-        const result = await runWhisperRuntime(page, true);
+        const result = await runWhisperRuntime(page, 'wasm');
 
         console.log(`[runtime] result ${JSON.stringify(result)}`);
         expect(result.backend).toBe('wasm');
@@ -147,7 +148,7 @@ test.describe('Whisper worker real runtime', () => {
             !process.env.WHISPER_WEBGPU_E2E,
             'Requires a browser/OS with a real WebGPU adapter and downloads the model',
         );
-        const result = await runWhisperRuntime(page, false);
+        const result = await runWhisperRuntime(page, 'webgpu');
 
         console.log(`[runtime:webgpu] result ${JSON.stringify(result)}`);
         expect(result.backend).toBe('webgpu');

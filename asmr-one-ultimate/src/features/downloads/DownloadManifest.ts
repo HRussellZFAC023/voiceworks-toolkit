@@ -1,6 +1,6 @@
 import type { DownloadMediaCategory } from './DownloadDomain';
 import { classifyDownloadMedia } from './DownloadMediaClassifier';
-import { reserveCollisionFreePath, sanitizeRelativePath } from './DownloadPathUtils';
+import { DownloadPathReservations } from './DownloadPathUtils';
 
 export type DownloadSourceUrlKind =
     | 'download'
@@ -133,17 +133,24 @@ function stableFallbackId(sourcePath: readonly string[], urls: readonly Download
 
 export function discoverDownloadManifest(tree: readonly DownloadTreeNode[]): DownloadManifest {
     const entries: DownloadManifestEntry[] = [];
-    const occupied = new Set<string>();
+    const destinations = new DownloadPathReservations();
 
-    const visit = (node: DownloadTreeNode, folders: readonly string[]): void => {
+    const visit = (
+        node: DownloadTreeNode,
+        sourceFolders: readonly string[],
+        destinationFolders: readonly string[],
+    ): void => {
         const title = nodeTitle(node);
         if (isFolder(node)) {
-            const nextFolders = [...folders, title];
-            for (const child of childrenOf(node)) visit(child, nextFolders);
+            const nextSourceFolders = [...sourceFolders, title];
+            const nextDestinationFolders = destinations.reserveDirectory([...destinationFolders, title]);
+            for (const child of childrenOf(node)) {
+                visit(child, nextSourceFolders, nextDestinationFolders);
+            }
             return;
         }
 
-        const sourcePath = [...folders, title];
+        const sourcePath = [...sourceFolders, title];
         const sourceUrls = sourceUrlsOf(node);
         const size = declaredSize(node);
         entries.push({
@@ -154,7 +161,7 @@ export function discoverDownloadManifest(tree: readonly DownloadTreeNode[]): Dow
             category: classifyDownloadMedia(title, node.type),
             size,
             sourcePath,
-            relativePath: reserveCollisionFreePath(sanitizeRelativePath(sourcePath), occupied),
+            relativePath: destinations.reserveFile([...destinationFolders, title]),
             sourceUrls,
             // Low-quality streams exist for lightweight playback/transcription.
             // Folder downloads must never promote that preview to the source
@@ -163,7 +170,7 @@ export function discoverDownloadManifest(tree: readonly DownloadTreeNode[]): Dow
         });
     };
 
-    for (const node of tree) visit(node, []);
+    for (const node of tree) visit(node, [], []);
     return {
         entries,
         totalKnownBytes: entries.reduce((total, entry) => total + (entry.size ?? 0), 0),

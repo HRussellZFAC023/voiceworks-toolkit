@@ -40,10 +40,10 @@ export interface DownloadProfile {
 export const DEFAULT_DOWNLOAD_PROFILE: Readonly<DownloadProfile> = Object.freeze({
     filters: Object.freeze({
         audio: true,
-        video: false,
+        video: true,
         image: true,
         text: true,
-        unknown: false,
+        unknown: true,
     }),
     titleMode: 'original-bracketed-translation',
     targetLanguage: 'en',

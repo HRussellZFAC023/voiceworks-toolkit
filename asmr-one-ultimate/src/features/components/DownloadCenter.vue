@@ -94,7 +94,9 @@ function settleSearch<T>(request: Promise<T>): Promise<SearchOutcome<T>> {
 
 const options = ref<Omit<BackupDownloadProfile, 'labels'>>({
     selectedWorkIds: [],
-    filters: { audio: true, video: false, image: true, text: true, other: false },
+    // "Complete works" means every manifest leaf by default. Users can opt
+    // out of bulky categories explicitly when storage is the priority.
+    filters: { audio: true, video: true, image: true, text: true, other: true },
     titleMode: 'original-bracketed-translation',
     convertToOpus: false,
     opusBitrate: 96,
@@ -127,6 +129,7 @@ const labels = computed(() => ({
     progress: t('downloadCenterProgress'),
     pause: t('downloadCenterPause'),
     resume: t('downloadCenterResume'),
+    resumeWithoutOpus: t('downloadCenterResumeWithoutOpus'),
     alreadyRunning: t('downloadCenterAlreadyRunning'),
     resumableDownloads: t('backupDownloaderResumeAvailable'),
     expandPlaylist: t('backupDownloaderExpand'),
@@ -148,6 +151,7 @@ const labels = computed(() => ({
     titleOriginalTranslated: t('backupDownloaderTitleBoth'),
     titleNone: t('backupDownloaderTitleNone'),
     convertToOpus: t('backupDownloaderOpus'),
+    convertToOpusMemoryWarning: t('backupDownloaderOpusMemoryWarning'),
     opusBitrate: t('backupDownloaderBitrate'),
     metadata: t('backupDownloaderMetadata'),
     metadataAdditive: t('backupDownloaderMetadataAdditive'),
@@ -657,6 +661,26 @@ async function refreshResumableJobs(): Promise<void> {
     catch (error) { Logger.warn('[DownloadCenter] Could not recover interrupted downloads', error); }
 }
 
+function markDownloadComplete(result: { jobId: string; skipped: number }): void {
+    resumableJobs.value = resumableJobs.value.filter(job => job.id !== result.jobId);
+    progress.value = {
+        ...(progress.value ?? { current: 1, total: 1 }),
+        phase: 'complete',
+        label: result.skipped
+            ? format('backupDownloaderDoneWithSkipped', { count: result.skipped })
+            : t('backupDownloaderDone'),
+    };
+}
+
+function markDownloadFailed(error: unknown): void {
+    if (error instanceof DownloadCenterRunError && error.code === 'paused') {
+        if (progress.value) progress.value = { ...progress.value, phase: 'paused' };
+        return;
+    }
+    jobError.value = friendlyError(error);
+    if (progress.value) progress.value = { ...progress.value, phase: 'failed' };
+}
+
 async function startDownload(state: BackupDownloadState): Promise<void> {
     if (busy.value) return;
     jobError.value = '';
@@ -679,48 +703,32 @@ async function startDownload(state: BackupDownloadState): Promise<void> {
             format('backupDownloaderJobTitle', { date: new Date().toLocaleString() }),
             next => { activeJobId = next.jobId ?? activeJobId; setRunnerProgress(next); },
         );
-        resumableJobs.value = resumableJobs.value.filter(job => job.id !== result.jobId);
-        progress.value = {
-            ...(progress.value ?? { current: 1, total: 1 }),
-            phase: 'complete',
-            label: result.skipped ? format('backupDownloaderDoneWithSkipped', { count: result.skipped }) : t('backupDownloaderDone'),
-        };
+        markDownloadComplete(result);
     } catch (error) {
         await rememberSettledJob(activeJobId);
-        if (error instanceof DownloadCenterRunError && error.code === 'paused') {
-            if (progress.value) progress.value = { ...progress.value, phase: 'paused' };
-        } else {
-            jobError.value = friendlyError(error);
-            if (progress.value) progress.value = { ...progress.value, phase: 'failed' };
-        }
+        markDownloadFailed(error);
     } finally {
         busy.value = false;
     }
 }
 
-async function resumeDownload(jobId: string): Promise<void> {
+async function resumeDownload(jobId: string, disableOpus = false): Promise<void> {
     const job = resumableJobs.value.find(item => item.id === jobId);
     if (!job || busy.value) return;
     jobError.value = '';
     busy.value = true;
     try {
-        const result = await runner.resume(job, setRunnerProgress);
-        resumableJobs.value = resumableJobs.value.filter(item => item.id !== jobId);
-        progress.value = {
-            ...(progress.value ?? { current: 1, total: 1 }),
-            phase: 'complete',
-            label: result.skipped ? format('backupDownloaderDoneWithSkipped', { count: result.skipped }) : t('backupDownloaderDone'),
-        };
+        const result = await runner.resume(job, setRunnerProgress, { disableOpus });
+        markDownloadComplete(result);
     } catch (error) {
-        if (error instanceof DownloadCenterRunError && error.code === 'paused') {
-            if (progress.value) progress.value = { ...progress.value, phase: 'paused' };
-        } else {
-            jobError.value = friendlyError(error);
-            if (progress.value) progress.value = { ...progress.value, phase: 'failed' };
-        }
+        markDownloadFailed(error);
     } finally {
         busy.value = false;
     }
+}
+
+function resumeDownloadWithoutOpus(jobId: string): void {
+    void resumeDownload(jobId, true);
 }
 
 async function pauseDownload(): Promise<void> {
@@ -752,6 +760,6 @@ defineExpose({ open });
 <template>
     <button class="q-btn q-btn-flat q-btn-dense asmr-download-center-btn text-white" data-testid="download-center-open" :title="t('downloadCenterButton')" :aria-label="t('downloadCenterButton')" @click="open"><span class="q-btn__content"><i class="q-icon material-icons" aria-hidden="true">download_for_offline</i></span></button>
     <Teleport to="body">
-        <BackupWorkDownloader v-if="visible" :playlists="playlists" :works="works" :profile="profile" :show-own="signedIn" :loading-own="loadingOwn" :loading-public="loadingPublic" :own-load-failed="ownLoadFailed" :public-load-failed="publicLoadFailed" :busy="busy" :progress="displayProgress" :error-message="jobError" :resumable-jobs="resumableJobs.map(job => ({ id: job.id, title: job.title }))" :resolve-playlist="resolvePlaylist" :search-all-works="searchAllWorks" @close="close" @source-change="handleSourceChange" @update="updateProfile" @start="startDownload" @pause="pauseDownload" @resume="resumeDownload" />
+        <BackupWorkDownloader v-if="visible" :playlists="playlists" :works="works" :profile="profile" :show-own="signedIn" :loading-own="loadingOwn" :loading-public="loadingPublic" :own-load-failed="ownLoadFailed" :public-load-failed="publicLoadFailed" :busy="busy" :progress="displayProgress" :error-message="jobError" :resumable-jobs="resumableJobs.map(job => ({ id: job.id, title: job.title, convertToOpus: job.options.state.convertToOpus }))" :resolve-playlist="resolvePlaylist" :search-all-works="searchAllWorks" @close="close" @source-change="handleSourceChange" @update="updateProfile" @start="startDownload" @pause="pauseDownload" @resume="resumeDownload" @resume-without-opus="resumeDownloadWithoutOpus" />
     </Teleport>
 </template>

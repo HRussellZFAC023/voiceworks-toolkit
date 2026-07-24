@@ -5,6 +5,30 @@
  */
 
 import { test, expect, helpers, TEST_WORKS } from './fixtures';
+import type { Page } from '@playwright/test';
+
+interface WhisperUiState {
+  isTranscribing: boolean;
+  isLoadingModel: boolean;
+}
+
+async function setWhisperUiState(
+  page: Page,
+  state: WhisperUiState,
+  cleanupSelector?: string,
+): Promise<void> {
+  await page.evaluate(({ next, selector }) => {
+    const runtime = window as typeof window & {
+      __ASMR_APP_STORE__?: { setWhisperState(state: WhisperUiState): void };
+      __ASMR_EVENT_BUS__?: {
+        emit(event: 'whisper:transcribing', payload: { active: boolean }): void;
+      };
+    };
+    runtime.__ASMR_APP_STORE__?.setWhisperState(next);
+    runtime.__ASMR_EVENT_BUS__?.emit('whisper:transcribing', { active: next.isTranscribing });
+    if (selector) document.querySelector(selector)?.remove();
+  }, { next: state, selector: cleanupSelector });
+}
 
 test.describe('Learner Mode UI Presence', () => {
   test('learner containers exist on work page', async ({ injectedPage, isScriptLoaded }) => {
@@ -136,6 +160,227 @@ test.describe('Learner Mode Layout', () => {
         expect(box.height).toBeGreaterThan(30);
       }
     }
+  });
+
+  for (const { label, whisperState } of [
+    {
+      label: 'model loading',
+      whisperState: { isTranscribing: false, isLoadingModel: true },
+    },
+    {
+      label: 'transcribing',
+      whisperState: { isTranscribing: true, isLoadingModel: false },
+    },
+  ]) {
+    test(`reserves the empty panel when remounted during Whisper startup (${label})`, async ({ injectedPage, isScriptLoaded }) => {
+      await injectedPage.addInitScript(() => {
+        localStorage.setItem('GM_whisperAutoWarmup', 'false');
+      });
+      await helpers.gotoHome(injectedPage);
+      await isScriptLoaded();
+      await injectedPage.evaluate(() => {
+        document.querySelector('[data-testid="learner-remount-fixture"]')?.remove();
+        const player = document.createElement('div');
+        player.className = 'audio-player';
+        player.dataset.testid = 'learner-remount-fixture';
+        player.innerHTML = '<div class="albumart"></div>';
+        document.body.appendChild(player);
+      });
+
+      const root = injectedPage.locator('#asmr-learner-subs-root');
+      const expanded = injectedPage.locator('.learner-subs-expanded').first();
+      await expect(root).toBeAttached({ timeout: 10000 });
+
+      await setWhisperUiState(injectedPage, {
+        isTranscribing: false,
+        isLoadingModel: false,
+      });
+      await expect(expanded).toHaveClass(/hidden/);
+
+      const beforeRemoval = await injectedPage.evaluate((state) => {
+        const runtime = window as typeof window & {
+          __ASMR_APP_STORE__?: {
+            state: { whisper: typeof state };
+            setWhisperState(next: typeof state): void;
+          };
+        };
+        const store = runtime.__ASMR_APP_STORE__;
+        if (!store) throw new Error('AppStore was unavailable');
+        store.setWhisperState(state);
+        const snapshot = { ...store.state.whisper };
+        document.getElementById('asmr-learner-subs-root')?.remove();
+        return snapshot;
+      }, whisperState);
+      expect(beforeRemoval).toMatchObject(whisperState);
+
+      await expect(root).toBeAttached({ timeout: 10000 });
+      const afterAttach = await injectedPage.evaluate(() => {
+        const runtime = window as typeof window & {
+          __ASMR_APP_STORE__?: { state: { whisper: unknown } };
+        };
+        return {
+          state: runtime.__ASMR_APP_STORE__?.state.whisper,
+          panelClass: document.querySelector('.learner-subs-expanded')?.className,
+        };
+      });
+      expect(afterAttach.state).toMatchObject(whisperState);
+      expect(afterAttach.panelClass).not.toMatch(/\bhidden\b/);
+      await expect(expanded).not.toHaveClass(/hidden/);
+
+      await setWhisperUiState(
+        injectedPage,
+        { isTranscribing: false, isLoadingModel: false },
+        '[data-testid="learner-remount-fixture"]',
+      );
+    });
+  }
+
+  test('keeps non-fullscreen player geometry stable as bilingual content grows', async ({ injectedPage, isScriptLoaded }) => {
+    await helpers.gotoWork(injectedPage, TEST_WORKS.WITH_SUBTITLES);
+    await isScriptLoaded();
+    await injectedPage.evaluate(() => {
+      const runtime = window as typeof window & {
+        ASMRUlt?: { set?(key: string, value: unknown): void };
+      };
+      runtime.ASMRUlt?.set?.('enableLearnerMode', false);
+      document.querySelector('[data-testid="learner-layout-fixture"]')?.remove();
+      const fixture = document.createElement('div');
+      fixture.dataset.testid = 'learner-layout-fixture';
+      fixture.className = 'audio-player';
+      fixture.style.cssText = [
+        'position:fixed',
+        'inset:80px auto auto 80px',
+        'display:flex',
+        'flex-direction:column',
+        'width:420px',
+        'height:520px',
+        'background:#222',
+        'z-index:2147483647',
+      ].join(';');
+      fixture.innerHTML = `
+        <div class="albumart" style="display:flex;flex:1 1 auto;min-height:0">
+          <div class="q-img" style="flex:1 1 auto;min-height:0"></div>
+        </div>
+        <div class="learner-subs-expanded">
+          <div class="learner-jp" lang="ja">短い字幕です</div>
+          <button class="learner-en" type="button">The short translation.</button>
+        </div>
+        <div style="flex:0 0 72px"></div>
+      `;
+      document.body.appendChild(fixture);
+    });
+
+    const expanded = injectedPage.locator(
+      '[data-testid="learner-layout-fixture"] .learner-subs-expanded',
+    ).first();
+    await expect(expanded).toBeVisible();
+
+    type Geometry = {
+      panelHeight: number;
+      playerHeight: number;
+      coverHeight: number;
+      coverMaxHeight: string;
+    };
+    const snapshot = async (): Promise<Geometry> => injectedPage.evaluate(async () => {
+      await new Promise<void>(resolve => requestAnimationFrame(() => {
+        requestAnimationFrame(() => resolve());
+      }));
+      const panel = document.querySelector(
+        '[data-testid="learner-layout-fixture"] .learner-subs-expanded',
+      ) as HTMLElement | null;
+      const player = panel?.closest('.audio-player') as HTMLElement | null;
+      const cover = player?.querySelector('.albumart .q-img') as HTMLElement | null;
+      if (!panel || !player || !cover) {
+        throw new Error('Expanded player geometry was not available');
+      }
+      return {
+        panelHeight: panel.getBoundingClientRect().height,
+        playerHeight: player.getBoundingClientRect().height,
+        coverHeight: cover.getBoundingClientRect().height,
+        coverMaxHeight: cover.style.maxHeight,
+      };
+    });
+
+    const baseline = await snapshot();
+    expect(baseline.panelHeight).toBeGreaterThan(0);
+    expect(baseline.coverHeight).toBeGreaterThan(0);
+
+    const variants = [
+      {
+        jp: '短い字幕です',
+        en: '',
+      },
+      {
+        jp: 'これは非同期で届く長い日本語字幕です。'.repeat(12),
+        en: 'This deliberately long translation arrives after the Japanese line. '.repeat(12),
+      },
+      {
+        jp: '次の行です',
+        en: 'The next line.',
+      },
+    ];
+
+    for (const variant of variants) {
+      await injectedPage.evaluate(({ jp, en }) => {
+        const panel = document.querySelector(
+          '[data-testid="learner-layout-fixture"] .learner-subs-expanded',
+        );
+        const primary = panel?.querySelector('.learner-jp');
+        const secondary = panel?.querySelector('.learner-en');
+        if (!primary || !secondary) throw new Error('Subtitle slots were not available');
+        primary.textContent = jp;
+        secondary.textContent = en;
+      }, variant);
+
+      const current = await snapshot();
+      expect(Math.abs(current.panelHeight - baseline.panelHeight)).toBeLessThanOrEqual(1);
+      expect(Math.abs(current.coverHeight - baseline.coverHeight)).toBeLessThanOrEqual(1);
+      expect(Math.abs(current.playerHeight - baseline.playerHeight)).toBeLessThanOrEqual(1);
+      expect(current.coverMaxHeight).toBe(baseline.coverMaxHeight);
+    }
+  });
+
+  test('contains both bilingual subtitle lanes on mobile', async ({ injectedPage, isScriptLoaded }) => {
+    await injectedPage.setViewportSize({ width: 390, height: 844 });
+    await helpers.gotoWork(injectedPage, TEST_WORKS.WITH_SUBTITLES);
+    await isScriptLoaded();
+    await injectedPage.evaluate(() => {
+      document.querySelector('[data-testid="learner-mobile-layout-fixture"]')?.remove();
+      const fixture = document.createElement('div');
+      fixture.dataset.testid = 'learner-mobile-layout-fixture';
+      fixture.className = 'audio-player';
+      fixture.style.cssText = 'position:fixed;inset:20px 15px auto;width:360px;z-index:2147483647';
+      fixture.innerHTML = `
+        <div class="learner-subs-expanded">
+          <div class="learner-jp" lang="ja">これは長い日本語字幕が複数行に折り返されても読めることを確認する表示です。</div>
+          <button class="learner-en" type="button">This checks that a long translated subtitle remains inside its reserved mobile lane.</button>
+        </div>
+      `;
+      document.body.appendChild(fixture);
+    });
+
+    const geometry = await injectedPage.evaluate(async () => {
+      await new Promise<void>(resolve => requestAnimationFrame(() => {
+        requestAnimationFrame(() => resolve());
+      }));
+      const panel = document.querySelector(
+        '[data-testid="learner-mobile-layout-fixture"] .learner-subs-expanded',
+      ) as HTMLElement | null;
+      const primary = panel?.querySelector('.learner-jp') as HTMLElement | null;
+      const secondary = panel?.querySelector('.learner-en') as HTMLElement | null;
+      if (!panel || !primary || !secondary) throw new Error('Mobile subtitle fixture was unavailable');
+      return {
+        panel: panel.getBoundingClientRect().toJSON(),
+        primary: primary.getBoundingClientRect().toJSON(),
+        secondary: secondary.getBoundingClientRect().toJSON(),
+        clientHeight: panel.clientHeight,
+        scrollHeight: panel.scrollHeight,
+      };
+    });
+
+    expect(geometry.scrollHeight).toBeLessThanOrEqual(geometry.clientHeight);
+    expect(geometry.primary.top).toBeGreaterThanOrEqual(geometry.panel.top - 1);
+    expect(geometry.secondary.bottom).toBeLessThanOrEqual(geometry.panel.bottom + 1);
   });
 
   test('collapsed panel is compact', async ({ injectedPage, isScriptLoaded }) => {

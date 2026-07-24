@@ -130,7 +130,7 @@ const WEBGPU_CORE_MIN_BUFFER_BYTES = 256 * 1024 * 1024;
  * WebGPU guarantees a 256 MiB `maxBufferSize` on every core adapter. That
  * limit describes one allocation, not total GPU memory, so it must not be used
  * as a proxy for whether a medium/large model fits. Let ORT's real session
- * allocations decide and retain the fresh-worker tiny recovery if they fail.
+ * allocations decide and report a pinned-model error if they fail.
  */
 export function getWhisperMinWebGpuBufferBytes(_model: string): number {
     return WEBGPU_CORE_MIN_BUFFER_BYTES;

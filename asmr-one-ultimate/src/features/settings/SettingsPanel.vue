@@ -113,9 +113,20 @@ function resolveEffectiveWhisperModel(): string {
     }
 }
 
+function resolveEffectiveWhisperBackend(): 'webgpu' | 'wasm' {
+    try {
+        return Whisper.getInstance().getEffectiveBackend();
+    } catch (e) {
+        Logger.warn('[SettingsPanel] Failed to resolve effective Whisper backend:', e);
+        return AppStore.getConfig('forceWhisperWasm') === true ? 'wasm' : 'webgpu';
+    }
+}
+
 const whisperEffectiveModel = ref(resolveEffectiveWhisperModel());
+const whisperEffectiveBackend = ref<'webgpu' | 'wasm'>(resolveEffectiveWhisperBackend());
 function refreshEffectiveWhisperModel() {
     whisperEffectiveModel.value = resolveEffectiveWhisperModel();
+    whisperEffectiveBackend.value = resolveEffectiveWhisperBackend();
 }
 
 const whisperModelPreset = useConfig('whisperModelPreset');
@@ -123,6 +134,7 @@ const whisperModelPreset = useConfig('whisperModelPreset');
 const whisperPresetOptions = computed(() => [
     { value: 'auto', label: t('whisperPresetAuto') },
     { value: 'tiny', label: t('whisperPresetTiny') },
+    { value: 'base', label: t('whisperPresetBase') },
     { value: 'small', label: t('whisperPresetSmall') },
     { value: 'medium', label: t('whisperPresetMedium') },
     { value: 'large-v3-turbo', label: t('whisperPresetLargeTurbo') },
@@ -130,6 +142,7 @@ const whisperPresetOptions = computed(() => [
 
 const whisperPresetHint = computed(() => {
     if (whisperModelPreset.value === 'tiny') return t('whisperPresetTinyWarning');
+    if (whisperModelPreset.value === 'base') return t('whisperPresetBaseWarning');
     if (whisperModelPreset.value === 'medium') return t('whisperPresetMediumWarning');
     if (whisperModelPreset.value === 'large-v3-turbo') return t('whisperPresetLargeTurboWarning');
     return '';
@@ -183,7 +196,9 @@ const whisperModelStatusColor = ref('');
 function computeWhisperUiState() {
     const status = whisperDownloadStatus.value;
     const whisperState = AppStore.state.whisper;
-    const cachedReady = SharedCache.get<boolean>(CacheKeys.whisperModelReady(whisperEffectiveModel.value)) === true;
+    const cachedReady = SharedCache.get<boolean>(
+        CacheKeys.whisperModelReady(whisperEffectiveModel.value, whisperEffectiveBackend.value),
+    ) === true;
     const progress = status.isLoading ? status.progress : whisperState.progress;
     const message = (status.message || whisperState.progressMessage || '').trim();
     const isLoading = whisperState.isLoadingModel || (status.isLoading && progress < 100);
@@ -474,20 +489,6 @@ on('whisper:error', (payload) => {
     updateWhisperModelStatus();
 });
 
-on('whisper:fallback', (payload) => {
-    const fallbackModel = payload?.fallbackModel || '';
-    const reason = payload?.reason || '';
-    const modelShort = fallbackModel.split('/').pop() || fallbackModel;
-    const reasonShort = reason.length > 60 ? reason.slice(0, 57) + '...' : reason;
-    whisperDownloadStatus.value = {
-        isLoading: true,
-        progress: 10,
-        message: format('whisperFallbackApplied', { model: modelShort, reason: reasonShort }),
-    };
-    refreshEffectiveWhisperModel();
-    updateWhisperModelStatus();
-});
-
 // ============================================================================
 // Initialization
 // ============================================================================
@@ -495,7 +496,9 @@ on('whisper:fallback', (payload) => {
 onMounted(() => {
     // Check if whisper model is cached
     refreshEffectiveWhisperModel();
-    if (SharedCache.get<boolean>(CacheKeys.whisperModelReady(whisperEffectiveModel.value))) {
+    if (SharedCache.get<boolean>(
+        CacheKeys.whisperModelReady(whisperEffectiveModel.value, whisperEffectiveBackend.value),
+    )) {
         whisperDownloadStatus.value = { isLoading: false, progress: 100, message: '' };
     }
     updateWhisperModelStatus();

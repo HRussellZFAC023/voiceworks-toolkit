@@ -210,6 +210,10 @@ export interface TrackItem {
     size?: number;
     /** Duration in seconds (for audio) */
     duration?: number;
+    /** Some host serializers attach empty folder fields to leaf items. */
+    children?: [];
+    dirs?: [];
+    tracks?: [];
 }
 
 /** Audio track with extended metadata */

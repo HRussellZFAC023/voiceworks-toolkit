@@ -1,5 +1,6 @@
 import { Logger } from '../../core/Utils';
 import { I18n } from '../../core/Config';
+import { DeviceCapabilities } from '../../core/DeviceCapabilities';
 import { TranslationService } from '../../services/TranslationService';
 import { WorkService } from '../../services/WorkService';
 import type { BackupDownloadProgress, BackupDownloadState, BackupWorkDownloadItem } from '../backupWorkDownloaderTypes';
@@ -11,7 +12,11 @@ import { DOWNLOAD_JOB_LEASE_MS, DownloadJobRepository, type DownloadJob } from '
 import { DownloadTransport, resolveDownloadRequestTarget } from './DownloadTransport';
 import { DownloadCoordinator, type DownloadCoordinatorProgress } from './DownloadCoordinator';
 import { FfmpegOpusTranscoder } from './OpusTranscoder';
-import { OpusFileTransformer, planOpusOutputPaths } from './OpusFileTransformer';
+import {
+    getOpusConversionMemoryBudget,
+    OpusFileTransformer,
+    planOpusOutputPaths,
+} from './OpusFileTransformer';
 import type { AudioTags, EmbeddedArtwork } from './MetadataPolicy';
 
 interface DownloadEnrichment { tags: AudioTags; artworkUrl?: string }
@@ -48,6 +53,9 @@ export type DownloadCenterStateListener = (
     progress: (BackupDownloadProgress & { jobId?: string }) | null,
     running: boolean,
 ) => void;
+export interface DownloadCenterResumeOptions {
+    disableOpus?: boolean;
+}
 
 export class DownloadCenterRunError extends Error {
     constructor(public readonly code: 'unsupported' | 'permission' | 'no-files' | 'paused' | 'already-running' | 'failed', cause?: unknown) {
@@ -78,6 +86,37 @@ function workHasTitleTranslation(work: BackupWorkDownloadItem, targetLanguage: s
     // provider fallbacks and must remain retryable.
     if (/^RJ\d{5,}$/i.test(title)) return true;
     return Boolean(title && TranslationService.isTargetLanguage(title, targetLanguage));
+}
+
+function reserveManifestPath(
+    occupied: Set<string>,
+    relativePath: readonly string[],
+): void {
+    for (let length = 1; length <= relativePath.length; length += 1) {
+        occupied.add(canonicalDownloadPath(relativePath.slice(0, length)));
+    }
+}
+
+function readHttpStatus(error: unknown): number | undefined {
+    if (!error || typeof error !== 'object') return undefined;
+    const candidate = error as {
+        status?: unknown;
+        response?: { status?: unknown };
+        cause?: unknown;
+        message?: unknown;
+    };
+    if (typeof candidate.status === 'number') return candidate.status;
+    if (typeof candidate.response?.status === 'number') return candidate.response.status;
+    const messageStatus = typeof candidate.message === 'string'
+        ? candidate.message.match(/\bHTTP\s+(\d{3})\b/i)
+        : null;
+    if (messageStatus) return Number(messageStatus[1]);
+    return readHttpStatus(candidate.cause);
+}
+
+function isUnavailableWorkFailure(error: unknown): boolean {
+    const status = readHttpStatus(error);
+    return status === 404 || status === 410;
 }
 
 const ARTWORK_TIMEOUT = Symbol('artwork-timeout');
@@ -311,11 +350,15 @@ export class DownloadCenterRunner {
         return this.runClaimed(jobId, options, onProgress);
     }
 
-    async resume(job: DownloadCenterJob, onProgress?: DownloadCenterProgressListener): Promise<{ jobId: string; skipped: number }> {
+    async resume(
+        job: DownloadCenterJob,
+        onProgress?: DownloadCenterProgressListener,
+        resumeOptions: DownloadCenterResumeOptions = {},
+    ): Promise<{ jobId: string; skipped: number }> {
         if (this.activeJobId) throw new DownloadCenterRunError('already-running');
         const sink = new DirectoryDownloadSink(job.options.directory);
         if (!await sink.ensurePermission(true)) throw new DownloadCenterRunError('permission');
-        return this.runClaimed(job.id, job.options, onProgress, sink);
+        return this.runClaimed(job.id, job.options, onProgress, sink, resumeOptions);
     }
 
     async pause(): Promise<void> {
@@ -329,6 +372,7 @@ export class DownloadCenterRunner {
         initialOptions: PersistedDownloadCenterOptions,
         onProgress?: DownloadCenterProgressListener,
         sink?: DirectoryDownloadSink,
+        resumeOptions: DownloadCenterResumeOptions = {},
     ): Promise<{ jobId: string; skipped: number }> {
         return this.withBrowserJobLock(jobId, async () => {
             if (!await this.repository.claimJob(jobId, this.ownerId, DOWNLOAD_JOB_LEASE_MS)) {
@@ -352,7 +396,16 @@ export class DownloadCenterRunner {
             };
             try {
                 const snapshot = await this.repository.loadJob<PersistedDownloadCenterOptions>(jobId);
-                const options = await this.prepareAndRun(jobId, snapshot?.job.options ?? initialOptions, report, sink);
+                let persistedOptions = snapshot?.job.options ?? initialOptions;
+                if (resumeOptions.disableOpus && persistedOptions.state.convertToOpus) {
+                    persistedOptions = cloneOptions({
+                        ...persistedOptions,
+                        state: { ...persistedOptions.state, convertToOpus: false },
+                        opusOutputPaths: {},
+                    });
+                    await this.repository.appendFilesAndUpdateOptions(jobId, persistedOptions, []);
+                }
+                const options = await this.prepareAndRun(jobId, persistedOptions, report, sink);
                 return { jobId, skipped: options.discovery?.skippedWorkIds.length ?? 0 };
             } catch (error) {
                 const normalized = this.leaseLost && !(error instanceof DownloadCenterRunError)
@@ -546,14 +599,14 @@ export class DownloadCenterRunner {
             skippedWorkIds.push(normalized);
         };
         const manifestRequests = new Map<number, Promise<{
-            tracks: Awaited<ReturnType<typeof WorkService.getTracks>>;
+            tracks: Awaited<ReturnType<typeof WorkService.getValidatedLiveTracks>>;
             info: Awaited<ReturnType<typeof WorkService.getWorkInfo>> | null;
         }>>();
         const prefetchManifest = (index: number): void => {
             if (index >= discovery!.works.length || manifestRequests.has(index)) return;
             const work = discovery!.works[index];
             const request = Promise.all([
-                WorkService.getTracks(work.id, false, true),
+                WorkService.getValidatedLiveTracks(work.id, { cacheFallback: 'none' }),
                 optionalWorkInfo(work.id, this.optionalMetadataRequests),
             ]).then(([tracks, info]) => ({ tracks, info }));
             // A pause can leave speculative requests unconsumed. Attach a
@@ -566,6 +619,8 @@ export class DownloadCenterRunner {
             const work = discovery.works[index];
             onProgress?.({ jobId, phase: 'discovering', current: index, total: discovery.works.length, label: work.title });
             const newFiles: Array<{ id: string; path: string; url: string; sourceUrls?: string[]; totalBytes?: number }> = [];
+            const workEnrichment: Record<string, DownloadEnrichment> = {};
+            let workFailure: unknown;
             try {
                 // Fetch several work manifests concurrently, then consume them
                 // in source order so folder names and resume checkpoints remain
@@ -582,7 +637,7 @@ export class DownloadCenterRunner {
                 const occupiedRelativePaths = new Set<string>();
                 let hasCoverImage = false;
                 for (const entry of manifest.entries) {
-                    occupiedRelativePaths.add(entry.relativePath.join('/').toLocaleLowerCase('en-US'));
+                    reserveManifestPath(occupiedRelativePaths, entry.relativePath);
                     const category = entry.category === 'unknown' ? 'other' : entry.category;
                     if (category === 'image' && entry.primaryUrl && /(?:^|[\/_. -])(?:cover|main|folder|thumb)/i.test(entry.relativePath.at(-1) || entry.sourceTitle)) {
                         hasCoverImage = true;
@@ -594,13 +649,7 @@ export class DownloadCenterRunner {
                         .find(source => source.url === entry.primaryUrl)
                         ?? fullQualitySources[0];
                     if (!primarySource) {
-                        markWorkUnavailable(work.id);
-                        Logger.warn(
-                            '[DownloadCenter] Skipping file without a full-quality source',
-                            String(work.id),
-                            entry.sourcePath.join('/'),
-                        );
-                        continue;
+                        throw new Error(`Missing full-quality source: ${entry.sourcePath.join('/')}`);
                     }
                     const id = `${jobId}:${work.id}:${entry.id}`;
                     const path = [folder, ...entry.relativePath].join('/');
@@ -615,7 +664,7 @@ export class DownloadCenterRunner {
                         totalBytes: entry.size,
                     });
                     const filename = entry.relativePath.at(-1) || entry.sourceTitle;
-                    enrichment[id] = {
+                    workEnrichment[id] = {
                         tags: {
                             title: filename.replace(/\.[^.]+$/, ''),
                             album: folder,
@@ -639,9 +688,28 @@ export class DownloadCenterRunner {
                         url: generatedCoverUrl,
                     });
                 }
+                Object.assign(enrichment, workEnrichment);
             } catch (error) {
-                markWorkUnavailable(work.id);
-                Logger.warn('[DownloadCenter] Skipping unavailable work', String(work.id), error);
+                if (isUnavailableWorkFailure(error)) {
+                    markWorkUnavailable(work.id);
+                    Logger.warn('[DownloadCenter] Skipping unavailable work', String(work.id), error);
+                } else {
+                    workFailure = error;
+                }
+            }
+            if (workFailure !== undefined) {
+                Logger.warn(
+                    '[DownloadCenter] Work manifest is incomplete; preserving it as the next resume boundary',
+                    String(work.id),
+                    workFailure,
+                );
+                discovery = { ...discovery, nextIndex: index, skippedWorkIds: [...skippedWorkIds], complete: false };
+                options = cloneOptions({ ...options, enrichment, discovery });
+                // Commit only the complete ordered prefix. No file or metadata
+                // from the failed work enters the resumable job.
+                await this.assertLease(jobId);
+                await this.repository.appendFilesAndUpdateOptions(jobId, options, pendingFiles);
+                throw new DownloadCenterRunError('failed', workFailure);
             }
             pendingFiles.push(...newFiles);
             const completedInBatch = index - discovery.nextIndex + 1;
@@ -742,18 +810,28 @@ export class DownloadCenterRunner {
 
     private createOpusTransformer(options: PersistedDownloadCenterOptions): OpusFileTransformer | undefined {
         if (!options.state.convertToOpus) return undefined;
-        const artworkCache = new Map<string, Promise<EmbeddedArtwork | undefined>>();
+        let artworkCache: {
+            url: string;
+            request: Promise<EmbeddedArtwork | undefined>;
+        } | undefined;
         const loadArtwork = (url: string, signal?: AbortSignal): Promise<EmbeddedArtwork | undefined> => {
-            const existing = artworkCache.get(url);
-            if (existing) return existing;
+            if (artworkCache?.url === url) return artworkCache.request;
             const request = fetchBoundedArtwork(url, signal);
-            artworkCache.set(url, request);
+            artworkCache = { url, request };
+            void request.then(result => {
+                if (!result && artworkCache?.request === request) artworkCache = undefined;
+            });
             return request;
         };
+        const device = DeviceCapabilities.profile;
         return new OpusFileTransformer(new FfmpegOpusTranscoder(), {
             enabled: true,
             bitrateKbps: options.state.opusBitrate,
             metadataPolicy: options.state.metadataMode,
+            memoryBudget: getOpusConversionMemoryBudget({
+                deviceMemoryGiB: device.memory,
+                isMobile: device.isMobile,
+            }),
             tagsForFile: file => options.enrichment[file.id]?.tags || {},
             outputPathForFile: file => options.opusOutputPaths?.[file.id],
             artworkForFile: async (file, signal): Promise<EmbeddedArtwork | undefined> => {

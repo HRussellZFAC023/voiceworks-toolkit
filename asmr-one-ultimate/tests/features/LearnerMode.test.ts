@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { LearnerMode } from '../../src/features/LearnerMode';
+import { AppStore } from '../../src/store/AppStore';
 
 vi.mock('../../src/services/TranslationService', () => ({
     TranslationService: {
@@ -46,6 +47,13 @@ describe('LearnerMode', () => {
     beforeEach(() => {
         vi.restoreAllMocks();
         document.body.innerHTML = '';
+        AppStore.setWhisperState({
+            isTranscribing: false,
+            isLoadingModel: false,
+            progress: 0,
+            progressMessage: '',
+            currentTrackSrc: null,
+        });
     });
 
     it('updates expanded subtitles with blurred EN by default', () => {
@@ -123,6 +131,48 @@ describe('LearnerMode', () => {
 
         // Expanded should NOT be hidden (stable layout)
         expect(expanded?.style.display).not.toBe('none');
+    });
+
+    it.each([
+        ['transcribing', { isTranscribing: true, isLoadingModel: false }],
+        ['loading', { isTranscribing: false, isLoadingModel: true }],
+    ])('hydrates the legacy panel when Whisper is already %s', async (_state, whisperState) => {
+        AppStore.setWhisperState(whisperState);
+        document.body.innerHTML = [
+            '<div class="audio-player"></div>',
+            '<div class="player-bar"></div>',
+        ].join('');
+
+        const learner = new LearnerMode();
+        await learner.enable();
+
+        const expanded = document.querySelector('.learner-subs-expanded') as HTMLElement | null;
+        expect(expanded?.style.visibility).toBe('');
+
+        learner.disable();
+        AppStore.setWhisperState({
+            isTranscribing: false,
+            isLoadingModel: false,
+        });
+    });
+
+    it('keeps the legacy panel synchronized with canonical Whisper state', async () => {
+        document.body.innerHTML = [
+            '<div class="audio-player"></div>',
+            '<div class="player-bar"></div>',
+        ].join('');
+
+        const learner = new LearnerMode();
+        await learner.enable();
+        const expanded = document.querySelector('.learner-subs-expanded') as HTMLElement;
+        expect(expanded.style.visibility).toBe('hidden');
+
+        AppStore.setWhisperState({ isLoadingModel: true });
+        expect(expanded.style.visibility).toBe('');
+
+        AppStore.setWhisperState({ isLoadingModel: false });
+        expect(expanded.style.visibility).toBe('hidden');
+        learner.disable();
     });
 
     it('defers seeking subtitle refresh to requestAnimationFrame', () => {

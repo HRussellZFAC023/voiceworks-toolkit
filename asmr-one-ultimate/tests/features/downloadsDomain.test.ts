@@ -22,7 +22,8 @@ describe('download profiles', () => {
             embedArtwork: true,
         });
         expect(categoryIsEnabled('audio', profile.filters)).toBe(true);
-        expect(categoryIsEnabled('video', profile.filters)).toBe(false);
+        expect(categoryIsEnabled('video', profile.filters)).toBe(true);
+        expect(categoryIsEnabled('unknown', profile.filters)).toBe(true);
     });
 
     it('creates independent profiles and permits explicit consistency overwrites', () => {

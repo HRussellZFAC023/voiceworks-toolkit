@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
-import { OpusFileTransformer, planOpusOutputPaths } from '../../src/features/downloads/OpusFileTransformer';
+import {
+    getOpusConversionMemoryBudget,
+    OpusConversionMemoryLimitError,
+    OpusFileTransformer,
+    planOpusOutputPaths,
+} from '../../src/features/downloads/OpusFileTransformer';
 
 describe('OpusFileTransformer', () => {
     it('converts audio and leaves source cleanup to the coordinator commit boundary', async () => {
@@ -15,6 +20,7 @@ describe('OpusFileTransformer', () => {
             tagsForFile: () => ({ album: 'Work [作品]' }),
         });
         const sink: any = {
+            size: vi.fn().mockResolvedValue(4),
             read: vi.fn().mockResolvedValue(new Uint8Array([1, 2, 3, 4])),
             writeAll: vi.fn(), remove: vi.fn(),
         };
@@ -36,12 +42,17 @@ describe('OpusFileTransformer', () => {
         const transformer = new OpusFileTransformer({ transcode: vi.fn().mockRejectedValue(new Error('codec failed')) } as any, {
             enabled: true, bitrateKbps: 64, metadataPolicy: 'additive',
         });
-        const sink: any = { read: vi.fn().mockResolvedValue(new Uint8Array([1])), writeAll: vi.fn(), remove: vi.fn() };
+        const sink: any = {
+            size: vi.fn().mockResolvedValue(1),
+            read: vi.fn().mockResolvedValue(new Uint8Array([1])),
+            writeAll: vi.fn(),
+            remove: vi.fn(),
+        };
         await expect(transformer.transform({ path: 'track.wav' } as any, sink)).rejects.toThrow('codec failed');
         expect(sink.remove).not.toHaveBeenCalled();
     });
 
-    it('loads optional artwork before retaining the full source buffer', async () => {
+    it('checks size and loads optional artwork before retaining the full source buffer', async () => {
         const order: string[] = [];
         const transformer = new OpusFileTransformer({
             transcode: vi.fn(async () => {
@@ -58,6 +69,10 @@ describe('OpusFileTransformer', () => {
             }),
         });
         const sink: any = {
+            size: vi.fn(async () => {
+                order.push('size');
+                return 1;
+            }),
             read: vi.fn(async () => {
                 order.push('source');
                 return new Uint8Array([1]);
@@ -67,7 +82,46 @@ describe('OpusFileTransformer', () => {
 
         await transformer.transform({ id: 'file', path: 'track.wav' } as any, sink);
 
-        expect(order).toEqual(['artwork', 'source', 'transcode']);
+        expect(order).toEqual(['size', 'artwork', 'source', 'transcode']);
+    });
+
+    it('rejects oversized sources before artwork or full source materialization', async () => {
+        const transcoder = { transcode: vi.fn() };
+        const artworkForFile = vi.fn();
+        const transformer = new OpusFileTransformer(transcoder as any, {
+            enabled: true,
+            bitrateKbps: 64,
+            metadataPolicy: 'additive',
+            memoryBudget: { maxSourceBytes: 4 },
+            artworkForFile,
+        });
+        const sink: any = {
+            size: vi.fn().mockResolvedValue(5),
+            read: vi.fn(),
+            writeAll: vi.fn(),
+            remove: vi.fn(),
+        };
+
+        await expect(transformer.transform({ id: 'file', path: 'track.wav' } as any, sink))
+            .rejects.toEqual(expect.objectContaining<Partial<OpusConversionMemoryLimitError>>({
+                name: 'OpusConversionMemoryLimitError',
+                sourceBytes: 5,
+                maxSourceBytes: 4,
+            }));
+        expect(artworkForFile).not.toHaveBeenCalled();
+        expect(sink.read).not.toHaveBeenCalled();
+        expect(transcoder.transcode).not.toHaveBeenCalled();
+        expect(sink.writeAll).not.toHaveBeenCalled();
+        expect(sink.remove).not.toHaveBeenCalled();
+    });
+
+    it('uses conservative device-scaled source limits with an absolute ceiling', () => {
+        const mib = 1024 * 1024;
+        expect(getOpusConversionMemoryBudget({ deviceMemoryGiB: -1, isMobile: false }).maxSourceBytes).toBe(128 * mib);
+        expect(getOpusConversionMemoryBudget({ deviceMemoryGiB: -1, isMobile: true }).maxSourceBytes).toBe(64 * mib);
+        expect(getOpusConversionMemoryBudget({ deviceMemoryGiB: 4, isMobile: false }).maxSourceBytes).toBe(128 * mib);
+        expect(getOpusConversionMemoryBudget({ deviceMemoryGiB: 32, isMobile: false }).maxSourceBytes).toBe(256 * mib);
+        expect(getOpusConversionMemoryBudget({ deviceMemoryGiB: 32, isMobile: true }).maxSourceBytes).toBe(96 * mib);
     });
 
     it('plans collision-free Opus paths against existing and converted files', () => {
