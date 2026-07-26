@@ -158,10 +158,15 @@
 /* ========================================
    Whisper Status Display
    ======================================== */
+/*
+ * This is the fallback status surface used only when Learner Mode's subtitle
+ * panel is not mounted. LearnerSubtitles.vue removes these nodes outright while
+ * it owns the status lane, so the two can never be on screen together.
+ */
 .whisper-status {
   text-align: center;
   width: 100%;
-  padding: 8px 16px;
+  padding: 4px 12px;
   box-sizing: border-box;
   display: flex;
   align-items: center;
@@ -169,45 +174,46 @@
   overflow: hidden;
 }
 
+/* A single compact line. The slot is reserved so show/hide never reflows the
+   player, but it is deliberately small rather than a 72px band of dead space. */
 .whisper-status--inline {
-  height: 72px;
-  min-height: 72px;
+  height: 28px;
+  min-height: 28px;
 }
 
-/* Normal expanded-player path: status floats over the cover and never changes
-   document flow, avoiding both initial and repeated layout shifts. */
+/* Anchor the overlay to the artwork's bottom edge without covering it. */
 .albumart.asmr-whisper-status-host {
   position: relative;
 }
 
 .whisper-status--overlay {
   position: absolute;
-  left: 12px;
-  right: 12px;
-  bottom: 12px;
+  left: 8px;
+  right: 8px;
+  bottom: 4px;
   z-index: 3;
   width: auto;
-  min-height: 44px;
-  padding: 6px 10px;
-  border-radius: 8px;
-  background: rgba(0, 0, 0, 0.68);
+  min-height: 24px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  /* Opaque enough that white copy clears 4.5:1 over any artwork underneath. */
+  background: rgba(12, 14, 20, 0.88);
   backdrop-filter: blur(4px);
   pointer-events: none;
 }
 
 .whisper-loading-indicator {
-  font-size: 0.9rem;
-  color: var(--asmr-accent);
+  font-size: 0.75rem;
+  /* Was var(--asmr-accent): #7c4dff on this scrim is 1.6:1 and unreadable. */
+  color: #fff;
   font-weight: 500;
-  opacity: 0.9;
+  opacity: 1;
   text-align: center;
-  padding: 8px 12px;
+  padding: 2px 4px;
   max-width: 100%;
   overflow: hidden;
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  line-clamp: 2;
+  white-space: nowrap;
+  text-overflow: ellipsis;
   animation: none;
 }
 
@@ -222,13 +228,19 @@
 }
 
 .whisper-error-indicator {
-  font-size: 0.9rem;
+  font-size: 0.75rem;
   color: var(--q-negative, #f44336);
-  font-weight: 500;
-  opacity: 0.9;
+  font-weight: 600;
+  opacity: 1;
   text-align: center;
-  padding: 8px 12px;
+  padding: 2px 4px;
   display: inline-block;
+}
+
+/* On the dark overlay scrim the negative red drops below 4.5:1; a light tint
+   keeps the error legible without losing its "this is a failure" reading. */
+.whisper-status--overlay .whisper-error-indicator {
+  color: #ffb4a9;
 }
 
 .whisper-crash-persistent {

@@ -351,6 +351,53 @@
 }
 
 /* ============================================
+   Stacked controls (advanced rows)
+   ============================================ */
+/* Advanced rows put their control under the label instead of in the side
+   column. A free-text model id and a numeric field both need the full row width
+   at 360px, and the side column would otherwise squeeze the label into a column
+   one word wide. Quasar only spaces adjacent *labels*, so the gaps on either
+   side of a stacked control have to be declared here or the control sits flush
+   against the caption above and the hint below. */
+.asmr-settings-section .asmr-settings-stacked-control {
+    display: block;
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
+}
+
+.asmr-settings-section .q-item__label + .asmr-settings-stacked-control {
+    margin-top: 8px;
+}
+
+.asmr-settings-section .asmr-settings-stacked-control + .q-item__label {
+    margin-top: 6px;
+}
+
+/* A numeric field wide enough for the whole row reads as a text box. Cap it,
+   but only above the narrowest layout, where full width is what fits. */
+@media (min-width: 420px) {
+    .asmr-settings-section .asmr-settings-number-input {
+        max-width: 220px;
+    }
+}
+
+/* Quasar paints every caption with the muted token and `!important`, so status
+   copy has to out-rank it to read as a rejection rather than a hint. */
+.asmr-settings-section .asmr-settings-invalid-text {
+    color: var(--asmr-settings-error) !important;
+}
+
+.asmr-settings-section .asmr-settings-active-text {
+    color: var(--asmr-accent) !important;
+}
+
+.asmr-settings-number-hint {
+    margin-top: 4px;
+}
+
+/* ============================================
    Danger / Factory Reset
    ============================================ */
 .asmr-danger-text {

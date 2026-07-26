@@ -210,6 +210,29 @@ export interface PluginConfig {
     whisperAdaptiveWindow: boolean;
     whisperLiveChunkSec: number;
     whisperLiveOverlapSec: number;
+    /**
+     * Advanced: explicit Hugging Face repo id (`owner/name`) for experimentation.
+     * Empty (default) means the `whisperModelPreset` tier decides. Any non-empty
+     * value was typed and accepted by the user and must be loaded verbatim.
+     */
+    whisperCustomModelId: string;
+    /**
+     * Advanced encoder precision: 'auto' (default, keeps the tested per-device
+     * policy) | 'fp32' | 'fp16' | 'q8' | 'q4' | 'q4f16' | 'int8'.
+     */
+    whisperEncoderDtype: string;
+    /** Advanced decoder precision; same value domain as `whisperEncoderDtype`. */
+    whisperDecoderDtype: string;
+    /**
+     * Advanced execution device: 'auto' (default) | 'webgpu' | 'wasm' | 'split'
+     * ('split' = encoder on WebGPU, decoder on WASM). Anything other than 'auto'
+     * is an explicit user choice and takes precedence over `forceWhisperWasm`.
+     */
+    whisperExecutionDevice: string;
+    /** Advanced: generation `no_repeat_ngram_size`. 0 disables anti-repetition. */
+    whisperNoRepeatNgramSize: number;
+    /** Advanced: generation `repetition_penalty`. 1 disables anti-repetition. */
+    whisperRepetitionPenalty: number;
     whisperCacheTranscripts: boolean;
     whisperAutoWarmup: boolean;
     alwaysTranscribe: boolean;

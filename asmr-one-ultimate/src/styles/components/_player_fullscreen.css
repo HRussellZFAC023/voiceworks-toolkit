@@ -134,11 +134,18 @@ body.asmr-fullscreen-active .player-bar-container {
     display: none !important;
 }
 
-/* Gallery Navigation in Fullscreen */
+/*
+ * Gallery navigation over artwork.
+ *
+ * Element opacity fades the glyph towards whatever image is underneath, so it
+ * cannot be used to make these controls quiet: white at 0.18 over a pale cover
+ * is ~1.2:1. Quietness comes from a translucent dark scrim instead, which keeps
+ * the white glyph at >= 4.5:1 over any artwork in either theme.
+ */
 @media (hover: hover) {
     .audio-player .albumart:hover .asmr-gallery-nav,
     .audio-player .albumart:hover .asmr-gallery-counter {
-        opacity: 0.72;
+        opacity: 1;
     }
 }
 
@@ -146,19 +153,19 @@ body.asmr-fullscreen-active .player-bar-container {
     z-index: 100 !important;
     width: 60px !important;
     height: 60px !important;
-    background: transparent !important;
+    background: rgba(17, 24, 39, 0.62) !important;
     backdrop-filter: blur(10px) !important;
     color: #fff !important;
     border: 1px solid transparent !important;
     border-radius: 50% !important;
     transition: all 0.2s ease !important;
-    opacity: 0.18;
+    opacity: 1;
 }
 
 @media (hover: hover) {
     .audio-player.asmr-player-fullscreen .albumart:hover .asmr-gallery-nav,
     .audio-player.asmr-player-fullscreen .albumart:hover .asmr-gallery-counter {
-        opacity: 0.72 !important;
+        opacity: 1 !important;
     }
 
     .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-nav:hover {
@@ -189,14 +196,15 @@ body.asmr-fullscreen-active .player-bar-container {
     right: calc(112px + env(safe-area-inset-right)) !important;
     width: 44px !important;
     height: 44px !important;
-    opacity: 0.18;
+    background: rgba(17, 24, 39, 0.62) !important;
+    opacity: 1;
     transform: none !important;
     z-index: 120 !important;
 }
 
 @media (hover: hover) {
     .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-slideshow-toggle:hover {
-        background: rgba(255, 255, 255, 0.15) !important;
+        background: rgba(17, 24, 39, 0.85) !important;
         opacity: 1 !important;
         transform: scale(1.05) !important;
     }
@@ -204,7 +212,7 @@ body.asmr-fullscreen-active .player-bar-container {
 
 @media (hover: none) {
     .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-slideshow-toggle:active {
-        background: rgba(255, 255, 255, 0.15) !important;
+        background: rgba(17, 24, 39, 0.85) !important;
         opacity: 1 !important;
         transform: scale(1.05) !important;
     }
@@ -219,14 +227,15 @@ body.asmr-fullscreen-active .player-bar-container {
     right: calc(60px + env(safe-area-inset-right)) !important;
     width: 44px !important;
     height: 44px !important;
-    opacity: 0.18;
+    background: rgba(17, 24, 39, 0.62) !important;
+    opacity: 1;
     transform: none !important;
     z-index: 120 !important;
 }
 
 @media (hover: hover) {
     .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-exclude:hover {
-        background: rgba(255, 255, 255, 0.15) !important;
+        background: rgba(17, 24, 39, 0.85) !important;
         opacity: 1 !important;
         transform: scale(1.05) !important;
     }
@@ -234,7 +243,7 @@ body.asmr-fullscreen-active .player-bar-container {
 
 @media (hover: none) {
     .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-exclude:active {
-        background: rgba(255, 255, 255, 0.15) !important;
+        background: rgba(17, 24, 39, 0.85) !important;
         opacity: 1 !important;
         transform: scale(1.05) !important;
     }
@@ -322,77 +331,6 @@ body.asmr-fullscreen-active .player-bar-container {
     color: #fff !important;
 }
 
-/* Fullscreen button: a quiet affordance that becomes clear on hover/focus. */
-.audio-player .asmr-fullscreen-btn {
-    position: absolute !important;
-    top: max(8px, env(safe-area-inset-top)) !important;
-    right: max(8px, env(safe-area-inset-right)) !important;
-    z-index: 1000000 !important;
-    width: 44px !important;
-    height: 44px !important;
-    background: transparent !important;
-    backdrop-filter: none !important;
-    border: 1px solid transparent !important;
-    border-radius: 50% !important;
-    display: flex !important;
-    align-items: center !important;
-    justify-content: center !important;
-    color: #111827 !important;
-    opacity: 0.28 !important;
-    cursor: pointer !important;
-    box-shadow: none !important;
-    transition: background-color 0.18s ease, border-color 0.18s ease, opacity 0.18s ease, transform 0.18s ease !important;
-}
-
-:is(.body--dark, .q-dark, [data-theme="dark"]) .audio-player .asmr-fullscreen-btn,
-.audio-player.asmr-player-fullscreen .asmr-fullscreen-btn {
-    background: transparent !important;
-    border-color: transparent !important;
-    color: #fff !important;
-    box-shadow: none !important;
-}
-
-@media (hover: hover) {
-    .audio-player .asmr-fullscreen-btn:hover {
-        background: rgba(255, 255, 255, 0.78) !important;
-        border-color: rgba(17, 24, 39, 0.45) !important;
-        opacity: 1 !important;
-        transform: scale(1.05) !important;
-    }
-
-    :is(.body--dark, .q-dark, [data-theme="dark"]) .audio-player .asmr-fullscreen-btn:hover,
-    .audio-player.asmr-player-fullscreen .asmr-fullscreen-btn:hover {
-        background: rgba(17, 24, 39, 0.72) !important;
-        border-color: rgba(255, 255, 255, 0.62) !important;
-    }
-}
-
-@media (hover: none) {
-    .audio-player .asmr-fullscreen-btn {
-        background: rgba(17, 24, 39, 0.2) !important;
-        border-color: rgba(255, 255, 255, 0.24) !important;
-        color: #fff !important;
-        opacity: 0.58 !important;
-    }
-
-    .audio-player .asmr-fullscreen-btn:active {
-        background: rgba(255, 255, 255, 0.72) !important;
-        opacity: 1 !important;
-        transform: scale(1.05) !important;
-    }
-}
-
-.audio-player .asmr-fullscreen-btn:focus-visible {
-    background: rgba(255, 255, 255, 0.78) !important;
-    opacity: 1 !important;
-    outline: 3px solid #1976d2 !important;
-    outline-offset: 2px !important;
-}
-
-.audio-player .asmr-fullscreen-btn .material-icons {
-    font-size: 22px !important;
-}
-
 /* Learner Subtitles - Larger in Fullscreen */
 .audio-player.asmr-player-fullscreen .learner-subs-expanded {
     padding: 20px 32px !important;
@@ -441,8 +379,7 @@ body.asmr-fullscreen-active .player-bar-container {
 .audio-player.asmr-player-fullscreen.asmr-controls-idle .albumart .asmr-gallery-nav,
 .audio-player.asmr-player-fullscreen.asmr-controls-idle .albumart .asmr-gallery-counter,
 .audio-player.asmr-player-fullscreen.asmr-controls-idle .albumart .asmr-gallery-slideshow-toggle,
-.audio-player.asmr-player-fullscreen.asmr-controls-idle .albumart .asmr-gallery-exclude,
-.audio-player.asmr-player-fullscreen.asmr-controls-idle .asmr-fullscreen-btn {
+.audio-player.asmr-player-fullscreen.asmr-controls-idle .albumart .asmr-gallery-exclude {
     pointer-events: auto !important;
 }
 
@@ -451,9 +388,8 @@ body.asmr-fullscreen-active .player-bar-container {
     .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-nav,
     .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-counter,
     .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-slideshow-toggle,
-    .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-exclude,
-    .audio-player.asmr-player-fullscreen .asmr-fullscreen-btn {
-        opacity: 0.58 !important;
+    .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-exclude {
+        opacity: 1 !important;
         pointer-events: auto !important;
     }
 }
@@ -470,10 +406,10 @@ body.asmr-fullscreen-active .player-bar-container {
 
     /* Smaller, subtler gallery nav arrows pushed flush to edges */
     .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-nav {
-        width: 32px !important;
-        height: 32px !important;
-        opacity: 0.4;
-        background: rgba(0, 0, 0, 0.25) !important;
+        width: 44px !important;
+        height: 44px !important;
+        opacity: 1;
+        background: rgba(17, 24, 39, 0.62) !important;
     }
 
     .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-nav .material-icons {
@@ -547,7 +483,7 @@ body.asmr-fullscreen-active .player-bar-container {
         bottom: 4px !important;
         padding: 2px 8px !important;
         font-size: 0.75rem !important;
-        opacity: 0.7 !important;
+        opacity: 1 !important;
     }
 
     /* Preserve accessible touch targets on the compact top toolbar. */
@@ -561,17 +497,6 @@ body.asmr-fullscreen-active .player-bar-container {
     .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-slideshow-toggle .material-icons,
     .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-exclude .material-icons {
         font-size: 20px !important;
-    }
-
-    .audio-player .asmr-fullscreen-btn {
-        width: 44px !important;
-        height: 44px !important;
-        top: max(6px, env(safe-area-inset-top)) !important;
-        right: max(6px, env(safe-area-inset-right)) !important;
-    }
-
-    .audio-player .asmr-fullscreen-btn .material-icons {
-        font-size: 22px !important;
     }
 }
 

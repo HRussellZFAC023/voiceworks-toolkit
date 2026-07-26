@@ -171,10 +171,12 @@ describe('PlayerGallery', () => {
         expect(next.isVisible()).toBe(true);
         expect(wrapper.find('.asmr-gallery-open').exists()).toBe(false);
 
-        expect(playerGallerySource).toMatch(/\.asmr-gallery-nav\s*\{[\s\S]*background:\s*transparent;[\s\S]*opacity:\s*0\.18;/);
+        // Quietness comes from a translucent scrim, never from element opacity:
+        // fading the whole control also fades the glyph towards the artwork.
+        expect(playerGallerySource).toMatch(/\.asmr-gallery-nav\s*\{[\s\S]*background:\s*rgba\(17, 24, 39, 0\.62\);[\s\S]*opacity:\s*1;/);
         expect(playerGallerySource).toMatch(/\.asmr-gallery-nav:hover\s*\{[\s\S]*opacity:\s*1\s*!important;/);
         expect(playerGallerySource).not.toContain(':global(.albumart):hover');
-        expect(playerFullscreenCss).toMatch(/\.audio-player \.albumart:hover \.asmr-gallery-nav,[\s\S]*\.audio-player \.albumart:hover \.asmr-gallery-counter\s*\{[\s\S]*opacity:\s*0\.72;/);
+        expect(playerFullscreenCss).toMatch(/\.audio-player \.albumart:hover \.asmr-gallery-nav,[\s\S]*\.audio-player \.albumart:hover \.asmr-gallery-counter\s*\{[\s\S]*opacity:\s*1;/);
         expect(getComputedStyle(next.element).pointerEvents).not.toBe('none');
 
         await mocks.eventHandlers.get('fullscreen:enter')?.();

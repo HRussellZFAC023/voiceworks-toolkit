@@ -50,26 +50,32 @@
     contain: layout paint;
 }
 
+/*
+ * Lane heights are declared in rem, never em. The auto-fit steps in
+ * LearnerSubtitles.vue shrink the lane font-size for long lines so more text
+ * stays readable instead of being cut; an em-based lane would shrink with it
+ * and move the artwork above on every subtitle change.
+ */
 .audio-player:not(.asmr-player-fullscreen) .learner-subs-expanded .learner-jp {
-    flex: 0 0 3.1em;
-    min-block-size: 3.1em;
-    max-block-size: 3.1em;
+    flex: 0 0 var(--asmr-subs-primary-lane, 3.875rem);
+    min-block-size: var(--asmr-subs-primary-lane, 3.875rem);
+    max-block-size: var(--asmr-subs-primary-lane, 3.875rem);
     overflow: hidden;
     display: -webkit-box;
     -webkit-box-orient: vertical;
-    -webkit-line-clamp: 2;
-    line-clamp: 2;
+    -webkit-line-clamp: var(--asmr-subs-primary-lines, 2);
+    line-clamp: var(--asmr-subs-primary-lines, 2);
 }
 
 .audio-player:not(.asmr-player-fullscreen) .learner-subs-expanded .learner-en {
-    flex: 0 0 2.6em;
-    min-block-size: 2.6em;
-    max-block-size: 2.6em;
+    flex: 0 0 var(--asmr-subs-secondary-lane, 2.1125rem);
+    min-block-size: var(--asmr-subs-secondary-lane, 2.1125rem);
+    max-block-size: var(--asmr-subs-secondary-lane, 2.1125rem);
     overflow: hidden;
     display: -webkit-box;
     -webkit-box-orient: vertical;
-    -webkit-line-clamp: 2;
-    line-clamp: 2;
+    -webkit-line-clamp: var(--asmr-subs-secondary-lines, 2);
+    line-clamp: var(--asmr-subs-secondary-lines, 2);
 }
 
 .learner-subs-collapsed {
@@ -114,20 +120,22 @@
     overflow: hidden;
     display: -webkit-box;
     -webkit-box-orient: vertical;
-    -webkit-line-clamp: 2;
-    line-clamp: 2;
 }
 
 .learner-subs-collapsed .learner-jp {
-    flex: 0 0 3.1em;
-    min-block-size: 3.1em;
-    max-block-size: 3.1em;
+    flex: 0 0 var(--asmr-subs-collapsed-primary-lane, 3.565rem);
+    min-block-size: var(--asmr-subs-collapsed-primary-lane, 3.565rem);
+    max-block-size: var(--asmr-subs-collapsed-primary-lane, 3.565rem);
+    -webkit-line-clamp: var(--asmr-subs-primary-lines, 2);
+    line-clamp: var(--asmr-subs-primary-lines, 2);
 }
 
 .learner-subs-collapsed .learner-en {
-    flex: 0 0 2.6em;
-    min-block-size: 2.6em;
-    max-block-size: 2.6em;
+    flex: 0 0 var(--asmr-subs-secondary-lane, 2.1125rem);
+    min-block-size: var(--asmr-subs-secondary-lane, 2.1125rem);
+    max-block-size: var(--asmr-subs-secondary-lane, 2.1125rem);
+    -webkit-line-clamp: var(--asmr-subs-secondary-lines, 2);
+    line-clamp: var(--asmr-subs-secondary-lines, 2);
 }
 
 .learner-subs-collapsed.hidden {
@@ -140,7 +148,7 @@
    Typography (JP/EN)
    ============================================ */
 .learner-jp {
-    font-size: 1.25rem;
+    font-size: calc(1.25rem * var(--asmr-subs-primary-scale, 1));
     line-height: 1.55;
     font-weight: 600;
     color: var(--asmr-text-primary);
@@ -160,7 +168,7 @@
 }
 
 .learner-subs-collapsed .learner-jp {
-    font-size: 1.15rem;
+    font-size: calc(1.15rem * var(--asmr-subs-primary-scale, 1));
     word-break: normal;
     overflow-wrap: anywhere;
 }
@@ -173,7 +181,7 @@
 }
 
 .learner-en {
-    font-size: 0.8125rem;
+    font-size: calc(0.8125rem * var(--asmr-subs-secondary-scale, 1));
     color: var(--asmr-text-secondary);
     cursor: pointer;
     text-align: center;
@@ -238,10 +246,20 @@ button.learner-en:focus-visible {
     line-height: 1.2;
     text-overflow: ellipsis;
     white-space: nowrap;
-    opacity: 0.72;
+    /*
+     * No opacity here. `--asmr-text-secondary` is 9.7:1 on the light surface and
+     * ~15:1 on the dark one; the previous 0.72 opacity dropped it to 4.4:1,
+     * under the 4.5:1 floor this 10.9px label needs.
+     */
     pointer-events: none;
 }
 
+/*
+ * The transcription status is deliberately absolutely positioned inside the
+ * fixed-height subtitle lane: it appears, changes and disappears without ever
+ * adding a box to the flow, so the artwork above cannot resize when Whisper
+ * moves between preparing/listening/catching-up.
+ */
 .learner-whisper-placeholder {
     position: absolute;
     inset: 18px 44px;
@@ -270,9 +288,16 @@ button.learner-en:focus-visible {
     padding: 0;
     border: 0;
     border-radius: 50%;
+    /*
+     * Quiet, not invisible: the background stays transparent until hover/focus,
+     * but the glyph itself is painted at full strength. At the previous 0.52
+     * opacity it resolved to #9e9e9e on the light player — 2.69:1, below the
+     * 3:1 floor for a control — which is why long lines looked simply cut off
+     * with no way to open them.
+     */
     background: transparent;
     color: var(--asmr-text-secondary);
-    opacity: 0.52;
+    opacity: 1;
     cursor: pointer;
     pointer-events: auto;
     z-index: 2;

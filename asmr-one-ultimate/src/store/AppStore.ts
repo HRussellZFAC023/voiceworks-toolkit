@@ -75,6 +75,15 @@ const CONFIG_DEFAULTS: PluginConfig = {
     whisperAdaptiveWindow: true,
     whisperLiveChunkSec: 29,
     whisperLiveOverlapSec: 5,
+    // Advanced Whisper overrides. Every default here reproduces the behavior
+    // that shipped before the Advanced disclosure existed, so an untouched
+    // install transcribes identically.
+    whisperCustomModelId: '',
+    whisperEncoderDtype: 'auto',
+    whisperDecoderDtype: 'auto',
+    whisperExecutionDevice: 'auto',
+    whisperNoRepeatNgramSize: 6,
+    whisperRepetitionPenalty: 1.15,
     whisperCacheTranscripts: true,
     whisperAutoWarmup: true,
     alwaysTranscribe: false,

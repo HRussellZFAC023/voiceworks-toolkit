@@ -4616,14 +4616,25 @@ export class Whisper {
         // materially better Japanese recognition and exact word timing.
         // Explicit presets opt out.
         const firefoxMacCompatibility = isFirefoxMacWhisperCompatibilityProfile(profile);
-        // Measured adapter capability, not a user-agent guess. A GPU exposing
-        // subgroups runs ORT's fast matmul kernels and comfortably sustains the
-        // configured model; one without them is ~25x slower and needs a
-        // conservative tier to stay near the playhead. Capable browsers must not
-        // be downgraded just because another browser lacks the feature.
+        // Measured adapter behaviour, not a user-agent guess.
+        //
+        // The decisive signal is GPU->CPU readback latency. Whisper's decoder
+        // KV-cache shape arithmetic is int64, which WebGPU cannot express, so it
+        // partitions to CPU and forces ~8 readbacks per generated token. Where
+        // those readbacks are timer-polled (~100 ms each, Mozilla bug 1870699)
+        // that is ~0.8 s of pure latency per token and dominates everything
+        // else — measured at 95% of total wall-clock. Such adapters need the
+        // conservative tier even though their raw compute is fine. Missing
+        // subgroups is a secondary signal for slower matmul kernels.
+        //
+        // Adapters that are fast on both counts must NOT be downgraded just
+        // because another browser is slow.
         const computeProfile = getWebGpuComputeProfile();
-        const hasFastGpuCompute = computeProfile?.subgroups === true;
-        const knownSlowGpuCompute = computeProfile !== null && !computeProfile.subgroups;
+        const hasFastGpuCompute = computeProfile !== null
+            && computeProfile.subgroups
+            && !computeProfile.slowReadback;
+        const knownSlowGpuCompute = computeProfile !== null
+            && (computeProfile.slowReadback || !computeProfile.subgroups);
 
         const model = isExplicitPreset
             ? requestedModel

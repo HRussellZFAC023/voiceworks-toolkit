@@ -1,5 +1,15 @@
 # Changelog
 
+## 174 — 2026-07-26
+
+- Live transcription now adapts to what the GPU can actually do. Whisper's decoder keeps its KV-cache shape arithmetic in int64, which WebGPU cannot express, so those nodes fall back to CPU and force roughly eight GPU-to-CPU readbacks per generated token. Where a browser resolves those readbacks on a polling timer rather than an event (Firefox does, on a fixed ~100 ms interval — Mozilla bug 1870699), that is around 0.8 s of pure waiting per token and accounts for about 95% of total transcription time. The worker now measures readback latency directly with an empty submit and, when it is slow, runs the encoder on WebGPU and the decoder on WASM. Measured on Apple M1 / Firefox with the base model: 0.20x realtime before, 1.04-1.35x after, with kanji intact. Browsers with fast readbacks are unaffected and keep the full pipeline on the GPU.
+- Precision now follows the execution device. A q4 decoder is a good choice on the GPU but has no fast path on the WASM backend — measured five times slower — so a decoder moved to WASM uses q8 instead.
+- Model tier selection is driven by measured adapter behaviour rather than the user agent, so a capable GPU is never downgraded to protect a slower browser, and an explicitly chosen model stays pinned exactly.
+- Added an Advanced section to the Whisper settings, collapsed by default, exposing the custom model ID, encoder and decoder precision, execution device, window length and overlap, the anti-repetition parameters and the task, each with its measured trade-off stated plainly. Invalid entries are refused rather than silently clamped or repaired.
+- Removed the duplicate fullscreen control: the host player already ships one, and the second was reported as unwanted. Fullscreen behaviour is unchanged and still available from the keyboard shortcut.
+- Transcription status is now a single compact line that cannot appear twice, cannot be covered by or overlap the artwork, and reserves stable geometry so showing or changing it never reflows the player.
+- Fixed a settings layout defect at narrow widths where an action row could overlap the row above it once its label wrapped.
+
 ## 173 — 2026-07-26
 
 - Fixed a settings-panel layout defect at narrow widths: Quasar's gutter helper pulls its container up with a negative top margin, so an action row directly below a list item overlapped that item as soon as its label wrapped, which it always did at phone widths. Action buttons now wrap instead of running past the panel edge.

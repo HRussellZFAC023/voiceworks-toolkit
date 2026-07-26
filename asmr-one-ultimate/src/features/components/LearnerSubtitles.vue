@@ -237,6 +237,53 @@ function scheduleUpdateLyrics() {
 
 const showExpanded = computed(() => !isPlayerMinimized.value && hasContent.value);
 const showCollapsed = computed(() => isPlayerMinimized.value && hasContent.value);
+
+/**
+ * Approximate how much horizontal room a subtitle needs. Full-width CJK glyphs
+ * occupy roughly twice the advance of Latin text, so counting code points alone
+ * badly under-estimates Japanese lines.
+ */
+const FULL_WIDTH_GLYPH = /[\u1100-\u115F\u2E80-\u303E\u3041-\u33FF\u3400-\u4DBF\u4E00-\u9FFF\uA000-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE30-\uFE4F\uFF00-\uFF60\uFFE0-\uFFE6]/;
+
+function subtitleTextWeight(text: string): number {
+    let weight = 0;
+    for (const char of text) weight += FULL_WIDTH_GLYPH.test(char) ? 2 : 1;
+    return weight;
+}
+
+/**
+ * Long lines used to be cut mid-sentence inside the fixed subtitle lanes, which
+ * reads like a clipped scroll region. Step the type down instead so far more of
+ * the line stays on screen before the "show full subtitles" dialog is needed.
+ *
+ * Every step keeps `scale * lines * line-height` inside the lane block-size,
+ * which is declared in rem and therefore independent of these font sizes. The
+ * panel — and the album artwork whose height is derived from it — never moves.
+ */
+function resolvePrimarySubtitleFit(text: string): { scale: number; lines: number } {
+    const weight = subtitleTextWeight(text);
+    if (weight <= 60) return { scale: 1, lines: 2 };
+    if (weight <= 75) return { scale: 0.8, lines: 2 };
+    return { scale: 0.66, lines: 3 };
+}
+
+function resolveSecondarySubtitleFit(text: string): { scale: number; lines: number } {
+    // The secondary lane is already small; 0.85 is the lowest step that keeps it
+    // above the 11px floor where it would stop being comfortably readable.
+    return subtitleTextWeight(text) <= 70 ? { scale: 1, lines: 2 } : { scale: 0.85, lines: 2 };
+}
+
+const subtitleFitStyle = computed<Record<string, string>>(() => {
+    const primary = resolvePrimarySubtitleFit(primaryText.value);
+    const secondary = resolveSecondarySubtitleFit(secondaryText.value);
+    return {
+        '--asmr-subs-primary-scale': String(primary.scale),
+        '--asmr-subs-primary-lines': String(primary.lines),
+        '--asmr-subs-secondary-scale': String(secondary.scale),
+        '--asmr-subs-secondary-lines': String(secondary.lines),
+    };
+});
+
 const whisperPlaceholderText = computed(() => {
     if (primaryText.value || secondaryText.value || !whisperStatusSessionActive.value) return '';
     const state = whisperUiState.value;
@@ -836,6 +883,26 @@ function clearDisplay() {
     lastDisplayedText = '';
     lastSecondaryShown = '';
     refreshVisibility();
+}
+
+/**
+ * Whisper keeps a legacy status node inside the host player for installs that
+ * do not render this subtitle surface. While this component is mounted the
+ * subtitle panel is that surface, so the legacy node must be removed outright:
+ *
+ *  - hiding it is not enough, because the inline fallback keeps a reserved
+ *    72px strip directly under the album artwork;
+ *  - the overlay variant is painted *on* the artwork, so leaving it visible
+ *    produces two competing status readouts over the cover.
+ *
+ * Whisper only creates the node when no dedicated surface exists and rebuilds
+ * it lazily once this component unmounts, so removal is safe and self-healing.
+ */
+function releaseLegacyWhisperStatus(): void {
+    for (const node of document.querySelectorAll('.whisper-status')) node.remove();
+    for (const host of document.querySelectorAll('.asmr-whisper-status-host')) {
+        host.classList.remove('asmr-whisper-status-host');
+    }
 }
 
 function refreshVisibility() {
@@ -2390,6 +2457,7 @@ function injectExpandedControls() {
  * move the live Vue root beside album art if the expanded player appears.
  */
 function syncExpandedMountPoint() {
+    releaseLegacyWhisperStatus();
     const root = document.getElementById('asmr-learner-subs-root');
     const albumArt = document.querySelector('.audio-player .albumart');
     if (!root || !albumArt || root.previousElementSibling === albumArt) return;
@@ -2694,7 +2762,9 @@ function setupStoreWatchers() {
 // ---------------------------------------------------------------------------
 
 onMounted(() => {
+    releaseLegacyWhisperStatus();
     storeWatcherCleanups.push(AppStore.subscribeWhisperState((state) => {
+        releaseLegacyWhisperStatus();
         whisperUiState.value = { ...state };
         whisperRunning = state.isTranscribing || state.isLoadingModel;
         if (whisperRunning || state.stage === 'recovering' || state.stage === 'error') {
@@ -2874,6 +2944,7 @@ watch(
         class="learner-subs-expanded"
         :class="[{ hidden: !showExpanded }, `learner-layout-${subtitleLayout}`]"
         :data-subtitle-layout="subtitleLayout"
+        :style="subtitleFitStyle"
         aria-live="polite"
     >
         <div v-show="showJP" class="learner-jp" :class="{ 'segment-fade': segmentFading }" :title="primaryText || undefined" @animationend="segmentFading = false" lang="ja" role="status">
@@ -2929,7 +3000,7 @@ watch(
             class="learner-subs-collapsed"
             :class="[{ hidden: !showCollapsed }, `learner-layout-${subtitleLayout}`]"
             :data-subtitle-layout="subtitleLayout"
-            :style="{ display: showCollapsed ? 'flex' : 'none !important' }"
+            :style="{ ...subtitleFitStyle, display: showCollapsed ? 'flex' : 'none !important' }"
             aria-live="polite"
         >
             <div v-show="showJP" class="learner-jp" :class="{ 'segment-fade': segmentFading }" :title="primaryText || undefined" @animationend="segmentFading = false" lang="ja" role="status">

@@ -4547,6 +4547,7 @@ describe('Whisper', () => {
             vi.spyOn(navigator, 'platform', 'get').mockReturnValue('MacIntel');
             __setWebGpuComputeProfileForTests({
                 subgroups: true, subgroupMatrix: true, shaderF16: true, maxBufferBytes: 4 * 1024 ** 3,
+                readbackLatencyMs: 0.4, slowReadback: false,
             });
             mockDevice(fullProfile);
 
@@ -4559,6 +4560,7 @@ describe('Whisper', () => {
             mockConfig({ whisperModelPreset: 'auto' });
             __setWebGpuComputeProfileForTests({
                 subgroups: false, subgroupMatrix: false, shaderF16: true, maxBufferBytes: 1024 ** 3,
+                readbackLatencyMs: 103, slowReadback: true,
             });
             mockDevice(fullProfile);
 
@@ -4570,6 +4572,7 @@ describe('Whisper', () => {
             mockConfig({ whisperModelPreset: 'small' });
             __setWebGpuComputeProfileForTests({
                 subgroups: false, subgroupMatrix: false, shaderF16: false, maxBufferBytes: 1024 ** 3,
+                readbackLatencyMs: 103, slowReadback: true,
             });
             mockDevice(fullProfile);
 

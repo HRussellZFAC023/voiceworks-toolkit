@@ -5,6 +5,8 @@ import SettingsInput from './SettingsInput.vue';
 import SettingsSelect from './SettingsSelect.vue';
 import SettingsRangeSelect from './SettingsRangeSelect.vue';
 import SettingsHotkeyInput from './SettingsHotkeyInput.vue';
+import SettingsNumberInput from './SettingsNumberInput.vue';
+import SettingsValidatedInput, { isHuggingFaceModelId } from './SettingsValidatedInput.vue';
 import { useI18n } from '../../composables/useI18n';
 import { useConfig } from '../../composables/useConfig';
 import { useEventBus } from '../../composables/useEventBus';
@@ -189,6 +191,148 @@ const whisperOverlapOptions = computed(() => [
     { value: 2, label: t('whisperOverlapLight') },
     { value: 5, label: t('whisperOverlapAsmr') },
 ]);
+
+// ---------------------------------------------------------------------------
+// Whisper advanced disclosure
+//
+// Collapsed on every open, deliberately not persisted: an ordinary user who
+// once expanded it out of curiosity should not find raw dtype selectors waiting
+// for them next time. The values inside are persisted; only the disclosure is
+// transient.
+// ---------------------------------------------------------------------------
+const whisperAdvancedOpen = ref(false);
+
+/** Config keys the Reset button restores. Also the section's contract. */
+const WHISPER_ADVANCED_KEYS: readonly ConfigKey[] = [
+    'whisperCustomModelId',
+    'whisperEncoderDtype',
+    'whisperDecoderDtype',
+    'whisperExecutionDevice',
+    'whisperLiveChunkSec',
+    'whisperLiveOverlapSec',
+    'whisperNoRepeatNgramSize',
+    'whisperRepetitionPenalty',
+    'whisperTask',
+];
+
+const WHISPER_ADVANCED_CHUNK_MIN = 8;
+const WHISPER_ADVANCED_CHUNK_MAX = 29;
+const WHISPER_ADVANCED_OVERLAP_MIN = 0;
+const WHISPER_ADVANCED_OVERLAP_MAX = 15;
+const WHISPER_NGRAM_MIN = 0;
+const WHISPER_NGRAM_MAX = 10;
+const WHISPER_PENALTY_MIN = 1;
+const WHISPER_PENALTY_MAX = 2;
+
+const whisperCustomModelId = useConfig('whisperCustomModelId');
+const whisperEncoderDtype = useConfig('whisperEncoderDtype');
+const whisperDecoderDtype = useConfig('whisperDecoderDtype');
+const whisperExecutionDevice = useConfig('whisperExecutionDevice');
+const whisperLiveChunkSec = useConfig('whisperLiveChunkSec');
+const whisperLiveOverlapSec = useConfig('whisperLiveOverlapSec');
+const whisperNoRepeatNgramSize = useConfig('whisperNoRepeatNgramSize');
+const whisperRepetitionPenalty = useConfig('whisperRepetitionPenalty');
+const whisperTask = useConfig('whisperTask');
+const forceWhisperWasm = useConfig('forceWhisperWasm');
+
+// Precision and device identifiers are the runtime's own vocabulary. They are
+// spelled the same in every UI language, so only "auto" carries a translation.
+const WHISPER_DTYPE_VALUES = ['auto', 'fp32', 'fp16', 'q8', 'q4', 'q4f16', 'int8'] as const;
+
+const whisperDtypeOptions = computed(() => WHISPER_DTYPE_VALUES.map(value => ({
+    value,
+    label: value === 'auto' ? t('whisperDtypeAuto') : value,
+})));
+
+const whisperDeviceOptions = computed(() => [
+    { value: 'auto', label: t('whisperDeviceAuto') },
+    { value: 'webgpu', label: t('whisperDeviceWebgpu') },
+    { value: 'wasm', label: t('whisperDeviceWasm') },
+    { value: 'split', label: t('whisperDeviceSplit') },
+]);
+
+const whisperTaskOptions = computed(() => [
+    { value: 'transcribe', label: t('whisperTaskTranscribe') },
+    { value: 'translate', label: t('whisperTaskTranslate') },
+]);
+
+/** Surfaced on whichever dtype select is actually set to fp16. */
+const whisperEncoderDtypeHint = computed(
+    () => whisperEncoderDtype.value === 'fp16' ? t('whisperDtypeFp16Hint') : '',
+);
+const whisperDecoderDtypeHint = computed(
+    () => whisperDecoderDtype.value === 'fp16' ? t('whisperDtypeFp16Hint') : '',
+);
+
+const whisperExecutionDeviceHint = computed(() => {
+    // Two controls can express "use the CPU". Rather than let one quietly win,
+    // name the precedence wherever the two disagree.
+    if (whisperExecutionDevice.value !== 'auto' && forceWhisperWasm.value === true) {
+        return t('whisperExecutionDeviceConflict');
+    }
+    if (whisperExecutionDevice.value === 'split') return t('whisperDeviceSplitHint');
+    return '';
+});
+
+const whisperExecutionDeviceHintColor = computed(
+    () => whisperExecutionDevice.value !== 'auto' && forceWhisperWasm.value === true
+        ? 'var(--asmr-settings-warning)'
+        : '',
+);
+
+/**
+ * An overlap at or above the window length leaves a pass with no new audio.
+ * Both values are legal on their own, so this is reported rather than prevented.
+ */
+const whisperOverlapConflictHint = computed(
+    () => Number(whisperLiveOverlapSec.value) >= Number(whisperLiveChunkSec.value)
+        ? t('whisperOverlapExceedsWindow')
+        : '',
+);
+
+const whisperNgramHint = computed(
+    () => Number(whisperNoRepeatNgramSize.value) === 0 ? t('whisperAntiRepetitionDisabled') : '',
+);
+const whisperPenaltyHint = computed(
+    () => Number(whisperRepetitionPenalty.value) <= 1 ? t('whisperAntiRepetitionDisabled') : '',
+);
+
+function whisperNumberInvalidText(min: number, max: number): string {
+    return format('whisperAdvancedNumberInvalid', { min, max });
+}
+
+const whisperAdvancedResetClicked = ref(false);
+
+/** True while every key this section owns still holds its shipped default. */
+const whisperAdvancedAtDefaults = computed(() => {
+    const current: Record<string, unknown> = {
+        whisperCustomModelId: whisperCustomModelId.value,
+        whisperEncoderDtype: whisperEncoderDtype.value,
+        whisperDecoderDtype: whisperDecoderDtype.value,
+        whisperExecutionDevice: whisperExecutionDevice.value,
+        whisperLiveChunkSec: whisperLiveChunkSec.value,
+        whisperLiveOverlapSec: whisperLiveOverlapSec.value,
+        whisperNoRepeatNgramSize: whisperNoRepeatNgramSize.value,
+        whisperRepetitionPenalty: whisperRepetitionPenalty.value,
+        whisperTask: whisperTask.value,
+    };
+    return WHISPER_ADVANCED_KEYS.every(key => current[key] === AppStore.getConfigDefault(key));
+});
+
+// Derived rather than latched: the confirmation is only true while the section
+// really is at defaults, so the first edit after a reset retires it by itself.
+const whisperAdvancedResetNotice = computed(
+    () => whisperAdvancedResetClicked.value && whisperAdvancedAtDefaults.value
+        ? t('whisperAdvancedResetDone')
+        : '',
+);
+
+function resetWhisperAdvanced(): void {
+    for (const key of WHISPER_ADVANCED_KEYS) {
+        AppStore.setConfig(key, AppStore.getConfigDefault(key));
+    }
+    whisperAdvancedResetClicked.value = true;
+}
 
 const learnerSubtitleModeOptions = computed(() => [
     { value: 'auto', label: t('learnerSubtitleModeAuto') },
@@ -877,6 +1021,169 @@ const credits = [
                     icon="join_inner"
                 />
                 <SettingsToggle config-key="forceWhisperWasm" :label="t('forceWhisperWasm')" :sublabel="t('forceWhisperWasmSub')" icon="developer_board_off" />
+
+                <!-- ---------------------------------------------------- -->
+                <!-- Advanced (collapsed by default)                      -->
+                <!-- ---------------------------------------------------- -->
+                <hr class="q-separator q-separator--horizontal asmr-settings-separator">
+                <div role="listitem" class="q-py-sm q-item q-item-type row no-wrap asmr-settings-item">
+                    <div class="q-item__section column q-item__section--avatar q-item__section--side justify-center">
+                        <i class="q-icon notranslate material-icons asmr-settings-icon" aria-hidden="true" role="presentation">science</i>
+                    </div>
+                    <div class="q-item__section column q-item__section--main justify-center">
+                        <div class="q-item__label"><span class="text-weight-medium">{{ t('whisperAdvanced') }}</span></div>
+                        <div class="q-item__label q-item__label--caption text-caption">{{ t('whisperAdvancedSub') }}</div>
+                    </div>
+                    <div class="q-item__section column q-item__section--side justify-center">
+                        <button
+                            type="button"
+                            class="q-btn q-btn-item non-selectable no-outline q-btn--standard q-btn--rectangle q-btn--actionable q-focusable q-hoverable"
+                            data-asmr-whisper-advanced-toggle
+                            :aria-expanded="whisperAdvancedOpen ? 'true' : 'false'"
+                            :aria-label="t('whisperAdvanced')"
+                            @click="whisperAdvancedOpen = !whisperAdvancedOpen"
+                        >
+                            <span class="q-focus-helper"></span>
+                            <span class="q-btn__content text-center col items-center q-anchor--skip justify-center row">
+                                {{ whisperAdvancedOpen ? t('whisperAdvancedHide') : t('whisperAdvancedShow') }}
+                            </span>
+                        </button>
+                    </div>
+                </div>
+
+                <template v-if="whisperAdvancedOpen">
+                    <hr class="q-separator q-separator--horizontal asmr-settings-separator">
+                    <SettingsValidatedInput
+                        config-key="whisperCustomModelId"
+                        :label="t('whisperCustomModelId')"
+                        :sublabel="t('whisperCustomModelIdSub')"
+                        :invalid-text="t('whisperCustomModelIdInvalid')"
+                        :active-text="t('whisperCustomModelIdActive')"
+                        :validate="isHuggingFaceModelId"
+                        placeholder="onnx-community/whisper-small_timestamped"
+                        icon="hub"
+                    />
+                    <hr class="q-separator q-separator--horizontal asmr-settings-separator">
+                    <SettingsSelect
+                        config-key="whisperEncoderDtype"
+                        :label="t('whisperEncoderDtype')"
+                        :sublabel="t('whisperEncoderDtypeSub')"
+                        :options="whisperDtypeOptions"
+                        :hint="whisperEncoderDtypeHint"
+                        icon="memory"
+                    />
+                    <hr class="q-separator q-separator--horizontal asmr-settings-separator">
+                    <SettingsSelect
+                        config-key="whisperDecoderDtype"
+                        :label="t('whisperDecoderDtype')"
+                        :sublabel="t('whisperDecoderDtypeSub')"
+                        :options="whisperDtypeOptions"
+                        :hint="whisperDecoderDtypeHint"
+                        icon="memory"
+                    />
+                    <hr class="q-separator q-separator--horizontal asmr-settings-separator">
+                    <SettingsSelect
+                        config-key="whisperExecutionDevice"
+                        :label="t('whisperExecutionDevice')"
+                        :sublabel="t('whisperExecutionDeviceSub')"
+                        :options="whisperDeviceOptions"
+                        :hint="whisperExecutionDeviceHint"
+                        :hint-color="whisperExecutionDeviceHintColor"
+                        icon="developer_board"
+                    />
+                    <hr class="q-separator q-separator--horizontal asmr-settings-separator">
+                    <SettingsNumberInput
+                        config-key="whisperLiveChunkSec"
+                        :label="t('whisperAdvancedChunkSec')"
+                        :sublabel="t('whisperAdvancedChunkSecSub')"
+                        :min="8"
+                        :max="29"
+                        :step="1"
+                        :invalid-text="whisperNumberInvalidText(8, 29)"
+                        icon="graphic_eq"
+                    />
+                    <hr class="q-separator q-separator--horizontal asmr-settings-separator">
+                    <SettingsNumberInput
+                        config-key="whisperLiveOverlapSec"
+                        :label="t('whisperAdvancedOverlapSec')"
+                        :sublabel="t('whisperAdvancedOverlapSecSub')"
+                        :min="0"
+                        :max="15"
+                        :step="1"
+                        :invalid-text="whisperNumberInvalidText(0, 15)"
+                        :hint="whisperOverlapConflictHint"
+                        hint-color="var(--asmr-settings-warning)"
+                        icon="join_inner"
+                    />
+                    <hr class="q-separator q-separator--horizontal asmr-settings-separator">
+                    <div class="q-px-md q-pb-sm asmr-settings-hint">
+                        <div class="text-caption asmr-settings-muted asmr-settings-hint-text">{{ t('whisperAntiRepetitionSub') }}</div>
+                    </div>
+                    <SettingsNumberInput
+                        config-key="whisperNoRepeatNgramSize"
+                        :label="t('whisperNoRepeatNgramSize')"
+                        :sublabel="t('whisperNoRepeatNgramSizeSub')"
+                        :min="0"
+                        :max="10"
+                        :step="1"
+                        :invalid-text="whisperNumberInvalidText(0, 10)"
+                        :hint="whisperNgramHint"
+                        hint-color="var(--asmr-settings-warning)"
+                        icon="repeat_on"
+                    />
+                    <hr class="q-separator q-separator--horizontal asmr-settings-separator">
+                    <SettingsNumberInput
+                        config-key="whisperRepetitionPenalty"
+                        :label="t('whisperRepetitionPenalty')"
+                        :sublabel="t('whisperRepetitionPenaltySub')"
+                        :min="1"
+                        :max="2"
+                        :step="0.01"
+                        :invalid-text="whisperNumberInvalidText(1, 2)"
+                        :hint="whisperPenaltyHint"
+                        hint-color="var(--asmr-settings-warning)"
+                        icon="repeat_one_on"
+                    />
+                    <hr class="q-separator q-separator--horizontal asmr-settings-separator">
+                    <!-- Spoken Language is already a row of this same section a
+                         few lines above, so it is not repeated here. -->
+                    <SettingsSelect
+                        config-key="whisperTask"
+                        :label="t('whisperTask')"
+                        :sublabel="t('whisperTaskSub')"
+                        :options="whisperTaskOptions"
+                        icon="translate"
+                    />
+                    <hr class="q-separator q-separator--horizontal asmr-settings-separator">
+                    <div role="listitem" class="q-py-sm q-item q-item-type row no-wrap asmr-settings-item">
+                        <div class="q-item__section column q-item__section--avatar q-item__section--side justify-center">
+                            <i class="q-icon notranslate material-icons asmr-settings-icon" aria-hidden="true" role="presentation">restart_alt</i>
+                        </div>
+                        <div class="q-item__section column q-item__section--main justify-center">
+                            <div class="q-item__label"><span class="text-weight-medium">{{ t('whisperAdvancedReset') }}</span></div>
+                            <div class="q-item__label q-item__label--caption text-caption">{{ t('whisperAdvancedResetSub') }}</div>
+                            <div
+                                v-if="whisperAdvancedResetNotice"
+                                class="q-item__label q-item__label--caption text-caption asmr-settings-active-text"
+                                role="status"
+                            >{{ whisperAdvancedResetNotice }}</div>
+                        </div>
+                        <div class="q-item__section column q-item__section--side justify-center">
+                            <button
+                                type="button"
+                                class="q-btn q-btn-item non-selectable no-outline q-btn--standard q-btn--rectangle q-btn--actionable q-focusable q-hoverable"
+                                data-asmr-whisper-advanced-reset
+                                :aria-label="t('whisperAdvancedReset')"
+                                @click="resetWhisperAdvanced"
+                            >
+                                <span class="q-focus-helper"></span>
+                                <span class="q-btn__content text-center col items-center q-anchor--skip justify-center row">
+                                    {{ t('whisperAdvancedResetAction') }}
+                                </span>
+                            </button>
+                        </div>
+                    </div>
+                </template>
             </div>
         </template>
 

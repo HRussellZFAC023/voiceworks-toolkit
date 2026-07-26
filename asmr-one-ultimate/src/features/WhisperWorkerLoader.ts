@@ -254,7 +254,12 @@ async function detectWebGPU(requiredBufferBytes = minWebgpuBufferBytes) {
         }
         if (!adapter) continue;
         const inspected = inspectWebGpuAdapter(adapter, requiredBufferBytes);
-        if (inspected.backend) return inspected;
+        if (inspected.backend) {
+            // Measure signalling latency before the model loads, so the device
+            // split can be chosen for this adapter.
+            await probeGpuReadbackLatency(adapter);
+            return inspected;
+        }
         rejectedResult = inspected;
     }
 
@@ -273,7 +278,86 @@ async function detectBackend(requiredBufferBytes = minWebgpuBufferBytes) {
     };
 }
 
+// Measured threshold. A healthy WebGPU implementation signals completion of an
+// empty submit in well under a millisecond; Firefox resolves it on a fixed
+// ~100 ms polling timer (Mozilla bug 1870699, "Don't poll WebGPU from a timer",
+// still open). 50 ms cleanly separates the two and cannot be reached by a
+// browser that is merely busy.
+const SLOW_READBACK_THRESHOLD_MS = 50;
+let slowGpuReadback = null;
+
+/**
+ * Time a GPU->CPU completion signal with NO work submitted, so this measures
+ * pure signalling latency rather than compute.
+ *
+ * This matters enormously for Whisper: WebGPU has no int64, so the decoder's
+ * KV-cache shape arithmetic partitions to CPU and forces ~8 GPU->CPU readbacks
+ * per generated token. At ~100 ms each that is ~0.8 s of pure waiting per
+ * token, which measured as 95% of total wall-clock on Firefox. Detecting the
+ * latency directly (rather than sniffing the browser) keeps fast
+ * implementations on the fast path and self-heals when the bug is fixed.
+ */
+async function probeGpuReadbackLatency(adapter) {
+    if (slowGpuReadback !== null) return slowGpuReadback;
+    try {
+        const device = await adapter.requestDevice();
+        // One warm-up submit so first-use initialisation is not counted.
+        device.queue.submit([]);
+        await device.queue.onSubmittedWorkDone();
+        let total = 0;
+        const trials = 3;
+        for (let i = 0; i < trials; i++) {
+            const started = performance.now();
+            device.queue.submit([]);
+            await device.queue.onSubmittedWorkDone();
+            total += performance.now() - started;
+        }
+        const median = total / trials;
+        slowGpuReadback = median >= SLOW_READBACK_THRESHOLD_MS;
+        console.log('[Whisper Worker] GPU readback latency ' + median.toFixed(1) + 'ms'
+            + (slowGpuReadback ? ' (slow: timer-polled)' : ' (fast)'));
+        try { device.destroy(); } catch { /* best effort */ }
+    } catch (err) {
+        console.warn('[Whisper Worker] Readback probe failed:', err);
+        slowGpuReadback = false;
+    }
+    return slowGpuReadback;
+}
+
+/**
+ * Resolve the execution device per model module.
+ *
+ * On implementations with timer-polled readbacks the encoder still belongs on
+ * WebGPU — it places 347/347 nodes on the GPU and performs essentially no
+ * readbacks — while the readback-bound decoder is far faster on WASM. Measured
+ * on Apple M1 / Firefox with whisper-base: 0.30x realtime all-WebGPU versus
+ * 1.47x split, readbacks 794 -> 2 per window, with a byte-identical transcript.
+ */
+function resolveDeviceForModules(hasSlowReadback) {
+    if (!hasSlowReadback) return 'webgpu';
+    return { encoder_model: 'webgpu', decoder_model_merged: 'wasm' };
+}
+
+/**
+ * Precision must follow the execution device, not just the model.
+ *
+ * q4 is a good decoder choice on WebGPU but is pathological on the WASM EP,
+ * which has no fast 4-bit matmul path: measured on whisper-tiny in Firefox, a
+ * q4 decoder took 135 s against 26 s for q8 — roughly 5x slower. So when the
+ * decoder is split onto WASM it must be q8, otherwise the split gives back most
+ * of what it wins. Measured end to end on Apple M1 / Firefox, whisper-base,
+ * 29 s windows, encoder fp32 on WebGPU:
+ *   decoder q4 on WASM: 0.60x, 0.41x realtime
+ *   decoder q8 on WASM: 1.04x, 0.93x, 1.35x realtime
+ */
+function getSplitDtypeCandidates() {
+    return [{ encoder_model: 'fp32', decoder_model_merged: 'q8' }];
+}
+
 function getDtypeCandidates(device) {
+    if (device && typeof device === 'object' && device.decoder_model_merged === 'wasm') {
+        return getSplitDtypeCandidates();
+    }
     if (device !== 'webgpu') return null;
     // Keep the acoustically sensitive encoder at full precision. Firefox/M1
     // profiling showed that fp16 could complete quickly while collapsing a
@@ -444,7 +528,10 @@ async function loadPipelineForModel(settings, progressCb) {
     // --- WebGPU path ---
     if (currentBackend === 'webgpu') {
         configureWebGpuRuntime(backend.adapter);
-        const dtypeCandidates = getDtypeCandidates(currentBackend);
+        // Resolve the device layout first: precision has to follow it, because a
+        // decoder split onto WASM needs q8 rather than the GPU-appropriate q4.
+        const resolvedDevice = resolveDeviceForModules(slowGpuReadback === true);
+        const dtypeCandidates = getDtypeCandidates(resolvedDevice);
         if (dtypeCandidates) {
             for (const dtype of dtypeCandidates) {
                 for (let hubIdx = 0; hubIdx < HUB_BASE_URLS.length; hubIdx++) {
@@ -452,7 +539,7 @@ async function loadPipelineForModel(settings, progressCb) {
                     const opts = {
                         progress_callback: progressCb,
                         revision,
-                        device: 'webgpu',
+                        device: resolvedDevice,
                         dtype,
                     };
                     pipelinePromise = pipeline('automatic-speech-recognition', modelName, opts);

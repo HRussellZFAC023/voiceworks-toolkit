@@ -513,13 +513,22 @@
   align-items: center;
   justify-content: center;
   gap: 12px;
-  color: rgba(255, 255, 255, 0.6);
+  /*
+   * This is the only place the lightbox shows the word "download" as copy
+   * ("Failed to download this media file"). At the previous 0.6/0.5 alphas it
+   * read as a grey smudge on the backdrop; 0.87 keeps it clearly legible while
+   * still sitting below the primary white header text.
+   */
+  color: rgba(255, 255, 255, 0.87);
   padding: 48px;
+  max-width: 32rem;
+  text-align: center;
+  text-wrap: pretty;
 }
 
 .media-viewer-error .material-icons {
   font-size: 64px;
-  opacity: 0.5;
+  opacity: 0.8;
 }
 
 /* Thumbnail Strip */

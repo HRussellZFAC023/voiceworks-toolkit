@@ -2,14 +2,17 @@
 /**
  * PlayerFullscreen.vue - Expands the audio player to fill the viewport.
  *
- * Renders a fullscreen toggle button inside the audio player.
- * Toggles a CSS class that makes the player fill the screen.
+ * Renders no control of its own. The host player already ships a fullscreen
+ * button, and injecting a second one next to it was reported as unwanted
+ * duplication, so this component is now behaviour-only: it owns the fullscreen
+ * CSS class, the idle auto-hide, and the exit gestures.
  *
- * Exit methods: button click, Escape key, swipe down.
+ * Entry: the `f` keyboard shortcut (KeyboardManager -> controller.toggle()) or
+ * any other caller of the exposed `toggleFullscreen`. Exit: the same shortcut,
+ * Escape, or a downward swipe.
  */
 
-import { ref, computed, onMounted, onUnmounted } from 'vue';
-import { useI18n } from '../../composables/useI18n';
+import { ref, onMounted, onUnmounted } from 'vue';
 import { useEventBus } from '../../composables/useEventBus';
 import { useAppStore } from '../../composables/useAppStore';
 import { AppStore } from '../../store/AppStore';
@@ -20,7 +23,6 @@ const SWIPE_MAX_TIME = 400;   // ms max duration for swipe gesture
 const IDLE_TIMEOUT = 4000;    // ms before auto-hiding controls on touch devices
 
 // -- Composables --
-const { t } = useI18n();
 const { emit } = useEventBus();
 const appStore = useAppStore();
 
@@ -35,12 +37,6 @@ let touchStartTime = 0;
 // Idle auto-hide for touch devices
 let idleTimer: ReturnType<typeof setTimeout> | null = null;
 const isTouchDevice = window.matchMedia('(hover: none)').matches;
-
-// -- Computed --
-const iconName = computed(() => isFullscreen.value ? 'fullscreen_exit' : 'fullscreen');
-const buttonLabel = computed(() =>
-    isFullscreen.value ? t('fullscreenExit') : t('fullscreenToggle')
-);
 
 // -- Idle auto-hide (touch devices only) --
 
@@ -78,12 +74,6 @@ function toggleFullscreen(): void {
     if (now - lastToggleTime < TOGGLE_COOLDOWN) return;
     lastToggleTime = now;
     isFullscreen.value ? exit() : enter();
-}
-
-function onToggleClick(e: Event): void {
-    e.preventDefault();
-    e.stopPropagation();
-    toggleFullscreen();
 }
 
 function enter(): void {
@@ -223,53 +213,5 @@ defineExpose({ syncFullscreenClass, toggleFullscreen, exit, isFullscreen });
 </script>
 
 <template>
-    <button
-        class="asmr-fullscreen-btn"
-        :aria-label="buttonLabel"
-        :title="buttonLabel"
-        @click="onToggleClick"
-    >
-        <i class="material-icons" role="img" aria-hidden="true">{{ iconName }}</i>
-    </button>
+    <!-- Behaviour-only feature: the host player supplies the fullscreen control. -->
 </template>
-
-<style scoped>
-.asmr-fullscreen-btn {
-    position: absolute !important;
-    top: 8px !important;
-    right: 8px !important;
-    z-index: 1000000 !important;
-    width: 44px !important;
-    height: 44px !important;
-    background: transparent !important;
-    backdrop-filter: none !important;
-    border: 1px solid transparent !important;
-    border-radius: 50% !important;
-    display: flex !important;
-    align-items: center !important;
-    justify-content: center !important;
-    color: #111827 !important;
-    opacity: 0.28 !important;
-    cursor: pointer !important;
-    box-shadow: none !important;
-    transition: background-color 0.18s ease, border-color 0.18s ease, opacity 0.18s ease, transform 0.18s ease !important;
-}
-
-.asmr-fullscreen-btn:hover {
-    background: rgba(255, 255, 255, 0.78) !important;
-    border-color: rgba(17, 24, 39, 0.45) !important;
-    opacity: 1 !important;
-    transform: scale(1.05) !important;
-}
-
-.asmr-fullscreen-btn:focus-visible {
-    background: rgba(255, 255, 255, 0.78) !important;
-    opacity: 1 !important;
-    outline: 3px solid #1976d2 !important;
-    outline-offset: 2px !important;
-}
-
-.asmr-fullscreen-btn :deep(.material-icons) {
-    font-size: 22px !important;
-}
-</style>
