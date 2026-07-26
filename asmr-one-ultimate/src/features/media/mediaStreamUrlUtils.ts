@@ -1,6 +1,15 @@
 import type { MediaFile } from './types';
+import { DEFAULT_API_SERVER } from '../../core/Constants';
 
 const FALLBACK_ORIGIN = 'https://asmr.one';
+const OFFICIAL_MEDIA_API_HOSTS = new Set([
+    'api.asmr.one',
+    'api.asmr-100.com',
+    'api.asmr-200.com',
+    'api.asmr-300.com',
+]);
+const FRONTEND_HOSTS = new Set(['asmr.one', 'www.asmr.one']);
+type PublicMediaRoute = 'stream' | 'download';
 
 function isBlobOrDataUrl(url: string): boolean {
     return url.startsWith('blob:') || url.startsWith('data:');
@@ -38,75 +47,174 @@ function parseUrl(url: string): URL | null {
     }
 }
 
-function isTrustedAsmrHost(hostname: string): boolean {
-    const host = hostname.toLowerCase();
-    return host === 'asmr.one' || host === 'www.asmr.one' || host.endsWith('.asmr.one');
-}
-
-function hasTokenQuery(url: string): boolean {
+function isFrontendRootPlaceholder(url: string): boolean {
     const parsed = parseUrl(url);
-    if (!parsed) {
-        return /(?:\?|&)token=/.test(url);
+    if (
+        !parsed
+        || (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')
+        || parsed.pathname !== '/'
+    ) {
+        return false;
     }
-    return parsed.searchParams.has('token');
+
+    return !isAbsoluteUrl(url) || FRONTEND_HOSTS.has(parsed.hostname.toLowerCase());
 }
 
-function ensureLeadingSlash(path: string): string {
-    return path.startsWith('/') ? path : `/${path}`;
+function isOfficialMediaApiHost(hostname: string): boolean {
+    return OFFICIAL_MEDIA_API_HOSTS.has(hostname.toLowerCase());
 }
 
-function normalizeLocalStreamPath(hash: string): string {
-    if (hash.includes('/')) {
-        if (hash.startsWith('/api/') || hash.startsWith('/media/')) {
-            return hash;
+export function resolveMediaApiBaseUrl(candidate?: string): string {
+    try {
+        const parsed = new URL(String(candidate || DEFAULT_API_SERVER));
+        if (parsed.protocol === 'https:' && isOfficialMediaApiHost(parsed.hostname)) {
+            return parsed.origin;
         }
-        if (hash.startsWith('api/') || hash.startsWith('media/')) {
-            return ensureLeadingSlash(hash);
-        }
-        return `/api/media/stream/${hash}`;
+    } catch {
+        // Fall through to the maintained API default.
     }
-    return `/api/media/stream/${hash}`;
+    return DEFAULT_API_SERVER;
 }
 
-function appendTokenToUrl(url: string, token: string): string {
-    if (!token || isBlobOrDataUrl(url) || hasTokenQuery(url)) return url;
+function fullyDecodeSegment(value: string): string | null {
+    let decoded = value;
+    for (let i = 0; i < 16; i++) {
+        let next: string;
+        try {
+            next = decodeURIComponent(decoded);
+        } catch {
+            return null;
+        }
+        if (next === decoded) return decoded;
+        decoded = next;
+    }
+    // Refuse inputs that never stabilize within a strict bound. This prevents
+    // a multiply-decoding upstream from recovering separators or traversal.
+    return null;
+}
+
+function encodeOpaquePathSegments(value: string): string | null {
+    const trimmed = value.trim();
+    if (!trimmed || /[?#\\\u0000-\u001f\u007f]/.test(trimmed)) return null;
+
+    const segments = trimmed.split('/');
+    if (segments.some(segment => segment === '')) return null;
+
+    const encoded: string[] = [];
+    for (const segment of segments) {
+        const decoded = fullyDecodeSegment(segment);
+        if (
+            decoded === null
+            || decoded === ''
+            || decoded === '.'
+            || decoded === '..'
+            || /[/\\?#\u0000-\u001f\u007f]/.test(decoded)
+        ) {
+            return null;
+        }
+        encoded.push(encodeURIComponent(decoded));
+    }
+    return encoded.join('/');
+}
+
+function buildMediaPathFromHash(hash: string, route: PublicMediaRoute): string {
+    const encoded = encodeOpaquePathSegments(hash);
+    return encoded ? `/api/media/${route}/${encoded}` : '';
+}
+
+function extractRawPath(url: string): string {
+    const absoluteMatch = url.match(/^(?:https?:)?\/\/[^/?#]+([^?#]*)/i);
+    if (absoluteMatch) return absoluteMatch[1] || '/';
+    return url.split(/[?#]/, 1)[0];
+}
+
+function canonicalizeMediaPath(path: string, route: PublicMediaRoute): string | null {
+    const prefixes = [
+        `/api/media/${route}/`,
+        `/media/${route}/`,
+        `api/media/${route}/`,
+        `media/${route}/`,
+    ];
+    const prefix = prefixes.find(candidate => path.startsWith(candidate));
+    if (!prefix) return null;
+    const encoded = encodeOpaquePathSegments(path.slice(prefix.length));
+    return encoded ? `/api/media/${route}/${encoded}` : '';
+}
+
+function rewriteMediaApiSource(
+    url: string,
+    route: PublicMediaRoute,
+    apiBaseUrl?: string,
+): string | null {
+    if (!url || isBlobOrDataUrl(url)) return null;
 
     const parsed = parseUrl(url);
-    if (!parsed) return url;
+    if (!parsed || (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')) return null;
 
-    const isApiPath = parsed.pathname.startsWith('/api/')
-        || parsed.pathname.startsWith('/media/');
-    if (!isApiPath) return url;
+    const mediaPath = canonicalizeMediaPath(extractRawPath(url), route);
+    if (mediaPath === null) return null;
+    if (!mediaPath) return '';
 
-    const isAbsolute = isAbsoluteUrl(url);
-    if (isAbsolute) {
-        const currentOrigin = getRuntimeOrigin();
-        const current = parseUrl(currentOrigin);
-        const currentHost = current?.hostname.toLowerCase() || '';
-        const targetHost = parsed.hostname.toLowerCase();
-        const isSameHost = currentHost !== '' && targetHost === currentHost;
-        if (!isSameHost && !isTrustedAsmrHost(targetHost)) return url;
+    const sourceHost = parsed.hostname.toLowerCase();
+    const isRelative = !isAbsoluteUrl(url);
+    if (!isRelative && !isOfficialMediaApiHost(sourceHost) && !FRONTEND_HOSTS.has(sourceHost)) {
+        return null;
     }
 
-    parsed.searchParams.set('token', token);
-    const hasProtocolRelativePrefix = url.startsWith('//');
-    if (isAbsolute) {
-        if (hasProtocolRelativePrefix) {
-            return `//${parsed.host}${parsed.pathname}${parsed.search}${parsed.hash}`;
+    try {
+        const rewritten = new URL(mediaPath, `${resolveMediaApiBaseUrl(apiBaseUrl)}/`);
+        for (const [key, value] of parsed.searchParams) {
+            if (key.toLowerCase() !== 'token') rewritten.searchParams.append(key, value);
         }
-        return parsed.toString();
+        rewritten.hash = parsed.hash;
+        return rewritten.toString();
+    } catch {
+        return '';
     }
-    return `${parsed.pathname}${parsed.search}${parsed.hash}`;
 }
 
 export function buildMediaStreamUrl(
     hash: string,
     item: Pick<MediaFile, 'mediaStreamUrl' | 'media_stream_url'> | undefined,
-    token: string,
+    _token: string,
+    apiBaseUrl?: string,
 ): string {
     const sourceUrl = (item?.mediaStreamUrl || item?.media_stream_url || '').trim();
-    if (sourceUrl && isSupportedMediaSource(sourceUrl)) {
-        return appendTokenToUrl(sourceUrl, token);
+    if (
+        sourceUrl
+        && isSupportedMediaSource(sourceUrl)
+        && !isFrontendRootPlaceholder(sourceUrl)
+    ) {
+        const rewritten = rewriteMediaApiSource(sourceUrl, 'stream', apiBaseUrl);
+        if (rewritten !== null) return rewritten;
+        return sourceUrl;
     }
-    return appendTokenToUrl(normalizeLocalStreamPath(hash), token);
+
+    const streamPath = buildMediaPathFromHash(hash, 'stream');
+    return streamPath
+        ? new URL(streamPath, `${resolveMediaApiBaseUrl(apiBaseUrl)}/`).toString()
+        : '';
+}
+
+export function buildMediaDownloadUrl(
+    hash: string,
+    item: Pick<MediaFile, 'mediaDownloadUrl' | 'media_download_url'> | undefined,
+    _token: string,
+    apiBaseUrl?: string,
+): string {
+    const sourceUrl = (item?.mediaDownloadUrl || item?.media_download_url || '').trim();
+    if (sourceUrl && !isFrontendRootPlaceholder(sourceUrl)) {
+        const rewritten = rewriteMediaApiSource(sourceUrl, 'download', apiBaseUrl);
+        if (rewritten !== null) return rewritten;
+
+        const parsed = parseUrl(sourceUrl);
+        if (isAbsoluteUrl(sourceUrl) && parsed?.protocol === 'https:') {
+            return sourceUrl.startsWith('//') ? parsed.toString() : sourceUrl;
+        }
+    }
+
+    const downloadPath = buildMediaPathFromHash(hash, 'download');
+    return downloadPath
+        ? new URL(downloadPath, `${resolveMediaApiBaseUrl(apiBaseUrl)}/`).toString()
+        : '';
 }

@@ -11,40 +11,13 @@ import {
     computeWordKaraokeIndices as computeWordKaraokeIndicesImpl,
     computeTimeFallbackKaraokeIndices as computeTimeFallbackKaraokeIndicesImpl,
 } from '../../src/features/karaokeUtils';
+import { findActiveLyricLine } from '../../src/features/learnerLyricsUtils';
 
 const WORD_REVEAL_DELAY_SEC = 0.002;
 
 // ---------------------------------------------------------------------------
 // Extracted pure functions (mirroring LearnerSubtitles.vue logic)
 // ---------------------------------------------------------------------------
-
-function findActiveLine(
-    lines: Array<{ time: number; endTime?: number; text: string }>,
-    now: number,
-): { time: number; endTime?: number; text: string } | null {
-    if (lines.length === 0) return null;
-    let activeIdx = -1;
-    for (let i = lines.length - 1; i >= 0; i--) {
-        if (lines[i].time <= now) { activeIdx = i; break; }
-    }
-    if (activeIdx < 0) return null;
-    const activeLine = lines[activeIdx];
-    if (activeLine.endTime && now >= activeLine.endTime) {
-        // Check for a longer overlapping segment that still covers `now`
-        for (let i = activeIdx - 1; i >= 0; i--) {
-            const earlier = lines[i];
-            if (earlier.endTime && earlier.endTime > now && earlier.time <= now) {
-                return earlier;
-            }
-            if (now - earlier.time > 60) break;
-        }
-        const nextLine = lines[activeIdx + 1];
-        if (!nextLine) return activeLine;
-        if ((nextLine.time - activeLine.endTime) < 2.0) return activeLine;
-        return null;
-    }
-    return activeLine;
-}
 
 function getProgressiveText(
     line: { time: number; endTime?: number; text: string; words?: Array<{ start: number; end: number; text: string }> },
@@ -286,9 +259,9 @@ describe('findActiveLine', () => {
     ];
 
     it('returns correct segment for time within range', () => {
-        expect(findActiveLine(lines, 3)?.text).toBe('A');
-        expect(findActiveLine(lines, 7)?.text).toBe('B');
-        expect(findActiveLine(lines, 12)?.text).toBe('C');
+        expect(findActiveLyricLine(lines, 3)?.text).toBe('A');
+        expect(findActiveLyricLine(lines, 7)?.text).toBe('B');
+        expect(findActiveLyricLine(lines, 12)?.text).toBe('C');
     });
 
     it('returns null in gap between segments', () => {
@@ -296,27 +269,30 @@ describe('findActiveLine', () => {
             { time: 0, endTime: 3, text: 'A' },
             { time: 7, endTime: 10, text: 'B' },
         ];
-        expect(findActiveLine(gapped, 5)).toBeNull();
+        expect(findActiveLyricLine(gapped, 5)).toBeNull();
     });
 
     it('returns null before first segment', () => {
-        expect(findActiveLine(lines, -1)).toBeNull();
+        expect(findActiveLyricLine(lines, -1)).toBeNull();
     });
 
-    it('holds last segment after it ends (live transcription catch-up)', () => {
-        expect(findActiveLine(lines, 16)?.text).toBe('C');
+    it('expires the last timed segment instead of presenting stale speech', () => {
+        expect(findActiveLyricLine(lines, 16)).toBeNull();
+    });
+
+    it('allows only a bounded grace period for live transcription boundaries', () => {
+        expect(findActiveLyricLine(lines, 15.5, { expiredGraceSeconds: 0.75 })?.text).toBe('C');
+        expect(findActiveLyricLine(lines, 15.8, { expiredGraceSeconds: 0.75 })).toBeNull();
     });
 
     it('returns segment at exact start time', () => {
-        expect(findActiveLine(lines, 5)?.text).toBe('B');
+        expect(findActiveLyricLine(lines, 5)?.text).toBe('B');
     });
 
     it('handles exact end time correctly', () => {
-        // With B starting at time=5, findActiveLine picks B (not expired A)
-        expect(findActiveLine(lines, 5)?.text).toBe('B');
-        // Single segment past endTime — held visible (no next line to transition to)
-        const lineA = findActiveLine([{ time: 0, endTime: 5, text: 'A' }], 5);
-        expect(lineA?.text).toBe('A');
+        // With B starting at time=5, the resolver picks B (not expired A)
+        expect(findActiveLyricLine(lines, 5)?.text).toBe('B');
+        expect(findActiveLyricLine([{ time: 0, endTime: 5, text: 'A' }], 5)).toBeNull();
     });
 
     it('returns segment without endTime (LRC-style)', () => {
@@ -325,12 +301,12 @@ describe('findActiveLine', () => {
             { time: 10, text: 'line2' },
         ];
         // Without endTime, segment is active forever until next starts
-        expect(findActiveLine(lrcLines, 5)?.text).toBe('line1');
-        expect(findActiveLine(lrcLines, 15)?.text).toBe('line2');
+        expect(findActiveLyricLine(lrcLines, 5)?.text).toBe('line1');
+        expect(findActiveLyricLine(lrcLines, 15)?.text).toBe('line2');
     });
 
     it('returns empty array → null', () => {
-        expect(findActiveLine([], 5)).toBeNull();
+        expect(findActiveLyricLine([], 5)).toBeNull();
     });
 
     it('holds current segment in short gap (< 2s)', () => {
@@ -339,7 +315,7 @@ describe('findActiveLine', () => {
             { time: 4.5, endTime: 8, text: 'B' },
         ];
         // Gap is 4.5 - 3 = 1.5 < 2.0, so A is held
-        expect(findActiveLine(gapped, 3.5)?.text).toBe('A');
+        expect(findActiveLyricLine(gapped, 3.5, { expiredGraceSeconds: 0.75 })?.text).toBe('A');
     });
 
     it('prefers longer overlapping segment over expired fragment', () => {
@@ -351,7 +327,7 @@ describe('findActiveLine', () => {
         ];
         // At time 12, fragment is expired (12 > 10.5). Should fall back
         // to the longer segment that still covers time 12.
-        expect(findActiveLine(lines, 12)?.text).toBe('はい頑張りすぎないくらいがちょうどいい');
+        expect(findActiveLyricLine(lines, 12)?.text).toBe('はい頑張りすぎないくらいがちょうどいい');
     });
 
     it('prefers longer overlapping segment even with more lines after', () => {
@@ -361,7 +337,7 @@ describe('findActiveLine', () => {
             { time: 20, endTime: 25, text: 'next sentence' },
         ];
         // At time 15, fragment expired, but full sentence still covers it
-        expect(findActiveLine(lines, 15)?.text).toBe('full sentence');
+        expect(findActiveLyricLine(lines, 15)?.text).toBe('full sentence');
     });
 });
 

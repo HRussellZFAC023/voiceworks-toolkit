@@ -9,6 +9,7 @@ export class DownloadCenterController extends FeatureController {
     get component(): Component { return DownloadCenter; }
     protected get debounceMs(): number { return 500; }
     protected get insertMode(): 'append' { return 'append'; }
+    protected get preserveMountOnAnchorReplacement(): boolean { return true; }
     protected shouldBeActive(): boolean { return true; }
     findInjectionPoint(): HTMLElement | null { return HeaderActions.ensure(); }
 }

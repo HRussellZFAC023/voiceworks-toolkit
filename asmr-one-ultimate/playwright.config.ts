@@ -19,16 +19,23 @@ import { defineConfig, devices } from '@playwright/test';
 // Set workers to undefined to let Playwright scale automatically based on CPU cores.
 const workers = process.env.PW_WORKERS ? parseInt(process.env.PW_WORKERS, 10) : undefined;
 const slowMo = parseInt(process.env.PW_SLOWMO || '', 10) || 0;
+const retries = process.env.PW_RETRIES
+    ? parseInt(process.env.PW_RETRIES, 10)
+    : (process.env.CI ? 2 : 1);
 const isRealE2E = process.env.E2E_REAL === '1' || process.env.E2E_NO_MOCKS === '1';
 const skipWebServer = process.env.E2E_SKIP_WEBSERVER === '1';
 const baseURL = process.env.E2E_BASE_URL || 'https://www.asmr.one';
 const includeFirefox = process.env.E2E_FIREFOX === '1';
+const chromiumExecutablePath = process.env.PW_CHROMIUM_EXECUTABLE_PATH || undefined;
 
 export default defineConfig({
     testDir: './tests/e2e',
     fullyParallel: false,
     forbidOnly: !!process.env.CI,
-    retries: process.env.CI ? 2 : 0,
+    // The suite exercises a real, region-gated host through a maintained relay.
+    // Retry one isolated test locally so a transient host 502 cannot invalidate
+    // product assertions; CI keeps its existing two-retry diagnostic budget.
+    retries,
     workers: workers ?? 1,
     reporter: [['html', { open: 'never' }], ['list']],
     timeout: 60000,
@@ -48,6 +55,7 @@ export default defineConfig({
         ignoreHTTPSErrors: true,
         launchOptions: {
             slowMo,
+            executablePath: chromiumExecutablePath,
             args: [
                 '--disable-web-security',
                 // WebGPU (needed for Whisper E2E)

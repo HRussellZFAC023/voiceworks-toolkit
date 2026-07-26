@@ -24,14 +24,22 @@ vi.mock('../../src/core/MountApp', () => ({
 vi.mock('../../src/core/Utils', () => ({
     Logger: { debug: vi.fn(), error: vi.fn() },
 }));
+vi.mock('../../src/features/components/DownloadCenter.vue', () => ({
+    default: {},
+}));
 
 import { FeatureController } from '../../src/features/FeatureController';
+import { DownloadCenterController } from '../../src/features/DownloadCenterController';
 
 class TestController extends FeatureController {
     active = true;
     get component(): Component { return {} as Component; }
     findInjectionPoint(): HTMLElement | null { return document.getElementById('anchor'); }
     protected shouldBeActive(): boolean { return this.active; }
+}
+
+class PersistentTestController extends TestController {
+    protected get preserveMountOnAnchorReplacement(): boolean { return true; }
 }
 
 describe('FeatureController lifecycle', () => {
@@ -91,5 +99,55 @@ describe('FeatureController lifecycle', () => {
 
         expect(mocks.unmount).toHaveBeenCalledTimes(1);
         expect(document.getElementById('feature-root')).toBeNull();
+    });
+
+    it('still unmounts an anchor-preserving feature when its route becomes inactive', () => {
+        const controller = new PersistentTestController('feature-root');
+        controller.enable();
+        const observerCallback = mocks.register.mock.calls[0][1] as () => void;
+
+        document.getElementById('anchor')?.remove();
+        controller.active = false;
+        observerCallback();
+
+        expect(mocks.unmount).toHaveBeenCalledTimes(1);
+        expect(document.getElementById('feature-root')).toBeNull();
+    });
+
+    it('reattaches the same Download Center app after the host replaces its toolbar', () => {
+        document.body.innerHTML = '<header class="q-header"><div class="q-toolbar"></div></header>';
+        const controller = new DownloadCenterController();
+        controller.enable();
+        const observerCallback = mocks.register.mock.calls.find(
+            ([id]) => id === 'asmr-download-center-root',
+        )?.[1] as (() => void) | undefined;
+        const originalRoot = document.getElementById('asmr-download-center-root');
+
+        expect(observerCallback).toBeTypeOf('function');
+        expect(originalRoot?.isConnected).toBe(true);
+        expect(mocks.mount).toHaveBeenCalledTimes(1);
+
+        document.querySelector('.q-header')?.remove();
+        observerCallback?.();
+
+        // Keep the Vue owner alive while the host is between toolbar renders.
+        // Its Teleport children remain connected to <body> throughout.
+        expect(originalRoot?.isConnected).toBe(false);
+        expect(mocks.unmount).not.toHaveBeenCalled();
+
+        document.body.insertAdjacentHTML(
+            'beforeend',
+            '<header class="q-header"><div class="q-toolbar"></div></header>',
+        );
+        observerCallback?.();
+
+        expect(document.getElementById('asmr-download-center-root')).toBe(originalRoot);
+        expect(originalRoot?.parentElement?.classList.contains('asmr-header-actions')).toBe(true);
+        expect(mocks.mount).toHaveBeenCalledTimes(1);
+        expect(mocks.unmount).not.toHaveBeenCalled();
+
+        controller.disable();
+        expect(mocks.unmount).toHaveBeenCalledTimes(1);
+        expect(originalRoot?.isConnected).toBe(false);
     });
 });

@@ -1,6 +1,10 @@
 import { I18n } from '../../core/Config';
 import { DirectoryDownloadSink, DirectoryPermissionError, ResumeOffsetMismatchError, type DownloadWriter } from './DirectoryDownloadSink';
-import { DownloadJobRepository, type DownloadFile } from './DownloadJobRepository';
+import { DownloadJobRepository, type DownloadCheckpoint, type DownloadFile } from './DownloadJobRepository';
+import {
+    createDownloadResumeFingerprint,
+    matchesDownloadResumeFingerprint,
+} from './DownloadResumeFingerprint';
 import {
     DownloadRequestTimeoutError,
     DownloadStallError,
@@ -25,7 +29,7 @@ export type DownloadProgressListener = (progress: DownloadCoordinatorProgress) =
 // Closing a FileSystemWritable commits its safe-write copy. A small interval
 // makes large files approach quadratic disk I/O, so checkpoint coarsely while
 // retaining close-before-checkpoint ordering and a bounded resume-loss window.
-export const DOWNLOAD_DURABLE_CHECKPOINT_INTERVAL = 256 * 1024 * 1024;
+export const DOWNLOAD_DURABLE_CHECKPOINT_INTERVAL = 64 * 1024 * 1024;
 export const DOWNLOAD_BODY_MAX_ATTEMPTS = 3;
 const DOWNLOAD_BODY_RETRY_BASE_DELAY_MS = 300;
 const DOWNLOAD_BODY_RETRY_MAX_DELAY_MS = 2_000;
@@ -242,6 +246,22 @@ export class DownloadCoordinator {
             await this.repository.markFileActive(file.id);
             checkpoint = await this.repository.getCheckpoint(file.id);
             latestDurableOffset = checkpoint?.offset ?? 0;
+            if (checkpoint?.resumeFingerprint) {
+                let fingerprintMatches = false;
+                try {
+                    fingerprintMatches = await matchesDownloadResumeFingerprint(
+                        checkpoint.resumeFingerprint,
+                        (offset, length) => this.sink.readRange(path, offset, length),
+                    );
+                } catch (error) {
+                    if (error instanceof DirectoryPermissionError) throw error;
+                }
+                if (!fingerprintMatches) {
+                    await this.repository.resetFile(file.id);
+                    checkpoint = undefined;
+                    latestDurableOffset = 0;
+                }
+            }
             try {
                 writer = await this.sink.open(path, checkpoint?.offset ?? 0);
             } catch (error) {
@@ -254,9 +274,16 @@ export class DownloadCoordinator {
             const attempt = async (sourceUrl: string): Promise<number> => {
                 let received = checkpoint?.offset ?? 0;
                 let durableOffset = received;
-                let lastValidator = {
+                let lastValidator: Pick<
+                    DownloadCheckpoint,
+                    'etag' | 'lastModified' | 'objectVersion' | 'objectIdentity' | 'sourceUrl' | 'resumeFingerprint'
+                > & { totalBytes?: number } = {
                     etag: checkpoint?.etag,
                     lastModified: checkpoint?.lastModified,
+                    objectVersion: checkpoint?.objectVersion,
+                    objectIdentity: checkpoint?.objectIdentity,
+                    sourceUrl: checkpoint?.sourceUrl,
+                    resumeFingerprint: checkpoint?.resumeFingerprint,
                     totalBytes: file.totalBytes,
                 };
                 const commit = async (offset: number, reopen: boolean): Promise<void> => {
@@ -265,6 +292,19 @@ export class DownloadCoordinator {
                     // Never let IndexedDB advertise an offset beyond committed disk data.
                     await writer.close();
                     writer = undefined;
+                    const canFingerprintTrustedObject = offset > 0
+                        && !lastValidator.etag
+                        && !lastValidator.lastModified
+                        && !lastValidator.objectVersion
+                        && !!lastValidator.objectIdentity
+                        && !!lastValidator.sourceUrl
+                        && Number.isSafeInteger(lastValidator.totalBytes);
+                    lastValidator.resumeFingerprint = canFingerprintTrustedObject
+                        ? await createDownloadResumeFingerprint(
+                            offset,
+                            (sampleOffset, length) => this.sink.readRange(path, sampleOffset, length),
+                        )
+                        : undefined;
                     await this.repository.checkpointFile(file.id, { offset, ...lastValidator });
                     durableOffset = offset;
                     latestDurableOffset = offset;
@@ -284,6 +324,10 @@ export class DownloadCoordinator {
                                 lastValidator = {
                                     etag: chunk.etag,
                                     lastModified: chunk.lastModified,
+                                    objectVersion: chunk.objectVersion,
+                                    objectIdentity: chunk.objectIdentity,
+                                    sourceUrl: chunk.sourceUrl,
+                                    resumeFingerprint: lastValidator.resumeFingerprint,
                                     totalBytes: chunk.total ?? lastValidator.totalBytes,
                                 };
                                 if (received - durableOffset >= DOWNLOAD_DURABLE_CHECKPOINT_INTERVAL) {
@@ -305,6 +349,10 @@ export class DownloadCoordinator {
                             signal: controller.signal,
                             expectedEtag: lastValidator.etag,
                             expectedLastModified: lastValidator.lastModified,
+                            expectedObjectVersion: lastValidator.objectVersion,
+                            expectedObjectIdentity: lastValidator.objectIdentity,
+                            expectedSourceUrl: lastValidator.sourceUrl,
+                            expectedResumeFingerprint: lastValidator.resumeFingerprint,
                             expectedTotal: lastValidator.totalBytes,
                         });
                         if (
@@ -355,6 +403,10 @@ export class DownloadCoordinator {
                 lastValidator = {
                     etag: probe.etag ?? lastValidator.etag,
                     lastModified: probe.lastModified ?? lastValidator.lastModified,
+                    objectVersion: probe.objectVersion ?? lastValidator.objectVersion,
+                    objectIdentity: probe.objectIdentity ?? lastValidator.objectIdentity,
+                    sourceUrl: probe.sourceUrl ?? lastValidator.sourceUrl,
+                    resumeFingerprint: lastValidator.resumeFingerprint,
                     totalBytes: probe.size ?? lastValidator.totalBytes,
                 };
                 await commit(received, false);

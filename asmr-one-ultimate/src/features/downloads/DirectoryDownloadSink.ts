@@ -105,6 +105,20 @@ export class DirectoryDownloadSink {
         return new Uint8Array(await file.arrayBuffer());
     }
 
+    /** Read a bounded range without materializing a large partial file. */
+    async readRange(path: string[], offset: number, length: number): Promise<Uint8Array> {
+        if (!await this.ensurePermission(false)) throw new DirectoryPermissionError();
+        if (
+            !Number.isSafeInteger(offset)
+            || offset < 0
+            || !Number.isSafeInteger(length)
+            || length < 0
+        ) throw new RangeError('A valid file range is required');
+        const { directory, filename } = await this.resolve(path);
+        const file = await (await directory.getFileHandle(filename)).getFile();
+        return new Uint8Array(await file.slice(offset, offset + length).arrayBuffer());
+    }
+
     /** Inspect a source without materializing its contents in browser memory. */
     async size(path: string[]): Promise<number> {
         const { directory, filename } = await this.resolve(path);

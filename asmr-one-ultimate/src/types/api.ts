@@ -439,9 +439,13 @@ export interface AvailableLyric {
     /** Work title */
     workTitle?: string;
     /** Streaming URL for the lyrics file (VTT, LRC, etc.) */
-    mediaStreamUrl: string;
+    mediaStreamUrl?: string;
+    /** Streaming URL used by snake_case host payloads. */
+    media_stream_url?: string;
     /** Download URL for the lyrics file */
     mediaDownloadUrl?: string;
+    /** Download URL used by snake_case host payloads. */
+    media_download_url?: string;
     /** File size in bytes */
     size?: number;
 }

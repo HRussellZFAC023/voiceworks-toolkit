@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
     HttpError,
     retryWithBackoff,
+    gmDownload,
     gmRequest,
     parseGmHeaders,
     KikoeruApiClient,
@@ -204,6 +205,8 @@ describe('gmRequest', () => {
             method: 'POST',
             headers: { 'X-Custom': 'test' },
             timeout: 5000,
+            anonymous: true,
+            redirect: 'error',
         });
 
         expect(mockGm).toHaveBeenCalledWith(expect.objectContaining({
@@ -211,6 +214,8 @@ describe('gmRequest', () => {
             url: 'https://example.com',
             headers: { 'X-Custom': 'test' },
             timeout: 5000,
+            anonymous: true,
+            redirect: 'error',
         }));
     });
 
@@ -233,6 +238,117 @@ describe('gmRequest', () => {
 
         await expect(request).rejects.toMatchObject({ name: 'AbortError' });
         expect(abort).toHaveBeenCalledTimes(1);
+    });
+});
+
+describe('gmDownload', () => {
+    afterEach(() => {
+        (globalThis as Record<string, unknown>).GM_download = undefined;
+        vi.useRealTimers();
+    });
+
+    it('reports success after the userscript manager finishes a Blob download', async () => {
+        const download = vi.fn((options: { onload: () => void }) => options.onload());
+        (globalThis as Record<string, unknown>).GM_download = download;
+        const blob = new Blob(['image'], { type: 'image/jpeg' });
+
+        await expect(gmDownload({ url: blob, name: 'cover.jpg', saveAs: false })).resolves.toBe(true);
+        expect(download).toHaveBeenCalledWith(expect.objectContaining({
+            url: blob,
+            name: 'cover.jpg',
+            saveAs: false,
+        }));
+    });
+
+    it('lets callers use their anchor fallback when the manager is unavailable', async () => {
+        await expect(gmDownload({
+            url: new Blob(['image']),
+            name: 'cover.jpg',
+        })).resolves.toBe(false);
+    });
+
+    it.each(['onerror', 'ontimeout'] as const)(
+        'lets callers use their anchor fallback after %s',
+        async (callback) => {
+            (globalThis as Record<string, unknown>).GM_download = vi.fn(
+                (options: Record<typeof callback, () => void>) => options[callback](),
+            );
+
+            await expect(gmDownload({
+                url: new Blob(['image']),
+                name: 'cover.jpg',
+            })).resolves.toBe(false);
+        },
+    );
+
+    it('lets callers use their anchor fallback after a synchronous manager error', async () => {
+        (globalThis as Record<string, unknown>).GM_download = vi.fn(() => {
+            throw new Error('unsupported Blob');
+        });
+
+        await expect(gmDownload({
+            url: new Blob(['image']),
+            name: 'cover.jpg',
+        })).resolves.toBe(false);
+    });
+
+    it('lets callers use their anchor fallback when the manager never calls back', async () => {
+        vi.useFakeTimers();
+        (globalThis as Record<string, unknown>).GM_download = vi.fn();
+
+        const result = gmDownload({
+            url: new Blob(['image']),
+            name: 'cover.jpg',
+        });
+        await vi.advanceTimersByTimeAsync(30_000);
+
+        await expect(result).resolves.toBe(false);
+    });
+
+    it('keeps a healthy manager download alive while progress continues', async () => {
+        vi.useFakeTimers();
+        let callbacks: { onload: () => void; onprogress: () => void } | undefined;
+        const abort = vi.fn();
+        (globalThis as Record<string, unknown>).GM_download = vi.fn(
+            (options: { onload: () => void; onprogress: () => void }) => {
+                callbacks = options;
+                return { abort };
+            },
+        );
+
+        const result = gmDownload({
+            url: new Blob(['image']),
+            name: 'cover.jpg',
+        });
+        await vi.advanceTimersByTimeAsync(29_000);
+        callbacks?.onprogress();
+        await vi.advanceTimersByTimeAsync(29_000);
+        callbacks?.onload();
+
+        expect(abort).not.toHaveBeenCalled();
+        await expect(result).resolves.toBe(true);
+    });
+
+    it('aborts a pending manager download before allowing the timeout fallback', async () => {
+        vi.useFakeTimers();
+        let callbacks: { ontimeout: () => void } | undefined;
+        const abort = vi.fn(() => callbacks?.ontimeout());
+        (globalThis as Record<string, unknown>).GM_download = vi.fn(
+            (options: { ontimeout: () => void }) => {
+                callbacks = options;
+                return { abort };
+            },
+        );
+
+        const result = gmDownload({
+            url: new Blob(['image']),
+            name: 'cover.jpg',
+        });
+        await vi.advanceTimersByTimeAsync(30_000);
+
+        expect(callbacks).toBeDefined();
+        expect(abort).toHaveBeenCalledTimes(1);
+        await expect(result).resolves.toBe(false);
     });
 });
 

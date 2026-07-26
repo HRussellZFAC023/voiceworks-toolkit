@@ -62,6 +62,7 @@ export default defineConfig({
                 icon: 'https://images2.imgbox.com/c8/21/h1DhlGPW_o.png',
                 grant: [
                     'GM_xmlhttpRequest',
+                    'GM_download',
                     'GM_setValue',
                     'GM_getValue',
                     'GM_listValues',

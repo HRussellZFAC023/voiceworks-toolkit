@@ -1,4 +1,5 @@
 import { deleteDB, openDB, type DBSchema, type IDBPDatabase } from 'idb';
+import type { DownloadResumeFingerprint } from './DownloadResumeFingerprint';
 
 export type DownloadJobStatus = 'pending' | 'active' | 'paused' | 'completed' | 'failed' | 'cancelled';
 export type DownloadFileStatus = DownloadJobStatus;
@@ -39,6 +40,10 @@ export interface DownloadCheckpoint {
     offset: number;
     etag?: string;
     lastModified?: string;
+    objectVersion?: string;
+    objectIdentity?: string;
+    sourceUrl?: string;
+    resumeFingerprint?: DownloadResumeFingerprint;
     updatedAt: number;
 }
 
@@ -182,7 +187,10 @@ export class DownloadJobRepository {
 
     async checkpointFile(
         fileId: string,
-        checkpoint: Pick<DownloadCheckpoint, 'offset' | 'etag' | 'lastModified'> & { totalBytes?: number },
+        checkpoint: Pick<
+            DownloadCheckpoint,
+            'offset' | 'etag' | 'lastModified' | 'objectVersion' | 'objectIdentity' | 'sourceUrl' | 'resumeFingerprint'
+        > & { totalBytes?: number },
     ): Promise<DownloadCheckpoint> {
         if (!Number.isSafeInteger(checkpoint.offset) || checkpoint.offset < 0) {
             throw new RangeError('Checkpoint offset must be a non-negative safe integer');
@@ -202,6 +210,12 @@ export class DownloadJobRepository {
             offset,
             etag: checkpoint.etag ?? previous?.etag,
             lastModified: checkpoint.lastModified ?? previous?.lastModified,
+            objectVersion: checkpoint.objectVersion ?? previous?.objectVersion,
+            objectIdentity: checkpoint.objectIdentity ?? previous?.objectIdentity,
+            sourceUrl: checkpoint.sourceUrl ?? previous?.sourceUrl,
+            resumeFingerprint: checkpoint.offset === offset
+                ? checkpoint.resumeFingerprint
+                : previous?.resumeFingerprint,
             updatedAt,
         };
         await checkpoints.put(value);

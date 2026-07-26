@@ -30,6 +30,10 @@ import {
     isSafeRasterImageBlob,
     normalizeImageUrl,
 } from '../media/externalImageUtils';
+import {
+    buildMediaStreamUrl,
+    resolveMediaApiBaseUrl,
+} from '../media/mediaStreamUrlUtils';
 
 const IMG_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg']);
 
@@ -578,17 +582,8 @@ function isImageItem(item: TrackItem | AudioTrack): boolean {
 }
 
 function buildUrl(item: TrackItem | AudioTrack, token: string): string {
-    const withToken = (url: string): string => {
-        if (url.startsWith('http') || url.startsWith('//')) return url;
-        if (url.startsWith('/api/') && token) {
-            return `${url}${url.includes('?') ? '&' : '?'}token=${token}`;
-        }
-        return url;
-    };
-    if (item.mediaStreamUrl) return withToken(item.mediaStreamUrl);
-    if ('media_stream_url' in item && item.media_stream_url) return withToken(item.media_stream_url);
-    if (item.hash) return withToken(`/api/media/stream/${item.hash}`);
-    return '';
+    const apiBaseUrl = resolveMediaApiBaseUrl(bridge.axios?.defaults?.baseURL);
+    return buildMediaStreamUrl(item.hash || '', item, token, apiBaseUrl);
 }
 
 function flattenTracks(nodes: (TrackFolder | TrackItem)[]): TrackItem[] {

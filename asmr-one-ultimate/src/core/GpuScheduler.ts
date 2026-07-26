@@ -171,6 +171,11 @@ const RECOVERY_COOLDOWN_MAX_MS = 30_000;
 const RECOVERY_BACKOFF_FACTOR = 2;
 const RECOVERY_PROBE_INTERVAL_MS = 60 * 1000; // 1 min
 
+export function isExplicitGpuDeviceLoss(reason: unknown): boolean {
+    return /device[- ]lost|instance reference|release session|invalid session/i
+        .test(String(reason || ''));
+}
+
 function createHealthState(): HealthState {
     return {
         gpuHealthy: true,
@@ -324,7 +329,7 @@ class GpuSchedulerImpl {
         health.lastFailureTime = Date.now();
 
         const reasonText = String(reason || '');
-        const explicitDeviceLoss = /device lost|instance reference|release session|invalid session/i.test(reasonText);
+        const explicitDeviceLoss = isExplicitGpuDeviceLoss(reasonText);
         const shouldBroadcast = explicitDeviceLoss;
         if (shouldBroadcast) {
             // Broadcast only on explicit device-loss signals to avoid cascading a
@@ -517,7 +522,8 @@ class GpuSchedulerImpl {
             entry.reject(err);
             // Check if this is a GPU-related error
             const msg = String((err as Error)?.message || err || '');
-            if (/device lost|OOM|out of memory|createBuffer|GPUDevice|WebGPU/i.test(msg)) {
+            if (isExplicitGpuDeviceLoss(msg)
+                || /OOM|out of memory|createBuffer|GPUDevice|WebGPU/i.test(msg)) {
                 this.onGpuFailure(worker, msg);
             }
         } finally {

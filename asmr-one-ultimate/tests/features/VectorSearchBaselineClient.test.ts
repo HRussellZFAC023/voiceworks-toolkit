@@ -88,6 +88,23 @@ describe('VectorSearchBaselineClient', () => {
         })).toThrow('global size limit');
     });
 
+    it('does not bind the browser fetch receiver to the baseline client', async () => {
+        let receiver: unknown = Symbol('not-called');
+        const fetchMock = vi.fn(function (this: unknown) {
+            receiver = this;
+            return Promise.resolve(new Response('unavailable', { status: 503 }));
+        }) as unknown as typeof fetch;
+
+        const result = await new VectorSearchBaselineClient(
+            repository(),
+            'https://baseline.test/semantic-index/manifest.json',
+            fetchMock,
+        ).synchronize();
+
+        expect(receiver).toBeUndefined();
+        expect(result).toMatchObject({ status: 'unavailable' });
+    });
+
     it('verifies and atomically activates a complete baseline', async () => {
         const repo = repository();
         const { bytes, manifest } = fixture();

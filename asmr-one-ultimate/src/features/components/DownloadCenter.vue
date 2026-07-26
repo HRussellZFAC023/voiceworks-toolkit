@@ -23,6 +23,7 @@ import {
     DownloadCenterRunError,
     DownloadCenterRunner,
     type DownloadCenterJob,
+    type DownloadCenterResumeOptions,
 } from '../downloads/DownloadCenterRunner';
 import { fetchCachedCommunityPlaylist } from '../playlist/CommunityPlaylistDetailsService';
 import { PlaylistDiscoveryService } from '../playlist/PlaylistDiscoveryService';
@@ -130,12 +131,15 @@ const labels = computed(() => ({
     pause: t('downloadCenterPause'),
     resume: t('downloadCenterResume'),
     resumeWithoutOpus: t('downloadCenterResumeWithoutOpus'),
+    resumeWithOriginalTitles: t('downloadCenterResumeWithOriginalTitles'),
     alreadyRunning: t('downloadCenterAlreadyRunning'),
     resumableDownloads: t('backupDownloaderResumeAvailable'),
     expandPlaylist: t('backupDownloaderExpand'),
     collapsePlaylist: t('backupDownloaderCollapse'),
     selectedSummary: t('backupDownloaderSelected'),
     unknownSize: t('backupDownloaderUnknownSize'),
+    durationAndFiles: t('backupDownloaderDurationAndFiles'),
+    fileCount: t('backupDownloaderFileCount'),
     partialSize: t('backupDownloaderPartialSize'),
     estimatedOpusSize: t('backupDownloaderEstimatedOpusSize'),
     noResults: t('backupDownloaderNoResults'),
@@ -445,9 +449,11 @@ async function enrichWorkItem(id: string, generation: number): Promise<void> {
         if (tracksResult.status === 'fulfilled') {
             const manifest = discoverDownloadManifest(tracksResult.value as unknown as DownloadTreeNode[]);
             const byType: Partial<Record<BackupFileFilter, number>> = {};
+            const fileCountByType: Partial<Record<BackupFileFilter, number>> = {};
             const unknownByType: Partial<Record<BackupFileFilter, number>> = {};
             for (const entry of manifest.entries) {
                 const category: BackupFileFilter = entry.category === 'unknown' ? 'other' : entry.category;
+                fileCountByType[category] = (fileCountByType[category] ?? 0) + 1;
                 if (!entry.size || entry.size <= 0) {
                     unknownByType[category] = (unknownByType[category] ?? 0) + 1;
                     continue;
@@ -456,6 +462,7 @@ async function enrichWorkItem(id: string, generation: number): Promise<void> {
             }
             const sizeBytes = Object.values(byType).reduce((sum, value) => sum + (value ?? 0), 0);
             const unknownSizeCount = Object.values(unknownByType).reduce((sum, value) => sum + (value ?? 0), 0);
+            update.fileCountByType = fileCountByType;
             if (sizeBytes > 0) {
                 update.sizeBytesByType = byType;
                 update.unknownSizeCountByType = unknownByType;
@@ -637,6 +644,7 @@ function friendlyError(error: unknown): string {
         if (error.code === 'permission') return t('backupDownloaderPermission');
         if (error.code === 'no-files') return t('backupDownloaderNoFiles');
         if (error.code === 'paused') return t('downloadCenterPaused');
+        if (error.code === 'title-translation') return t('backupDownloaderTitleTranslationRequired');
         if (error.code === 'already-running') return t('downloadCenterAlreadyRunning');
         if (error.code === 'failed') {
             const detail = sanitizeDownloadFailureDetail(error);
@@ -646,6 +654,13 @@ function friendlyError(error: unknown): string {
         }
     }
     return t('backupDownloaderFailed');
+}
+
+function needsTitleTranslation(job: DownloadCenterJob): boolean {
+    const { discovery, state } = job.options;
+    return discovery?.titlesReady === false
+        && discovery.nextIndex === 0
+        && (state.titleMode === 'translated' || state.titleMode === 'original-bracketed-translation');
 }
 
 async function rememberSettledJob(jobId?: string): Promise<void> {
@@ -673,7 +688,11 @@ function markDownloadComplete(result: { jobId: string; skipped: number }): void 
 }
 
 function markDownloadFailed(error: unknown): void {
-    if (error instanceof DownloadCenterRunError && error.code === 'paused') {
+    if (
+        error instanceof DownloadCenterRunError
+        && (error.code === 'paused' || error.code === 'title-translation')
+    ) {
+        if (error.code === 'title-translation') jobError.value = friendlyError(error);
         if (progress.value) progress.value = { ...progress.value, phase: 'paused' };
         return;
     }
@@ -712,13 +731,16 @@ async function startDownload(state: BackupDownloadState): Promise<void> {
     }
 }
 
-async function resumeDownload(jobId: string, disableOpus = false): Promise<void> {
+async function resumeDownload(
+    jobId: string,
+    resumeOptions: DownloadCenterResumeOptions = {},
+): Promise<void> {
     const job = resumableJobs.value.find(item => item.id === jobId);
     if (!job || busy.value) return;
     jobError.value = '';
     busy.value = true;
     try {
-        const result = await runner.resume(job, setRunnerProgress, { disableOpus });
+        const result = await runner.resume(job, setRunnerProgress, resumeOptions);
         markDownloadComplete(result);
     } catch (error) {
         markDownloadFailed(error);
@@ -728,7 +750,11 @@ async function resumeDownload(jobId: string, disableOpus = false): Promise<void>
 }
 
 function resumeDownloadWithoutOpus(jobId: string): void {
-    void resumeDownload(jobId, true);
+    void resumeDownload(jobId, { disableOpus: true });
+}
+
+function resumeDownloadWithOriginalTitles(jobId: string): void {
+    void resumeDownload(jobId, { useOriginalTitles: true });
 }
 
 async function pauseDownload(): Promise<void> {
@@ -760,6 +786,6 @@ defineExpose({ open });
 <template>
     <button class="q-btn q-btn-flat q-btn-dense asmr-download-center-btn text-white" data-testid="download-center-open" :title="t('downloadCenterButton')" :aria-label="t('downloadCenterButton')" @click="open"><span class="q-btn__content"><i class="q-icon material-icons" aria-hidden="true">download_for_offline</i></span></button>
     <Teleport to="body">
-        <BackupWorkDownloader v-if="visible" :playlists="playlists" :works="works" :profile="profile" :show-own="signedIn" :loading-own="loadingOwn" :loading-public="loadingPublic" :own-load-failed="ownLoadFailed" :public-load-failed="publicLoadFailed" :busy="busy" :progress="displayProgress" :error-message="jobError" :resumable-jobs="resumableJobs.map(job => ({ id: job.id, title: job.title, convertToOpus: job.options.state.convertToOpus }))" :resolve-playlist="resolvePlaylist" :search-all-works="searchAllWorks" @close="close" @source-change="handleSourceChange" @update="updateProfile" @start="startDownload" @pause="pauseDownload" @resume="resumeDownload" @resume-without-opus="resumeDownloadWithoutOpus" />
+        <BackupWorkDownloader v-if="visible" :playlists="playlists" :works="works" :profile="profile" :show-own="signedIn" :loading-own="loadingOwn" :loading-public="loadingPublic" :own-load-failed="ownLoadFailed" :public-load-failed="publicLoadFailed" :busy="busy" :progress="displayProgress" :error-message="jobError" :resumable-jobs="resumableJobs.map(job => ({ id: job.id, title: job.title, convertToOpus: job.options.state.convertToOpus, needsTitleTranslation: needsTitleTranslation(job) }))" :resolve-playlist="resolvePlaylist" :search-all-works="searchAllWorks" @close="close" @source-change="handleSourceChange" @update="updateProfile" @start="startDownload" @pause="pauseDownload" @resume="resumeDownload" @resume-without-opus="resumeDownloadWithoutOpus" @resume-with-original-titles="resumeDownloadWithOriginalTitles" />
     </Teleport>
 </template>

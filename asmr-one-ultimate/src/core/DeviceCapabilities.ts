@@ -104,11 +104,11 @@ export function isAppleM1CompatibilityGpu(gpuVendor = ''): boolean {
 }
 
 /**
- * Keep the overall device tier intact, but start Whisper on its smaller model
- * when Firefox exposes an M1-compatible renderer and withholds system memory.
- * Known-memory M1 browsers and explicitly newer Apple renderers are unaffected.
+ * Identify Firefox/macOS WebGPU profiles whose hidden memory information needs
+ * a bounded live-transcription policy. The caller decides the model and
+ * scheduling window; this signal must not itself imply a Tiny downgrade.
  */
-export function shouldUseTinyWhisperModel(profile: Pick<
+export function isFirefoxMacWhisperCompatibilityProfile(profile: Pick<
     DeviceProfile,
     'hasGpu' | 'memory' | 'isMobile' | 'gpuVendor'
 >, ua = navigator.userAgent || '', platform = navigator.platform || ''): boolean {
@@ -142,7 +142,8 @@ export function shouldRunBackgroundMl(
     ua = navigator.userAgent || '',
     platform = navigator.platform || '',
 ): boolean {
-    return profile.tier === 'full' && !shouldUseTinyWhisperModel(profile, ua, platform);
+    return profile.tier === 'full'
+        && !isFirefoxMacWhisperCompatibilityProfile(profile, ua, platform);
 }
 
 export function classifyDeviceTier(

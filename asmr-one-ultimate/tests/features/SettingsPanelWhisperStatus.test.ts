@@ -26,6 +26,7 @@ const mocks = vi.hoisted(() => ({
     },
     effectiveModel: 'onnx-community/whisper-small_timestamped',
     effectiveBackend: 'webgpu' as 'webgpu' | 'wasm',
+    autoWarmupSuppression: null as 'force-wasm' | 'device-capability' | null,
     warmupModel: vi.fn(),
 }));
 
@@ -70,6 +71,7 @@ vi.mock('../../src/features/Whisper', () => ({
         getInstance: () => ({
             getEffectiveModelId: () => mocks.effectiveModel,
             getEffectiveBackend: () => mocks.effectiveBackend,
+            getAutoWarmupSuppressionReason: () => mocks.autoWarmupSuppression,
             warmupModel: mocks.warmupModel,
         }),
     },
@@ -96,6 +98,7 @@ describe('SettingsPanel Whisper download status', () => {
         mocks.configs.whisperAutoWarmup = false;
         mocks.effectiveModel = 'onnx-community/whisper-small_timestamped';
         mocks.effectiveBackend = 'webgpu';
+        mocks.autoWarmupSuppression = null;
         Object.assign(mocks.whisperState, {
             isTranscribing: false,
             isLoadingModel: false,
@@ -155,5 +158,21 @@ describe('SettingsPanel Whisper download status', () => {
 
         expect(button().attributes('disabled')).toBeDefined();
         expect(section().text()).toContain('whisper-medium_timestamped (42%)');
+    });
+
+    it('explains when a requested auto-warmup is capability-suppressed', async () => {
+        mocks.configs.whisperAutoWarmup = true;
+        mocks.autoWarmupSuppression = 'device-capability';
+        wrapper = shallowMount(SettingsPanel);
+        await nextTick();
+
+        const warmupToggle = wrapper
+            .findAllComponents({ name: 'SettingsToggle' })
+            .find(control => control.props('configKey') === 'whisperAutoWarmup');
+
+        expect(warmupToggle?.props('sublabel'))
+            .toBe('whisperAutoWarmupSuppressedDevice');
+        expect(wrapper.get('#asmr-whisper-settings-section').text())
+            .toContain('whisperAutoWarmupSuppressedDevice');
     });
 });

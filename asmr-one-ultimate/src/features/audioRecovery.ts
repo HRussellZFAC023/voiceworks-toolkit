@@ -130,12 +130,11 @@ export function setupAudioRecovery(): () => void {
             attempt: audioRecoveryAttempts,
         });
 
-        // Register before assigning src: cached media can expose metadata very
-        // quickly. Position restoration and play() happen only after metadata
-        // makes seeking safe.
+        // Register before load(): cached media can expose metadata very
+        // quickly. Keep the valid URL in place—assigning an empty source makes
+        // browsers resolve and request the document URL (https://asmr.one/).
         restoreAfterMetadata(audio, current, savedTime, shouldResume);
-        audio.src = '';
-        audio.src = current;
+        if (audio.src !== current) audio.src = current;
         audio.load();
     };
 

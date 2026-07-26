@@ -8,8 +8,10 @@ import { DirectoryPermissionError, ResumeOffsetMismatchError } from '../../src/f
 import {
     DownloadRequestTimeoutError,
     DownloadStallError,
+    DownloadTransport,
     RangeRestartRequiredError,
 } from '../../src/features/downloads/DownloadTransport';
+import { createDownloadResumeFingerprint } from '../../src/features/downloads/DownloadResumeFingerprint';
 
 describe('DownloadCoordinator', () => {
     it('resumes at a checkpoint, writes the remaining bytes, and completes the job', async () => {
@@ -48,6 +50,79 @@ describe('DownloadCoordinator', () => {
         expect(writer.close.mock.invocationCallOrder[0]).toBeLessThan(repository.checkpointFile.mock.invocationCallOrder[0]);
         expect(repository.markFileComplete).toHaveBeenCalledWith('file-1', 5);
         expect(repository.completeJob).toHaveBeenCalledWith('job-1');
+    });
+
+    it('resumes after refresh from a locally and remotely fingerprinted audio checkpoint', async () => {
+        const sourceUrl = 'https://api.asmr-200.com/api/media/download/flac-hash';
+        const objectIdentity = 'https://raw.kiko-play-niptan.one/media/download/object/track.flac';
+        const completeBytes = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]);
+        const resumeFingerprint = await createDownloadResumeFingerprint(
+            4,
+            async (offset, length) => completeBytes.slice(offset, offset + length),
+        );
+        const file: any = {
+            id: 'file', jobId: 'job', path: 'Work/track.flac', url: sourceUrl,
+            status: 'paused', downloadedBytes: 4, totalBytes: completeBytes.byteLength,
+        };
+        const repository: any = {
+            activateJob: vi.fn(async () => { file.status = 'pending'; }),
+            listFiles: vi.fn(async () => [file]),
+            markFileActive: vi.fn(async () => { file.status = 'active'; }),
+            getCheckpoint: vi.fn(async () => ({
+                fileId: file.id,
+                jobId: file.jobId,
+                offset: 4,
+                objectIdentity,
+                sourceUrl,
+                resumeFingerprint,
+            })),
+            checkpointFile: vi.fn(async (_id: string, checkpoint: any) => checkpoint),
+            markSourceComplete: vi.fn(),
+            markFileComplete: vi.fn(async () => { file.status = 'completed'; }),
+            completeJob: vi.fn(),
+            pauseJob: vi.fn(),
+            markFileFailed: vi.fn(),
+            resetFile: vi.fn(),
+        };
+        const writer = { write: vi.fn(), close: vi.fn(), abort: vi.fn() };
+        const sink: any = {
+            open: vi.fn(async () => writer),
+            readRange: vi.fn(async (_path: string[], offset: number, length: number) => (
+                completeBytes.slice(offset, offset + length)
+            )),
+        };
+        const transport: any = {
+            stream: vi.fn(async (_url: string, offset: number, onChunk: any, options: any) => {
+                expect(offset).toBe(4);
+                expect(options).toMatchObject({
+                    expectedObjectIdentity: objectIdentity,
+                    expectedSourceUrl: sourceUrl,
+                    expectedResumeFingerprint: resumeFingerprint,
+                    expectedTotal: completeBytes.byteLength,
+                });
+                await onChunk({
+                    bytes: completeBytes.slice(4),
+                    offset: 4,
+                    total: completeBytes.byteLength,
+                    objectIdentity,
+                    sourceUrl,
+                });
+                return {
+                    size: completeBytes.byteLength,
+                    objectIdentity,
+                    sourceUrl,
+                    acceptsRanges: true,
+                };
+            }),
+        };
+
+        await new DownloadCoordinator(repository, transport, sink, 1).run('job');
+
+        expect(sink.readRange).toHaveBeenCalledWith(['Work', 'track.flac'], 0, 4);
+        expect(sink.open).toHaveBeenCalledWith(['Work', 'track.flac'], 4);
+        expect(writer.write).toHaveBeenCalledWith(expect.any(Uint8Array), 4);
+        expect(repository.resetFile).not.toHaveBeenCalled();
+        expect(repository.markFileComplete).toHaveBeenCalledWith('file', completeBytes.byteLength);
     });
 
     it('finalizes a fully durable checkpoint left before sourceComplete without requesting bytes past EOF', async () => {
@@ -251,7 +326,9 @@ describe('DownloadCoordinator', () => {
 
     it('uses coarse durable checkpoints and closes before persisting their offsets', async () => {
         const boundary = DOWNLOAD_DURABLE_CHECKPOINT_INTERVAL;
-        const file: any = { id: 'file', jobId: 'job', path: 'track.wav', url: 'url', status: 'pending' };
+        const sourceUrl = 'https://raw.kiko-play-niptan.one/media/download/object/track.wav';
+        const objectVersion = '1783777782.543';
+        const file: any = { id: 'file', jobId: 'job', path: 'track.wav', url: sourceUrl, status: 'pending' };
         const repository: any = {
             activateJob: vi.fn(), listFiles: vi.fn(async () => [file]), markFileActive: vi.fn(), getCheckpoint: vi.fn(),
             checkpointFile: vi.fn(), markSourceComplete: vi.fn(), markFileComplete: vi.fn(async () => { file.status = 'completed'; }),
@@ -263,16 +340,116 @@ describe('DownloadCoordinator', () => {
         const transport: any = { stream: vi.fn(async (_url: string, _offset: number, onChunk: any) => {
             const block = new Uint8Array(4 * 1024 * 1024);
             for (let offset = 0; offset < boundary; offset += block.byteLength) {
-                await onChunk({ bytes: block, offset, total: boundary + 1, etag: 'stable' });
+                await onChunk({
+                    bytes: block,
+                    offset,
+                    total: boundary + 1,
+                    objectVersion,
+                    objectIdentity: sourceUrl,
+                    sourceUrl,
+                });
             }
-            await onChunk({ bytes: new Uint8Array([1]), offset: boundary, total: boundary + 1, etag: 'stable' });
-            return { size: boundary + 1, etag: 'stable', acceptsRanges: true };
+            await onChunk({
+                bytes: new Uint8Array([1]),
+                offset: boundary,
+                total: boundary + 1,
+                objectVersion,
+                objectIdentity: sourceUrl,
+                sourceUrl,
+            });
+            return {
+                size: boundary + 1,
+                objectVersion,
+                objectIdentity: sourceUrl,
+                sourceUrl,
+                acceptsRanges: true,
+            };
         }) };
         await new DownloadCoordinator(repository, transport, sink, 1).run('job');
         expect(sink.open).toHaveBeenNthCalledWith(2, ['track.wav'], boundary);
         expect(first.close.mock.invocationCallOrder[0]).toBeLessThan(repository.checkpointFile.mock.invocationCallOrder[0]);
         expect(repository.checkpointFile.mock.invocationCallOrder[0]).toBeLessThan(sink.open.mock.invocationCallOrder[1]);
         expect(second.close.mock.invocationCallOrder[0]).toBeLessThan(repository.checkpointFile.mock.invocationCallOrder[1]);
+        expect(repository.checkpointFile).toHaveBeenCalledWith('file', expect.objectContaining({
+            objectVersion,
+            objectIdentity: sourceUrl,
+            sourceUrl,
+            totalBytes: boundary + 1,
+        }));
+    });
+
+    it('durably checkpoints a common 201 MB FLAC before an interrupted run reaches EOF', async () => {
+        const boundary = DOWNLOAD_DURABLE_CHECKPOINT_INTERVAL;
+        const total = 201_474_412;
+        const sourceUrl = 'https://api.asmr-200.com/api/media/download/flac-hash';
+        const objectIdentity = 'https://raw.kiko-play-niptan.one/media/download/object/track.flac';
+        const file: any = {
+            id: 'file', jobId: 'job', path: 'track.flac', url: sourceUrl,
+            status: 'pending', downloadedBytes: 0, totalBytes: total,
+        };
+        const repository: any = {
+            activateJob: vi.fn(),
+            listFiles: vi.fn(async () => [file]),
+            markFileActive: vi.fn(),
+            getCheckpoint: vi.fn(),
+            checkpointFile: vi.fn(async (_id: string, checkpoint: any) => checkpoint),
+            markSourceComplete: vi.fn(),
+            markFileComplete: vi.fn(),
+            markFileFailed: vi.fn(),
+            resetFile: vi.fn(),
+            completeJob: vi.fn(),
+            pauseJob: vi.fn(async () => { file.status = 'paused'; }),
+        };
+        const first = { write: vi.fn(), close: vi.fn(), abort: vi.fn() };
+        const resumed = { write: vi.fn(), close: vi.fn(), abort: vi.fn() };
+        const sample = new Uint8Array(64 * 1024);
+        sample.set([0x66, 0x4c, 0x61, 0x43]);
+        const sink: any = {
+            open: vi.fn().mockResolvedValueOnce(first).mockResolvedValueOnce(resumed),
+            readRange: vi.fn(async (_path: string[], _offset: number, length: number) => sample.slice(0, length)),
+        };
+        const block = new Uint8Array(4 * 1024 * 1024);
+        let coordinator!: DownloadCoordinator;
+        const transport: any = {
+            stream: vi.fn(async (_url: string, _offset: number, onChunk: any, options: any) => {
+                for (let offset = 0; offset < boundary; offset += block.byteLength) {
+                    await onChunk({
+                        bytes: block,
+                        offset,
+                        total,
+                        objectIdentity,
+                        sourceUrl,
+                    });
+                }
+                expect(options.signal.aborted).toBe(true);
+                throw new DOMException('paused', 'AbortError');
+            }),
+        };
+        coordinator = new DownloadCoordinator(repository, transport, sink, 1);
+
+        await coordinator.run('job', progress => {
+            if (progress.completedBytes === boundary) void coordinator.pause('job');
+        });
+
+        expect(boundary).toBe(64 * 1024 * 1024);
+        expect(boundary).toBeLessThan(total);
+        expect(first.close).toHaveBeenCalledOnce();
+        expect(repository.checkpointFile).toHaveBeenCalledWith('file', expect.objectContaining({
+            offset: boundary,
+            totalBytes: total,
+            objectIdentity,
+            sourceUrl,
+            resumeFingerprint: expect.objectContaining({
+                checkpointOffset: boundary,
+                algorithm: 'SHA-256',
+                samples: expect.arrayContaining([
+                    expect.objectContaining({ offset: 0, length: 64 * 1024 }),
+                    expect.objectContaining({ offset: boundary - (64 * 1024), length: 64 * 1024 }),
+                ]),
+            }),
+        }));
+        expect(sink.open).toHaveBeenNthCalledWith(2, ['track.flac'], boundary);
+        expect(repository.markFileComplete).not.toHaveBeenCalled();
     });
 
     it('restarts safely when the on-disk partial file is shorter than its checkpoint', async () => {
@@ -800,5 +977,49 @@ describe('DownloadCoordinator', () => {
         expect(transport.stream.mock.calls.map((call: any[]) => call[1])).toEqual([2, 0]);
         expect(sleep).not.toHaveBeenCalled();
         expect(repository.markFileComplete).toHaveBeenCalledWith('file', 1);
+    });
+
+    it('restarts a validator-less persisted checkpoint from zero before fetching bytes', async () => {
+        const file: any = {
+            id: 'file', jobId: 'job', path: 'track.wav', url: 'https://media.example/track.wav',
+            status: 'pending', downloadedBytes: 2, totalBytes: 4,
+        };
+        const repository: any = {
+            activateJob: vi.fn(), listFiles: vi.fn(async () => [file]), markFileActive: vi.fn(),
+            getCheckpoint: vi.fn(async () => ({ offset: 2 })),
+            checkpointFile: vi.fn(), markSourceComplete: vi.fn(),
+            resetFile: vi.fn(async () => { file.downloadedBytes = 0; }),
+            markFileComplete: vi.fn(async () => { file.status = 'completed'; }),
+            markFileFailed: vi.fn(), completeJob: vi.fn(), pauseJob: vi.fn(),
+        };
+        const first = { write: vi.fn(), close: vi.fn(), abort: vi.fn() };
+        const second = { write: vi.fn(), close: vi.fn(), abort: vi.fn() };
+        const sink: any = {
+            open: vi.fn().mockResolvedValueOnce(first).mockResolvedValueOnce(second),
+        };
+        const fetchMock = vi.fn().mockResolvedValue(new Response(
+            new Uint8Array([1, 2, 3, 4]),
+            {
+                status: 200,
+                headers: { 'content-length': '4', etag: 'fresh' },
+            },
+        ));
+
+        await new DownloadCoordinator(
+            repository,
+            new DownloadTransport(fetchMock as typeof fetch),
+            sink,
+            1,
+        ).run('job');
+
+        expect(first.abort).toHaveBeenCalledTimes(1);
+        expect(repository.resetFile).toHaveBeenCalledWith('file');
+        expect(sink.open).toHaveBeenNthCalledWith(1, ['track.wav'], 2);
+        expect(sink.open).toHaveBeenNthCalledWith(2, ['track.wav'], 0);
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(new Headers(fetchMock.mock.calls[0][1]?.headers).has('Range')).toBe(false);
+        expect([...second.write.mock.calls[0][0]]).toEqual([1, 2, 3, 4]);
+        expect(second.write.mock.calls[0][1]).toBe(0);
+        expect(repository.markFileComplete).toHaveBeenCalledWith('file', 4);
     });
 });

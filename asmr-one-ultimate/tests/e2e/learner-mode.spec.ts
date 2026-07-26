@@ -30,6 +30,21 @@ async function setWhisperUiState(
   }, { next: state, selector: cleanupSelector });
 }
 
+async function pushHostRoute(page: Page, path: string): Promise<void> {
+  await page.evaluate(async (nextPath) => {
+    const runtime = window as typeof window & {
+      __ASMR_KIKOERU_BRIDGE__?: {
+        router?: { push(path: string): Promise<unknown> };
+      };
+    };
+    const router = runtime.__ASMR_KIKOERU_BRIDGE__?.router;
+    if (!router) throw new Error('Host router is unavailable');
+    await router.push(nextPath).catch((error: unknown) => {
+      if (!String(error).includes('NavigationDuplicated')) throw error;
+    });
+  }, path);
+}
+
 test.describe('Learner Mode UI Presence', () => {
   test('learner containers exist on work page', async ({ injectedPage, isScriptLoaded }) => {
     await helpers.gotoWork(injectedPage, TEST_WORKS.WITH_SUBTITLES);
@@ -56,6 +71,100 @@ test.describe('Learner Mode UI Presence', () => {
 });
 
 test.describe('Learner Mode Subtitle Display', () => {
+  test('loads native VTT and reloads it after same-work route re-entry', async ({ injectedPage, isScriptLoaded }) => {
+    const nativeSubtitleUrl = 'https://asmr.one/e2e-native-subtitle.vtt';
+    const nativeText = 'ネイティブ字幕を再読み込みしました';
+    let subtitleRequests = 0;
+
+    await injectedPage.addInitScript(() => {
+      localStorage.setItem('GM_whisperAutoWarmup', 'false');
+    });
+    // The host re-probes its selected API server on route re-entry. Keep that
+    // host concern deterministic so this test measures only the learner
+    // subtitle lifecycle; transient relay health failures otherwise replace
+    // the work page with the host's "Network Error" screen before any VTT
+    // request can be made.
+    await injectedPage.route('**/api/health*', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: '{}',
+      });
+    });
+    await injectedPage.route('**/e2e-native-subtitle.vtt*', async (route) => {
+      subtitleRequests += 1;
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/vtt; charset=utf-8',
+        body: `WEBVTT\n\n00:00:00.000 --> 00:00:20.000\n${nativeText}\n`,
+      });
+    });
+
+    await helpers.gotoWork(injectedPage, TEST_WORKS.WITH_SUBTITLES);
+    expect(await isScriptLoaded()).toBe(true);
+    await helpers.playFirstTrack(injectedPage);
+    await injectedPage.evaluate(() => {
+      if (document.querySelector('audio')) return;
+      const audio = document.createElement('audio');
+      audio.dataset.e2eNativeSubtitleClock = 'true';
+      document.body.appendChild(audio);
+    });
+
+    await injectedPage.evaluate((url) => {
+      const runtime = window as typeof window & {
+        __ASMR_KIKOERU_BRIDGE__?: {
+          store?: {
+            commit?: (type: string, payload: unknown) => void;
+            state?: {
+              AudioPlayer?: {
+                queue?: Array<Record<string, unknown>>;
+                queueIndex?: number;
+                currentTrack?: Record<string, unknown>;
+                currentPlayingFile?: Record<string, unknown>;
+              };
+            };
+          };
+        };
+      };
+      const player = runtime.__ASMR_KIKOERU_BRIDGE__?.store?.state?.AudioPlayer;
+      const queue = player?.queue;
+      const index = player?.queueIndex;
+      if (!queue || typeof index !== 'number' || !queue[index]) {
+        throw new Error('Active host track is unavailable');
+      }
+      const nextTrack = {
+        ...queue[index],
+        availableLyrics: [{
+          title: 'e2e-native-subtitle.vtt',
+          mediaStreamUrl: url,
+        }],
+      };
+      const nextQueue = queue.map((track, trackIndex) => trackIndex === index ? nextTrack : track);
+      const store = runtime.__ASMR_KIKOERU_BRIDGE__?.store;
+      if (!store?.commit) throw new Error('Host store commit is unavailable');
+      if (player.currentTrack) player.currentTrack = nextTrack;
+      if (player.currentPlayingFile) player.currentPlayingFile = nextTrack;
+      store.commit('AudioPlayer/SET_QUEUE', { queue: nextQueue, index });
+    }, nativeSubtitleUrl);
+
+    await pushHostRoute(injectedPage, '/works');
+    await expect(injectedPage).toHaveURL(/\/works\/?$/);
+    await pushHostRoute(injectedPage, `/work/${TEST_WORKS.WITH_SUBTITLES}`);
+    await expect(injectedPage).toHaveURL(new RegExp(`/work/${TEST_WORKS.WITH_SUBTITLES}/?$`, 'i'));
+
+    const nativeCaption = injectedPage.locator('.learner-jp').filter({ hasText: nativeText }).first();
+    await expect.poll(() => subtitleRequests, { timeout: 10000 }).toBe(1);
+    await expect(nativeCaption).toBeVisible({ timeout: 10000 });
+
+    await pushHostRoute(injectedPage, '/works');
+    await expect(injectedPage).toHaveURL(/\/works\/?$/);
+    await pushHostRoute(injectedPage, `/work/${TEST_WORKS.WITH_SUBTITLES}`);
+    await expect(injectedPage).toHaveURL(new RegExp(`/work/${TEST_WORKS.WITH_SUBTITLES}/?$`, 'i'));
+
+    await expect.poll(() => subtitleRequests, { timeout: 10000 }).toBe(2);
+    await expect(nativeCaption).toBeVisible({ timeout: 10000 });
+  });
+
   test('JP subtitle container exists', async ({ injectedPage, isScriptLoaded }) => {
     await helpers.gotoWork(injectedPage, TEST_WORKS.WITH_SUBTITLES);
     await isScriptLoaded();

@@ -229,10 +229,14 @@ export class VectorSearchBaselineClient {
     async synchronize(signal?: AbortSignal): Promise<BaselineSyncResult> {
         let importingDataset: string | undefined;
         try {
+            // Native Firefox fetch validates its WebIDL receiver. Calling a
+            // stored function as `this.fetchImpl(...)` incorrectly supplies
+            // VectorSearchBaselineClient as that receiver.
+            const fetchImpl = this.fetchImpl;
             const state = await this.repository.getState();
             const headers: Record<string, string> = { Accept: 'application/json' };
             if (state.manifestEtag) headers['If-None-Match'] = state.manifestEtag;
-            const response = await this.fetchImpl(this.manifestUrl, { headers, cache: 'no-cache', signal });
+            const response = await fetchImpl(this.manifestUrl, { headers, cache: 'no-cache', signal });
             if (response.status === 304) {
                 if (!state.activeDatasetId
                     || !Number.isSafeInteger(state.expectedBaselineCount) || (state.expectedBaselineCount ?? 0) <= 0
@@ -314,7 +318,7 @@ export class VectorSearchBaselineClient {
             for (const shard of manifest.shards) {
                 if (signal?.aborted) throw new DOMException('Baseline import aborted', 'AbortError');
                 const shardUrl = new URL(shard.key, this.manifestUrl).toString();
-                const shardResponse = await this.fetchImpl(shardUrl, { cache: 'force-cache', signal });
+                const shardResponse = await fetchImpl(shardUrl, { cache: 'force-cache', signal });
                 if (!shardResponse.ok) throw new Error(`Baseline shard HTTP ${shardResponse.status}`);
                 const shardBytes = await readBoundedResponse(shardResponse, Math.min(MAX_ENCODED_SHARD_BYTES, shard.bytes));
                 if (shardBytes.byteLength !== shard.bytes) throw new Error('Baseline shard byte length mismatch');

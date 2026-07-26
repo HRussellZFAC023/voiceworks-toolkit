@@ -13,6 +13,7 @@ export interface BackupWorkDownloadItem {
     coverUrl?: string;
     sizeBytes?: number;
     sizeBytesByType?: Partial<Record<BackupFileFilter, number>>;
+    fileCountByType?: Partial<Record<BackupFileFilter, number>>;
     unknownSizeCountByType?: Partial<Record<BackupFileFilter, number>>;
     sizeState?: 'loading' | 'resolved' | 'partial' | 'unavailable';
     /** Total playable duration when the upstream response omits byte size. */
@@ -73,12 +74,15 @@ export interface BackupDownloaderLabels {
     pause: string;
     resume: string;
     resumeWithoutOpus: string;
+    resumeWithOriginalTitles: string;
     alreadyRunning: string;
     resumableDownloads: string;
     expandPlaylist: string;
     collapsePlaylist: string;
     selectedSummary: string;
     unknownSize: string;
+    durationAndFiles: string;
+    fileCount: string;
     partialSize: string;
     estimatedOpusSize: string;
     noResults: string;

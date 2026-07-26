@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { Whisper, resolveWhisperLanguage, resolveWhisperModelPreset } from '../../src/features/Whisper';
 import { DeviceCapabilities } from '../../src/core/DeviceCapabilities';
 import { GpuScheduler, Priority } from '../../src/core/GpuScheduler';
-import { Config, I18n } from '../../src/core/Utils';
+import { Config, I18n, Logger } from '../../src/core/Utils';
 import { EventBus } from '../../src/core/EventBus';
 import { TranslationService } from '../../src/services/TranslationService';
 import { MLCrashGuard } from '../../src/core/MLCrashGuard';
@@ -12,6 +12,7 @@ import {
     getWhisperInferenceTimeoutMs,
     WHISPER_STALL_WATCHDOG_MARGIN_MS,
 } from '../../src/features/whisperInferencePolicy';
+import { __getWhisperWorkerCodeForTests } from '../../src/features/WhisperWorkerLoader';
 
 const { gmSpy, trustedCorsSpy } = vi.hoisted(() => ({
     gmSpy: vi.fn(),
@@ -618,15 +619,45 @@ describe('Whisper', () => {
             });
         });
 
-        it('flushes an active trailing checkpoint on pagehide', () => {
+        it('rewinds unfinished audio before bfcache WebGPU reclamation and resumes the exact plan', () => {
             const whisper = new Whisper();
             const flush = vi.spyOn(whisper as any, 'flushCacheCheckpoint').mockImplementation(() => {});
+            const initWorker = vi.spyOn(whisper as any, 'initWorker').mockImplementation(() => {});
+            const worker = createMockWhisperWorker();
+            const settings = createCompatibilityWhisperSettings({
+                model: 'onnx-community/whisper-base',
+                backend: 'webgpu',
+            });
+            vi.spyOn(whisper as any, 'getExecutionSettings').mockReturnValue(settings);
+            (whisper as any).enabled = true;
             (whisper as any).transcribing = true;
+            (whisper as any).worker = worker;
+            (whisper as any).loadedPlan = Object.freeze({
+                model: settings.model,
+                backend: 'webgpu',
+                multilingual: settings.multilingual,
+            });
+            (whisper as any).pcmDuration = 60;
+            (whisper as any).transcribedUpTo = 40;
+            (whisper as any).pendingChunks = 2;
+            (whisper as any).chunkOffsets.set(10, 18);
+            (whisper as any).chunkOffsets.set(11, 24);
             (whisper as any).setupEventListeners();
 
             try {
                 window.dispatchEvent(new Event('pagehide'));
                 expect(flush).toHaveBeenCalledWith(false);
+                expect(worker.terminate).toHaveBeenCalledTimes(1);
+                expect(worker.postMessage).not.toHaveBeenCalledWith({ type: 'reset' });
+                expect((whisper as any).worker).toBeNull();
+                expect((whisper as any).transcribedUpTo).toBe(18);
+                expect((whisper as any).chunkOffsets.size).toBe(0);
+
+                const pageShow = new Event('pageshow');
+                Object.defineProperty(pageShow, 'persisted', { value: true });
+                window.dispatchEvent(pageShow);
+                expect(initWorker).toHaveBeenCalledWith(settings);
+                expect((whisper as any).transcribedUpTo).toBe(18);
             } finally {
                 (whisper as any).eventCleanups.splice(0).forEach((cleanup: () => void) => cleanup());
             }
@@ -731,6 +762,150 @@ describe('Whisper', () => {
     });
 
     describe('worker replacement races', () => {
+        it('does not overlap replacement Firefox WebGPU sessions after terminating the old owner', () => {
+            vi.useFakeTimers();
+            vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(
+                'Mozilla/5.0 (Macintosh; Intel Mac OS X 14.5; rv:153.0) Gecko/20100101 Firefox/153.0',
+            );
+            try {
+                const whisper = new Whisper();
+                const worker = createMockWhisperWorker();
+                const settings = createCompatibilityWhisperSettings({
+                    model: 'onnx-community/whisper-base',
+                    backend: 'webgpu',
+                });
+                (whisper as any).enabled = true;
+                (whisper as any).worker = worker;
+                (whisper as any).loadedPlan = Object.freeze({
+                    model: settings.model,
+                    backend: 'webgpu',
+                    multilingual: settings.multilingual,
+                });
+
+                (whisper as any).resetWorker('model-change');
+                const ensureWorker = vi.spyOn(whisper as any, 'ensureWorker').mockImplementation(() => {});
+                (whisper as any).initWorker(settings);
+
+                expect(worker.terminate).toHaveBeenCalledTimes(1);
+                expect(worker.postMessage).not.toHaveBeenCalledWith({ type: 'reset' });
+                expect(ensureWorker).not.toHaveBeenCalled();
+
+                vi.advanceTimersByTime(1_499);
+                expect(ensureWorker).not.toHaveBeenCalled();
+                vi.advanceTimersByTime(1);
+                expect(ensureWorker).toHaveBeenCalledTimes(1);
+            } finally {
+                vi.clearAllTimers();
+                vi.useRealTimers();
+            }
+        });
+
+        it('cancels a deferred Firefox WebGPU restart when transcription is stopped', () => {
+            vi.useFakeTimers();
+            vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(
+                'Mozilla/5.0 (Macintosh; Intel Mac OS X 14.5; rv:153.0) Gecko/20100101 Firefox/153.0',
+            );
+            try {
+                const whisper = new Whisper();
+                const worker = createMockWhisperWorker();
+                const settings = createCompatibilityWhisperSettings({
+                    model: 'onnx-community/whisper-base',
+                    backend: 'webgpu',
+                    forceWasm: false,
+                });
+                const ensureWorker = vi.spyOn(whisper as any, 'ensureWorker').mockImplementation(() => {});
+                vi.spyOn(whisper as any, 'scheduleIdleUnload').mockImplementation(() => {});
+                (whisper as any).enabled = true;
+                (whisper as any).transcribing = true;
+                (whisper as any).activeRunSettings = settings;
+                (whisper as any).worker = worker;
+                (whisper as any).loadedPlan = Object.freeze({
+                    model: settings.model,
+                    backend: 'webgpu',
+                    multilingual: settings.multilingual,
+                });
+
+                (whisper as any).resetWorker('inference-runtime-error', true);
+                (whisper as any).initWorker(settings);
+
+                expect((whisper as any).workerRestartTimer).not.toBeNull();
+                expect((whisper as any).deferredWorkerSettings).toBe(settings);
+
+                (whisper as any).stopTranscription('toggle');
+                vi.advanceTimersByTime(1_500);
+
+                expect(ensureWorker).not.toHaveBeenCalled();
+                expect((whisper as any).workerRestartTimer).toBeNull();
+                expect((whisper as any).deferredWorkerSettings).toBeNull();
+            } finally {
+                vi.clearAllTimers();
+                vi.useRealTimers();
+            }
+        });
+
+        it('gates a direct different-plan Firefox WebGPU replacement without changing the selected plan', async () => {
+            vi.useFakeTimers();
+            vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(
+                'Mozilla/5.0 (Macintosh; Intel Mac OS X 14.5; rv:153.0) Gecko/20100101 Firefox/153.0',
+            );
+            const whisper = new Whisper();
+            const oldWorker = createMockWhisperWorker();
+            const replacementWorker = createMockWhisperWorker();
+            const settings = createCompatibilityWhisperSettings({
+                model: 'onnx-community/whisper-small_timestamped',
+                backend: 'webgpu',
+                forceWasm: false,
+            });
+            const releaseLease = vi.fn();
+            vi.spyOn(GpuScheduler, 'acquireLoadLease').mockResolvedValue(releaseLease);
+            vi.spyOn(whisper as any, 'getExecutionSettings').mockReturnValue(settings);
+            const ensureWorker = vi.spyOn(whisper as any, 'ensureWorker').mockImplementation(() => {
+                (whisper as any).worker = replacementWorker;
+            });
+            (whisper as any).enabled = true;
+            (whisper as any).transcribing = true;
+            (whisper as any).worker = oldWorker;
+            (whisper as any).inferenceDurationEwmaMs = 100_000;
+            (whisper as any).loadedPlan = Object.freeze({
+                model: 'onnx-community/whisper-base',
+                backend: 'webgpu',
+                multilingual: true,
+            });
+
+            try {
+                (whisper as any).initWorker(settings);
+
+                expect(oldWorker.terminate).toHaveBeenCalledTimes(1);
+                expect(ensureWorker).not.toHaveBeenCalled();
+                expect((whisper as any).deferredWorkerSettings).toBe(settings);
+
+                await vi.advanceTimersByTimeAsync(1_499);
+                expect(ensureWorker).not.toHaveBeenCalled();
+                expect(replacementWorker.postMessage).not.toHaveBeenCalled();
+
+                await vi.advanceTimersByTimeAsync(1);
+                await Promise.resolve();
+
+                expect(ensureWorker).toHaveBeenCalledTimes(1);
+                expect(replacementWorker.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+                    type: 'init',
+                    model: settings.model,
+                    backend: 'webgpu',
+                    multilingual: settings.multilingual,
+                    recentInferenceDurationMs: null,
+                }));
+                expect((whisper as any).loadedPlan).toEqual({
+                    model: settings.model,
+                    backend: 'webgpu',
+                    multilingual: settings.multilingual,
+                });
+            } finally {
+                (whisper as any).resetWorker('test-cleanup', true);
+                vi.clearAllTimers();
+                vi.useRealTimers();
+            }
+        });
+
         it('settles a controlled init reset so crash sentinels do not accumulate', () => {
             const whisper = new Whisper();
             const initComplete = vi.spyOn(MLCrashGuard, 'initComplete').mockImplementation(() => {});
@@ -941,6 +1116,7 @@ describe('Whisper', () => {
                 minWebgpuBufferBytes: 256 * 1024 * 1024,
             };
             (whisper as any).enabled = true;
+            (whisper as any).inferenceDurationEwmaMs = 100_000;
             vi.spyOn(whisper as any, 'ensureWorker').mockImplementation(() => {
                 if (!(whisper as any).worker) (whisper as any).worker = worker;
             });
@@ -952,7 +1128,10 @@ describe('Whisper', () => {
 
             resolveLease(release);
             await vi.waitFor(() => expect(worker.postMessage).toHaveBeenCalledTimes(1));
-            expect(worker.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'init' }));
+            expect(worker.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+                type: 'init',
+                recentInferenceDurationMs: 100_000,
+            }));
 
             (whisper as any).handleWorkerMessage({
                 data: {
@@ -1268,7 +1447,7 @@ describe('Whisper', () => {
             expect(settings.idleUnloadMs).toBe(10 * 60 * 1000);
         });
 
-        it('starts the exact M1 Firefox compatibility profile on WebGPU tiny', () => {
+        it('starts the M1 Firefox Auto profile on timestamped Base with bounded WebGPU scheduling', () => {
             vi.spyOn(Config, 'get').mockImplementation((key) => {
                 const map: Record<string, string | number | boolean> = {
                     whisperModel: 'onnx-community/whisper-small_timestamped',
@@ -1277,6 +1456,9 @@ describe('Whisper', () => {
                     whisperAutoWarmup: true,
                     whisperCacheTranscripts: true,
                     forceWhisperWasm: false,
+                    whisperAdaptiveWindow: true,
+                    whisperLiveChunkSec: 29,
+                    whisperLiveOverlapSec: 5,
                 };
                 return map[key as string] ?? false;
             });
@@ -1299,10 +1481,12 @@ describe('Whisper', () => {
 
             const settings = (new Whisper() as any).getWhisperSettings();
 
-            expect(settings.model).toBe('onnx-community/whisper-tiny');
+            expect(settings.model).toBe('onnx-community/whisper-base_timestamped');
             expect(settings.forceWasm).toBe(false);
             expect(settings.preferLowPowerAdapter).toBe(false);
-            expect(settings.maxPendingChunks).toBe(2);
+            expect(settings.maxPendingChunks).toBe(3);
+            expect(settings.chunkLengthS).toBe(8);
+            expect(settings.strideLengthS).toBe(2);
             expect(settings.autoWarmup).toBe(true);
         });
 
@@ -1694,11 +1878,18 @@ describe('Whisper', () => {
             return resetWorker;
         }
 
-        function signalPoisonedWorker(whisper: Whisper): void {
+        function signalPoisonedWorker(
+            whisper: Whisper,
+            details: Record<string, unknown> = {},
+        ): void {
             (whisper as any).handleWorkerMessage({
                 data: {
                     status: 'worker-poisoned',
-                    data: { reason: 'inference-timeout', gpuFailure: false },
+                    data: {
+                        reason: 'inference-timeout',
+                        gpuFailure: false,
+                        ...details,
+                    },
                 },
             } as any);
         }
@@ -1737,7 +1928,7 @@ describe('Whisper', () => {
             (whisper as any).handleWorkerMessage({
                 data: {
                     status: 'error',
-                    data: { message: 'WebGPU inference timed out after 45s' },
+                    data: { message: 'WebGPU inference timed out after 120s' },
                     chunkId: 42,
                 },
             } as any);
@@ -1762,7 +1953,7 @@ describe('Whisper', () => {
             (whisper as any).handleWorkerMessage({
                 data: {
                     status: 'error',
-                    data: { message: 'WebGPU inference timed out after 45s', gpuFailure: true },
+                    data: { message: 'WebGPU inference timed out after 120s', gpuFailure: false },
                     chunkId: 9,
                 },
             } as any);
@@ -1788,7 +1979,7 @@ describe('Whisper', () => {
             (whisper as any).handleWorkerMessage({
                 data: {
                     status: 'error',
-                    data: { message: 'WebGPU inference timed out after 45s', gpuFailure: true },
+                    data: { message: 'WebGPU inference timed out after 120s', gpuFailure: false },
                     chunkId: 99,
                 },
             } as any);
@@ -1825,6 +2016,55 @@ describe('Whisper', () => {
             expect((whisper as any).droppedBufferSeconds).toBe(8);
             expect(lagSpy).toHaveBeenCalledWith('capture-buffer-trim', 8);
             expect(progressSpy).not.toHaveBeenCalled();
+        });
+
+        it('logs timeout diagnostics and resumes the exact plan without changing seek generation', () => {
+            const whisper = new Whisper();
+            const { resetWorkerSpy, initSpy } = stubPoisonRecovery(whisper);
+            const warning = vi.spyOn(Logger, 'warn').mockImplementation(() => {});
+            const exactSettings = Object.freeze({
+                model: 'onnx-community/whisper-base_timestamped',
+                backend: 'webgpu',
+                multilingual: true,
+            });
+            (whisper as any).activeRunSettings = exactSettings;
+            (whisper as any).transcribing = true;
+            (whisper as any).worker = { postMessage: vi.fn() };
+            (whisper as any).transcriptionGeneration = 11;
+            (whisper as any).transcribedUpTo = 70;
+            (whisper as any).chunkOffsets.set(41, 36);
+
+            signalPoisonedWorker(whisper, {
+                chunkId: 41,
+                chunkLengthS: 8,
+                elapsedMs: 150_004,
+                budgetMs: 150_000,
+                kind: 'warm',
+                backend: 'webgpu',
+                model: exactSettings.model,
+                observedInferenceMs: 100_000,
+            });
+
+            expect(warning).toHaveBeenCalledWith(
+                '[Whisper] Replacing poisoned inference worker without stopping the live run',
+                expect.objectContaining({
+                    reason: 'inference-timeout',
+                    chunkId: 41,
+                    chunkLengthS: 8,
+                    elapsedMs: 150_004,
+                    budgetMs: 150_000,
+                    kind: 'warm',
+                    backend: 'webgpu',
+                    model: exactSettings.model,
+                    observedInferenceMs: 100_000,
+                    resumeFrom: 36,
+                }),
+            );
+            expect(resetWorkerSpy).toHaveBeenCalledWith('inference-timeout', true);
+            expect(initSpy).toHaveBeenCalledWith(exactSettings);
+            expect((whisper as any).activeRunSettings).toBe(exactSettings);
+            expect((whisper as any).transcriptionGeneration).toBe(11);
+            expect((whisper as any).transcribedUpTo).toBe(36);
         });
 
         it('resumes Firefox Buffer unmapped from the earliest unfinished cursor on the exact plan', () => {
@@ -1866,6 +2106,83 @@ describe('Whisper', () => {
             expect((whisper as any).segments).toEqual([{ start: 0, end: 28, text: '完成済み' }]);
             expect(persistSpy).toHaveBeenCalledWith(false, true);
             expect(stopSpy).not.toHaveBeenCalled();
+        });
+
+        it('bounds transient Firefox Buffer unmapped recovery without changing the exact plan', () => {
+            const { whisper, resetWorkerSpy, initSpy, stopSpy } = setupTerminalPoisonRecovery();
+            const exactSettings = Object.freeze({
+                model: 'onnx-community/whisper-base',
+                backend: 'webgpu',
+                multilingual: true,
+            });
+            vi.spyOn(whisper as any, 'flushCacheCheckpoint').mockImplementation(() => {});
+            (whisper as any).activeRunSettings = exactSettings;
+
+            const loseReadback = () => (whisper as any).handleWorkerMessage({
+                data: {
+                    status: 'worker-poisoned',
+                    data: {
+                        reason: 'inference-runtime-error',
+                        message: 'Failed to download data from buffer: Buffer unmapped',
+                        gpuFailure: true,
+                    },
+                },
+            } as any);
+
+            loseReadback();
+            loseReadback();
+            loseReadback();
+
+            expect(initSpy).toHaveBeenCalledTimes(3);
+            expect(initSpy).toHaveBeenLastCalledWith(exactSettings);
+            expect(stopSpy).not.toHaveBeenCalled();
+            expect((whisper as any).activeRunSettings).toBe(exactSettings);
+
+            loseReadback();
+
+            expect(resetWorkerSpy).toHaveBeenLastCalledWith(
+                'inference-runtime-error-terminal',
+                true,
+            );
+            expect(stopSpy).toHaveBeenCalledWith('inference-runtime-error-terminal');
+            expect(initSpy).toHaveBeenCalledTimes(3);
+        });
+
+        it('retries a transient replacement-adapter miss on the exact WebGPU plan', () => {
+            const { whisper, resetWorkerSpy, initSpy, stopSpy } = setupTerminalPoisonRecovery();
+            const exactSettings = Object.freeze({
+                model: 'onnx-community/whisper-base',
+                backend: 'webgpu',
+                multilingual: true,
+            });
+            const failPinnedSelection = vi.spyOn(
+                whisper as any,
+                'failPinnedSelection',
+            ).mockImplementation(() => {});
+            vi.spyOn(whisper as any, 'flushCacheCheckpoint').mockImplementation(() => {});
+            (whisper as any).activeRunSettings = exactSettings;
+            (whisper as any).loadedPlan = exactSettings;
+            (whisper as any).consecutiveInferenceTimeouts = 1;
+
+            (whisper as any).handleWorkerMessage({
+                data: {
+                    status: 'load-failed',
+                    model: exactSettings.model,
+                    backend: exactSettings.backend,
+                    data: {
+                        model: exactSettings.model,
+                        backend: exactSettings.backend,
+                        message: 'Requested WebGPU backend is unavailable: requestAdapter returned no usable adapter',
+                        sessionPoisoned: true,
+                    },
+                },
+            } as any);
+
+            expect(resetWorkerSpy).toHaveBeenCalledWith('webgpu-adapter-unavailable', true);
+            expect(initSpy).toHaveBeenCalledWith(exactSettings);
+            expect(failPinnedSelection).not.toHaveBeenCalled();
+            expect(stopSpy).not.toHaveBeenCalled();
+            expect((whisper as any).activeRunSettings).toBe(exactSettings);
         });
 
         it('terminates a poisoned session before checkpointing and reinitializing the exact plan', () => {
@@ -2111,8 +2428,10 @@ describe('Whisper', () => {
             playback: number;
             pcmDuration: number;
             processedRanges: Array<{ start: number; end: number }>;
+            progressOrigin?: number;
             pendingChunks?: number;
             timingQuality?: 'word' | 'segment';
+            throughputRatio?: number;
         }): Whisper {
             const whisper = new Whisper();
             (whisper as any).transcribing = true;
@@ -2123,8 +2442,10 @@ describe('Whisper', () => {
             (whisper as any).pcmDuration = input.pcmDuration;
             (whisper as any).processedRanges = input.processedRanges;
             (whisper as any).coverageOrigin = 0;
+            (whisper as any).runtimeProgressOrigin = input.progressOrigin || 0;
             (whisper as any).pendingChunks = input.pendingChunks || 0;
             (whisper as any).timingQuality = input.timingQuality || null;
+            (whisper as any).throughputRatio = input.throughputRatio ?? null;
             (whisper as any).activeRunSettings = Object.freeze({
                 model: 'onnx-community/whisper-tiny',
                 backend: 'webgpu',
@@ -2178,6 +2499,15 @@ describe('Whisper', () => {
             );
         });
 
+        it('measures effective per-chunk throughput from active inference time', () => {
+            const whisper = new Whisper();
+            vi.spyOn(performance, 'now').mockReturnValue(11_000);
+
+            (whisper as any).recordChunkThroughput(1_000, 6);
+
+            expect((whisper as any).throughputRatio).toBeCloseTo(0.6);
+        });
+
         it('reports processed timeline, playback backlog, queue, model, and backend truthfully', () => {
             const whisper = setupRuntimeProgress({
                 duration: 100,
@@ -2227,7 +2557,38 @@ describe('Whisper', () => {
                 progress: 30,
             });
             expect(AppStore.state.whisper.progressMessage).toContain('30s analyzed');
-            expect(AppStore.state.whisper.progressMessage).toContain('timeline 80/100s');
+            expect(AppStore.state.whisper.progressMessage).toContain('playhead 100/100s');
+        });
+
+        it('measures random-seek lag from the current playhead window without changing durable coverage', () => {
+            const whisper = setupRuntimeProgress({
+                duration: 400,
+                playback: 378,
+                pcmDuration: 400,
+                progressOrigin: 363,
+                processedRanges: [
+                    { start: 0, end: 48 },
+                    { start: 363, end: 371 },
+                ],
+                pendingChunks: 1,
+                throughputRatio: 0.72,
+            });
+
+            (whisper as any).updateTranscribingProgress();
+
+            expect(AppStore.state.whisper).toMatchObject({
+                processedSeconds: 56,
+                processedThroughSeconds: 371,
+                playbackSeconds: 378,
+                backlogSeconds: 7,
+                pendingChunks: 1,
+            });
+            expect(AppStore.state.whisper.progressMessage).toMatch(/^7s behind/);
+            expect(AppStore.state.whisper.progressMessage).toContain('0.7× realtime now');
+            expect(AppStore.state.whisper.progressMessage).toContain('playhead 378/400s');
+            // The playhead-only anchor is not durable: whole-track continuation
+            // must still resume at the untouched 48-second prefix boundary.
+            expect((whisper as any).coverageOrigin).toBe(0);
         });
 
         it('publishes natural completion exactly once and leaves no active processing loop', () => {
@@ -2638,6 +2999,160 @@ describe('Whisper', () => {
                 vi.useRealTimers();
             }
         });
+
+        it('coalesces random scrubbing onto the final destination without changing the pinned plan', () => {
+            vi.useFakeTimers();
+            try {
+                const whisper = new Whisper();
+                const audio = document.createElement('audio');
+                const worker = { postMessage: vi.fn() };
+                const settings = createCompatibilityWhisperSettings({
+                    model: 'onnx-community/whisper-base',
+                    backend: 'webgpu',
+                    forceWasm: false,
+                });
+                const loadedPlan = Object.freeze({
+                    model: settings.model,
+                    backend: 'webgpu' as const,
+                    multilingual: settings.multilingual,
+                });
+                (whisper as any).audio = audio;
+                (whisper as any).worker = worker;
+                (whisper as any).transcribing = true;
+                (whisper as any).modelReady = true;
+                (whisper as any).activeRunSettings = Object.freeze(settings);
+                (whisper as any).loadedPlan = loadedPlan;
+                (whisper as any).pcmBuffer = new Float32Array(1);
+                (whisper as any).pcmDuration = 300;
+                (whisper as any).transcribedUpTo = 140;
+                (whisper as any).processedRanges = [{ start: 0, end: 120 }];
+                (whisper as any).pendingChunks = 2;
+                (whisper as any).chunkSendTimes.set(70, performance.now());
+                (whisper as any).chunkSendTimes.set(71, performance.now());
+                (whisper as any).chunkGenerations.set(70, (whisper as any).transcriptionGeneration);
+                (whisper as any).chunkGenerations.set(71, (whisper as any).transcriptionGeneration);
+                (whisper as any).chunkOffsets.set(70, 120);
+                (whisper as any).chunkOffsets.set(71, 126);
+                const processSpy = vi.spyOn(whisper as any, 'maybeProcessNextChunk').mockImplementation(() => {});
+                const mergeSpy = vi.spyOn(whisper as any, 'mergeSegments');
+                vi.spyOn(window, 'requestAnimationFrame').mockImplementation(() => 1);
+                vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => {});
+
+                audio.currentTime = 210;
+                (whisper as any).handleSeek();
+                expect((whisper as any).seekInProgress).toBe(true);
+                expect((whisper as any).pendingChunks).toBe(0);
+                expect(worker.postMessage).toHaveBeenCalledTimes(1);
+                expect(worker.postMessage).toHaveBeenLastCalledWith({ type: 'flush-queue' });
+
+                // The old active inference cannot be cancelled in ORT, but its
+                // late completion no longer belongs to controller state.
+                (whisper as any).handleWorkerMessage({
+                    data: {
+                        status: 'complete',
+                        chunkId: 70,
+                        data: {
+                            text: '古い再生位置',
+                            rawChunks: [{ text: '古い再生位置', timestamp: [120, 122] }],
+                        },
+                    },
+                });
+                expect(mergeSpy).not.toHaveBeenCalled();
+
+                vi.advanceTimersByTime(30);
+                audio.currentTime = 40;
+                (whisper as any).handleSeek();
+                vi.advanceTimersByTime(30);
+                audio.currentTime = 240;
+                (whisper as any).handleSeek();
+
+                // Repeated intermediate positions neither flush repeatedly nor
+                // admit work until the final debounce settles.
+                expect(worker.postMessage).toHaveBeenCalledTimes(1);
+                vi.advanceTimersByTime(99);
+                expect(processSpy).not.toHaveBeenCalled();
+
+                vi.advanceTimersByTime(1);
+                expect((whisper as any).seekInProgress).toBe(false);
+                expect((whisper as any).transcribedUpTo).toBe(225);
+                expect((whisper as any).runtimeProgressOrigin).toBe(225);
+                expect(processSpy).toHaveBeenCalledTimes(1);
+                expect((whisper as any).loadedPlan).toBe(loadedPlan);
+                expect((whisper as any).activeRunSettings.model).toBe(settings.model);
+                expect((whisper as any).activeRunSettings.backend).toBe('webgpu');
+            } finally {
+                vi.useRealTimers();
+            }
+        });
+
+        it('does not present a previous cue as current after scrubbing into a timeline gap', () => {
+            const whisper = new Whisper();
+            const audio = document.createElement('audio');
+            audio.currentTime = 90;
+            (whisper as any).audio = audio;
+            (whisper as any).transcribing = true;
+            (whisper as any).segments = [
+                { start: 10, end: 14, text: '前の位置の字幕' },
+            ];
+            const emit = vi.spyOn(EventBus, 'emit');
+
+            (whisper as any).emitWhisperSnapshot('seek');
+
+            expect(findWhisperUpdate(emit, 'seek')).toMatchObject({
+                text: '',
+                segments: [{ start: 10, end: 14, text: '前の位置の字幕' }],
+            });
+        });
+
+        it('commits the final scrub position before a bfcache freeze and resumes the exact plan', () => {
+            vi.useFakeTimers();
+            const whisper = new Whisper();
+            const worker = createMockWhisperWorker();
+            const audio = document.createElement('audio');
+            const settings = createCompatibilityWhisperSettings({
+                model: 'onnx-community/whisper-base',
+                backend: 'webgpu',
+                forceWasm: false,
+            });
+            vi.spyOn(whisper as any, 'getExecutionSettings').mockReturnValue(settings);
+            const initWorker = vi.spyOn(whisper as any, 'initWorker').mockImplementation(() => {});
+            vi.spyOn(whisper as any, 'flushCacheCheckpoint').mockImplementation(() => {});
+            vi.spyOn(window, 'requestAnimationFrame').mockImplementation(() => 1);
+            vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => {});
+            (whisper as any).enabled = true;
+            (whisper as any).transcribing = true;
+            (whisper as any).audio = audio;
+            (whisper as any).worker = worker;
+            (whisper as any).loadedPlan = Object.freeze({
+                model: settings.model,
+                backend: 'webgpu' as const,
+                multilingual: settings.multilingual,
+            });
+            (whisper as any).pcmBuffer = new Float32Array(1);
+            (whisper as any).pcmDuration = 180;
+            (whisper as any).processedRanges = [{ start: 0, end: 30 }];
+            (whisper as any).transcribedUpTo = 60;
+            (whisper as any).setupEventListeners();
+
+            try {
+                audio.currentTime = 90;
+                (whisper as any).handleSeek();
+                window.dispatchEvent(new Event('pagehide'));
+
+                expect((whisper as any).seekInProgress).toBe(false);
+                expect((whisper as any).transcribedUpTo).toBe(75);
+                expect(worker.terminate).toHaveBeenCalledTimes(1);
+
+                const pageShow = new Event('pageshow');
+                Object.defineProperty(pageShow, 'persisted', { value: true });
+                window.dispatchEvent(pageShow);
+                expect(initWorker).toHaveBeenCalledWith(settings);
+                expect((whisper as any).transcribedUpTo).toBe(75);
+            } finally {
+                (whisper as any).eventCleanups.splice(0).forEach((cleanup: () => void) => cleanup());
+                vi.useRealTimers();
+            }
+        });
     });
 
     describe('chunk stall watchdog', () => {
@@ -2689,11 +3204,79 @@ describe('Whisper', () => {
         ] as const)('waits beyond the exact 29s %s worker timeout for pinned %s', (backend, model) => {
             const whisper = new Whisper();
             const pinnedSettings = { ...settings, backend, model };
-            const workerTimeout = getWhisperInferenceTimeoutMs(backend, 29);
+            const workerTimeout = getWhisperInferenceTimeoutMs(
+                backend,
+                29,
+                backend === 'webgpu',
+                model,
+            );
             const watchdogTimeout = (whisper as any).getChunkStallTimeoutMs(pinnedSettings);
 
             expect(watchdogTimeout).toBe(workerTimeout + WHISPER_STALL_WATCHDOG_MARGIN_MS);
             expect(watchdogTimeout).toBeGreaterThan(workerTimeout);
+        });
+
+        it('uses the cold WebGPU watchdog only until the first inference completes', () => {
+            const whisper = new Whisper();
+            const coldTimeout = (whisper as any).getChunkStallTimeoutMs(settings);
+
+            expect(coldTimeout).toBe(
+                getWhisperInferenceTimeoutMs('webgpu', 29, true, settings.model)
+                + WHISPER_STALL_WATCHDOG_MARGIN_MS,
+            );
+
+            (whisper as any).workerHasCompletedInference = true;
+            const warmTimeout = (whisper as any).getChunkStallTimeoutMs(settings);
+
+            expect(warmTimeout).toBe(
+                getWhisperInferenceTimeoutMs('webgpu', 29, false, settings.model)
+                + WHISPER_STALL_WATCHDOG_MARGIN_MS,
+            );
+            expect(warmTimeout).toBeLessThan(coldTimeout);
+        });
+
+        it('lengthens the controller watchdog from completed direct inference', () => {
+            const whisper = new Whisper();
+            const baseSettings = {
+                ...settings,
+                model: 'onnx-community/whisper-base_timestamped',
+                chunkLengthS: 8,
+                strideLengthS: 2,
+            };
+            (whisper as any).workerHasCompletedInference = true;
+            const baseTimeout = (whisper as any).getChunkStallTimeoutMs(baseSettings);
+
+            (whisper as any).recordInferenceDuration(100_000);
+            const observedTimeout = (whisper as any).getChunkStallTimeoutMs(baseSettings);
+
+            expect(baseTimeout).toBe(120_000 + WHISPER_STALL_WATCHDOG_MARGIN_MS);
+            expect(observedTimeout).toBe(150_000 + WHISPER_STALL_WATCHDOG_MARGIN_MS);
+        });
+
+        it('uses each adaptive in-flight window length instead of the foreground timeout', () => {
+            const whisper = new Whisper();
+            const recoverSpy = vi.spyOn(whisper as any, 'recoverFromStalledChunks').mockImplementation(() => {});
+            let now = 150_000;
+            vi.spyOn(performance, 'now').mockImplementation(() => now);
+
+            (whisper as any).transcribing = true;
+            (whisper as any).pendingChunks = 1;
+            (whisper as any).workerHasCompletedInference = true;
+            (whisper as any).chunkStartedAt.set(12, 0);
+            (whisper as any).chunkLastActivity.set(12, 0);
+            (whisper as any).chunkWindowLengths.set(12, 29);
+            const foregroundSettings = { ...settings, chunkLengthS: 8 };
+
+            expect((whisper as any).getChunkStallTimeoutMs(foregroundSettings, 12)).toBe(
+                getWhisperInferenceTimeoutMs('webgpu', 29, false, settings.model)
+                + WHISPER_STALL_WATCHDOG_MARGIN_MS,
+            );
+            (whisper as any).checkForStalledChunks(foregroundSettings);
+            expect(recoverSpy).not.toHaveBeenCalled();
+
+            now = 197_000;
+            (whisper as any).checkForStalledChunks(foregroundSettings);
+            expect(recoverSpy).toHaveBeenCalledWith(foregroundSettings, 12, 197_000);
         });
 
         it('detects stalled in-flight chunks and triggers recovery', () => {
@@ -2731,6 +3314,7 @@ describe('Whisper', () => {
             const whisper = new Whisper();
             (whisper as any).transcribing = true;
             (whisper as any).pendingChunks = 1;
+            (whisper as any).workerQueueSaturated = true;
             (whisper as any).chunkSendTimes.set(9, performance.now());
             (whisper as any).chunkGenerations.set(9, (whisper as any).transcriptionGeneration);
 
@@ -2744,12 +3328,13 @@ describe('Whisper', () => {
             });
             expect((whisper as any).chunkStartedAt.has(9)).toBe(true);
             expect((whisper as any).hasWorkerChunkActivity).toBe(true);
+            expect((whisper as any).workerQueueSaturated).toBe(false);
         });
 
-        it('rewinds a worker-dropped queued range so it is retried', () => {
+        it('rewinds a queue-full range but waits for a worker capacity signal', () => {
             const whisper = new Whisper();
             vi.spyOn(whisper as any, 'reportLiveLag').mockImplementation(() => {});
-            vi.spyOn(whisper as any, 'maybeProcessNextChunk').mockImplementation(() => {});
+            const processNext = vi.spyOn(whisper as any, 'maybeProcessNextChunk').mockImplementation(() => {});
             (whisper as any).transcribing = true;
             (whisper as any).pendingChunks = 1;
             (whisper as any).transcribedUpTo = 40;
@@ -2764,12 +3349,40 @@ describe('Whisper', () => {
             (whisper as any).chunkAdvances.set(10, 15);
 
             (whisper as any).handleWorkerMessage({
-                data: { status: 'dropped', chunkId: 10, data: { reason: 'queue-replaced' } },
+                data: { status: 'dropped', chunkId: 10, data: { reason: 'queue-full' } },
             });
 
             expect((whisper as any).pendingChunks).toBe(0);
             expect((whisper as any).transcribedUpTo).toBe(18);
             expect((whisper as any).chunkSendTimes.has(10)).toBe(false);
+            expect((whisper as any).workerQueueSaturated).toBe(true);
+            expect(processNext).not.toHaveBeenCalled();
+        });
+
+        it('rewinds an intentionally superseded range without marking it unavailable', () => {
+            const whisper = new Whisper();
+            const lagSpy = vi.spyOn(whisper as any, 'reportLiveLag').mockImplementation(() => {});
+            const processNext = vi.spyOn(whisper as any, 'maybeProcessNextChunk').mockImplementation(() => {});
+            (whisper as any).transcribing = true;
+            (whisper as any).pendingChunks = 2;
+            (whisper as any).pcmDuration = 100;
+            (whisper as any).transcribedUpTo = 40;
+            (whisper as any).chunkSendTimes.set(10, performance.now());
+            (whisper as any).chunkGenerations.set(10, (whisper as any).transcriptionGeneration);
+            (whisper as any).chunkOffsets.set(10, 18);
+            (whisper as any).chunkAdvances.set(10, 15);
+
+            (whisper as any).handleWorkerMessage({
+                data: { status: 'dropped', chunkId: 10, data: { reason: 'queue-replaced' } },
+            });
+
+            expect((whisper as any).transcribedUpTo).toBe(18);
+            expect((whisper as any).unavailableRanges).toEqual([]);
+            expect((whisper as any).droppedBufferSeconds).toBe(0);
+            expect((whisper as any).pendingChunks).toBe(1);
+            expect((whisper as any).workerQueueSaturated).toBe(true);
+            expect(lagSpy).toHaveBeenCalledWith('queue-replaced');
+            expect(processNext).not.toHaveBeenCalled();
         });
 
         it('surfaces queued audio that expired before a dropped range can be retried', () => {
@@ -2786,7 +3399,7 @@ describe('Whisper', () => {
             (whisper as any).chunkAdvances.set(10, 15);
 
             (whisper as any).handleWorkerMessage({
-                data: { status: 'dropped', chunkId: 10, data: { reason: 'queue-replaced' } },
+                data: { status: 'dropped', chunkId: 10, data: { reason: 'queue-full' } },
             });
 
             expect((whisper as any).transcribedUpTo).toBe(30);
@@ -2857,6 +3470,121 @@ describe('Whisper', () => {
 
             expect(sendChunk).toHaveBeenCalledTimes(1);
             expect(sendChunk.mock.calls[0]?.[4]).toBe(6);
+        });
+
+        it('preserves every oldest missing live window across repeated slow worker cycles', async () => {
+            vi.useFakeTimers();
+            try {
+                const whisper = new Whisper();
+                const settings = createCompatibilityWhisperSettings({
+                    backend: 'webgpu',
+                    forceWasm: false,
+                    chunkLengthS: 8,
+                    strideLengthS: 2,
+                    // Deliberately higher than the worker's actual active + queued
+                    // capacity. The controller must still never admit a third.
+                    maxPendingChunks: 3,
+                });
+                vi.spyOn(whisper as any, 'getExecutionSettings').mockReturnValue(settings);
+                vi.spyOn((whisper as any).bridge, 'currentTrack', 'get').mockReturnValue(null);
+
+                let receiveWorkerMessage: ((event: { data: any }) => void) | null = null;
+                const hostEvents: any[] = [];
+                const workerEvents: any[] = [];
+                const workerSelf: any = {
+                    addEventListener: (type: string, handler: (event: { data: any }) => void) => {
+                        if (type === 'message') receiveWorkerMessage = handler;
+                    },
+                    postMessage: (message: any) => {
+                        workerEvents.push(message);
+                        hostEvents.push(message);
+                    },
+                };
+                const activeInferences: Array<{
+                    message: any;
+                    resolve: (value: any) => void;
+                }> = [];
+                workerSelf.__whisperTestTranscribe = vi.fn((message: any) => {
+                    workerSelf.postMessage({ status: 'started', chunkId: message.chunkId });
+                    return new Promise<any>((resolve) => {
+                        activeInferences.push({ message, resolve });
+                    });
+                });
+                new Function('self', __getWhisperWorkerCodeForTests(true))(workerSelf);
+
+                const hostPosts: any[] = [];
+                (whisper as any).worker = {
+                    postMessage: (message: any) => {
+                        hostPosts.push(message);
+                        receiveWorkerMessage!({ data: message });
+                    },
+                };
+                const audio = document.createElement('audio');
+                audio.currentTime = 60;
+                (whisper as any).audio = audio;
+                (whisper as any).transcribing = true;
+                (whisper as any).modelReady = true;
+                (whisper as any).liveCaptureActive = true;
+                (whisper as any).pcmBuffer = new Float32Array(60 * 16_000);
+                (whisper as any).pcmDuration = 60;
+                (whisper as any).pcmSampleLength = 60 * 16_000;
+                (whisper as any).transcribedUpTo = 0;
+
+                const flushHostEvents = () => {
+                    while (hostEvents.length > 0) {
+                        (whisper as any).handleWorkerMessage({ data: hostEvents.shift() });
+                    }
+                };
+                const pollRepeatedly = async () => {
+                    for (let poll = 0; poll < 4; poll += 1) {
+                        await vi.advanceTimersByTimeAsync(250);
+                        (whisper as any).maybeProcessNextChunk();
+                        flushHostEvents();
+                    }
+                };
+                const completeActiveInference = async () => {
+                    const active = activeInferences.shift();
+                    expect(active).toBeDefined();
+                    active!.resolve({
+                        text: '',
+                        rawChunks: [],
+                        inputRms: 0,
+                        wordTimestamps: false,
+                    });
+                    await Promise.resolve();
+                    await Promise.resolve();
+                    flushHostEvents();
+                    await pollRepeatedly();
+                };
+
+                (whisper as any).maybeProcessNextChunk();
+                flushHostEvents();
+                await pollRepeatedly();
+                expect(hostPosts.filter(message => message.type === 'transcribe').map(message => message.timeOffset))
+                    .toEqual([0, 6]);
+
+                for (let cycle = 0; cycle < 6; cycle += 1) {
+                    await completeActiveInference();
+                }
+
+                const transcribePosts = hostPosts.filter(message => message.type === 'transcribe');
+                const completedIds = workerEvents
+                    .filter(message => message.status === 'complete')
+                    .map(message => message.chunkId);
+                const offsetsById = new Map(
+                    transcribePosts.map(message => [message.chunkId, message.timeOffset]),
+                );
+                expect(completedIds.map(chunkId => offsetsById.get(chunkId)))
+                    .toEqual([0, 6, 12, 18, 24, 30]);
+                expect(transcribePosts.map(message => message.timeOffset))
+                    .toEqual([0, 6, 12, 18, 24, 30, 36, 42]);
+                expect(workerEvents.filter(message => message.status === 'dropped')).toEqual([]);
+                expect((whisper as any).processedRanges).toEqual([{ start: 0, end: 36 }]);
+                expect((whisper as any).pendingChunks).toBe(2);
+                expect((whisper as any).unavailableRanges).toEqual([]);
+            } finally {
+                vi.useRealTimers();
+            }
         });
 
         it('queues every missing window between discontiguous analyzed ranges', () => {
@@ -3113,6 +3841,22 @@ describe('Whisper', () => {
             ];
             (whisper as any).mergeSegments(newSegments, { preferNew: true });
             expect((whisper as any).segments).toHaveLength(2);
+        });
+
+        it('caps a repeated decoder phrase only after it accumulates across completed windows', () => {
+            const whisper = new Whisper();
+            const repeated = Array.from({ length: 14 }, (_, index) => ({
+                start: index * 8,
+                end: index * 8 + 1,
+                text: 'う',
+            }));
+
+            (whisper as any).mergeSegments(repeated.slice(0, 7), { preferNew: true });
+            expect((whisper as any).segments).toHaveLength(7);
+
+            (whisper as any).mergeSegments(repeated.slice(7), { preferNew: true });
+            expect((whisper as any).segments.map((segment: { start: number }) => segment.start))
+                .toEqual([0, 8, 16, 88, 96, 104]);
         });
 
         it('updates existing segment when overlap detected', () => {
@@ -3492,6 +4236,7 @@ describe('Whisper', () => {
                 whisperAutoWarmup: false,
                 whisperCacheTranscripts: true,
                 forceWhisperWasm: false,
+                whisperAdaptiveWindow: true,
                 ...overrides,
             };
             vi.spyOn(Config, 'get').mockImplementation((key) => map[key as string] ?? false);
@@ -3536,20 +4281,68 @@ describe('Whisper', () => {
                 isTouch: false, isMobile: false, screenWidth: 1728,
                 gpuVendor: 'mozilla apple m1, or similar', reason: 'full, GPU, 10 cores',
             });
-            // auto would downgrade this profile to tiny; an explicit preset must not.
+            // Auto chooses timestamped Base here; an explicit preset must not be changed.
             expect((new Whisper() as any).getWhisperSettings().model)
                 .toBe('onnx-community/whisper-large-v3-turbo_timestamped');
         });
 
-        it('keeps auto conservative downgrade to tiny on the same constrained profile', () => {
+        it('uses timestamped Base for Auto on the M1 profile with adaptive word timing', () => {
             mockConfig({ whisperModelPreset: 'auto' });
             mockDevice({
                 tier: 'full', hasGpu: true, memory: -1, cores: 10,
                 isTouch: false, isMobile: false, screenWidth: 1728,
                 gpuVendor: 'mozilla apple m1, or similar', reason: 'full, GPU, 10 cores',
             });
-            expect((new Whisper() as any).getWhisperSettings().model)
-                .toBe('onnx-community/whisper-tiny');
+            const settings = (new Whisper() as any).getWhisperSettings();
+            expect(settings.model).toBe('onnx-community/whisper-base_timestamped');
+            expect(settings.chunkLengthS).toBe(8);
+            expect(settings.strideLengthS).toBe(2);
+            expect(settings.catchUpChunkLengthS).toBe(29);
+            expect(settings.catchUpStrideLengthS).toBe(5);
+            expect(settings.adaptiveCatchUp).toBe(true);
+            expect(settings.maxPendingChunks).toBe(3);
+
+            mockConfig({ whisperModelPreset: 'base' });
+            const manualSettings = (new Whisper() as any).getWhisperSettings();
+            expect(manualSettings.model).toBe('onnx-community/whisper-base_timestamped');
+            expect(manualSettings.chunkLengthS).toBe(29);
+            expect(manualSettings.strideLengthS).toBe(5);
+            expect(manualSettings.adaptiveCatchUp).toBe(false);
+        });
+
+        it('pins the configured Firefox/M1 window when adaptive mode is disabled', () => {
+            mockConfig({
+                whisperModelPreset: 'auto',
+                whisperAdaptiveWindow: false,
+                whisperLiveChunkSec: 29,
+                whisperLiveOverlapSec: 5,
+            });
+            mockDevice({
+                tier: 'full', hasGpu: true, memory: -1, cores: 10,
+                isTouch: false, isMobile: false, screenWidth: 1728,
+                gpuVendor: 'mozilla apple m1, or similar', reason: 'full, GPU, 10 cores',
+            });
+            const settings = (new Whisper() as any).getWhisperSettings();
+            expect(settings.model).toBe('onnx-community/whisper-base_timestamped');
+            expect(settings.chunkLengthS).toBe(29);
+            expect(settings.strideLengthS).toBe(5);
+            expect(settings.maxPendingChunks).toBe(2);
+        });
+
+        it('keeps an unknown-renderer limited Firefox Mac on Tiny instead of assigning M1 Base', () => {
+            mockConfig({ whisperModelPreset: 'auto' });
+            vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(
+                'Mozilla/5.0 (Macintosh; Intel Mac OS X 14.5; rv:153.0) Gecko/20100101 Firefox/153.0',
+            );
+            vi.spyOn(navigator, 'platform', 'get').mockReturnValue('MacIntel');
+            mockDevice({
+                tier: 'limited', hasGpu: true, memory: -1, cores: 4,
+                isTouch: false, isMobile: false, screenWidth: 1440,
+                gpuVendor: '', reason: 'limited, GPU, intel-mac',
+            });
+            const settings = (new Whisper() as any).getWhisperSettings();
+            expect(settings.model).toBe('onnx-community/whisper-tiny');
+            expect(settings.backend).toBe('webgpu');
         });
 
         it('force-WASM keeps an explicit model exact and changes only the selected backend', () => {
@@ -3616,6 +4409,72 @@ describe('Whisper', () => {
             } finally {
                 (whisper as any).eventCleanups.splice(0).forEach((cleanup: () => void) => cleanup());
             }
+        });
+
+        it('cancels an in-flight automatic warmup and its deferred restart on opt-out', () => {
+            vi.useFakeTimers();
+            const config = mockConfig({ whisperAutoWarmup: true });
+            mockDevice(fullProfile, true);
+            const whisper = new Whisper();
+            const settings = (whisper as any).getWhisperSettings();
+            const worker = createMockWhisperWorker();
+            (whisper as any).worker = worker;
+            (whisper as any).loadedPlan = {
+                model: settings.model,
+                backend: settings.backend,
+                multilingual: settings.multilingual,
+            };
+            (whisper as any).workerInitPending = {
+                worker,
+                generation: 1,
+                plan: (whisper as any).loadedPlan,
+            };
+            (whisper as any).autoWarmupStarted = true;
+            (whisper as any).deferredWorkerSettings = settings;
+            (whisper as any).workerRestartTimer = window.setTimeout(() => {
+                (whisper as any).initWorker(settings);
+            }, 5_000);
+            (whisper as any).setupEventListeners();
+
+            try {
+                config.whisperAutoWarmup = false;
+                EventBus.emit('config:change', {
+                    key: 'whisperAutoWarmup',
+                    value: false,
+                    oldValue: true,
+                });
+
+                expect(worker.terminate).toHaveBeenCalledTimes(1);
+                expect((whisper as any).worker).toBeNull();
+                expect((whisper as any).workerRestartTimer).toBeNull();
+                expect((whisper as any).deferredWorkerSettings).toBeNull();
+                expect((whisper as any).autoWarmupStarted).toBe(false);
+
+                vi.advanceTimersByTime(5_000);
+                expect((whisper as any).worker).toBeNull();
+            } finally {
+                (whisper as any).eventCleanups.splice(0).forEach((cleanup: () => void) => cleanup());
+                vi.clearAllTimers();
+                vi.useRealTimers();
+            }
+        });
+
+        it('reports why a requested background warmup is capability-suppressed', () => {
+            mockConfig({ whisperAutoWarmup: true });
+            mockDevice({
+                tier: 'limited', hasGpu: true, memory: 8, cores: 4,
+                isTouch: false, isMobile: false, screenWidth: 1440,
+                gpuVendor: '', reason: 'limited',
+            }, false);
+
+            expect(new Whisper().getAutoWarmupSuppressionReason())
+                .toBe('device-capability');
+
+            vi.restoreAllMocks();
+            mockConfig({ whisperAutoWarmup: true, forceWhisperWasm: true });
+            mockDevice(fullProfile, true);
+            expect(new Whisper().getAutoWarmupSuppressionReason())
+                .toBe('force-wasm');
         });
 
         it('clears stale ready UI and warms the newly selected idle model', () => {
@@ -3718,6 +4577,75 @@ describe('Whisper', () => {
                 source,
                 (differentContextWhisper as any).activeRunSettings,
             )).not.toBe(webGpuKey);
+        });
+    });
+
+    describe('adaptive current-run scheduling', () => {
+        function setupScheduler(playback: number, throughputRatio: number): {
+            whisper: Whisper;
+            send: ReturnType<typeof vi.spyOn>;
+            settings: ReturnType<typeof createCompatibilityWhisperSettings> & {
+                adaptiveCatchUp: boolean;
+                catchUpChunkLengthS: number;
+                catchUpStrideLengthS: number;
+            };
+        } {
+            const whisper = new Whisper();
+            const audio = document.createElement('audio');
+            audio.currentTime = playback;
+            const settings = {
+                ...createCompatibilityWhisperSettings({
+                    model: 'onnx-community/whisper-base',
+                    backend: 'webgpu',
+                    chunkLengthS: 8,
+                    strideLengthS: 2,
+                    maxPendingChunks: 3,
+                }),
+                adaptiveCatchUp: true,
+                catchUpChunkLengthS: 29,
+                catchUpStrideLengthS: 5,
+            };
+            (whisper as any).audio = audio;
+            (whisper as any).transcribing = true;
+            (whisper as any).modelReady = true;
+            (whisper as any).hasWorkerChunkActivity = true;
+            (whisper as any).activeRunSettings = Object.freeze(settings);
+            (whisper as any).pcmBuffer = new Float32Array(90 * 16_000);
+            (whisper as any).pcmDuration = 90;
+            (whisper as any).pcmBufferStartTime = 0;
+            (whisper as any).transcribedUpTo = 0;
+            (whisper as any).runtimeProgressOrigin = 0;
+            (whisper as any).throughputRatio = throughputRatio;
+            vi.spyOn((whisper as any).bridge, 'currentTrack', 'get').mockReturnValue(undefined);
+            const send = vi.spyOn(whisper as any, 'sendChunk').mockImplementation(() => {});
+            return { whisper, send, settings };
+        }
+
+        it('widens context under measured contention without changing the selected model/backend', () => {
+            const { whisper, send, settings } = setupScheduler(30, 0.7);
+
+            (whisper as any).maybeProcessNextChunk();
+
+            expect(send).toHaveBeenCalledOnce();
+            expect(send.mock.calls[0][4]).toBe(29);
+            expect(send.mock.calls[0][5]).toBe(5);
+            expect((whisper as any).activeRunSettings.model).toBe(settings.model);
+            expect((whisper as any).activeRunSettings.backend).toBe('webgpu');
+        });
+
+        it('keeps the low-latency window for a 15-second random-seek backfill', () => {
+            const { whisper, send } = setupScheduler(378, 0.5);
+            (whisper as any).transcribedUpTo = 363;
+            (whisper as any).runtimeProgressOrigin = 363;
+            (whisper as any).pcmBufferStartTime = 363;
+            (whisper as any).pcmDuration = 392;
+            (whisper as any).pcmBuffer = new Float32Array(29 * 16_000);
+
+            (whisper as any).maybeProcessNextChunk();
+
+            expect(send).toHaveBeenCalledOnce();
+            expect(send.mock.calls[0][4]).toBe(8);
+            expect(send.mock.calls[0][5]).toBe(2);
         });
     });
 

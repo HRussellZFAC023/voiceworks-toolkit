@@ -82,9 +82,13 @@ const __dirname = path.dirname(__filename);
 // Test-local fixture: WAV file served, audio not blocked, extended timeouts
 // ---------------------------------------------------------------------------
 
-const VIA_PROXY = process.env.E2E_PROXY === '1';
+// Keep this custom fixture aligned with the shared E2E fixture: remote asmr.one
+// documents are region/language gated from common CI and agent networks, so use
+// the maintained relay by default and allow direct-network tests to opt out.
+const VIA_PROXY = process.env.E2E_PROXY !== '0';
 const E2E_PROXY_URL = (process.env.E2E_PROXY_URL
     || 'https://asmr-api-proxy.henry-robert-christopher-russell.workers.dev').replace(/\/$/, '');
+const E2E_SITE_ORIGIN = (process.env.E2E_BASE_URL || 'https://www.asmr.one').replace(/\/$/, '');
 
 const TEST_WAV_DATA = createSilentWav(16000, 2);
 
@@ -323,12 +327,13 @@ const TEST_WORK = 'RJ01052162';
 
 async function setupWhisperPage(page: Page): Promise<void> {
     await ensureLoggedIn(page);
-    await page.goto(`https://asmr.one/work/${TEST_WORK}`, { waitUntil: 'commit', timeout: 30000 });
+    await page.goto(`${E2E_SITE_ORIGIN}/work/${TEST_WORK}`, { waitUntil: 'commit', timeout: 30000 });
 
     // Wait for userscript injection
     const ready = await page.waitForFunction(
         () => !!(window as any).__ASMR_LOGGER__ || !!(window as any).ASMRUlt || !!(window as any).__ASMR_ULTIMATE_INITIALIZED__,
-        { timeout: 20000 }
+        undefined,
+        { timeout: 20000 },
     ).then(() => true).catch(() => false);
 
     if (!ready) throw new Error('Userscript did not initialize within 20s');
@@ -685,10 +690,11 @@ test.describe('Feature: Whisper AI Transcription End-to-End', () => {
          * Then:  An error message is shown telling them to play a track
          *
          * Covers: US-8
-         */
+        */
         test('should show error when no audio source available', async ({ whisperPage: page }) => {
+            test.setTimeout(60_000);
             await ensureLoggedIn(page);
-            await page.goto(`https://asmr.one/work/${TEST_WORK}`, { waitUntil: 'commit', timeout: 30000 });
+            await page.goto(`${E2E_SITE_ORIGIN}/work/${TEST_WORK}`, { waitUntil: 'commit', timeout: 30000 });
 
             await page.waitForFunction(
                 () => {
@@ -701,7 +707,8 @@ test.describe('Feature: Whisper AI Transcription End-to-End', () => {
                         return false;
                     }
                 },
-                { timeout: 20000 }
+                undefined,
+                { timeout: 20000 },
             );
 
             await page.waitForTimeout(3000);
@@ -728,7 +735,7 @@ test.describe('Feature: Whisper AI Transcription End-to-End', () => {
             await page.waitForFunction(() => {
                 const errors = (window as any).__E2E_WHISPER_ERRORS__ as string[] | undefined;
                 return errors?.some((message) => /No audio source found|音声ソース|未找到音频源/.test(message));
-            }, { timeout: 15000 });
+            }, undefined, { timeout: 15000 });
 
             const errors = await page.evaluate(() => (window as any).__E2E_WHISPER_ERRORS__ as string[]);
             expect(errors.some((message) => /No audio source found|音声ソース|未找到音频源/.test(message))).toBe(true);

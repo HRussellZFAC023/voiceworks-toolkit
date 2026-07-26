@@ -9,9 +9,9 @@ const labels: BackupDownloaderLabels = {
     playlistSource: 'Playlist source', sourceAll: 'All', sourceOwn: 'My playlists', sourcePublic: 'Community playlists',
     selectAll: 'Select all shown', clearAll: 'Clear all', filterTags: 'Tags', allTags: 'All tags',
     playlistOwner: 'by {owner}', playlistWorks: '{count} works', loading: 'Loading', loadFailed: 'Unavailable',
-    options: 'Options', progress: 'Progress', pause: 'Pause', resume: 'Resume', resumeWithoutOpus: 'Resume without Opus', alreadyRunning: 'Already running', resumableDownloads: 'Resume jobs',
+    options: 'Options', progress: 'Progress', pause: 'Pause', resume: 'Resume', resumeWithoutOpus: 'Resume without Opus', resumeWithOriginalTitles: 'Resume with Original titles', alreadyRunning: 'Already running', resumableDownloads: 'Resume jobs',
     expandPlaylist: 'Expand', collapsePlaylist: 'Collapse', selectedSummary: '{count} selected · {bytes}',
-    unknownSize: 'size unavailable', partialSize: 'at least {size}', estimatedOpusSize: 'about {size} after Opus', noResults: 'No results', fileTypes: 'Files', audio: 'Audio', video: 'Video',
+    unknownSize: 'size unavailable', durationAndFiles: '{duration} · {count} files', fileCount: '{count} files', partialSize: 'at least {size}', estimatedOpusSize: 'about {size} after Opus', noResults: 'No results', fileTypes: 'Files', audio: 'Audio', video: 'Video',
     images: 'Images', text: 'Text', other: 'Other', filenameTitle: 'Titles', titleOriginal: 'Original',
     titleTranslated: 'Translated', titleOriginalTranslated: 'Original [Translated]', titleNone: 'No title changes',
     convertToOpus: 'Convert to Opus', convertToOpusMemoryWarning: 'Large sources stay original.', opusBitrate: 'Bitrate', metadata: 'Metadata', metadataAdditive: 'Additive',
@@ -137,6 +137,28 @@ describe('BackupWorkDownloader', () => {
         expect(wrapper.get('[data-testid="search-work-RJ98"] .work-size').text()).toBe('size unavailable');
     });
 
+    it('shows duration and file count instead of a bare unknown size', async () => {
+        const result: BackupWorkDownloadItem = {
+            id: 'RJ97',
+            title: 'Unknown byte sizes',
+            directSearchResult: true,
+            durationSeconds: 815,
+            fileCountByType: { audio: 2, image: 1 },
+            unknownSizeCountByType: { audio: 2, image: 1 },
+            sizeState: 'partial',
+        };
+        const searchAllWorks = vi.fn(async () => { await (wrapper as any).setProps({ works: [result] }); });
+        const wrapper = mount(BackupWorkDownloader, {
+            props: { playlists: [], works: [], profile: profile(), searchAllWorks },
+        });
+        await wrapper.get('[data-testid="search"]').setValue('unknown');
+        await wrapper.get('[data-testid="search-all-works"]').trigger('click');
+        await vi.waitFor(() => expect(wrapper.find('[data-testid="search-work-RJ97"]').exists()).toBe(true));
+
+        expect(wrapper.get('[data-testid="search-work-RJ97"] .work-size').text()).toBe('13:35 · 3 files');
+        wrapper.unmount();
+    });
+
     it('hides results from the previous query until the next search completes', async () => {
         const searchAllWorks = vi.fn(async (query: string) => {
             const direct = query === 'first' ? [{ id: 'RJ9', title: 'First result', directSearchResult: true }] : [];
@@ -209,6 +231,27 @@ describe('BackupWorkDownloader', () => {
 
         expect(wrapper.emitted('resumeWithoutOpus')).toEqual([['job-opus']]);
         expect(wrapper.get('[data-testid="resume-without-opus-job-opus"]').text()).toBe('Resume without Opus');
+    });
+
+    it('offers an explicit original-title resume only for translation-blocked jobs', async () => {
+        const wrapper = mount(BackupWorkDownloader, {
+            props: {
+                playlists,
+                works,
+                profile: profile({ selectedWorkIds: [1] }),
+                resumableJobs: [
+                    { id: 'job-translation', title: 'Waiting for titles', needsTitleTranslation: true },
+                    { id: 'job-download', title: 'Downloading files' },
+                ],
+            },
+        });
+
+        await wrapper.get('[data-testid="resume-with-original-titles-job-translation"]').trigger('click');
+
+        expect(wrapper.emitted('resumeWithOriginalTitles')).toEqual([['job-translation']]);
+        expect(wrapper.get('[data-testid="resume-with-original-titles-job-translation"]').text())
+            .toBe('Resume with Original titles');
+        expect(wrapper.find('[data-testid="resume-with-original-titles-job-download"]').exists()).toBe(false);
     });
 
     it('shows incremental Opus conversion progress and keeps pause available', () => {

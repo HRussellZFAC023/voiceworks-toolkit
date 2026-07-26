@@ -31,4 +31,22 @@ describe('DirectoryDownloadSink', () => {
             .rejects.toBeInstanceOf(ResumeOffsetMismatchError);
         expect(handle.createWritable).not.toHaveBeenCalled();
     });
+
+    it('reads only the requested fingerprint range from a committed file', async () => {
+        const slice = vi.fn().mockReturnValue({
+            arrayBuffer: vi.fn().mockResolvedValue(new Uint8Array([3, 4]).buffer),
+        });
+        const handle = {
+            getFile: vi.fn().mockResolvedValue({ slice }),
+        };
+        const root = {
+            queryPermission: vi.fn().mockResolvedValue('granted'),
+            getFileHandle: vi.fn().mockResolvedValue(handle),
+        };
+
+        const bytes = await new DirectoryDownloadSink(root as any).readRange(['track.flac'], 2, 2);
+
+        expect(slice).toHaveBeenCalledWith(2, 4);
+        expect([...bytes]).toEqual([3, 4]);
+    });
 });

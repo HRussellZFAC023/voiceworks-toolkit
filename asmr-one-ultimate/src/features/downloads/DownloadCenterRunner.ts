@@ -24,7 +24,7 @@ export const DOWNLOAD_DISCOVERY_BATCH_SIZE = 8;
 export const DOWNLOAD_DISCOVERY_CONCURRENCY = 3;
 export const DOWNLOAD_OPTIONAL_METADATA_CONCURRENCY = 3;
 export const DOWNLOAD_OPTIONAL_METADATA_WAIT_MS = 2_000;
-export const DOWNLOAD_OPTIONAL_TRANSLATION_WAIT_MS = 3_000;
+export const DOWNLOAD_OPTIONAL_TRANSLATION_WAIT_MS = 30_000;
 export const DOWNLOAD_ARTWORK_TIMEOUT_MS = 8_000;
 export const DOWNLOAD_ARTWORK_MAX_BYTES = 5 * 1024 * 1024;
 // Match the translation service's default remote concurrency so each
@@ -55,10 +55,11 @@ export type DownloadCenterStateListener = (
 ) => void;
 export interface DownloadCenterResumeOptions {
     disableOpus?: boolean;
+    useOriginalTitles?: boolean;
 }
 
 export class DownloadCenterRunError extends Error {
-    constructor(public readonly code: 'unsupported' | 'permission' | 'no-files' | 'paused' | 'already-running' | 'failed', cause?: unknown) {
+    constructor(public readonly code: 'unsupported' | 'permission' | 'no-files' | 'paused' | 'title-translation' | 'already-running' | 'failed', cause?: unknown) {
         super(code);
         this.name = 'DownloadCenterRunError';
         if (cause !== undefined) (this as Error & { cause?: unknown }).cause = cause;
@@ -66,9 +67,16 @@ export class DownloadCenterRunError extends Error {
 }
 
 function cloneOptions(options: PersistedDownloadCenterOptions): PersistedDownloadCenterOptions {
-    const { directory, ...serializable } = options;
+    const { directory, enrichment, ...serializable } = options;
+    // Enrichment is consumed only by Opus metadata/artwork conversion. Strip
+    // it before serializing non-Opus jobs so large manifests do not repeatedly
+    // clone and checkpoint an ever-growing per-file metadata object.
+    const persistable = {
+        ...serializable,
+        enrichment: options.state.convertToOpus ? enrichment : {},
+    };
     return {
-        ...(JSON.parse(JSON.stringify(serializable)) as Omit<PersistedDownloadCenterOptions, 'directory'>),
+        ...(JSON.parse(JSON.stringify(persistable)) as Omit<PersistedDownloadCenterOptions, 'directory'>),
         directory,
     };
 }
@@ -397,12 +405,31 @@ export class DownloadCenterRunner {
             try {
                 const snapshot = await this.repository.loadJob<PersistedDownloadCenterOptions>(jobId);
                 let persistedOptions = snapshot?.job.options ?? initialOptions;
+                let resumeOptionsChanged = false;
                 if (resumeOptions.disableOpus && persistedOptions.state.convertToOpus) {
                     persistedOptions = cloneOptions({
                         ...persistedOptions,
                         state: { ...persistedOptions.state, convertToOpus: false },
                         opusOutputPaths: {},
                     });
+                    resumeOptionsChanged = true;
+                }
+                const discovery = persistedOptions.discovery;
+                if (
+                    resumeOptions.useOriginalTitles
+                    && discovery
+                    && !discovery.titlesReady
+                    && discovery.nextIndex === 0
+                    && titleModeNeedsTranslation(persistedOptions.state)
+                ) {
+                    persistedOptions = cloneOptions({
+                        ...persistedOptions,
+                        state: { ...persistedOptions.state, titleMode: 'original' },
+                        discovery: { ...discovery, titlesReady: true },
+                    });
+                    resumeOptionsChanged = true;
+                }
+                if (resumeOptionsChanged) {
                     await this.repository.appendFilesAndUpdateOptions(jobId, persistedOptions, []);
                 }
                 const options = await this.prepareAndRun(jobId, persistedOptions, report, sink);
@@ -411,7 +438,8 @@ export class DownloadCenterRunner {
                 const normalized = this.leaseLost && !(error instanceof DownloadCenterRunError)
                     ? new DownloadCenterRunError('paused', error)
                     : error;
-                const paused = normalized instanceof DownloadCenterRunError && normalized.code === 'paused';
+                const paused = normalized instanceof DownloadCenterRunError
+                    && (normalized.code === 'paused' || normalized.code === 'title-translation');
                 this.currentProgress = {
                     ...(this.currentProgress ?? { jobId, current: 0, total: 0 }),
                     jobId,
@@ -459,9 +487,20 @@ export class DownloadCenterRunner {
         const bytes = new Map(files.map(file => [file.id, file.downloadedBytes]));
         const totals = new Map(files.filter(file => file.totalBytes != null).map(file => [file.id, file.totalBytes as number]));
         const labels = new Map(files.map(file => [file.id, file.path]));
+        let completedBytes = files.reduce((sum, file) => sum + file.downloadedBytes, 0);
+        let knownTotalBytes = files.reduce((sum, file) => sum + (file.totalBytes ?? 0), 0);
+        let knownTotalCount = totals.size;
         const notify = (progress: DownloadCoordinatorProgress): void => {
+            const previousBytes = bytes.get(progress.fileId) ?? 0;
             bytes.set(progress.fileId, progress.completedBytes);
-            if (progress.totalBytes != null) totals.set(progress.fileId, progress.totalBytes);
+            completedBytes += progress.completedBytes - previousBytes;
+            if (progress.totalBytes != null) {
+                const previousTotal = totals.get(progress.fileId);
+                if (previousTotal == null) knownTotalCount += 1;
+                else knownTotalBytes -= previousTotal;
+                totals.set(progress.fileId, progress.totalBytes);
+                knownTotalBytes += progress.totalBytes;
+            }
             if (progress.status === 'complete') completed.add(progress.fileId);
             onProgress?.({
                 jobId,
@@ -470,8 +509,8 @@ export class DownloadCenterRunner {
                     : progress.status === 'converting' ? 'converting' : 'downloading',
                 current: completed.size,
                 total: files.length,
-                completedBytes: [...bytes.values()].reduce((sum, value) => sum + value, 0),
-                totalBytes: totals.size === files.length ? [...totals.values()].reduce((sum, value) => sum + value, 0) : undefined,
+                completedBytes,
+                totalBytes: knownTotalCount === files.length ? knownTotalBytes : undefined,
                 conversionRatio: progress.conversionRatio,
                 label: labels.get(progress.fileId) ?? progress.fileId,
             });
@@ -566,7 +605,7 @@ export class DownloadCenterRunner {
         if (!checkpointed) await checkpoint();
         if (!options.discovery?.titlesReady) {
             throw new DownloadCenterRunError(
-                'failed',
+                'title-translation',
                 new Error(I18n.t('backupDownloaderTitleTranslationRequired')),
             );
         }
@@ -589,7 +628,8 @@ export class DownloadCenterRunner {
         const existingRootEntries = await new DirectoryDownloadSink(options.directory).listTopLevelEntryNames();
         for (const entry of existingRootEntries) occupiedWorkFolders.add(canonicalDownloadPath([entry]));
         let pendingFiles: Array<{ id: string; path: string; url: string; sourceUrls?: string[]; totalBytes?: number }> = [];
-        const enrichment = { ...options.enrichment };
+        const enrichOpusFiles = options.state.convertToOpus;
+        const enrichment = enrichOpusFiles ? { ...options.enrichment } : {};
         const skippedWorkIds = [...discovery.skippedWorkIds];
         const skippedWorkIdSet = new Set(skippedWorkIds.map(String));
         const markWorkUnavailable = (workId: string | number): void => {
@@ -636,6 +676,10 @@ export class DownloadCenterRunner {
                 const folder = reserveCollisionFreePath([resolvedWorkFolder(work, options.state)], occupiedWorkFolders)[0];
                 const occupiedRelativePaths = new Set<string>();
                 let hasCoverImage = false;
+                const artworkUrl = info?.mainCoverUrl
+                    || info?.thumbnailCoverUrl
+                    || info?.samCoverUrl
+                    || work.coverUrl;
                 for (const entry of manifest.entries) {
                     reserveManifestPath(occupiedRelativePaths, entry.relativePath);
                     const category = entry.category === 'unknown' ? 'other' : entry.category;
@@ -664,31 +708,32 @@ export class DownloadCenterRunner {
                         totalBytes: entry.size,
                     });
                     const filename = entry.relativePath.at(-1) || entry.sourceTitle;
-                    workEnrichment[id] = {
-                        tags: {
-                            title: filename.replace(/\.[^.]+$/, ''),
-                            album: folder,
-                            artist: info?.vas?.map(va => va.name).filter(Boolean) || [],
-                            albumartist: info?.circle?.name || info?.name || '',
-                            genre: info?.tags?.map(tag => tag.name).filter(Boolean) || [],
-                            date: info?.release || '',
-                            website: info?.source_url || (info?.source_id ? `https://www.dlsite.com/maniax/work/=/product_id/${info.source_id}.html` : ''),
-                            circle_id: String(info?.circle_id || ''),
-                            age_rating: info?.age_category_string || '',
-                        },
-                        artworkUrl: info?.mainCoverUrl || info?.thumbnailCoverUrl || info?.samCoverUrl,
-                    };
+                    if (enrichOpusFiles) {
+                        workEnrichment[id] = {
+                            tags: {
+                                title: filename.replace(/\.[^.]+$/, ''),
+                                album: folder,
+                                artist: info?.vas?.map(va => va.name).filter(Boolean) || [],
+                                albumartist: info?.circle?.name || info?.name || '',
+                                genre: info?.tags?.map(tag => tag.name).filter(Boolean) || [],
+                                date: info?.release || '',
+                                website: info?.source_url || (info?.source_id ? `https://www.dlsite.com/maniax/work/=/product_id/${info.source_id}.html` : ''),
+                                circle_id: String(info?.circle_id || ''),
+                                age_rating: info?.age_category_string || '',
+                            },
+                            artworkUrl,
+                        };
+                    }
                 }
-                const generatedCoverUrl = info?.mainCoverUrl || info?.thumbnailCoverUrl || info?.samCoverUrl;
-                if (options.state.filters.image && options.state.includeArtwork && !hasCoverImage && generatedCoverUrl) {
+                if (options.state.filters.image && options.state.includeArtwork && !hasCoverImage && artworkUrl) {
                     const coverName = reserveCollisionFreePath(['cover.jpg'], occupiedRelativePaths)[0];
                     newFiles.push({
                         id: `${jobId}:${work.id}:generated-cover`,
                         path: [folder, coverName].join('/'),
-                        url: generatedCoverUrl,
+                        url: artworkUrl,
                     });
                 }
-                Object.assign(enrichment, workEnrichment);
+                if (enrichOpusFiles) Object.assign(enrichment, workEnrichment);
             } catch (error) {
                 if (isUnavailableWorkFailure(error)) {
                     markWorkUnavailable(work.id);

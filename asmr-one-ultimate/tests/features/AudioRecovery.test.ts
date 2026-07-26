@@ -145,6 +145,32 @@ describe('setupAudioRecovery', () => {
         expect(audio.play).toHaveBeenCalledTimes(1);
     });
 
+    it('reloads a waiting source without ever assigning the document URL', () => {
+        vi.useFakeTimers();
+        vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+
+        const audio = createAudio('https://media.example/track.mp3', 12);
+        const assigned: string[] = [];
+        const nativeDescriptor = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'src');
+        Object.defineProperty(audio.element, 'src', {
+            configurable: true,
+            get: () => nativeDescriptor?.get?.call(audio.element) || '',
+            set: (value: string) => {
+                assigned.push(value);
+                nativeDescriptor?.set?.call(audio.element, value);
+            },
+        });
+        mocks.currentAudio = audio.element;
+        cleanup = setupAudioRecovery();
+
+        audio.element.dispatchEvent(new Event('waiting'));
+        vi.advanceTimersByTime(5_000);
+
+        expect(audio.load).toHaveBeenCalledTimes(1);
+        expect(assigned).not.toContain('');
+        expect(assigned).not.toContain(window.location.href);
+    });
+
     it('also defers invalid-source restoration while hidden', () => {
         vi.useFakeTimers();
         let visibility: DocumentVisibilityState = 'hidden';

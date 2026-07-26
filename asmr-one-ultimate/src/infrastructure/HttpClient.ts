@@ -81,6 +81,10 @@ export interface GmRequestConfig {
     data?: string;
     responseType?: 'blob' | 'json' | 'text' | 'arraybuffer';
     timeout?: number;
+    /** Omit cookies and HTTP authentication from privileged cross-origin requests. */
+    anonymous?: boolean;
+    /** Redirect policy supported by Tampermonkey's GM_xmlhttpRequest. */
+    redirect?: 'follow' | 'error';
     signal?: AbortSignal;
     onprogress?: (event: { loaded: number; total: number; lengthComputable: boolean }) => void;
 }
@@ -93,6 +97,14 @@ export interface GmResponse {
     responseHeaders: string;
     finalUrl?: string;
 }
+
+export interface GmDownloadConfig {
+    url: string | Blob | File;
+    name: string;
+    saveAs?: boolean;
+}
+
+const GM_DOWNLOAD_IDLE_TIMEOUT_MS = 30_000;
 
 /** Alias for fetch RequestCredentials — mirrors the built-in type for clarity */
 type RequestCredentialsType = RequestCredentials;
@@ -233,6 +245,8 @@ export function gmRequest(config: GmRequestConfig): Promise<GmResponse> {
                 data: config.data,
                 responseType: config.responseType,
                 timeout: config.timeout ?? TIMING.HTTP_TIMEOUT_MS,
+                anonymous: config.anonymous,
+                redirect: config.redirect,
                 onprogress: config.onprogress ? (event: { loaded: number; total: number; lengthComputable: boolean }) => {
                     if (!settled && !config.signal?.aborted) config.onprogress!(event);
                 } : undefined,
@@ -255,6 +269,58 @@ export function gmRequest(config: GmRequestConfig): Promise<GmResponse> {
             if (config.signal?.aborted) onSignalAbort();
         } catch (error) {
             rejectOnce(error);
+        }
+    });
+}
+
+/**
+ * Prefer the userscript manager for Blob downloads (reliable in Firefox), but
+ * report `false` when the API is unavailable or rejects so callers can retain
+ * a normal anchor-download fallback.
+ */
+export function gmDownload(config: GmDownloadConfig): Promise<boolean> {
+    const win = getMonkeyWindow() as unknown as Record<string, unknown>;
+    const download = win.GM_download
+        ?? (globalThis as unknown as Record<string, unknown>).GM_download;
+    if (typeof download !== 'function') return Promise.resolve(false);
+
+    return new Promise((resolve) => {
+        let settled = false;
+        let cancellingTimedOutDownload = false;
+        let downloadHandle: { abort?: () => void } | undefined;
+        let idleTimeout: ReturnType<typeof setTimeout> | undefined;
+        const finish = (result: boolean) => {
+            if (settled) return;
+            settled = true;
+            if (idleTimeout) clearTimeout(idleTimeout);
+            resolve(result);
+        };
+        const timeoutAndFallback = () => {
+            if (settled) return;
+            if (!cancellingTimedOutDownload) {
+                cancellingTimedOutDownload = true;
+                try { downloadHandle?.abort?.(); } catch { /* continue to the fallback */ }
+            }
+            finish(false);
+        };
+        const renewIdleTimeout = () => {
+            if (settled) return;
+            if (idleTimeout) clearTimeout(idleTimeout);
+            idleTimeout = setTimeout(timeoutAndFallback, GM_DOWNLOAD_IDLE_TIMEOUT_MS);
+        };
+        renewIdleTimeout();
+        try {
+            downloadHandle = (download as (
+                options: Record<string, unknown>,
+            ) => { abort?: () => void } | undefined)({
+                ...config,
+                onload: () => finish(true),
+                onerror: () => finish(false),
+                ontimeout: timeoutAndFallback,
+                onprogress: renewIdleTimeout,
+            });
+        } catch {
+            finish(false);
         }
     });
 }

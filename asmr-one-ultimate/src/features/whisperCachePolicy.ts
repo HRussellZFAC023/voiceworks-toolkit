@@ -1,5 +1,7 @@
 import type { WhisperSegment } from '../types';
 import { buildLrcFromSegments, buildVttFromSegments } from './transcriptFileUtils';
+import { serializeRollingTranscriptRepetitionRuns } from './whisperProcessing';
+import type { SerializedRollingRepetitionRun } from './whisperProcessing';
 import {
     getWhisperCoverageEnd,
     normalizeWhisperCoverage,
@@ -21,6 +23,7 @@ export interface WhisperCachedTranscript {
     processedRanges?: WhisperCoverageRange[];
     unavailableRanges?: WhisperCoverageRange[];
     coverageOrigin?: number;
+    rollingRepetitionRuns?: SerializedRollingRepetitionRun[];
     translations?: Record<string, { text: string; lrc: string; vtt?: string }>;
     /** Original identity string (pre-hash) for collision detection. */
     sourceIdentity?: string;
@@ -183,6 +186,7 @@ export function buildWhisperCacheCheckpoint(
     input: CacheCheckpointInput,
 ): CacheCheckpointDecision {
     const text = input.segments.map(segment => segment.text).join(' ');
+    const rollingRepetitionRuns = serializeRollingTranscriptRepetitionRuns(input.segments);
     const currentCoverageEnd = segmentCoverageEnd(input.segments, input.processedRanges);
     const existingCoverageEnd = segmentCoverageEnd(
         input.existing?.segments,
@@ -223,6 +227,9 @@ export function buildWhisperCacheCheckpoint(
             processedRanges: normalizeWhisperCoverage(input.processedRanges),
             unavailableRanges: normalizeWhisperCoverage(input.unavailableRanges),
             coverageOrigin: input.coverageOrigin,
+            rollingRepetitionRuns: rollingRepetitionRuns.length > 0
+                ? rollingRepetitionRuns
+                : undefined,
             translations: input.existing?.text === text
                 ? input.existing.translations
                 : undefined,

@@ -24,7 +24,7 @@ const viaProxy = process.env.E2E_PROXY !== '0';
 const E2E_PROXY_URL = (process.env.E2E_PROXY_URL || 'https://asmr-api-proxy.henry-robert-christopher-russell.workers.dev').replace(/\/$/, '');
 const requireAuth = process.env.E2E_REQUIRE_AUTH === '1';
 const TEST_IMAGE_BODY = Buffer.from(
-    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMB/6XGD2sAAAAASUVORK5CYII=',
+    'iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAAEUlEQVR4nGP4z8Dwn6Hh/38AEXkEfRkE0tIAAAAASUVORK5CYII=',
     'base64'
 );
 
@@ -35,6 +35,29 @@ const TEST_AUDIO_BODY = createSilentWav(8000, 30);
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 type AuthConfig = { username: string; password: string };
+
+function resolveWorkFixture(workId: string, suffix = ''): string | null {
+    let decoded: string;
+    try {
+        decoded = decodeURIComponent(workId);
+    } catch {
+        return null;
+    }
+    if (!/^(?:RJ)?\d+$/i.test(decoded)) return null;
+    const digits = decoded.replace(/^RJ/i, '');
+    const numeric = digits.replace(/^0+(?=\d)/, '');
+    const candidates = [...new Set([
+        decoded,
+        digits,
+        numeric,
+        `RJ${digits}`,
+    ])];
+    for (const candidate of candidates) {
+        const fixture = path.join(__dirname, `mock-data/api/work/${candidate}${suffix}.json`);
+        if (fs.existsSync(fixture)) return fixture;
+    }
+    return null;
+}
 
 function loadAuthConfig(): AuthConfig | null {
     const username = process.env.ASMR_ONE_USER || process.env.E2E_USERNAME || process.env.ASMR_USER;
@@ -156,7 +179,11 @@ async function gotoWithFallback(page: Page, pathOrUrl: string, waitMs = 0): Prom
             const isUnavailable = await page.evaluate(() => {
                 const text = (document.body?.innerText || '').toLowerCase();
                 const hasHostApp = !!document.querySelector('#q-app');
-                return text.includes('502') || text.includes('bad gateway') || !hasHostApp;
+                return text.includes('502')
+                    || text.includes('bad gateway')
+                    || text.includes('network error')
+                    || text.includes('无法连接服务器')
+                    || !hasHostApp;
             }).catch(() => true);
             if (isUnavailable) throw new Error(`Host app unavailable on ${target}`);
             if (waitMs > 0) await sleep(waitMs);
@@ -428,7 +455,7 @@ export const test = base.extend<Fixtures>({
         }
 
         // Serve a tiny placeholder image for tests that need media preview
-        await context.route('**/test-image-*.png', (route) => {
+        await context.route('**/test-image-*.png*', (route) => {
             route.fulfill({
                 status: 200,
                 contentType: 'image/png',
@@ -444,10 +471,16 @@ export const test = base.extend<Fixtures>({
 
         if (!isRealE2E) {
             // Block heavy resources context-wide
-            await context.route('**/*.{png,jpg,jpeg,gif,webp,svg,ico,woff2,ttf,eot,mp3,mp4,ogg,wav,flac}*', (route) => route.abort());
+            await context.route('**/*.{png,jpg,jpeg,gif,webp,svg,ico,woff2,ttf,eot,mp3,mp4,ogg,wav,flac}*', (route) => {
+                if (/\/test-image-[^/?]+\.png(?:\?|$)/i.test(route.request().url())) {
+                    return route.fallback();
+                }
+                return route.abort();
+            });
             await context.route(url =>
-                BLOCKED_URL_PATTERNS.some(p => p.test(url.toString())),
-                (route) => route.abort()
+                !/\/test-image-[^/?]+\.png(?:\?|$)/i.test(url.toString())
+                    && BLOCKED_URL_PATTERNS.some(p => p.test(url.toString())),
+                (route) => route.abort(),
             );
         }
 
@@ -477,11 +510,11 @@ export const test = base.extend<Fixtures>({
                 const workId = workIdMatch ? workIdMatch[1] : null;
 
                 if (url.includes('/tracks')) {
-                    const mockPath = path.join(__dirname, `mock-data/api/work/${workId}-tracks.json`);
-                    if (fs.existsSync(mockPath)) return route.fulfill({ path: mockPath });
+                    const mockPath = workId ? resolveWorkFixture(workId, '-tracks') : null;
+                    if (mockPath) return route.fulfill({ path: mockPath });
                 } else if (workId) {
-                    const mockPath = path.join(__dirname, `mock-data/api/work/${workId}.json`);
-                    if (fs.existsSync(mockPath)) return route.fulfill({ path: mockPath });
+                    const mockPath = resolveWorkFixture(workId);
+                    if (mockPath) return route.fulfill({ path: mockPath });
                 }
             }
 
@@ -490,10 +523,10 @@ export const test = base.extend<Fixtures>({
                 const workIdMatch = url.match(/workInfo\/([^\/?]+)/);
                 const workId = workIdMatch ? workIdMatch[1] : null;
                 if (workId) {
-                    const infoPath = path.join(__dirname, `mock-data/api/work/${workId}-info.json`);
-                    if (fs.existsSync(infoPath)) return route.fulfill({ path: infoPath });
-                    const fallbackPath = path.join(__dirname, `mock-data/api/work/${workId}.json`);
-                    if (fs.existsSync(fallbackPath)) return route.fulfill({ path: fallbackPath });
+                    const infoPath = resolveWorkFixture(workId, '-info');
+                    if (infoPath) return route.fulfill({ path: infoPath });
+                    const fallbackPath = resolveWorkFixture(workId);
+                    if (fallbackPath) return route.fulfill({ path: fallbackPath });
                 }
             }
 
@@ -502,8 +535,8 @@ export const test = base.extend<Fixtures>({
                 const workIdMatch = url.match(/tracks\/([^\/?]+)/);
                 const workId = workIdMatch ? workIdMatch[1] : null;
                 if (workId) {
-                    const mockPath = path.join(__dirname, `mock-data/api/work/${workId}-tracks.json`);
-                    if (fs.existsSync(mockPath)) return route.fulfill({ path: mockPath });
+                    const mockPath = resolveWorkFixture(workId, '-tracks');
+                    if (mockPath) return route.fulfill({ path: mockPath });
                 }
             }
 

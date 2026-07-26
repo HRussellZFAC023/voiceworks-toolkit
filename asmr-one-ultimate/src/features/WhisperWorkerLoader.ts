@@ -303,10 +303,10 @@ function configureWebGpuRuntime(adapter) {
     return true;
 }
 
-// Inference timeout. The controller embeds this exact same typed policy and
-// waits beyond it before treating an inference as unresponsive.
+// Worker inference hard ceiling. The controller shares the policy, refreshes
+// its inactivity watchdog on heartbeats, and retains a margin for delivery.
 ${inferencePolicySource}
-const GPU_INFERENCE_ERROR_RE = /createBuffer|RangeError|out of memory|OOM|allocation|device lost|GPUDevice|createComputePipeline|createShaderModule|mapAsync|MapAsyncStatus|mapping webgpu buffer|failed to download data from buffer|buffer unmapped|invalid buffer|OrtRun|Instance reference|AbortError|release session|invalid session|index out of bounds|timed out|reading 'destroy'|reading 'dispose'/i;
+const GPU_INFERENCE_ERROR_RE = /createBuffer|RangeError|out of memory|OOM|allocation|device lost|GPUDevice|createComputePipeline|createShaderModule|mapAsync|MapAsyncStatus|mapping webgpu buffer|failed to download data from buffer|buffer unmapped|invalid buffer|OrtRun|Instance reference|AbortError|release session|invalid session|index out of bounds|reading 'destroy'|reading 'dispose'/i;
 
 function toErrorMessage(error) {
     return error && error.message ? error.message : String(error || 'Unknown error');
@@ -317,10 +317,45 @@ function postChunkError(chunkId, message, gpuFailure = false) {
     self.postMessage({ status: 'error', data, chunkId });
 }
 
-function withInferenceTimeout(promise, ms, backendName) {
+function getInferenceTimeoutDetails(error) {
+    return error && error.whisperInferenceTimeout
+        ? error.whisperInferenceTimeout
+        : null;
+}
+
+function withInferenceTimeout(promise, options) {
     let timer;
+    const {
+        budgetMs,
+        backend,
+        model,
+        chunkId,
+        chunkLengthS,
+        kind,
+        observedInferenceMs,
+        startedAt,
+    } = options;
     const timeout = new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new Error(backendName + ' inference timed out after ' + (ms / 1000) + 's')), ms);
+        timer = setTimeout(() => {
+            const details = {
+                chunkId,
+                chunkLengthS,
+                elapsedMs: Math.max(0, Date.now() - startedAt),
+                budgetMs,
+                kind,
+                backend,
+                model,
+                observedInferenceMs,
+            };
+            // Emit diagnostics before rejecting. The rejection poisons the
+            // worker and the controller immediately detaches its listener.
+            console.error('[Whisper Worker] Inference hard ceiling exceeded', details);
+            const error = new Error(
+                backend + ' inference timed out after ' + (budgetMs / 1000) + 's',
+            );
+            error.whisperInferenceTimeout = details;
+            reject(error);
+        }, budgetMs);
     });
     return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
@@ -332,6 +367,8 @@ function withInferenceTimeout(promise, ms, backendName) {
 let pipelinePromise = null;
 let currentModel = null;
 let currentMultilingual = null;
+let successfulInferenceCount = 0;
+let recentInferenceDurationMs = null;
 
 function initializeTimestampCapability(modelName) {
     // "_timestamped" exports advertise alignment heads and are eligible for a
@@ -371,6 +408,8 @@ async function loadPipelineForModel(settings, progressCb) {
         currentDtype = '';
         wordTimestampsSupported = null;
         wordTimestampsEnabled = false;
+        successfulInferenceCount = 0;
+        recentInferenceDurationMs = null;
     }
 
     const requestedMinBuffer = Number(settings.minWebgpuBufferBytes);
@@ -597,6 +636,7 @@ async function transcribe(msg) {
         return opts;
     };
     let pipeOpts = createAttemptOptions(useWordTimestamps ? 'word' : true);
+    let completedInferenceDurationMs = null;
 
     let inferenceStarted = false;
     const runInference = async (targetPipe, opts, backendName) => {
@@ -609,9 +649,41 @@ async function transcribe(msg) {
             });
             emitHeartbeat('started');
         }
-        const timeoutMs = getInferenceTimeoutMs(backendName, msg.chunkLengthS);
-        console.log('[Whisper Worker] Starting inference on ' + backendName + ' (timeout=' + timeoutMs / 1000 + 's)');
-        return withInferenceTimeout(targetPipe(msg.audio, opts), timeoutMs, backendName);
+        const coldStart = backendName === 'webgpu' && successfulInferenceCount === 0;
+        const selectedModel = String(currentModel || msg.model || '');
+        const chunkLengthS = Number(msg.chunkLengthS) || 0;
+        const observedInferenceMs = recentInferenceDurationMs;
+        const timeoutMs = getInferenceTimeoutMs(
+            backendName,
+            chunkLengthS,
+            coldStart,
+            selectedModel,
+            observedInferenceMs,
+        );
+        const timeoutKind = coldStart ? 'cold-start' : 'warm';
+        const startedAt = Date.now();
+        console.log(
+            '[Whisper Worker] Starting '
+            + (coldStart ? 'cold-start ' : '')
+            + 'inference on ' + backendName
+            + ' (timeout=' + timeoutMs / 1000 + 's)',
+        );
+        const result = await withInferenceTimeout(targetPipe(msg.audio, opts), {
+            budgetMs: timeoutMs,
+            backend: backendName,
+            model: selectedModel,
+            chunkId,
+            chunkLengthS,
+            kind: timeoutKind,
+            observedInferenceMs,
+            startedAt,
+        });
+        completedInferenceDurationMs = Math.max(0, Date.now() - startedAt);
+        recentInferenceDurationMs = updateInferenceDurationEwma(
+            recentInferenceDurationMs,
+            completedInferenceDurationMs,
+        );
+        return result;
     };
 
     let result = null;
@@ -619,12 +691,13 @@ async function transcribe(msg) {
         result = await runInference(pipe, pipeOpts, currentBackend);
     } catch (initialError) {
         const initialMsg = toErrorMessage(initialError);
+        const initialTimeout = getInferenceTimeoutDetails(initialError);
         // Promise.race cannot cancel the underlying Transformers pipeline call.
         // Starting a word->segment retry after a timeout would run a second
         // inference concurrently on the same wedged pipeline. Let the host
         // terminate/recreate this worker instead.
-        if (/inference timed out/i.test(initialMsg)) {
-            haltTimedOutWorker(chunkId, initialMsg, currentBackend !== 'wasm');
+        if (initialTimeout) {
+            haltTimedOutWorker(chunkId, initialMsg, initialTimeout);
             return null;
         }
         const isWordTimestampCapabilityError = pipeOpts.return_timestamps === 'word'
@@ -642,8 +715,9 @@ async function transcribe(msg) {
                 result = await runInference(pipe, pipeOpts, currentBackend);
             } catch (retryError) {
                 const retryMsg = toErrorMessage(retryError);
-                if (/inference timed out/i.test(retryMsg)) {
-                    haltTimedOutWorker(chunkId, retryMsg, currentBackend !== 'wasm');
+                const retryTimeout = getInferenceTimeoutDetails(retryError);
+                if (retryTimeout) {
+                    haltTimedOutWorker(chunkId, retryMsg, retryTimeout);
                     return null;
                 }
                 if (currentBackend !== 'wasm' && GPU_INFERENCE_ERROR_RE.test(retryMsg)) {
@@ -666,6 +740,7 @@ async function transcribe(msg) {
     }
 
     if (!result) return null;
+    successfulInferenceCount += 1;
     if (pipeOpts.return_timestamps === 'word') {
         wordTimestampsSupported = true;
     }
@@ -679,6 +754,7 @@ async function transcribe(msg) {
         rawChunks,
         inputRms: msg.inputRms,
         wordTimestamps: pipeOpts.return_timestamps === 'word',
+        inferenceElapsedMs: completedInferenceDurationMs,
     };
 }
 
@@ -700,11 +776,25 @@ function normalizedDistance(msg) {
     return Number.isFinite(distance) ? distance : Number.POSITIVE_INFINITY;
 }
 
+function normalizedWindowEnd(msg) {
+    const timeOffset = Number(msg?.timeOffset);
+    const chunkLength = Number(msg?.chunkLengthS);
+    if (!Number.isFinite(timeOffset)) return Number.NEGATIVE_INFINITY;
+    return timeOffset + (Number.isFinite(chunkLength) ? Math.max(0, chunkLength) : 0);
+}
+
 function shouldReplaceQueued(existing, incoming) {
     const existingPriority = normalizedPriority(existing);
     const incomingPriority = normalizedPriority(incoming);
     if (incomingPriority !== existingPriority) return incomingPriority < existingPriority;
-    return normalizedDistance(incoming) < normalizedDistance(existing);
+    const existingDistance = normalizedDistance(existing);
+    const incomingDistance = normalizedDistance(incoming);
+    if (incomingDistance !== existingDistance) return incomingDistance < existingDistance;
+    // Live windows are commonly submitted with the same priority and distance
+    // (for example offset 6 at t=14, then offset 12 at t=20). Prefer the newer
+    // window so slow inference converges toward playback instead of rejecting
+    // and repeatedly resubmitting it.
+    return normalizedWindowEnd(incoming) > normalizedWindowEnd(existing);
 }
 
 function postDropped(msg, reason, replacedByChunkId) {
@@ -744,7 +834,7 @@ function postLoadFailed(error, chunkId) {
     for (const queued of queuedJobs) postDropped(queued, 'worker-poisoned');
 }
 
-function haltTimedOutWorker(chunkId, message, gpuFailure) {
+function haltTimedOutWorker(chunkId, message, timeoutDetails = {}) {
     // Promise.race cannot cancel model.generate(). Once it times out, this
     // worker may still be executing the old inference. Poison it so no queued
     // job can overlap. Report poison before the chunk error: replacing the
@@ -753,9 +843,16 @@ function haltTimedOutWorker(chunkId, message, gpuFailure) {
     workerPoisoned = true;
     self.postMessage({
         status: 'worker-poisoned',
-        data: { reason: 'inference-timeout', message, gpuFailure: gpuFailure === true },
+        chunkId,
+        data: {
+            reason: 'inference-timeout',
+            message,
+            ...timeoutDetails,
+            gpuFailure: false,
+            chunkId,
+        },
     });
-    postChunkError(chunkId, message, gpuFailure);
+    postChunkError(chunkId, message);
     const queuedJobs = jobQueue;
     jobQueue = [];
     for (const queued of queuedJobs) postDropped(queued, 'worker-poisoned');
@@ -810,6 +907,10 @@ self.__whisperTestSetPipeline = (testPipe, options = {}) => {
     transformersLoaded = true;
     pipelineLoadPromise = null;
     initializeTimestampCapability(currentModel);
+    successfulInferenceCount = 0;
+    recentInferenceDurationMs = Number(options.recentInferenceDurationMs) > 0
+        ? Number(options.recentInferenceDurationMs)
+        : null;
 };
 self.__whisperTestTranscribeDirect = transcribe;
 ` : ''}
@@ -914,12 +1015,18 @@ self.addEventListener('message', async (event) => {
         currentMultilingual = null;
         wordTimestampsSupported = null;
         wordTimestampsEnabled = false;
+        successfulInferenceCount = 0;
+        recentInferenceDurationMs = null;
         pipelineLoadPromise = null;
         pipelineLoadKey = '';
         return;
     }
 
     if (msg.type === 'init') {
+        const inheritedInferenceDuration = Number(msg.recentInferenceDurationMs);
+        if (Number.isFinite(inheritedInferenceDuration) && inheritedInferenceDuration > 0) {
+            recentInferenceDurationMs = inheritedInferenceDuration;
+        }
         if (msg.gpuVendorHint) gpuVendorHint = String(msg.gpuVendorHint).toLowerCase();
         const requestedMinBuffer = Number(msg.minWebgpuBufferBytes);
         minWebgpuBufferBytes = Number.isFinite(requestedMinBuffer) && requestedMinBuffer > 0

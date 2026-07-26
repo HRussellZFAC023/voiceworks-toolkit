@@ -84,7 +84,9 @@ export function rewriteFfmpegClassWorkerSource(source: string, packageBaseUrl: s
 }
 
 async function fetchFfmpegClassWorkerSource(url: string, runtime: FfmpegLoaderRuntime): Promise<string> {
-    const response = await runtime.fetchImpl(url, {
+    // Keep native Firefox fetch unbound if a caller supplies it directly.
+    const fetchImpl = runtime.fetchImpl;
+    const response = await fetchImpl(url, {
         credentials: 'omit',
         headers: { Accept: 'text/javascript' },
     });

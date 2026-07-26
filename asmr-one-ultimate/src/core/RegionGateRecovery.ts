@@ -648,6 +648,24 @@ function hostAppBooted(): boolean {
     return !!qApp && qApp.childElementCount > 0;
 }
 
+/**
+ * The recovered document already installs validated bootstrap/runtime assets.
+ * Replaying the host's optional mirror retry helper adds a permanent stylesheet
+ * scanner and repeats blocked npmmirror/unpkg requests. Skip only scripts with
+ * multiple distinctive retry-helper signatures; unrelated inline config is
+ * preserved byte-for-byte.
+ */
+export function shouldReplayRegionInlineScript(code: string): boolean {
+    const signatures = [
+        /\bassetsRetry\b/i,
+        /all retry failed for:/i,
+        /\bretry with\b/i,
+        /registry\.npmmirror\.com/i,
+        /\bunpkg\.com/i,
+    ];
+    return signatures.filter((signature) => signature.test(code)).length < 2;
+}
+
 function waitForHostAppBoot(timeoutMs = HOST_BOOT_TIMEOUT_MS): Promise<boolean> {
     if (hostAppBooted()) return Promise.resolve(true);
     return new Promise((resolve) => {
@@ -715,7 +733,9 @@ function installRecoveryDocument(recovery: RecoveryDocument, pageUrl: string, ex
                 script.dataset.asmrRegionSource = url;
                 script.textContent = `${code}\n//# sourceURL=${url}`;
             } else {
-                script.textContent = sourceScript.textContent || '';
+                const code = sourceScript.textContent || '';
+                if (!shouldReplayRegionInlineScript(code)) return;
+                script.textContent = code;
             }
             parent.append(script);
             return;

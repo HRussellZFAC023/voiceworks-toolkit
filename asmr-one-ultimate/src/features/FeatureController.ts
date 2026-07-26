@@ -16,6 +16,7 @@ export abstract class FeatureController {
     protected bridge: KikoeruBridge;
     protected mounted: MountedApp | null = null;
     protected containerId: string;
+    private mountedContainer: HTMLElement | null = null;
     private routeUnwatch: (() => void) | undefined;
     private enabled = false;
 
@@ -48,6 +49,18 @@ export abstract class FeatureController {
     /** How the container is placed relative to the injection point */
     protected get insertMode(): 'append' | 'prepend' | 'after' | 'before' {
         return 'append';
+    }
+
+    /**
+     * Preserve the mounted Vue app when the host temporarily removes its
+     * injection anchor, then move the same root into the replacement anchor.
+     *
+     * This is opt-in because some route-scoped components intentionally use a
+     * remount to rediscover host DOM. Components that teleport persistent UI
+     * to <body> should opt in so a volatile host shell cannot destroy that UI.
+     */
+    protected get preserveMountOnAnchorReplacement(): boolean {
+        return false;
     }
 
     public enable(): void {
@@ -94,9 +107,29 @@ export abstract class FeatureController {
             return;
         }
 
-        // Already mounted and container still in DOM
+        // Already mounted and its original container is still in the DOM.
         const existingContainer = document.getElementById(this.containerId);
-        if (this.mounted && existingContainer?.isConnected) return;
+        if (
+            this.mounted
+            && this.mountedContainer?.isConnected
+            && existingContainer === this.mountedContainer
+        ) return;
+
+        if (this.mounted && this.mountedContainer && this.preserveMountOnAnchorReplacement) {
+            const anchor = this.findInjectionPoint();
+            if (!anchor) {
+                // The host often removes the old toolbar one render before it
+                // inserts the replacement. Keep the Vue app (and any Teleport
+                // children) alive until a later observer pass finds the anchor.
+                return;
+            }
+            if (existingContainer && existingContainer !== this.mountedContainer) {
+                existingContainer.remove();
+            }
+            this.insertContainer(anchor, this.mountedContainer);
+            Logger.debug(`[FeatureController] Reattached: ${this.containerId}`);
+            return;
+        }
 
         // If we had a mounted instance but container was removed, clean up
         if (this.mounted) {
@@ -113,23 +146,10 @@ export abstract class FeatureController {
         if (!container) {
             container = document.createElement('div');
             container.id = this.containerId;
-
-            switch (this.insertMode) {
-                case 'append':
-                    anchor.appendChild(container);
-                    break;
-                case 'prepend':
-                    anchor.prepend(container);
-                    break;
-                case 'after':
-                    anchor.after(container);
-                    break;
-                case 'before':
-                    anchor.before(container);
-                    break;
-            }
+            this.insertContainer(anchor, container);
         }
 
+        this.mountedContainer = container;
         try {
             this.mounted = mountApp(
                 markRaw(this.component),
@@ -142,7 +162,25 @@ export abstract class FeatureController {
         }
     }
 
+    private insertContainer(anchor: HTMLElement, container: HTMLElement): void {
+        switch (this.insertMode) {
+            case 'append':
+                anchor.appendChild(container);
+                break;
+            case 'prepend':
+                anchor.prepend(container);
+                break;
+            case 'after':
+                anchor.after(container);
+                break;
+            case 'before':
+                anchor.before(container);
+                break;
+        }
+    }
+
     protected unmount(): void {
+        const container = this.mountedContainer ?? document.getElementById(this.containerId);
         if (this.mounted) {
             try {
                 this.mounted.unmount();
@@ -150,12 +188,9 @@ export abstract class FeatureController {
                 Logger.error(`[FeatureController] Failed to unmount ${this.containerId}:`, err);
             }
             this.mounted = null;
-
-            // Remove container from DOM
-            const container = document.getElementById(this.containerId);
-            container?.remove();
-
             Logger.debug(`[FeatureController] Unmounted: ${this.containerId}`);
         }
+        container?.remove();
+        this.mountedContainer = null;
     }
 }

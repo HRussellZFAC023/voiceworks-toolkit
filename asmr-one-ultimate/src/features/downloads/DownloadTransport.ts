@@ -1,9 +1,20 @@
 import { getApiBaseUrl, getAuthHeader } from '../playlist/PlaylistService';
+import {
+    isDownloadResumeFingerprint,
+    matchesDownloadResumeFingerprint,
+    type DownloadResumeFingerprint,
+} from './DownloadResumeFingerprint';
 
 export interface DownloadProbe {
     size?: number;
     etag?: string;
     lastModified?: string;
+    /** Trusted raw-object version metadata used when standard HTTP validators are absent. */
+    objectVersion?: string;
+    /** Canonical trusted raw-object origin + path (verification query excluded). */
+    objectIdentity?: string;
+    /** Exact manifest/API request URL that selected this object. */
+    sourceUrl?: string;
     acceptsRanges: boolean;
     /** A validator-proven 416 established that the persisted offset is exact EOF. */
     confirmedCompleteAtOffset?: true;
@@ -17,6 +28,9 @@ export interface DownloadChunk {
     total?: number;
     etag?: string;
     lastModified?: string;
+    objectVersion?: string;
+    objectIdentity?: string;
+    sourceUrl?: string;
 }
 
 export class RangeRestartRequiredError extends Error {
@@ -58,8 +72,37 @@ export interface DownloadStreamOptions {
     signal?: AbortSignal;
     expectedEtag?: string;
     expectedLastModified?: string;
+    expectedObjectVersion?: string;
+    expectedObjectIdentity?: string;
+    expectedSourceUrl?: string;
+    expectedResumeFingerprint?: DownloadResumeFingerprint;
     /** Manifest/checkpoint total required to prove an offset-at-EOF 416 is complete. */
     expectedTotal?: number;
+}
+
+const TRUSTED_RAW_MEDIA_ORIGIN = 'https://raw.kiko-play-niptan.one';
+
+function canonicalTrustedObjectIdentity(value: string): string | undefined {
+    try {
+        const url = new URL(value);
+        if (url.origin !== TRUSTED_RAW_MEDIA_ORIGIN || !url.pathname.startsWith('/')) return undefined;
+        return `${url.origin}${url.pathname}`;
+    } catch {
+        return undefined;
+    }
+}
+
+function trustedObjectValidator(
+    response: Response,
+    fallbackUrl: string,
+): { objectVersion?: string; objectIdentity?: string } {
+    const objectIdentity = canonicalTrustedObjectIdentity(response.url || fallbackUrl);
+    if (!objectIdentity) return {};
+    const rawVersion = response.headers.get('x-bz-info-mtime')?.trim() || '';
+    if (!/^\d+(?:\.\d+)?$/.test(rawVersion) || rawVersion.length > 64) {
+        return { objectIdentity };
+    }
+    return { objectVersion: rawVersion, objectIdentity };
 }
 
 const DEFAULT_RETRY_ATTEMPTS = 3;
@@ -181,7 +224,12 @@ export class DownloadTransport {
             let timedOut = false;
             const timeoutError = new DownloadRequestTimeoutError();
             try {
-                const fetchRequest = this.fetchImpl(url, {
+                // Firefox enforces the WebIDL receiver for window.fetch. Reading
+                // it through the transport instance and immediately calling
+                // `this.fetchImpl(...)` binds `this` to DownloadTransport, which
+                // Firefox rejects before issuing the request.
+                const fetchImpl = this.fetchImpl;
+                const fetchRequest = fetchImpl(url, {
                     ...init,
                     signal: attemptController.signal,
                 });
@@ -235,6 +283,66 @@ export class DownloadTransport {
         });
     }
 
+    private async readExactResponseBytes(
+        response: Response,
+        expectedLength: number,
+        controller: AbortController,
+    ): Promise<Uint8Array> {
+        if (!response.body) throw new RangeRestartRequiredError('Resume proof body is unavailable');
+        const reader = response.body.getReader();
+        const result = new Uint8Array(expectedLength);
+        let cursor = 0;
+        try {
+            for (;;) {
+                const { done, value } = await this.readWithStallTimeout(reader, controller);
+                if (done) break;
+                if (!value?.byteLength) continue;
+                if (cursor + value.byteLength > expectedLength) {
+                    throw new RangeRestartRequiredError('Resume proof exceeded its declared byte range');
+                }
+                result.set(value, cursor);
+                cursor += value.byteLength;
+            }
+            if (cursor !== expectedLength) {
+                throw new RangeRestartRequiredError('Resume proof was truncated');
+            }
+            return result;
+        } catch (error) {
+            await reader.cancel(error).catch(() => undefined);
+            throw error;
+        }
+    }
+
+    private async verifyTrustedResumeFingerprint(
+        target: DownloadRequestTarget,
+        fingerprint: DownloadResumeFingerprint,
+        expectedObjectIdentity: string,
+        expectedTotal: number,
+        controller: AbortController,
+    ): Promise<boolean> {
+        return matchesDownloadResumeFingerprint(fingerprint, async (offset, length) => {
+            const end = offset + length - 1;
+            const response = await this.request(target.url, {
+                headers: { ...target.headers, Range: `bytes=${offset}-${end}` },
+                signal: controller.signal,
+                credentials: target.credentials,
+            });
+            const range = parseContentRange(response.headers.get('content-range'));
+            const identity = canonicalTrustedObjectIdentity(response.url || target.url);
+            if (
+                response.status !== 206
+                || range?.start !== offset
+                || range.end !== end
+                || range.total !== expectedTotal
+                || identity !== expectedObjectIdentity
+            ) {
+                await response.body?.cancel().catch(() => undefined);
+                throw new RangeRestartRequiredError('Remote resume proof did not match the checkpoint object');
+            }
+            return this.readExactResponseBytes(response, length, controller);
+        });
+    }
+
     async probe(url: string, signal?: AbortSignal): Promise<DownloadProbe> {
         const target = resolveDownloadRequestTarget(url);
         const response = await this.request(target.url, {
@@ -244,10 +352,13 @@ export class DownloadTransport {
             credentials: target.credentials,
         });
         if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        const objectValidator = trustedObjectValidator(response, target.url);
         return {
             size: numericHeader(response.headers, 'content-length'),
             etag: response.headers.get('etag') || undefined,
             lastModified: response.headers.get('last-modified') || undefined,
+            ...objectValidator,
+            ...(objectValidator.objectIdentity ? { sourceUrl: target.url } : {}),
             acceptsRanges: /bytes/i.test(response.headers.get('accept-ranges') || ''),
         };
     }
@@ -259,6 +370,31 @@ export class DownloadTransport {
         options: DownloadStreamOptions = {},
     ): Promise<DownloadProbe> {
         const target = resolveDownloadRequestTarget(url);
+        const hasTrustedObjectValidator = !!options.expectedObjectVersion
+            && !!options.expectedObjectIdentity
+            && !!options.expectedSourceUrl
+            && options.expectedSourceUrl === target.url
+            && Number.isSafeInteger(options.expectedTotal)
+            && canonicalTrustedObjectIdentity(options.expectedObjectIdentity) === options.expectedObjectIdentity;
+        const hasTrustedResumeFingerprint = !options.expectedObjectVersion
+            && !!options.expectedObjectIdentity
+            && !!options.expectedSourceUrl
+            && options.expectedSourceUrl === target.url
+            && Number.isSafeInteger(options.expectedTotal)
+            && canonicalTrustedObjectIdentity(options.expectedObjectIdentity) === options.expectedObjectIdentity
+            && isDownloadResumeFingerprint(options.expectedResumeFingerprint)
+            && options.expectedResumeFingerprint.checkpointOffset === offset;
+        if (
+            offset > 0
+            && !options.expectedEtag
+            && !options.expectedLastModified
+            && !hasTrustedObjectValidator
+            && !hasTrustedResumeFingerprint
+        ) {
+            throw new RangeRestartRequiredError(
+                'Cannot safely resume without a persisted remote object validator',
+            );
+        }
         const headers: Record<string, string> = { ...target.headers };
         if (offset > 0) headers.Range = `bytes=${offset}-`;
         if (offset > 0 && options.expectedEtag) headers['If-Range'] = options.expectedEtag;
@@ -269,7 +405,18 @@ export class DownloadTransport {
         if (options.signal?.aborted) forwardAbort();
         else options.signal?.addEventListener('abort', forwardAbort, { once: true });
         try {
-            let validatorContinuityProven = false;
+            let validatorContinuityProven = hasTrustedResumeFingerprint
+                ? await this.verifyTrustedResumeFingerprint(
+                    target,
+                    options.expectedResumeFingerprint!,
+                    options.expectedObjectIdentity!,
+                    options.expectedTotal!,
+                    requestController,
+                )
+                : false;
+            if (hasTrustedResumeFingerprint && !validatorContinuityProven) {
+                throw new RangeRestartRequiredError('Remote file changed since the checkpoint');
+            }
             let response = await this.request(target.url, {
                 headers: { ...headers },
                 signal: requestController.signal,
@@ -300,11 +447,18 @@ export class DownloadTransport {
                 const remoteTotal = parseUnsatisfiedContentRange(response.headers.get('content-range'));
                 const responseEtag = response.headers.get('etag') || undefined;
                 const responseLastModified = response.headers.get('last-modified') || undefined;
+                const responseObject = trustedObjectValidator(response, target.url);
                 const responseProvesContinuity = options.expectedEtag
                     ? responseEtag === options.expectedEtag
                     : options.expectedLastModified
                         ? responseLastModified === options.expectedLastModified
-                        : false;
+                        : hasTrustedObjectValidator
+                            ? responseObject.objectVersion === options.expectedObjectVersion
+                                && responseObject.objectIdentity === options.expectedObjectIdentity
+                            : hasTrustedResumeFingerprint
+                                ? validatorContinuityProven
+                                    && responseObject.objectIdentity === options.expectedObjectIdentity
+                            : false;
                 await response.body?.cancel().catch(() => undefined);
                 if (
                     Number.isSafeInteger(options.expectedTotal)
@@ -316,6 +470,10 @@ export class DownloadTransport {
                         size: remoteTotal,
                         etag: responseEtag ?? options.expectedEtag,
                         lastModified: responseLastModified ?? options.expectedLastModified,
+                        ...(responseObject.objectIdentity ? {
+                            ...responseObject,
+                            sourceUrl: target.url,
+                        } : {}),
                         acceptsRanges: true,
                         confirmedCompleteAtOffset: true,
                     };
@@ -338,6 +496,29 @@ export class DownloadTransport {
             }
             let etag = response.headers.get('etag') || undefined;
             let lastModified = response.headers.get('last-modified') || undefined;
+            const responseObject = trustedObjectValidator(response, target.url);
+            if (
+                hasTrustedObjectValidator
+                && (
+                    responseObject.objectVersion !== options.expectedObjectVersion
+                    || responseObject.objectIdentity !== options.expectedObjectIdentity
+                    || range?.total !== options.expectedTotal
+                )
+            ) {
+                await response.body?.cancel().catch(() => undefined);
+                throw new RangeRestartRequiredError('Remote file changed since the checkpoint');
+            }
+            if (
+                hasTrustedResumeFingerprint
+                && (
+                    !validatorContinuityProven
+                    || responseObject.objectIdentity !== options.expectedObjectIdentity
+                    || range?.total !== options.expectedTotal
+                )
+            ) {
+                await response.body?.cancel().catch(() => undefined);
+                throw new RangeRestartRequiredError('Remote file changed since the checkpoint');
+            }
             if (options.expectedEtag && etag !== options.expectedEtag) {
                 await response.body?.cancel().catch(() => undefined);
                 throw new RangeRestartRequiredError('Remote file changed since the checkpoint');
@@ -386,7 +567,17 @@ export class DownloadTransport {
                     const { done, value } = await this.readWithStallTimeout(reader, requestController);
                     if (done) break;
                     if (!value?.byteLength) continue;
-                    await onChunk({ bytes: value, offset: cursor, total, etag, lastModified });
+                    await onChunk({
+                        bytes: value,
+                        offset: cursor,
+                        total,
+                        etag,
+                        lastModified,
+                        ...(responseObject.objectIdentity ? {
+                            ...responseObject,
+                            sourceUrl: target.url,
+                        } : {}),
+                    });
                     cursor += value.byteLength;
                 }
                 const expectedEnd = typeof total === 'number' ? total : range ? range.end + 1 : undefined;
@@ -397,6 +588,10 @@ export class DownloadTransport {
                     size: total,
                     etag,
                     lastModified,
+                    ...(responseObject.objectIdentity ? {
+                        ...responseObject,
+                        sourceUrl: target.url,
+                    } : {}),
                     acceptsRanges: response.status === 206 || /bytes/i.test(response.headers.get('accept-ranges') || ''),
                     ...(response.status === 200 && total === 0 && cursor === 0
                         ? { confirmedEmpty: true as const }

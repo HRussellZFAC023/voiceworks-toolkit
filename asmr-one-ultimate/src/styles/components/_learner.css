@@ -226,6 +226,38 @@ button.learner-en:focus-visible {
     padding-inline: 38px;
 }
 
+.learner-whisper-delayed {
+    position: absolute;
+    inset-block-start: 6px;
+    inset-inline-start: 8px;
+    max-inline-size: calc(100% - 56px);
+    overflow: hidden;
+    color: var(--asmr-text-secondary);
+    font-size: 0.68rem;
+    font-weight: 600;
+    line-height: 1.2;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    opacity: 0.72;
+    pointer-events: none;
+}
+
+.learner-whisper-placeholder {
+    position: absolute;
+    inset: 18px 44px;
+    display: grid;
+    place-items: center;
+    margin: 0;
+    overflow: hidden;
+    color: var(--asmr-text-secondary);
+    font-size: 0.78rem;
+    font-weight: 600;
+    line-height: 1.35;
+    text-align: center;
+    text-wrap: balance;
+    pointer-events: none;
+}
+
 .learner-subtitle-expand {
     position: absolute;
     inset-block-start: 4px;

@@ -391,6 +391,39 @@ describe('DownloadCenter', () => {
         wrapper.unmount();
     });
 
+    it('replaces a bare unknown size with manifest file count and duration', async () => {
+        mocks.searchWorks.mockResolvedValue({
+            works: [{
+                id: 490,
+                title: 'Unknown manifest sizes',
+                duration: 815,
+                thumbnailCoverUrl: 'https://images.example.test/490.jpg',
+                tags: [{ name: 'ASMR' }],
+            }],
+            pagination: { currentPage: 1, pageSize: 20, totalCount: 1 },
+        });
+        mocks.getTracks.mockResolvedValue([
+            { type: 'audio', title: 'one.wav', mediaDownloadUrl: 'https://media.example.test/one.wav' },
+            { type: 'audio', title: 'two.wav', mediaDownloadUrl: 'https://media.example.test/two.wav' },
+            { type: 'image', title: 'cover.jpg', mediaDownloadUrl: 'https://media.example.test/cover.jpg' },
+        ]);
+        const wrapper = mount(DownloadCenter, { attachTo: document.body });
+        await wrapper.get('[data-testid="download-center-open"]').trigger('click');
+        const input = document.querySelector('[data-testid="search"]') as HTMLInputElement;
+        input.value = 'unknown sizes';
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        await flushPromises();
+        (document.querySelector('[data-testid="search-all-works"]') as HTMLButtonElement).click();
+
+        await vi.waitFor(() => {
+            expect(document.querySelector('[data-testid^="search-work-"]')?.textContent)
+                .toContain('13:35 · 3 files');
+        });
+        expect(document.querySelector('[data-testid^="search-work-"]')?.textContent)
+            .not.toContain('size unavailable');
+        wrapper.unmount();
+    });
+
     it('stops queued work enrichment when the component unmounts', async () => {
         const tracks = [deferred<any[]>(), deferred<any[]>(), deferred<any[]>()];
         mocks.searchWorks.mockResolvedValue({
@@ -707,6 +740,113 @@ describe('DownloadCenter', () => {
             expect.any(Function),
             { disableOpus: true },
         );
+        wrapper.unmount();
+    });
+
+    it('offers an explicit original-title resume only for translation-blocked jobs', async () => {
+        const blockedJob = {
+            id: 'job-translation',
+            title: 'Waiting for translated titles',
+            status: 'paused',
+            options: {
+                state: {
+                    selectedWorkIds: ['RJ123456'],
+                    filters: { audio: true, video: true, image: true, text: true, other: true },
+                    titleMode: 'original-bracketed-translation',
+                    convertToOpus: false,
+                    opusBitrate: 96,
+                    metadataMode: 'additive',
+                    includeArtwork: true,
+                },
+                directory: {},
+                enrichment: {},
+                discovery: {
+                    works: [{ id: 'RJ123456', title: 'Original title' }],
+                    nextIndex: 0,
+                    skippedWorkIds: [],
+                    titlesReady: false,
+                    complete: false,
+                },
+            },
+            createdAt: 1,
+            updatedAt: 1,
+        };
+        const ordinaryJob = {
+            ...blockedJob,
+            id: 'job-files',
+            title: 'Downloading files',
+            options: {
+                ...blockedJob.options,
+                state: { ...blockedJob.options.state, titleMode: 'original' },
+                discovery: { ...blockedJob.options.discovery, titlesReady: true },
+            },
+        };
+        mocks.recover.mockResolvedValue([blockedJob, ordinaryJob]);
+        mocks.runnerResume.mockResolvedValue({ jobId: blockedJob.id, skipped: 0 });
+        const wrapper = mount(DownloadCenter, { attachTo: document.body });
+        await flushPromises();
+        await wrapper.get('[data-testid="download-center-open"]').trigger('click');
+
+        expect(document.querySelector('[data-testid="resume-with-original-titles-job-files"]')).toBeNull();
+        (document.querySelector(
+            '[data-testid="resume-with-original-titles-job-translation"]',
+        ) as HTMLButtonElement).click();
+        await flushPromises();
+
+        expect(mocks.runnerResume).toHaveBeenCalledWith(
+            blockedJob,
+            expect.any(Function),
+            { useOriginalTitles: true },
+        );
+        wrapper.unmount();
+    });
+
+    it('presents unavailable title translation as a paused choice instead of a failed download', async () => {
+        mocks.fetchOwn.mockResolvedValue([{
+            id: 'mine',
+            name: 'Mine',
+            privacy: 0,
+            works: ['RJ123456'],
+            works_count: 1,
+        }]);
+        mocks.fetchPlaylist.mockResolvedValue({
+            id: 'mine',
+            name: 'Mine',
+            description: '',
+            worksCount: 1,
+            works: [{ rjCode: 'RJ123456', title: 'Selected work' }],
+        });
+        mocks.runnerStart.mockImplementation(async (_works, _state, _directory, _title, onProgress) => {
+            onProgress({
+                jobId: 'job-translation',
+                phase: 'translating',
+                current: 0,
+                total: 1,
+            });
+            const ErrorType = (await import('../../src/features/downloads/DownloadCenterRunner')).DownloadCenterRunError;
+            throw new ErrorType('title-translation');
+        });
+        Object.defineProperty(window, 'showDirectoryPicker', {
+            configurable: true,
+            value: vi.fn(),
+        });
+        const wrapper = mount(DownloadCenter, { attachTo: document.body });
+        await wrapper.get('[data-testid="download-center-open"]').trigger('click');
+        (document.querySelector('[data-testid="source-own"]') as HTMLButtonElement).click();
+        await flushPromises();
+        (document.querySelector('[data-testid="playlist-check-mine"]') as HTMLInputElement).click();
+        await flushPromises();
+        (document.querySelector('[data-testid="start"]') as HTMLButtonElement).click();
+        await flushPromises();
+
+        expect(document.querySelector('[data-testid="download-error"]')?.textContent)
+            .toContain('Title translation is still unavailable');
+        expect(document.querySelector('[data-testid="download-error"]')?.textContent)
+            .not.toContain('Work download failed');
+        expect(document.querySelector('[data-testid="download-progress"]')?.textContent)
+            .toContain('Download paused');
+        expect(document.querySelector('[data-testid="progress-count"]')?.textContent)
+            .toContain('0 / 1');
         wrapper.unmount();
     });
 

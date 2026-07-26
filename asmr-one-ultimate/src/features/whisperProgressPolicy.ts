@@ -14,9 +14,11 @@ interface RuntimeProgressInput {
     playbackSeconds: number;
     knownDuration: number;
     pcmDuration: number;
-    coverageOrigin: number;
+    /** Current playhead window; deliberately separate from durable resume coverage. */
+    progressOrigin: number;
     processedRanges: WhisperCoverageRange[];
     unavailableRanges: WhisperCoverageRange[];
+    throughputLabel: string;
 }
 
 export interface RuntimeProgressSnapshot {
@@ -78,7 +80,7 @@ export function buildWhisperRuntimeProgress(
         input.playbackSeconds,
     );
     const coverage = summarizeWhisperCoverage({
-        origin: input.coverageOrigin,
+        origin: input.progressOrigin,
         processed: input.processedRanges,
         unavailable: input.unavailableRanges,
     }, input.playbackSeconds, totalSeconds);
@@ -90,7 +92,9 @@ export function buildWhisperRuntimeProgress(
         plan: `${input.model} · ${input.backend.toUpperCase()}`,
         processed: Math.round(coverage.processedSeconds),
         through: Math.round(coverage.processedThroughSeconds),
+        playback: Math.round(input.playbackSeconds),
         total: Math.round(totalSeconds),
+        throughput: input.throughputLabel,
         timing: input.timingLabel,
     };
 

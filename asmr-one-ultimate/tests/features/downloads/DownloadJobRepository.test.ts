@@ -45,13 +45,37 @@ describe('DownloadJobRepository', () => {
         const name = `download-jobs-${crypto.randomUUID()}`;
         const first = repository(name);
         await seed(first);
-        await first.checkpointFile('file-1', { offset: 42, etag: 'v1' });
+        await first.checkpointFile('file-1', {
+            offset: 42,
+            etag: 'v1',
+            objectVersion: '1783777782.543',
+            objectIdentity: 'https://raw.kiko-play-niptan.one/media/download/object/one.wav',
+            sourceUrl: '/one',
+            resumeFingerprint: {
+                version: 1,
+                algorithm: 'SHA-256',
+                checkpointOffset: 42,
+                samples: [{
+                    offset: 0,
+                    length: 42,
+                    sha256: 'a'.repeat(64),
+                }],
+            },
+        });
         await first.close();
 
         const snapshot = await repository(name).loadJob<{ language: string; selected: string[] }>('job-1');
         expect(snapshot?.job.options).toEqual({ language: 'zh-CN', selected: ['audio'] });
         expect(snapshot?.files.find((file) => file.id === 'file-1')?.downloadedBytes).toBe(42);
-        expect(snapshot?.checkpoints).toEqual([expect.objectContaining({ fileId: 'file-1', offset: 42, etag: 'v1' })]);
+        expect(snapshot?.checkpoints).toEqual([expect.objectContaining({
+            fileId: 'file-1',
+            offset: 42,
+            etag: 'v1',
+            objectVersion: '1783777782.543',
+            objectIdentity: 'https://raw.kiko-play-niptan.one/media/download/object/one.wav',
+            sourceUrl: '/one',
+            resumeFingerprint: expect.objectContaining({ checkpointOffset: 42 }),
+        })]);
     });
 
     it('persists the selected full-quality source for refresh-safe resume', async () => {

@@ -262,6 +262,37 @@ describe('DownloadCenterRunner', () => {
         }));
     });
 
+    it('updates aggregate byte progress by deltas without rescanning every file per chunk', async () => {
+        const files = [
+            { id: 'first', jobId: 'job', path: 'First.wav', status: 'paused', downloadedBytes: 2, totalBytes: 10 },
+            { id: 'second', jobId: 'job', path: 'Second.wav', status: 'paused', downloadedBytes: 1 },
+            { id: 'done', jobId: 'job', path: 'Done.wav', status: 'completed', downloadedBytes: 5, totalBytes: 5 },
+        ];
+        const repo = repository(files);
+        const runner = new DownloadCenterRunner(repo as any);
+        const persisted = options([{ id: 'RJ2', title: 'Work' }]);
+        persisted.discovery!.complete = true;
+        const progress = vi.fn();
+        const mapValues = vi.spyOn(Map.prototype, 'values');
+        let progressMapScans = 0;
+        mocks.coordinatorRun.mockImplementationOnce(async (jobId: string, notify: (value: unknown) => void) => {
+            const callsBeforeProgress = mapValues.mock.calls.length;
+            notify({ jobId, fileId: 'first', completedBytes: 4, totalBytes: 10, status: 'downloading' });
+            notify({ jobId, fileId: 'second', completedBytes: 3, totalBytes: 8, status: 'downloading' });
+            notify({ jobId, fileId: 'first', completedBytes: 6, totalBytes: 12, status: 'downloading' });
+            progressMapScans = mapValues.mock.calls.length - callsBeforeProgress;
+        });
+
+        await (runner as any).prepareAndRun('job', persisted, progress).catch(() => undefined);
+
+        const byteProgress = progress.mock.calls
+            .map(call => call[0])
+            .filter(value => value.completedBytes != null);
+        expect(byteProgress.map(value => value.completedBytes)).toEqual([10, 12, 14]);
+        expect(byteProgress.map(value => value.totalBytes)).toEqual([undefined, 23, 25]);
+        expect(progressMapScans).toBe(0);
+    });
+
     it.each([
         { image: true, artwork: true, existingCover: false, expected: true },
         { image: false, artwork: true, existingCover: false, expected: false },
@@ -305,6 +336,7 @@ describe('DownloadCenterRunner', () => {
         mocks.getWorkInfo.mockRejectedValueOnce(new Error('metadata offline'));
         const { files: additions } = await discoverDefaultWork();
         expect(additions).toEqual(expect.arrayContaining([expect.objectContaining({ path: 'Work/track.wav' })]));
+        expect(additions.some(file => file.id.endsWith(':generated-cover'))).toBe(false);
     });
 
     it('persists full-quality stream fallbacks without ever selecting low-quality audio', async () => {
@@ -459,15 +491,49 @@ describe('DownloadCenterRunner', () => {
         mocks.getWorkInfo.mockReturnValueOnce(new Promise(() => undefined));
         const repo = repository();
         const runner = new DownloadCenterRunner(repo as any);
+        const snapshotCover = 'https://media.test/snapshot-cover.jpg';
 
-        const discovery = (runner as any).continueDiscovery('job', options([{ id: 'RJ2', title: 'Work' }]));
+        const discovery = (runner as any).continueDiscovery('job', options([{
+            id: 'RJ2',
+            title: 'Work',
+            coverUrl: snapshotCover,
+        }], 0, { convertToOpus: true }));
         await vi.advanceTimersByTimeAsync(DOWNLOAD_OPTIONAL_METADATA_WAIT_MS);
         await discovery;
 
         const additions = repo.appendFilesAndUpdateOptions.mock.calls.flatMap(call => call[2] as any[]);
         expect(additions).toEqual(expect.arrayContaining([
             expect.objectContaining({ path: 'Work/track.wav' }),
+            expect.objectContaining({
+                path: 'Work/cover.jpg',
+                url: snapshotCover,
+            }),
         ]));
+        const track = additions.find(file => file.path === 'Work/track.wav');
+        expect(repo.storedOptions?.enrichment[track.id]?.artworkUrl).toBe(snapshotCover);
+    });
+
+    it('prefers full work metadata artwork over the persisted work thumbnail', async () => {
+        const metadataCover = 'https://media.test/full-cover.jpg';
+        mocks.getWorkInfo.mockResolvedValueOnce(info(metadataCover));
+        const repo = repository();
+        const runner = new DownloadCenterRunner(repo as any);
+
+        await (runner as any).continueDiscovery('job', options([{
+            id: 'RJ2',
+            title: 'Work',
+            coverUrl: 'https://media.test/snapshot-cover.jpg',
+        }], 0, { convertToOpus: true }));
+
+        const additions = repo.appendFilesAndUpdateOptions.mock.calls.flatMap(call => call[2] as any[]);
+        expect(additions).toEqual(expect.arrayContaining([
+            expect.objectContaining({
+                path: 'Work/cover.jpg',
+                url: metadataCover,
+            }),
+        ]));
+        const track = additions.find(file => file.path === 'Work/track.wav');
+        expect(repo.storedOptions?.enrichment[track.id]?.artworkUrl).toBe(metadataCover);
     });
 
     it('bounds timed-out optional metadata while continuing every required manifest', async () => {
@@ -504,7 +570,7 @@ describe('DownloadCenterRunner', () => {
         const error = await preparingTitles;
 
         expect(error).toBeInstanceOf(DownloadCenterRunError);
-        expect(error).toMatchObject({ code: 'failed' });
+        expect(error).toMatchObject({ code: 'title-translation' });
         expect(repo.storedOptions?.discovery).toMatchObject({
             titlesReady: false,
             works: [expect.objectContaining({ title: 'Original work' })],
@@ -568,7 +634,7 @@ describe('DownloadCenterRunner', () => {
         const error = await (runner as any).ensureTitles('job', persisted).catch((value: unknown) => value);
 
         expect(error).toBeInstanceOf(DownloadCenterRunError);
-        expect(error).toMatchObject({ code: 'failed' });
+        expect(error).toMatchObject({ code: 'title-translation' });
         expect(repo.storedOptions?.discovery?.works).toEqual([
             expect.objectContaining({ translatedTitle: 'Translated first' }),
             expect.objectContaining({ translatedTitle: '作品 2' }),
@@ -618,7 +684,7 @@ describe('DownloadCenterRunner', () => {
         const partial = repo.storedOptions!;
 
         expect(firstError).toBeInstanceOf(DownloadCenterRunError);
-        expect(firstError).toMatchObject({ code: 'failed' });
+        expect(firstError).toMatchObject({ code: 'title-translation' });
         expect(partial.discovery?.titlesReady).toBe(false);
         expect(partial.discovery?.works.slice(0, DOWNLOAD_TITLE_TRANSLATION_BATCH_SIZE))
             .toEqual(expect.arrayContaining([
@@ -684,6 +750,39 @@ describe('DownloadCenterRunner', () => {
         ]);
         expect(calls.at(-1)?.[1].discovery).toMatchObject({ nextIndex: workCount, complete: true });
         expect(calls.at(-1)?.[2]).toEqual([]);
+    });
+
+    it('does not build or serialize per-file Opus enrichment when conversion is disabled', async () => {
+        const trackCount = 128;
+        mocks.getValidatedLiveTracks.mockResolvedValue(Array.from({ length: trackCount }, (_, index) => ({
+            type: 'audio',
+            hash: `audio-${index}`,
+            title: `track-${index}.wav`,
+            mediaDownloadUrl: `https://media.test/track-${index}.wav`,
+        })));
+        mocks.getWorkInfo.mockResolvedValue(info(''));
+        const stringify = vi.spyOn(JSON, 'stringify');
+        const repo = repository();
+        const runner = new DownloadCenterRunner(repo as any);
+
+        await (runner as any).continueDiscovery('job', options(
+            [{ id: 'RJ2', title: 'Work' }],
+            0,
+            { convertToOpus: false, includeArtwork: false },
+        ));
+
+        expect(repo.appendFilesAndUpdateOptions.mock.calls.flatMap(call => call[2] as any[]))
+            .toHaveLength(trackCount);
+        expect(repo.appendFilesAndUpdateOptions.mock.calls.every(call =>
+            Object.keys(call[1].enrichment).length === 0,
+        )).toBe(true);
+        const serializedOptions = stringify.mock.calls
+            .map(call => call[0] as { enrichment?: Record<string, unknown> })
+            .filter(value => value?.enrichment);
+        expect(serializedOptions.length).toBeGreaterThan(0);
+        expect(serializedOptions.every(value =>
+            Object.keys(value.enrichment || {}).length === 0,
+        )).toBe(true);
     });
 
     it('prefetches manifests with bounded concurrency and preserves output order', async () => {
@@ -823,6 +922,9 @@ describe('DownloadCenterRunner', () => {
         const runner = new DownloadCenterRunner(repo as any);
         const persisted = options([{ id: 'RJ2', title: 'Work' }], 0, { convertToOpus: true });
         persisted.discovery!.complete = true;
+        persisted.enrichment = {
+            file: { tags: { title: 'Track' }, artworkUrl: 'https://media.test/cover.jpg' },
+        };
         await repo.createJob({ id: 'job', title: 'Interrupted', options: persisted });
         const job = (await repo.loadJob())!.job as DownloadCenterJob;
         const prepare = vi.spyOn(runner as any, 'prepareAndRun')
@@ -834,6 +936,7 @@ describe('DownloadCenterRunner', () => {
             'job',
             expect.objectContaining({
                 state: expect.objectContaining({ convertToOpus: false }),
+                enrichment: {},
                 opusOutputPaths: {},
             }),
             [],
@@ -844,6 +947,65 @@ describe('DownloadCenterRunner', () => {
             expect.any(Function),
             expect.anything(),
         );
+    });
+
+    it('persists an explicit original-title choice before resuming discovery', async () => {
+        const repo = repository();
+        const runner = new DownloadCenterRunner(repo as any);
+        const persisted = options([{ id: 'RJ2', title: 'Original work' }]);
+        persisted.state.titleMode = 'original-bracketed-translation';
+        persisted.discovery!.titlesReady = false;
+        await repo.createJob({ id: 'job', title: 'Waiting for titles', options: persisted });
+        const job = (await repo.loadJob())!.job as DownloadCenterJob;
+        const prepare = vi.spyOn(runner as any, 'prepareAndRun')
+            .mockImplementation(async (...args: unknown[]) =>
+                (runner as any).ensureTitles(
+                    args[0] as string,
+                    args[1] as PersistedDownloadCenterOptions,
+                ));
+
+        await runner.resume(job, undefined, { useOriginalTitles: true });
+
+        expect(repo.appendFilesAndUpdateOptions).toHaveBeenCalledWith(
+            'job',
+            expect.objectContaining({
+                state: expect.objectContaining({ titleMode: 'original' }),
+                discovery: expect.objectContaining({ titlesReady: true, nextIndex: 0 }),
+            }),
+            [],
+        );
+        expect(prepare).toHaveBeenCalledWith(
+            'job',
+            expect.objectContaining({
+                state: expect.objectContaining({ titleMode: 'original' }),
+                discovery: expect.objectContaining({ titlesReady: true }),
+            }),
+            expect.any(Function),
+            expect.anything(),
+        );
+        expect(mocks.translateBatch).not.toHaveBeenCalled();
+    });
+
+    it('reports unavailable title translation as paused and retryable', async () => {
+        const repo = repository();
+        const runner = new DownloadCenterRunner(repo as any);
+        const persisted = options([{ id: 'RJ2', title: 'Original work' }]);
+        persisted.state.titleMode = 'translated';
+        persisted.discovery!.titlesReady = false;
+        await repo.createJob({ id: 'job', title: 'Waiting for titles', options: persisted });
+        const job = (await repo.loadJob())!.job as DownloadCenterJob;
+        vi.spyOn(runner as any, 'prepareAndRun')
+            .mockRejectedValue(new DownloadCenterRunError('title-translation'));
+
+        await expect(runner.resume(job)).rejects.toMatchObject({ code: 'title-translation' });
+
+        expect(runner.progress).toMatchObject({
+            jobId: 'job',
+            phase: 'paused',
+            current: 0,
+            total: 1,
+        });
+        expect(repo.pauseJob).toHaveBeenCalledWith('job', expect.any(String));
     });
 
     it('omits credentials when loading Opus artwork from an external CDN', async () => {

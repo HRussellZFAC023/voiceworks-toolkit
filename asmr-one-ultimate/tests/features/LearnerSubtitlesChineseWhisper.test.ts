@@ -65,6 +65,7 @@ describe('LearnerSubtitles Chinese Whisper rendering', () => {
             progress: 0,
             progressMessage: '',
             currentTrackSrc: null,
+            stage: 'idle',
         });
 
         vi.spyOn(TranslationService, 'peekCached').mockReturnValue(null);
@@ -81,6 +82,7 @@ describe('LearnerSubtitles Chinese Whisper rendering', () => {
             progress: 0,
             progressMessage: '',
             currentTrackSrc: null,
+            stage: 'idle',
         });
     });
 
@@ -155,6 +157,47 @@ describe('LearnerSubtitles Chinese Whisper rendering', () => {
         await nextTick();
         expect(remounted.wrapper.get('.learner-subs-expanded').classes()).not.toContain('hidden');
         remounted.wrapper.unmount();
+    });
+
+    it('shows canonical Whisper progress instead of a blank reserved panel', async () => {
+        AppStore.setWhisperState({
+            isTranscribing: true,
+            isLoadingModel: false,
+            stage: 'behind',
+            progressMessage: '21s behind · whisper-base · WEBGPU',
+        });
+
+        const { wrapper } = mountLearner();
+        await nextTick();
+
+        expect(wrapper.get('.learner-subs-expanded').classes()).not.toContain('hidden');
+        expect(wrapper.get('.learner-subs-expanded .learner-whisper-placeholder').text())
+            .toBe('21s behind · whisper-base · WEBGPU');
+        wrapper.unmount();
+    });
+
+    it('keeps a WebGPU failure visible after an active empty session stops', async () => {
+        AppStore.setWhisperState({
+            isTranscribing: true,
+            isLoadingModel: false,
+            stage: 'transcribing',
+            progressMessage: 'whisperTranscribing',
+        });
+        const { wrapper } = mountLearner();
+        await nextTick();
+
+        AppStore.setWhisperState({
+            isTranscribing: false,
+            isLoadingModel: false,
+            stage: 'error',
+            progressMessage: 'whisperGpuCrashed',
+        });
+        await nextTick();
+
+        expect(wrapper.get('.learner-subs-expanded').classes()).not.toContain('hidden');
+        expect(wrapper.get('.learner-subs-expanded .learner-whisper-placeholder').text())
+            .toBe('whisperGpuCrashed');
+        wrapper.unmount();
     });
 
     it('releases a loading-only reservation when canonical model state becomes ready', async () => {
@@ -321,6 +364,105 @@ describe('LearnerSubtitles Chinese Whisper rendering', () => {
         wrapper.unmount();
     });
 
+    it('renders Japanese plus the configured translation and rejects a stale seek result', async () => {
+        setConfig('learnerSubtitleMode', 'jp-en');
+        const firstTranslation = deferred<string>();
+        vi.spyOn(TranslationService, 'translate').mockImplementation(async (text, target) => {
+            if (target !== 'en') return '';
+            if (text === '最初の字幕') return firstTranslation.promise;
+            if (text === '最後の字幕') return 'Final subtitle';
+            return '';
+        });
+        const { wrapper, eventBus } = mountLearner();
+        const audio = document.querySelector('audio')!;
+
+        eventBus.emit('whisper:update', {
+            text: '最初の字幕 最後の字幕',
+            segments: [
+                { start: 0, end: 5, text: '最初の字幕' },
+                { start: 10, end: 15, text: '最後の字幕' },
+            ],
+            final: false,
+            live: true,
+            sourceLanguageHint: 'ja',
+            timingQuality: 'segment',
+        });
+        await nextTick();
+        expect(wrapper.get('.learner-subs-expanded .learner-jp').text()).toBe('最初の字幕');
+
+        // Rapid forward/backward scrubbing may start several obsolete
+        // translation requests before the final seeked event settles.
+        for (const currentTime of [11, 1, 11]) {
+            audio.currentTime = currentTime;
+            audio.dispatchEvent(new Event('seeking'));
+            audio.dispatchEvent(new Event('timeupdate'));
+        }
+        audio.dispatchEvent(new Event('seeked'));
+        // The final seek invalidates any callback started by the intermediate
+        // timeupdate. The live ticker must then re-request the final line.
+        vi.advanceTimersByTime(120);
+        await flushPromises();
+        await nextTick();
+
+        expect(wrapper.get('.learner-subs-expanded .learner-jp').text()).toBe('最後の字幕');
+        expect(wrapper.get('.learner-subs-expanded .learner-en').text()).toBe('Final subtitle');
+        expect(wrapper.get('.learner-subs-expanded .learner-en').attributes('lang')).toBe('en');
+
+        firstTranslation.resolve('Stale first subtitle');
+        await flushPromises();
+        await nextTick();
+
+        expect(wrapper.get('.learner-subs-expanded .learner-jp').text()).toBe('最後の字幕');
+        expect(wrapper.get('.learner-subs-expanded .learner-en').text()).toBe('Final subtitle');
+        wrapper.unmount();
+    });
+
+    it('settles native subtitles on the final rapid scrub position and rejects stale translation results', async () => {
+        setConfig('learnerSubtitleMode', 'jp-en');
+        const firstTranslation = deferred<string>();
+        vi.spyOn(TranslationService, 'translate').mockImplementation(async (text, target) => {
+            if (target !== 'en') return '';
+            if (text === '最初のネイティブ字幕') return firstTranslation.promise;
+            if (text === '最後のネイティブ字幕') return 'Final native subtitle';
+            return '';
+        });
+        const { wrapper } = mountLearner([
+            { time: 0, endTime: 5, text: '最初のネイティブ字幕' },
+            { time: 10, endTime: 15, text: '最後のネイティブ字幕' },
+        ]);
+        const audio = document.querySelector('audio')!;
+
+        audio.dispatchEvent(new Event('timeupdate'));
+        await nextTick();
+        expect(wrapper.get('.learner-subs-expanded .learner-jp').text())
+            .toBe('最初のネイティブ字幕');
+
+        for (const currentTime of [11, 1, 11]) {
+            audio.currentTime = currentTime;
+            audio.dispatchEvent(new Event('seeking'));
+            audio.dispatchEvent(new Event('timeupdate'));
+        }
+        audio.dispatchEvent(new Event('seeked'));
+        vi.advanceTimersByTime(30);
+        await flushPromises();
+        await nextTick();
+
+        expect(wrapper.get('.learner-subs-expanded .learner-jp').text())
+            .toBe('最後のネイティブ字幕');
+        expect(wrapper.get('.learner-subs-expanded .learner-en').text())
+            .toBe('Final native subtitle');
+
+        firstTranslation.resolve('Stale first native subtitle');
+        await flushPromises();
+        await nextTick();
+
+        expect(wrapper.get('.learner-subs-expanded .learner-jp').text())
+            .toBe('最後のネイティブ字幕');
+        expect(wrapper.get('.learner-subs-expanded .learner-en').text())
+            .toBe('Final native subtitle');
+        wrapper.unmount();
+    });
+
     it('clears provisional text when the finalized Whisper window is empty', async () => {
         const { wrapper, eventBus } = mountLearner();
 
@@ -347,6 +489,200 @@ describe('LearnerSubtitles Chinese Whisper rendering', () => {
 
         expect(wrapper.get('.learner-subs-expanded .learner-jp').text()).toBe('');
         expect(wrapper.text()).not.toContain('暫定テキスト');
+        wrapper.unmount();
+    });
+
+    it('clears an expired live cue instead of presenting stale speech as current', async () => {
+        const { wrapper, eventBus } = mountLearner();
+
+        eventBus.emit('whisper:update', {
+            text: 'もう終わった字幕',
+            segments: [{ start: 0, end: 1, text: 'もう終わった字幕' }],
+            final: false,
+            live: true,
+            source: 'complete',
+            sourceLanguageHint: 'ja',
+        });
+        await nextTick();
+        expect(wrapper.get('.learner-subs-expanded .learner-jp').text()).toBe('もう終わった字幕');
+
+        document.querySelector('audio')!.currentTime = 2;
+        document.querySelector('audio')!.dispatchEvent(new Event('timeupdate'));
+        await nextTick();
+
+        expect(wrapper.get('.learner-subs-expanded .learner-jp').text()).toBe('');
+        expect(wrapper.get('.learner-subs-expanded .learner-en').text()).toBe('');
+        wrapper.unmount();
+    });
+
+    it('shows a late successful result briefly and labels it as delayed', async () => {
+        const { wrapper, eventBus } = mountLearner();
+        const audio = document.querySelector('audio')!;
+        audio.currentTime = 11.2;
+
+        eventBus.emit('whisper:update', {
+            text: '遅れて届いた字幕',
+            segments: [{ start: 0, end: 8, text: '遅れて届いた字幕' }],
+            final: false,
+            live: true,
+            source: 'complete',
+            sourceLanguageHint: 'ja',
+            timingQuality: 'segment',
+        });
+        await nextTick();
+
+        expect(wrapper.get('.learner-subs-expanded .learner-jp').text()).toBe('遅れて届いた字幕');
+        expect(wrapper.get('.learner-subs-expanded .learner-whisper-delayed').text())
+            .toBe('whisperCaptionDelayed');
+
+        vi.advanceTimersByTime(3_600);
+        audio.currentTime = 15;
+        audio.dispatchEvent(new Event('timeupdate'));
+        await nextTick();
+
+        expect(wrapper.get('.learner-subs-expanded .learner-jp').text()).toBe('');
+        expect(wrapper.find('.learner-subs-expanded .learner-whisper-delayed').exists()).toBe(false);
+        wrapper.unmount();
+    });
+
+    it('drops a delayed caption immediately when the user scrubs elsewhere', async () => {
+        vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+            callback(performance.now());
+            return 1;
+        });
+        const { wrapper, eventBus } = mountLearner();
+        const audio = document.querySelector('audio')!;
+        audio.currentTime = 11.2;
+
+        eventBus.emit('whisper:update', {
+            text: '前の再生位置から遅れて届いた字幕',
+            segments: [{ start: 0, end: 8, text: '前の再生位置から遅れて届いた字幕' }],
+            final: false,
+            live: true,
+            source: 'complete',
+            sourceLanguageHint: 'ja',
+            timingQuality: 'segment',
+        });
+        await nextTick();
+        expect(wrapper.get('.learner-subs-expanded .learner-jp').text())
+            .toBe('前の再生位置から遅れて届いた字幕');
+
+        audio.currentTime = 120;
+        audio.dispatchEvent(new Event('seeking'));
+        await nextTick();
+
+        // The controller emits the full finalized timeline at the settled
+        // position. Existing cues must not be reclassified as newly-arrived
+        // delayed speech merely because the playhead changed.
+        eventBus.emit('whisper:update', {
+            text: '',
+            segments: [{ start: 0, end: 8, text: '前の再生位置から遅れて届いた字幕' }],
+            final: false,
+            live: true,
+            source: 'seek',
+            sourceLanguageHint: 'ja',
+            timingQuality: 'segment',
+        });
+        await nextTick();
+
+        expect(wrapper.get('.learner-subs-expanded .learner-jp').text()).toBe('');
+        expect(wrapper.get('.learner-subs-expanded .learner-en').text()).toBe('');
+        expect(wrapper.find('.learner-subs-expanded .learner-whisper-delayed').exists()).toBe(false);
+        wrapper.unmount();
+    });
+
+    it('shows a resumed backfill as delayed when a later cached segment is unchanged', async () => {
+        const { wrapper, eventBus } = mountLearner();
+        const audio = document.querySelector('audio')!;
+        audio.currentTime = 30;
+
+        eventBus.emit('whisper:update', {
+            text: '後のキャッシュ字幕',
+            segments: [{ start: 20, end: 24, text: '後のキャッシュ字幕' }],
+            final: false,
+            fromCache: true,
+            live: false,
+            sourceLanguageHint: 'ja',
+            timingQuality: 'segment',
+        });
+        await nextTick();
+        expect(wrapper.get('.learner-subs-expanded .learner-jp').text()).toBe('');
+
+        eventBus.emit('whisper:update', {
+            text: '後のキャッシュ字幕',
+            segments: [
+                { start: 0, end: 8, text: '再開して埋めた字幕' },
+                { start: 20, end: 24, text: '後のキャッシュ字幕' },
+            ],
+            final: false,
+            fromCache: false,
+            live: true,
+            source: 'complete',
+            sourceLanguageHint: 'ja',
+            timingQuality: 'segment',
+        });
+        await nextTick();
+
+        expect(wrapper.get('.learner-subs-expanded .learner-jp').text()).toBe('再開して埋めた字幕');
+        expect(wrapper.get('.learner-subs-expanded .learner-whisper-delayed').text())
+            .toBe('whisperCaptionDelayed');
+        wrapper.unmount();
+    });
+
+    it('does not replay an expired backfill after a current cue ends', async () => {
+        const { wrapper, eventBus } = mountLearner();
+        const audio = document.querySelector('audio')!;
+        audio.currentTime = 10.5;
+
+        eventBus.emit('whisper:update', {
+            text: '現在の字幕',
+            segments: [{ start: 10, end: 12, text: '現在の字幕' }],
+            final: false,
+            fromCache: true,
+            live: false,
+            sourceLanguageHint: 'ja',
+            timingQuality: 'segment',
+        });
+        await nextTick();
+        expect(wrapper.get('.learner-subs-expanded .learner-jp').text()).toBe('現在の字幕');
+
+        eventBus.emit('whisper:update', {
+            text: '現在の字幕',
+            segments: [
+                { start: 0, end: 8, text: '遅れて埋めた古い字幕' },
+                { start: 10, end: 12, text: '現在の字幕' },
+            ],
+            final: false,
+            fromCache: false,
+            live: true,
+            source: 'complete',
+            sourceLanguageHint: 'ja',
+            timingQuality: 'segment',
+        });
+        await nextTick();
+
+        expect(wrapper.get('.learner-subs-expanded .learner-jp').text()).toBe('現在の字幕');
+        expect(wrapper.find('.learner-subs-expanded .learner-whisper-delayed').exists()).toBe(false);
+
+        audio.currentTime = 13;
+        audio.dispatchEvent(new Event('timeupdate'));
+        await nextTick();
+
+        expect(wrapper.get('.learner-subs-expanded .learner-jp').text()).toBe('');
+        expect(wrapper.find('.learner-subs-expanded .learner-whisper-delayed').exists()).toBe(false);
+        wrapper.unmount();
+    });
+
+    it('clears both native subtitle lanes at an explicit cue end time', async () => {
+        const { wrapper } = await showNonWhisperLrc('欢迎回来');
+        expect(wrapper.get('.learner-subs-expanded .learner-en').text()).toBe('欢迎回来');
+
+        document.querySelector('audio')!.currentTime = 10;
+        document.querySelector('audio')!.dispatchEvent(new Event('timeupdate'));
+        await nextTick();
+
+        expect(wrapper.get('.learner-subs-expanded .learner-jp').text()).toBe('');
+        expect(wrapper.get('.learner-subs-expanded .learner-en').text()).toBe('');
         wrapper.unmount();
     });
 

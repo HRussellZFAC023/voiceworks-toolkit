@@ -34,7 +34,10 @@ import {
     isTextExtension,
     isVideoExtension,
 } from './media/mediaFileUtils';
-import { buildMediaStreamUrl } from './media/mediaStreamUrlUtils';
+import {
+    buildMediaStreamUrl,
+    resolveMediaApiBaseUrl,
+} from './media/mediaStreamUrlUtils';
 import { replaceHostPlaybackQueue } from './audioPlayerQueueUtils';
 import {
     applyMediaViewerWorkTreePatch,
@@ -274,13 +277,23 @@ export class MediaViewerController {
         const mediaType = resolveMediaTypeForCandidate(title, vueItem?.type);
         if (!mediaType) return;
 
-        e.stopPropagation();
-        e.preventDefault();
-
         let hash = readMediaHashFromElement(qItem as Vue2MediaElement);
         let itemData: MediaFile | null = null;
+        const workTree = this.findWorkTreeComponent() as PatchableWorkTree | null;
+        const folder = (workTree?.fatherFolder ??
+            workTree?.$data?.fatherFolder ?? []) as MediaFile[];
+        const canonicalItem = folder.length > 0
+            ? findMatchingMediaItem({ hash, title }, folder)
+            : undefined;
 
-        if (hash) {
+        if (canonicalItem) {
+            hash = canonicalItem.hash || hash;
+            itemData = {
+                ...canonicalItem,
+                hash,
+                type: mediaType,
+            };
+        } else if (hash) {
             // Preserve stream/download URLs and expected size from the host
             // item. They let the lightbox validate the real upstream image
             // instead of falling back to an opaque synthetic stream URL.
@@ -310,9 +323,6 @@ export class MediaViewerController {
 
         // Fallback: try WorkTree component's fatherFolder
         if (!itemData) {
-            const workTree = this.findWorkTreeComponent() as PatchableWorkTree | null;
-            const folder = (workTree?.fatherFolder ??
-                workTree?.$data?.fatherFolder ?? []) as MediaFile[];
             if (folder.length > 0) {
                 const match = findMatchingMediaItem({ hash: '', title }, folder);
                 if (match) {
@@ -322,9 +332,12 @@ export class MediaViewerController {
             }
         }
 
-        if (!itemData) {
-            itemData = { hash: hash || `__delegated_${Date.now()}`, title };
-        }
+        // If neither the host data nor DOM exposes a usable source, leave the
+        // click alone so the native viewer can handle it.
+        if (!itemData) return;
+
+        e.stopPropagation();
+        e.preventDefault();
 
         Logger.debug(`[MediaViewerController] Delegated click: ${title} (${mediaType}), hash=${itemData.hash}`);
 
@@ -349,8 +362,11 @@ export class MediaViewerController {
     }
 
     private findWorkTreeComponent(): WorkTreeComponent | null {
-        return this.bridge.findComponent(
-            (vm: KikoeruApp) => vm.$options?.name === 'WorkTree'
+        return (
+            this.bridge.findWorkTreeComponent?.()
+            || this.bridge.findComponent(
+                (vm: KikoeruApp) => vm.$options?.name === 'WorkTree'
+            )
         ) as WorkTreeComponent | null;
     }
 
@@ -787,6 +803,9 @@ export class MediaViewerController {
         const items: MediaFile[] = [];
         const seenHashes = new Set<string>();
         const qItems = workTreeEl.querySelectorAll('.q-item');
+        const workTree = this.findWorkTreeComponent() as PatchableWorkTree | null;
+        const folder = (workTree?.fatherFolder ??
+            workTree?.$data?.fatherFolder ?? []) as MediaFile[];
 
         qItems.forEach((qItem) => {
             const title = getMediaTitleFromListItem(qItem);
@@ -801,19 +820,18 @@ export class MediaViewerController {
 
             if (!hash && fromVue?.hash) hash = fromVue.hash;
 
-            if (!hash) {
-                const workTree = this.findWorkTreeComponent() as PatchableWorkTree | null;
-                const folder = (workTree?.fatherFolder ??
-                    workTree?.$data?.fatherFolder ?? []) as MediaFile[];
-                if (folder.length > 0) {
-                    const match = findMatchingMediaItem({ hash: '', title }, folder);
-                    if (match?.hash) hash = match.hash;
-                }
-            }
+            const canonicalItem = folder.length > 0
+                ? findMatchingMediaItem({ hash, title }, folder)
+                : undefined;
+            if (canonicalItem?.hash) hash = canonicalItem.hash;
 
             if (hash && !seenHashes.has(hash)) {
                 seenHashes.add(hash);
-                items.push({ hash, title, type: candidateType });
+                items.push(canonicalItem
+                    ? { ...canonicalItem, hash, type: candidateType }
+                    : fromVue
+                    ? { ...fromVue, hash, title, type: candidateType }
+                    : { hash, title, type: candidateType });
             }
         });
 
@@ -826,7 +844,8 @@ export class MediaViewerController {
 
     private getMediaUrl(hash: string, item?: MediaFile): string {
         const token = localStorage.getItem('jwt-token') || '';
-        return buildMediaStreamUrl(hash, item, token);
+        const apiBaseUrl = resolveMediaApiBaseUrl(this.bridge.axios?.defaults?.baseURL);
+        return buildMediaStreamUrl(hash, item, token, apiBaseUrl);
     }
 
     private resolvePlayerTrackSource(track?: PlayerTrack | null): string {

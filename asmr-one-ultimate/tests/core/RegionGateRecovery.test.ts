@@ -7,6 +7,7 @@ import {
     recoverRegionGateIfNeeded,
     requestRegionGateResource,
     rewriteRegionGateCssUrls,
+    shouldReplayRegionInlineScript,
     validateRegionGateResponse,
     validateWebpackJsonpChunk,
     waitForRegionGateOrDomReady,
@@ -14,6 +15,26 @@ import {
 import type { GmResponse } from '../../src/infrastructure/HttpClient';
 
 describe('RegionGateRecovery', () => {
+    it('omits only the redundant host asset-retry helper during recovery', () => {
+        expect(shouldReplayRegionInlineScript(`
+            window.assetsRetry = function assetsRetry() {
+                console.log('retry with', next);
+                console.error('all retry failed for:', path);
+            };
+        `)).toBe(false);
+        expect(shouldReplayRegionInlineScript(`
+            assetsRetry({
+                hosts: ['https://registry.npmmirror.com/', 'https://unpkg.com/']
+            });
+        `)).toBe(false);
+        expect(shouldReplayRegionInlineScript(`
+            window.__APP_CONFIG__ = {
+                api: 'https://api.asmr.one/',
+                fallbackLabel: 'retry with care'
+            };
+        `)).toBe(true);
+    });
+
     it('recognizes the exact ASMR.one language gate without matching normal pages', () => {
         const gated = document.implementation.createHTMLDocument('remember, no english');
         gated.body.textContent = 'I have an idea: how about not using asmr.one?';

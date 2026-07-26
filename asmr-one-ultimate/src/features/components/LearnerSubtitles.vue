@@ -22,7 +22,7 @@ import { AudioCache } from '../../infrastructure/AudioCache';
 import { getAudioElement, getPlayerBar, isChinese, isTranslatable } from '../../core/DomUtils';
 import { Logger, Config } from '../../core/Utils';
 import { Priority } from '../../core/GpuScheduler';
-import type { WhisperUpdatePayload, JPDBToken, AudioPlayerState, KikoeruStoreState, KikoeruApp, VueRoute, PlayerTrack, AvailableLyric, TranslationSourceHint } from '../../types';
+import type { WhisperUpdatePayload, WhisperState, JPDBToken, AudioPlayerState, KikoeruStoreState, KikoeruApp, VueRoute, PlayerTrack, AvailableLyric, TranslationSourceHint } from '../../types';
 import { buildSegments, sliceSegments, type FuriganaSegment } from '../../lib/jpdb-segments';
 import { sanitizeWhisperText } from '../whisperProcessing';
 import {
@@ -30,11 +30,13 @@ import {
     type WhisperTextRequestContext,
 } from '../learnerWhisperRequestUtils';
 import {
+    findActiveLyricLine,
     findLyricsSource as findLyricsSourceUtil,
     normalizeLyricLines,
     normalizeWhisperSubtitleLines,
     parseLrcContent,
     parseSubtitleContent,
+    type LyricLine,
 } from '../learnerLyricsUtils';
 import {
     buildKaraokeCharMap, computeWordKaraokeIndices, computeTimeFallbackKaraokeIndices,
@@ -52,6 +54,7 @@ import {
     resolveLearnerSecondaryLanguage,
     subtitleLanguageAttribute,
 } from '../learnerSubtitleMode';
+import { fetchSafeMediaText } from '../media/safeMediaTransport';
 
 // ---------------------------------------------------------------------------
 // Composables
@@ -95,6 +98,9 @@ const isPlayerMinimized = ref(false);
 const hasContent = ref(false);
 const hasClampedSubtitle = ref(false);
 const fullSubtitleOpen = ref(false);
+const whisperCaptionDelayed = ref(false);
+const whisperUiState = ref<WhisperState>({ ...AppStore.state.whisper });
+const whisperStatusSessionActive = ref(false);
 
 // Playback speed
 const playbackRate = ref(Number(Config.get('playbackRate')) || 1.0);
@@ -128,12 +134,16 @@ let whisperTextGeneration = 0;
 let lastWhisperDisplayText = '';
 let whisperTickerId: number | null = null;
 let whisperTickerInterval = 80;
+let laggedWhisperLine: LyricLine | null = null;
+let laggedWhisperUntilMs = 0;
+const seenWhisperArrivalSignatures = new Set<string>();
 
 // Subtitle lead / append
 const subtitleLeadSec = 1.2;
 const subtitleAppendWindowSec = 1.5;
 const subtitleAppendMaxChars = 140;
 const WORD_REVEAL_DELAY_SEC = 0.002;
+const LAGGED_WHISPER_DWELL_MS = 3_500;
 const LEARNER_SECONDARY_TARGET = { preserveRequestedTarget: true } as const;
 
 /** Adjust lead time for playback rate: at 2x, need 2x audio-seconds of lead for same real-world reaction time */
@@ -149,7 +159,14 @@ let seekedDebounceTimer: number | null = null;
 // LRC fetch state
 let lastLrcTrackHash: string | null = null;
 let lrcFetchPromise: Promise<void> | null = null;
+let lrcFetchAbortController: AbortController | null = null;
+let queuedAvailableLyricsHash: string | null = null;
 const lrcFetchAttemptedHashes = new Set<string>();
+const lrcApiDeniedHashes = new Set<string>();
+const lrcRetryAttempts = new Map<string, number>();
+const LRC_RETRY_DELAYS_MS = [250, 1_000, 3_000] as const;
+const MAX_SUBTITLE_BYTES = 4 * 1024 * 1024;
+const SUBTITLE_FETCH_TIMEOUT_MS = 20_000;
 let lastNoLyricsLogHash: string | null = null;
 let lastPreTranslatedKey: string | null = null;
 let pretranslateInFlightKey: string | null = null;
@@ -218,6 +235,23 @@ function scheduleUpdateLyrics() {
 
 const showExpanded = computed(() => !isPlayerMinimized.value && hasContent.value);
 const showCollapsed = computed(() => isPlayerMinimized.value && hasContent.value);
+const whisperPlaceholderText = computed(() => {
+    if (primaryText.value || secondaryText.value || !whisperStatusSessionActive.value) return '';
+    const state = whisperUiState.value;
+    switch (state.stage) {
+        case 'loading':
+            return state.progressMessage || t('whisperLoading');
+        case 'transcribing':
+        case 'behind':
+            return state.progressMessage || t('whisperTranscribing');
+        case 'recovering':
+            return state.progressMessage || t('whisperRecovering');
+        case 'error':
+            return state.progressMessage || t('whisperUnknownError');
+        default:
+            return '';
+    }
+});
 const secondaryLanguage = computed(() => resolveLearnerSecondaryLanguage(
     learnerSubtitleMode.value,
     subtitleLang.value,
@@ -504,10 +538,24 @@ function clearKaraokeState() {
     karaokeFullTextCached = '';
 }
 
+function resetLaggedWhisperCaption(clearArrivalSignatures = true): void {
+    laggedWhisperLine = null;
+    laggedWhisperUntilMs = 0;
+    if (clearArrivalSignatures) seenWhisperArrivalSignatures.clear();
+    whisperCaptionDelayed.value = false;
+}
+
 
 function getTrackKey(): string | null {
     const track = bridge.currentTrack;
-    return track?.hash || track?.mediaStreamUrl || track?.src || track?.title || null;
+    const candidates = [
+        track?.hash,
+        track?.mediaStreamUrl,
+        track?.media_stream_url,
+        track?.src,
+        track?.title,
+    ];
+    return candidates.find((value): value is string => typeof value === 'string' && value.length > 0) ?? null;
 }
 
 function cancelQueue(cancellableKey: string): void {
@@ -552,9 +600,45 @@ function resetLearnerTranslationQueues(): void {
 
 function resetTrackTasks(): void {
     trackTasks.cancelAll();
-    // The transport may not be abortable, but its generation/key guard will
-    // prevent it from mutating the replacement track.
+    lrcFetchAbortController?.abort(new DOMException('Subtitle track changed', 'AbortError'));
+    lrcFetchAbortController = null;
     lrcFetchPromise = null;
+    queuedAvailableLyricsHash = null;
+}
+
+function resetTrackRuntimeState(): void {
+    resetTrackTasks();
+    resetDedupState({ includeWhisperDisplay: true, bumpTranslationToken: true });
+    currentLyrics = [];
+    whisperLines = [];
+    whisperText = '';
+    whisperActive = false;
+    whisperFromCache = false;
+    whisperLive = false;
+    whisperLeadSec = 0;
+    whisperSourceLanguageHint = 'auto';
+    whisperTimingQuality = 'segment';
+    // A component/host remount can rebuild the player while the same canonical
+    // run is still active. Preserve its status reservation; an ensuing idle
+    // state or explicit clear will release it.
+    whisperStatusSessionActive.value = whisperRunning;
+    resetLaggedWhisperCaption();
+    clearWhisperTicker();
+    resetLearnerTranslationQueues();
+    lastPreTranslatedKey = null;
+    lastLrcTrackHash = null;
+    lrcFetchAttemptedHashes.clear();
+    lrcApiDeniedHashes.clear();
+    lrcRetryAttempts.clear();
+    lastNoLyricsLogHash = null;
+    clearDisplay();
+}
+
+function enterTrack(trackKey: string | null): boolean {
+    if (!trackKey || trackKey === lastTrackKey) return false;
+    lastTrackKey = trackKey;
+    resetTrackRuntimeState();
+    return true;
 }
 
 function schedulePreTranslation(
@@ -762,7 +846,10 @@ function clearDisplay() {
 
 function refreshVisibility() {
     isPlayerMinimized.value = !!bridge.store?.state?.AudioPlayer?.hide;
-    hasContent.value = !!lastDisplayedText || currentLyrics.length > 0 || whisperActive || whisperRunning;
+    const reservedStatus = whisperStatusSessionActive.value
+        && (whisperUiState.value.stage === 'error' || whisperUiState.value.stage === 'recovering');
+    hasContent.value = !!lastDisplayedText || currentLyrics.length > 0
+        || whisperActive || whisperRunning || reservedStatus;
 }
 
 // ---------------------------------------------------------------------------
@@ -791,6 +878,9 @@ function handleAudioSeeking() {
     // Reset dedup state and defer subtitle update to next frame so audio.currentTime
     // has synchronized with the seek target. During rapid scrubbing, the seeking event
     // fires before currentTime is fully updated, causing subtitles to lag behind.
+    // A deliberately delayed live result belongs to the old playhead and must
+    // never survive a manual seek into an uncovered part of the timeline.
+    resetLaggedWhisperCaption(false);
     resetDedupState({ includeWhisperDisplay: true, bumpTranslationToken: true });
     resetRealtimeQueues();
 
@@ -863,41 +953,6 @@ function unbindAudio() {
 // Timeline helpers
 // ---------------------------------------------------------------------------
 
-function findActiveLine(
-    lines: Array<{ time: number; endTime?: number; text: string }>,
-    now: number,
-): { time: number; endTime?: number; text: string } | null {
-    if (lines.length === 0) return null;
-    let activeIdx = -1;
-    for (let i = lines.length - 1; i >= 0; i--) {
-        if (lines[i].time <= now) { activeIdx = i; break; }
-    }
-    if (activeIdx < 0) return null;
-    const activeLine = lines[activeIdx];
-    // If we're past this line's endTime, check for a longer overlapping segment
-    // that still covers `now` (defense against residual fragments from chunk
-    // boundary overlap in mergeSegments).
-    if (activeLine.endTime && now >= activeLine.endTime) {
-        for (let i = activeIdx - 1; i >= 0; i--) {
-            const earlier = lines[i];
-            if (earlier.endTime && earlier.endTime > now && earlier.time <= now) {
-                return earlier;
-            }
-            // Stop scanning once we're too far back (segments are sorted by time)
-            if (now - earlier.time > 60) break;
-        }
-        const nextLine = lines[activeIdx + 1];
-        // No next line — hold the last segment visible (during live transcription
-        // the worker hasn't caught up; at end of transcript it's the final line)
-        if (!nextLine) return activeLine;
-        // Short gap between existing segments — hold to prevent flash
-        if ((nextLine.time - activeLine.endTime) < 2.0) return activeLine;
-        // Long gap between existing segments — genuine silence
-        return null;
-    }
-    return activeLine;
-}
-
 function getProgressiveText(
     line: { time: number; endTime?: number; text: string },
     now: number,
@@ -939,7 +994,7 @@ function getTextFromTimelineFor(
     const audio = getAudioElement();
     if (!audio || lines.length === 0) return '';
     const now = audio.currentTime + Math.max(0, leadSec);
-    const activeLine = findActiveLine(lines, now);
+    const activeLine = findActiveLyricLine(lines, now);
     if (!activeLine || !activeLine.text) return '';
     if (progressive && activeLine.endTime && activeLine.endTime > activeLine.time) {
         return getProgressiveText(activeLine, now);
@@ -963,6 +1018,7 @@ interface SubtitleDisplayResult {
     activeLine?: { time: number; endTime?: number; text: string; words?: Array<{ start: number; end: number; text: string }> };
     now?: number;
     audioTime?: number;
+    delayed?: boolean;
 }
 
 function getWhisperDisplay(): SubtitleDisplayResult {
@@ -970,8 +1026,25 @@ function getWhisperDisplay(): SubtitleDisplayResult {
     if (!audio || whisperLines.length === 0) return { displayText: '', fullText: '' };
     const audioTime = audio.currentTime;
     const now = audioTime + Math.max(0, effectiveLead(whisperLeadSec));
-    const activeLine = findActiveLine(whisperLines, now);
-    if (!activeLine || !activeLine.text) return { displayText: '', fullText: '' };
+    const activeLine = findActiveLyricLine(whisperLines, now, { expiredGraceSeconds: 0.75 });
+    if (!activeLine || !activeLine.text) {
+        if (laggedWhisperLine?.text && performance.now() < laggedWhisperUntilMs) {
+            const text = laggedWhisperLine.text.trim();
+            return {
+                displayText: text,
+                fullText: text,
+                activeLine: laggedWhisperLine,
+                now: laggedWhisperLine.endTime ?? laggedWhisperLine.time,
+                audioTime,
+                delayed: true,
+            };
+        }
+        return { displayText: '', fullText: '' };
+    }
+    // Once a current cue wins, an older backfill must never reappear after it
+    // ends, even if the delayed-caption dwell window is still open.
+    laggedWhisperLine = null;
+    laggedWhisperUntilMs = 0;
     return { displayText: getProgressiveText(activeLine, now), fullText: activeLine.text.trim(), activeLine, now, audioTime };
 }
 
@@ -980,7 +1053,7 @@ function getSubtitleDisplay(): SubtitleDisplayResult {
     if (!audio || currentLyrics.length === 0) return { displayText: '', fullText: '' };
     const audioTime = audio.currentTime;
     const now = audioTime + effectiveLead(subtitleLeadSec);
-    const activeLine = findActiveLine(currentLyrics, now);
+    const activeLine = findActiveLyricLine(currentLyrics, now);
     if (!activeLine || !activeLine.text) return { displayText: '', fullText: '' };
     return { displayText: getProgressiveText(activeLine, now), fullText: activeLine.text.trim(), activeLine, now, audioTime };
 }
@@ -1024,15 +1097,90 @@ function isCurrentTrackRequest(generation: number, expectedTrackKey: string): bo
     return trackTasks.isCurrent(generation) && getTrackKey() === expectedTrackKey;
 }
 
+function resolveHostApiSubtitleUrl(rawUrl: string): string | null {
+    // Backslashes and encoded path separators have browser/HTTP-client
+    // normalization differences. Native subtitle paths are opaque hashes, so
+    // reject those ambiguous forms before attaching host authorization.
+    if (/\\|%(?:2f|5c)/i.test(rawUrl)) return null;
+    try {
+        const locationHref = globalThis.location?.href;
+        if (!locationHref) return null;
+        const baseUrl = bridge.axios.defaults?.baseURL;
+        const base = new URL(baseUrl || locationHref, locationHref);
+        const parsed = new URL(rawUrl, base);
+        const trustedOrigins = new Set<string>();
+        if (globalThis.location?.origin) trustedOrigins.add(globalThis.location.origin);
+        trustedOrigins.add(base.origin);
+        if (!trustedOrigins.has(parsed.origin) || parsed.username || parsed.password) return null;
+        parsed.hash = '';
+        return parsed.href;
+    } catch {
+        return null;
+    }
+}
+
+async function fetchHostSubtitleText(url: string, signal: AbortSignal): Promise<string> {
+    const controller = new AbortController();
+    let exceededByteLimit = false;
+    const forwardAbort = () => controller.abort(signal.reason);
+    if (signal.aborted) forwardAbort();
+    else signal.addEventListener('abort', forwardAbort, { once: true });
+    try {
+        const res = await bridge.axios.get<string>(url, {
+            responseType: 'text',
+            signal: controller.signal,
+            timeout: SUBTITLE_FETCH_TIMEOUT_MS,
+            onDownloadProgress: (event: { loaded?: number; total?: number }) => {
+                const loaded = Number(event.loaded) || 0;
+                const total = Number(event.total) || 0;
+                if (loaded <= MAX_SUBTITLE_BYTES && total <= MAX_SUBTITLE_BYTES) return;
+                exceededByteLimit = true;
+                controller.abort(new DOMException('Subtitle response exceeded byte limit', 'AbortError'));
+            },
+        });
+        const content = typeof res.data === 'string' ? res.data : String(res.data);
+        if (new TextEncoder().encode(content).byteLength > MAX_SUBTITLE_BYTES) {
+            throw new Error('Native subtitle response exceeded byte limit');
+        }
+        return content;
+    } catch (error) {
+        if (exceededByteLimit) throw new Error('Native subtitle response exceeded byte limit');
+        throw error;
+    } finally {
+        signal.removeEventListener('abort', forwardAbort);
+    }
+}
+
+async function fetchSubtitleText(url: string, signal: AbortSignal): Promise<string> {
+    const hostApiUrl = resolveHostApiSubtitleUrl(url);
+    if (hostApiUrl) {
+        return fetchHostSubtitleText(hostApiUrl, signal);
+    }
+
+    if (!/^https:\/\//i.test(url) || /\\|%(?:2f|5c)/i.test(url.split(/[?#]/, 1)[0] || '')) {
+        throw new Error('Blocked ambiguous external subtitle URL');
+    }
+    const result = await fetchSafeMediaText(url, {
+        maxBytes: MAX_SUBTITLE_BYTES,
+        timeoutMs: SUBTITLE_FETCH_TIMEOUT_MS,
+        signal,
+        headers: {
+            Accept: 'text/vtt, application/x-subrip, text/plain;q=0.9',
+        },
+    });
+    if (!result) throw new Error('External subtitle request failed');
+    return result.text;
+}
+
 async function fetchSubtitleFromUrl(
     url: string,
     generation: number,
     expectedTrackKey: string,
+    signal: AbortSignal,
 ): Promise<boolean> {
     try {
-        const res = await bridge.axios.get<string>(url, { responseType: 'text' });
+        const content = await fetchSubtitleText(url, signal);
         if (!isCurrentTrackRequest(generation, expectedTrackKey)) return false;
-        const content = typeof res.data === 'string' ? res.data : String(res.data);
         if (!content) return false;
         const lyrics = parseSubtitleContent(content);
         if (lyrics.length > 0) {
@@ -1044,6 +1192,7 @@ async function fetchSubtitleFromUrl(
             return true;
         }
     } catch (err) {
+        if (signal.aborted) return false;
         Logger.error('[LearnerMode] Error fetching subtitle:', err);
     }
     return false;
@@ -1053,11 +1202,11 @@ async function fetchLrcByHash(
     hash: string,
     generation: number,
     expectedTrackKey: string,
+    signal: AbortSignal,
 ): Promise<boolean> {
     try {
-        const res = await bridge.axios.get<string>(`/api/media/stream/${hash}`, { responseType: 'text' });
+        const content = await fetchSubtitleText(`/api/media/stream/${encodeURIComponent(hash)}`, signal);
         if (!isCurrentTrackRequest(generation, expectedTrackKey)) return false;
-        const content = typeof res.data === 'string' ? res.data : String(res.data);
         if (!content) return false;
         const lyrics = parseLrcContent(content);
         if (lyrics.length > 0) {
@@ -1069,6 +1218,7 @@ async function fetchLrcByHash(
             return true;
         }
     } catch (err) {
+        if (signal.aborted) return false;
         Logger.debug('[LearnerMode] Error fetching LRC by hash:', err);
     }
     return false;
@@ -1077,17 +1227,67 @@ async function fetchLrcByHash(
 async function fetchLrcForCurrentTrack(): Promise<void> {
     const track = bridge.currentTrack;
     if (!track) return;
-    const trackHash = track.hash || track.src || track.mediaStreamUrl || '';
+    const trackHash = track.hash || track.src || track.mediaStreamUrl || track.media_stream_url || '';
     if (!trackHash || trackHash === lastLrcTrackHash) return;
     if (lrcFetchAttemptedHashes.has(trackHash)) return;
     if (lrcFetchPromise) return lrcFetchPromise;
     const generation = trackTasks.token;
     const expectedTrackKey = getTrackKey() || trackHash;
-    const request = _fetchLrcInner(track, trackHash, generation, expectedTrackKey);
-    lrcFetchPromise = request;
-    void request.finally(() => {
-        if (lrcFetchPromise === request) lrcFetchPromise = null;
+    const requestController = new AbortController();
+    lrcFetchAbortController = requestController;
+    const request = _fetchLrcInner(
+        track,
+        trackHash,
+        generation,
+        expectedTrackKey,
+        requestController.signal,
+    ).then((fetched) => {
+        if (!isCurrentTrackRequest(generation, expectedTrackKey)) return;
+        if (fetched) {
+            lrcFetchAttemptedHashes.add(trackHash);
+            lrcRetryAttempts.delete(trackHash);
+            return;
+        }
+        // Authentication failures are deterministic for the current host
+        // session. Do not hammer check-lrc, but leave availableLyrics discovery
+        // eligible so late track metadata can still supply a native subtitle.
+        if (lrcApiDeniedHashes.has(trackHash)) {
+            lrcRetryAttempts.delete(trackHash);
+            return;
+        }
+        const attempt = lrcRetryAttempts.get(trackHash) || 0;
+        const delay = LRC_RETRY_DELAYS_MS[attempt];
+        if (delay == null) return;
+        lrcRetryAttempts.set(trackHash, attempt + 1);
+        trackTasks.schedule(
+            () => fetchLrcForCurrentTrack().catch(err => Logger.error('[LearnerMode] LRC retry failed:', err)),
+            delay,
+            () => getTrackKey() === expectedTrackKey && currentLyrics.length === 0,
+        );
     });
+    lrcFetchPromise = request;
+    const finalizeRequest = () => {
+        if (lrcFetchPromise !== request) return;
+        lrcFetchPromise = null;
+        if (lrcFetchAbortController === requestController) lrcFetchAbortController = null;
+
+        // Some host builds attach availableLyrics while check-lrc is already
+        // in flight. Its watcher deliberately shares the active request, then
+        // queues one post-flight discovery so a 401/403 response cannot swallow
+        // the newly arrived native subtitle.
+        const shouldRefreshAvailableLyrics = queuedAvailableLyricsHash === trackHash
+            && isCurrentTrackRequest(generation, expectedTrackKey)
+            && currentLyrics.length === 0;
+        if (queuedAvailableLyricsHash === trackHash) queuedAvailableLyricsHash = null;
+        if (shouldRefreshAvailableLyrics) {
+            fetchLrcForCurrentTrack().catch(err => (
+                Logger.error('[LearnerMode] Queued availableLyrics fetch failed:', err)
+            ));
+        }
+    };
+    // A two-branch continuation performs cleanup without creating the rejected
+    // derivative that an ignored Promise.finally() would leave behind.
+    void request.then(finalizeRequest, finalizeRequest);
     return request;
 }
 
@@ -1096,9 +1296,10 @@ async function _fetchLrcInner(
     trackHash: string,
     generation: number,
     expectedTrackKey: string,
-): Promise<void> {
+    signal: AbortSignal,
+): Promise<boolean> {
     let fetched = false;
-    if (!isCurrentTrackRequest(generation, expectedTrackKey)) return;
+    if (signal.aborted || !isCurrentTrackRequest(generation, expectedTrackKey)) return false;
 
     // Priority 1: availableLyrics
     if (track.availableLyrics?.length) {
@@ -1109,14 +1310,21 @@ async function _fetchLrcInner(
             return aMatch - bMatch;
         });
         for (const lyricFile of sorted) {
-            if (!lyricFile.mediaStreamUrl) continue;
-            try { fetched = await fetchSubtitleFromUrl(lyricFile.mediaStreamUrl, generation, expectedTrackKey); if (fetched) break; }
+            const lyricUrl = lyricFile.mediaStreamUrl
+                || lyricFile.media_stream_url
+                || lyricFile.mediaDownloadUrl
+                || lyricFile.media_download_url;
+            if (!lyricUrl) continue;
+            try {
+                fetched = await fetchSubtitleFromUrl(lyricUrl, generation, expectedTrackKey, signal);
+                if (fetched) break;
+            }
             catch (err) { Logger.error('[LearnerMode] Error fetching subtitle:', err); }
         }
     }
 
     // Priority 2: /api/media/check-lrc
-    if (!fetched) {
+    if (!fetched && !lrcApiDeniedHashes.has(trackHash)) {
         const workId = bridge.currentWorkId;
         if (workId) {
             const queue = bridge.queue;
@@ -1127,24 +1335,41 @@ async function _fetchLrcInner(
             if (Number.isFinite(fallback) && fallback >= 0) candidates.add(fallback);
 
             if (candidates.size === 0) {
-                fetched = await fetchLrcByHash(trackHash, generation, expectedTrackKey);
+                fetched = await fetchLrcByHash(trackHash, generation, expectedTrackKey, signal);
             } else {
                 for (const idx of candidates) {
                     try {
-                        const checkRes = await bridge.axios.get<{ result: boolean; hash?: string }>(`/api/media/check-lrc/${workId}/${idx}`);
-                        if (!isCurrentTrackRequest(generation, expectedTrackKey)) return;
+                        const checkRes = await bridge.axios.get<{ result: boolean; hash?: string }>(
+                            `/api/media/check-lrc/${workId}/${idx}`,
+                            { signal, timeout: SUBTITLE_FETCH_TIMEOUT_MS },
+                        );
+                        if (!isCurrentTrackRequest(generation, expectedTrackKey)) return false;
                         if (!checkRes.data.result || !checkRes.data.hash) continue;
-                        fetched = await fetchLrcByHash(checkRes.data.hash, generation, expectedTrackKey);
+                        fetched = await fetchLrcByHash(
+                            checkRes.data.hash,
+                            generation,
+                            expectedTrackKey,
+                            signal,
+                        );
                         if (fetched) break;
-                    } catch (err) { Logger.debug('[LearnerMode] Error fetching LRC:', err); }
+                    } catch (err) {
+                        const status = (err as { response?: { status?: unknown }; status?: unknown })?.response?.status
+                            ?? (err as { status?: unknown })?.status;
+                        if (status === 401 || status === 403) {
+                            lrcApiDeniedHashes.add(trackHash);
+                            Logger.debug('[LearnerMode] Native LRC API unavailable for this host session');
+                            break;
+                        }
+                        Logger.debug('[LearnerMode] Error fetching LRC:', err);
+                    }
                 }
             }
         }
     }
 
-    if (!isCurrentTrackRequest(generation, expectedTrackKey)) return;
+    if (signal.aborted || !isCurrentTrackRequest(generation, expectedTrackKey)) return false;
     if (fetched) lastLrcTrackHash = trackHash;
-    lrcFetchAttemptedHashes.add(trackHash);
+    return fetched;
 }
 
 // ---------------------------------------------------------------------------
@@ -1272,28 +1497,14 @@ function preTranslateAll(
 
 function updateLyrics() {
     const trackKey = getTrackKey();
-    if (trackKey && trackKey !== lastTrackKey) {
-        lastTrackKey = trackKey;
-        resetTrackTasks();
-        resetDedupState({ includeWhisperDisplay: true, bumpTranslationToken: true });
-        currentLyrics = [];
-        whisperLines = [];
-        whisperText = '';
-        whisperActive = false;
-        whisperFromCache = false;
-        whisperLive = false;
-        whisperLeadSec = 0;
-        whisperSourceLanguageHint = 'auto';
-        clearWhisperTicker();
-        resetLearnerTranslationQueues();
-        clearDisplay();
-    }
+    enterTrack(trackKey);
 
     const useWhisper = whisperActive;
     if (useWhisper) {
         _updateWhisperDisplay();
         return;
     }
+    whisperCaptionDelayed.value = false;
 
     // Only try to find lyrics from other sources if we don't already have them
     if (currentLyrics.length === 0) {
@@ -1323,9 +1534,11 @@ function updateLyrics() {
     const fullText = display.fullText;
     const progressiveText = display.displayText;
     if (!fullText) {
-        // Between timed segments or before first line — clear stale text
-        if (lastWhisperDisplayText) {
-            updatePrimaryLine('');
+        // Explicitly timed native cues expire. Clear both lanes while the fixed
+        // subtitle container keeps player geometry stable.
+        if (lastWhisperDisplayText || lastDisplayedText || secondaryText.value) {
+            clearDisplay();
+            lastText = '';
             lastWhisperDisplayText = '';
         }
         refreshVisibility();
@@ -1427,6 +1640,7 @@ function _updateWhisperDisplay() {
     if (whisperLines.length) {
         currentLyrics = whisperLines;
         const display = getWhisperDisplay();
+        whisperCaptionDelayed.value = display.delayed === true;
         const fullText = display.fullText;
         if (fullText && fullText !== lastText) lastText = fullText;
         const secondaryRequestContext: WhisperTextRequestContext = {
@@ -1595,15 +1809,18 @@ function _updateWhisperDisplay() {
                 karaokeHighlightStart.value = -1;
             }
         } else if (!display.displayText) {
-            // Between segments (gap/silence) — hold previous text visible.
-            // Clearing causes blank flashes and content shift. The next segment
-            // will naturally replace the text when it arrives.
+            // Never present an expired ASR cue as current speech. The container
+            // has fixed geometry, so clearing does not shift the player.
+            clearDisplay();
+            lastText = '';
+            lastWhisperDisplayText = '';
         }
         refreshVisibility();
         return;
     }
 
     // No whisperLines but whisperText exists
+    whisperCaptionDelayed.value = false;
     if (whisperText) {
         const requestedText = whisperText;
         const requestContext: WhisperTextRequestContext = {
@@ -1737,6 +1954,7 @@ function applyWhisperSegments(payload: WhisperUpdatePayload) {
     if (segments.length === 0) {
         if (payload.source === 'complete' || payload.final) {
             whisperLines = [];
+            resetLaggedWhisperCaption();
             resetDedupState({ includeWhisperDisplay: true, bumpTranslationToken: true });
             clearDisplay();
         }
@@ -1745,6 +1963,28 @@ function applyWhisperSegments(payload: WhisperUpdatePayload) {
     const newLines = normalizeWhisperSubtitleLines(segments);
     if (newLines.length > 0) {
         schedulePreTranslation(newLines, 20, whisperSourceLanguageHint);
+        const newlyArrived = newLines.filter((line) => {
+            const signature = `${line.time}:${line.endTime ?? ''}:${line.text}`;
+            if (seenWhisperArrivalSignatures.has(signature)) return false;
+            seenWhisperArrivalSignatures.add(signature);
+            return true;
+        });
+        if (newlyArrived.length > 0) {
+            const audioTime = getAudioElement()?.currentTime;
+            const latestExpiredArrival = payload.live === true && typeof audioTime === 'number'
+                ? newlyArrived.filter(line => (
+                    typeof line.endTime === 'number'
+                    && audioTime >= line.endTime + 0.75
+                )).at(-1)
+                : undefined;
+            if (latestExpiredArrival) {
+                laggedWhisperLine = latestExpiredArrival;
+                laggedWhisperUntilMs = performance.now() + LAGGED_WHISPER_DWELL_MS;
+            } else {
+                laggedWhisperLine = null;
+                laggedWhisperUntilMs = 0;
+            }
+        }
     }
     whisperLines = newLines;
 }
@@ -1753,6 +1993,7 @@ function handleWhisperUpdate(payload: WhisperUpdatePayload) {
     if (!payload) return;
     whisperTextGeneration++;
     whisperActive = true;
+    whisperStatusSessionActive.value = true;
     applyWhisperRuntimeMetadata(payload);
     ensureWhisperTicker(whisperLive ? 80 : 200);
     applyWhisperSegments(payload);
@@ -1767,6 +2008,7 @@ function handleWhisperUpdate(payload: WhisperUpdatePayload) {
 function handleWhisperClear() {
     whisperTextGeneration++;
     whisperActive = false;
+    whisperStatusSessionActive.value = false;
     whisperText = '';
     whisperLines = [];
     whisperFromCache = false;
@@ -1774,6 +2016,7 @@ function handleWhisperClear() {
     whisperLeadSec = 0;
     whisperSourceLanguageHint = 'auto';
     whisperTimingQuality = 'segment';
+    resetLaggedWhisperCaption();
     resetDedupState({ includeWhisperDisplay: true });
     clearWhisperTicker();
     resetLearnerTranslationQueues();
@@ -1803,24 +2046,14 @@ function onTrackOrWorkChange() {
     // Reset blur to default from settings
     isBlurred.value = !!learnerBlur.value;
 
-    resetTrackTasks();
-    resetDedupState({ includeWhisperDisplay: true, bumpTranslationToken: true });
-    currentLyrics = [];
-    whisperLines = [];
-    whisperText = '';
-    whisperActive = false;
-    whisperFromCache = false;
-    whisperLeadSec = 0;
-    whisperSourceLanguageHint = 'auto';
-    whisperTimingQuality = 'segment';
-    clearWhisperTicker();
-    resetLearnerTranslationQueues();
-    lastPreTranslatedKey = null;
-    lastLrcTrackHash = null;
-    lrcFetchAttemptedHashes.clear();
-    lastNoLyricsLogHash = null;
-    clearDisplay();
+    // Host events can arrive before currentTrack/queue switches over. Always
+    // clear the outgoing track immediately, but only fetch/render when the
+    // bridge already exposes a genuinely new track key. Store watchers handle
+    // the common event-first, state-second ordering.
+    const enteredTrack = enterTrack(getTrackKey());
+    if (!enteredTrack) resetTrackRuntimeState();
     bindAudioTimeUpdate();
+    if (!enteredTrack) return;
     fetchLrcForCurrentTrack().catch(err => Logger.error('[LearnerMode] LRC fetch failed:', err));
     updateLyrics();
 }
@@ -2403,7 +2636,7 @@ function setupStoreWatchers() {
         const track = player.queue[player.queueIndex];
         return track?.hash || track?.mediaStreamUrl || null;
     }, (trackKey: string | null) => {
-        resetTrackTasks();
+        enterTrack(trackKey);
         trackTasks.schedule(() => {
             bindAudioTimeUpdate();
             if (trackKey) fetchLrcForCurrentTrack().catch(err => Logger.error('[LearnerMode] Store watcher LRC fetch failed:', err));
@@ -2413,13 +2646,34 @@ function setupStoreWatchers() {
     // Audio source
     add(store.watch((state: KikoeruStoreState) => state.AudioPlayer?.source, (src: string | undefined) => {
         if (!src) return;
-        resetTrackTasks();
         trackTasks.schedule(
             () => fetchLrcForCurrentTrack().catch(err => Logger.error('[LearnerMode] Source watcher LRC fetch failed:', err)),
             200,
             () => bridge.store?.state?.AudioPlayer?.source === src,
         );
     }, { immediate: true }));
+
+    // availableLyrics is populated asynchronously by some host builds. A late
+    // native subtitle must wake discovery without invalidating an in-flight
+    // request for the same track.
+    add(store.watch((state: KikoeruStoreState) => {
+        const player = state.AudioPlayer;
+        if (!player?.queue || typeof player.queueIndex !== 'number') return '';
+        const track = player.queue[player.queueIndex];
+        return (track?.availableLyrics || []).map((lyric: AvailableLyric) => [
+            lyric.hash,
+            lyric.mediaStreamUrl,
+            lyric.media_stream_url,
+            lyric.mediaDownloadUrl,
+            lyric.media_download_url,
+        ].filter(Boolean).join(':')).join('|');
+    }, (signature: string) => {
+        if (!signature) return;
+        const trackHash = bridge.currentTrack?.hash || bridge.currentTrack?.mediaStreamUrl || '';
+        if (trackHash) lrcFetchAttemptedHashes.delete(trackHash);
+        if (trackHash && lrcFetchPromise) queuedAvailableLyricsHash = trackHash;
+        fetchLrcForCurrentTrack().catch(err => Logger.error('[LearnerMode] availableLyrics fetch failed:', err));
+    }));
 
     // Playing state
     add(store.watch((state: KikoeruStoreState) => state.AudioPlayer?.playing, (playing: boolean | undefined) => {
@@ -2436,7 +2690,13 @@ function setupStoreWatchers() {
 
 onMounted(() => {
     storeWatcherCleanups.push(AppStore.subscribeWhisperState((state) => {
+        whisperUiState.value = { ...state };
         whisperRunning = state.isTranscribing || state.isLoadingModel;
+        if (whisperRunning || state.stage === 'recovering' || state.stage === 'error') {
+            whisperStatusSessionActive.value = true;
+        } else if (state.stage === 'idle' || state.stage === 'partial' || state.stage === 'complete') {
+            whisperStatusSessionActive.value = false;
+        }
         refreshVisibility();
     }));
 
@@ -2472,13 +2732,7 @@ onMounted(() => {
     if (app?.$watch) {
         routeUnwatch = app.$watch('$route', (to: VueRoute) => {
             lifecycleTasks.cancelAll();
-            resetTrackTasks();
-            resetDedupState();
-            currentLyrics = [];
-            whisperLines = [];
-            whisperText = '';
-            whisperActive = false;
-            resetLearnerTranslationQueues();
+            resetTrackRuntimeState();
             const path = to?.path || '';
             if (!path.startsWith('/work/')) {
                 // Clean up controls when navigating away
@@ -2492,6 +2746,7 @@ onMounted(() => {
                     injectCollapsedControls();
                     setupCoverAdjustment();
                     updateLyrics();
+                    fetchLrcForCurrentTrack().catch(err => Logger.error('[LearnerMode] Route watcher LRC fetch failed:', err));
                 }, 100);
             }
             refreshVisibility();
@@ -2540,6 +2795,7 @@ onMounted(() => {
     // Initial LRC fetch — immediate if track is already known, otherwise store
     // watchers (100ms/200ms delays) handle the case where the track appears later.
     if (bridge.currentTrack) {
+        enterTrack(getTrackKey());
         fetchLrcForCurrentTrack().catch(err => Logger.error('[LearnerMode] Initial LRC fetch failed:', err));
     }
 
@@ -2631,6 +2887,12 @@ watch(
                 :furigana-all="furiganaAll"
             />
         </div>
+        <p v-if="whisperPlaceholderText" class="learner-whisper-placeholder" role="status">
+            {{ whisperPlaceholderText }}
+        </p>
+        <span v-if="whisperCaptionDelayed" class="learner-whisper-delayed">
+            {{ t('whisperCaptionDelayed') }}
+        </span>
         <LearnerSecondarySubtitle
             v-show="enablePlayerTranslator"
             :text="secondaryText"
@@ -2681,6 +2943,12 @@ watch(
                     :furigana-all="furiganaAll"
                 />
             </div>
+            <p v-if="whisperPlaceholderText" class="learner-whisper-placeholder" role="status">
+                {{ whisperPlaceholderText }}
+            </p>
+            <span v-if="whisperCaptionDelayed" class="learner-whisper-delayed">
+                {{ t('whisperCaptionDelayed') }}
+            </span>
             <LearnerSecondarySubtitle
                 v-show="enablePlayerTranslator"
                 :text="secondaryText"

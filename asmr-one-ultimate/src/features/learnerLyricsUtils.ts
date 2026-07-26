@@ -15,6 +15,54 @@ export interface LyricLine {
     words?: LyricWord[];
 }
 
+export interface ActiveLyricLineOptions {
+    /**
+     * A short grace period can smooth live ASR segment boundaries. Native
+     * subtitle cues should keep the default of zero so their explicit end time
+     * remains authoritative.
+     */
+    expiredGraceSeconds?: number;
+}
+
+/**
+ * Resolve the line that is actually active at `now`.
+ *
+ * Explicitly timed cues expire; they are never held indefinitely while a live
+ * transcription is behind. Untimed LRC lines remain active until the next line
+ * starts because LRC has no end-time signal.
+ */
+export function findActiveLyricLine(
+    lines: LyricLine[],
+    now: number,
+    options: ActiveLyricLineOptions = {},
+): LyricLine | null {
+    if (lines.length === 0) return null;
+    let activeIdx = -1;
+    for (let index = lines.length - 1; index >= 0; index--) {
+        if (lines[index].time <= now) {
+            activeIdx = index;
+            break;
+        }
+    }
+    if (activeIdx < 0) return null;
+
+    const activeLine = lines[activeIdx];
+    if (activeLine.endTime == null || now < activeLine.endTime) return activeLine;
+
+    // Chunk overlap can leave an earlier, longer segment active after a short
+    // replacement fragment has ended.
+    for (let index = activeIdx - 1; index >= 0; index--) {
+        const earlier = lines[index];
+        if (earlier.endTime != null && earlier.endTime > now && earlier.time <= now) {
+            return earlier;
+        }
+        if (now - earlier.time > 60) break;
+    }
+
+    const grace = Math.max(0, Number(options.expiredGraceSeconds) || 0);
+    return now < activeLine.endTime + grace ? activeLine : null;
+}
+
 export function normalizeWhisperSubtitleLines(
     segments: WhisperUpdatePayload['segments'],
 ): LyricLine[] {
@@ -161,9 +209,9 @@ export function parseLyricsFromDom(root: Document | HTMLElement = document): Arr
 
         const minutes = parseInt(match[1], 10);
         const seconds = parseInt(match[2], 10);
-        const centiseconds = parseInt(match[3], 10);
+        const fractionalSeconds = Number(`0.${match[3]}`);
         lyrics.push({
-            time: (minutes * 60 + seconds) * 1000 + centiseconds * 10,
+            time: minutes * 60 + seconds + fractionalSeconds,
             text: labelText,
         });
     }

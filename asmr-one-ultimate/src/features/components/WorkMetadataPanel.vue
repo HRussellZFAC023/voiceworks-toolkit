@@ -21,6 +21,7 @@ import { sanitizeAllowedHtml, toSafeHttpUrl } from '../../core/SafeHtml';
 import { gmRequest, retryWithBackoff } from '../../infrastructure/HttpClient';
 import { DEFAULT_DLSITE_PROXY } from '../../core/Constants';
 import { fetchVerifiedImageBlob } from '../media/externalImageUtils';
+import { verifyMetadataImageBatch } from '../media/workMetadataImageVerification';
 
 // ============================================================================
 // Composables
@@ -218,11 +219,14 @@ function isImageLoaded(url: string): boolean {
     return loadedImageUrls.value.has(url);
 }
 
-async function verifySampleImage(url: string): Promise<boolean> {
+async function verifySampleImage(
+    url: string,
+    generation = imageVerificationGeneration,
+): Promise<boolean> {
+    if (generation !== imageVerificationGeneration) return false;
     if (imageBlobUrls.value.has(url)) return true;
     if (imageBlobAttempts.value.has(url)) return false;
     imageBlobAttempts.value.add(url);
-    const generation = imageVerificationGeneration;
     const sourceUrl = toAbsoluteUrl(url);
     if (!sourceUrl) {
         hiddenImageUrls.value.add(url);
@@ -276,7 +280,13 @@ async function verifySampleImage(url: string): Promise<boolean> {
 }
 
 async function verifySampleImages(): Promise<void> {
-    await Promise.allSettled(imageSamples.value.map(url => verifySampleImage(url)));
+    const generation = imageVerificationGeneration;
+    await verifyMetadataImageBatch(
+        imageSamples.value,
+        generation,
+        () => imageVerificationGeneration,
+        verifySampleImage,
+    );
 }
 
 function onImageError(url: string): void {

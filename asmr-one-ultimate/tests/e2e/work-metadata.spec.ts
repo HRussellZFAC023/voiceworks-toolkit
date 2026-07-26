@@ -86,7 +86,7 @@ test.describe('Work Metadata Panel', () => {
 
     test('metadata panel shows tag chips', async ({ injectedPage }) => {
         const chips = injectedPage.locator('.asmr-chip-tag');
-        await injectedPage.waitForTimeout(3000);
+        await expect(chips.first()).toBeVisible({ timeout: 15000 });
         const count = await chips.count();
         console.log(`Tag chips: ${count}`);
         // Should have at least some tags (CV, circle, or tags)

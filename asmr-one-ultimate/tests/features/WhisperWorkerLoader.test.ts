@@ -208,27 +208,194 @@ describe('WhisperWorkerLoader', () => {
     it('uses proportional inference timeout scaled to chunk length', () => {
         const code = __getWhisperWorkerCodeForTests();
 
-        expect(code).toContain('"minimumMs":45000');
+        expect(code).toContain('"minimumMs":120000');
+        expect(code).toContain('"coldStartMinimumMs":180000');
+        expect(code).toContain('"maximumMs":300000');
+        expect(code).toContain('"medium":1.75');
+        expect(code).toContain('"large":2.25');
+        expect(code).toContain('"observedDurationHeadroom":1.5');
         expect(code).toContain('"minimumMs":90000');
         expect(code).toContain('"maximumMs":180000');
         expect(code).toContain('calculateWhisperInferenceTimeoutMs');
-        expect(code).toContain("backendName + ' inference timed out after '");
+        expect(code).toContain("' inference timed out after ' + (budgetMs / 1000)");
         expect(code).not.toContain('const INFERENCE_TIMEOUT_MS');
         expect(code).not.toContain('FAST_BOOTSTRAP_TIMEOUT_MS');
     });
 
+    it('uses the cold WebGPU budget only until the first inference completes', async () => {
+        const timestampModes: unknown[] = [];
+        const pipe = createSuccessfulTimestampPipe(timestampModes);
+        const workerSelf = createTestWorker();
+        const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+        workerSelf.__whisperTestSetPipeline(pipe, {
+            model: TIMESTAMPED_TINY_MODEL,
+            backend: 'webgpu',
+        });
+
+        await transcribeTestChunk(workerSelf, 1);
+        await transcribeTestChunk(workerSelf, 2);
+
+        const messages = log.mock.calls.map(args => args.join(' '));
+        expect(messages).toContain(
+            '[Whisper Worker] Starting cold-start inference on webgpu (timeout=180s)',
+        );
+        expect(messages).toContain(
+            '[Whisper Worker] Starting inference on webgpu (timeout=120s)',
+        );
+        expect(messages.filter(message => message.includes('cold-start inference'))).toHaveLength(1);
+        expect(pipe).toHaveBeenCalledTimes(2);
+    });
+
+    it('reports a hard-ceiling timeout as unresponsive before poisoning the worker', async () => {
+        vi.useFakeTimers();
+        try {
+            const model = 'onnx-community/whisper-large-v3-turbo_timestamped';
+            const emitted: any[] = [];
+            const pipe: any = vi.fn(() => new Promise<any>(() => {}));
+            pipe.tokenizer = {};
+            const postMessage = vi.fn((message: any) => emitted.push(message));
+            const workerSelf = createTestWorker(postMessage);
+            const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+            workerSelf.__whisperTestSetPipeline(pipe, {
+                model,
+                backend: 'webgpu',
+            });
+
+            const pending = transcribeTestChunk(workerSelf, 17, {
+                model,
+                chunkLengthS: 8,
+            });
+            await Promise.resolve();
+            await Promise.resolve();
+            await vi.advanceTimersByTimeAsync(300_000);
+            await pending;
+
+            expect(errorLog).toHaveBeenCalledWith(
+                '[Whisper Worker] Inference hard ceiling exceeded',
+                expect.objectContaining({
+                    chunkId: 17,
+                    chunkLengthS: 8,
+                    elapsedMs: 300_000,
+                    budgetMs: 300_000,
+                    kind: 'cold-start',
+                    backend: 'webgpu',
+                    model,
+                }),
+            );
+            const poisonedIndex = emitted.findIndex(message => message.status === 'worker-poisoned');
+            const poisonedCallIndex = postMessage.mock.calls.findIndex(
+                ([message]) => message.status === 'worker-poisoned',
+            );
+            expect(poisonedIndex).toBeGreaterThanOrEqual(0);
+            expect(errorLog.mock.invocationCallOrder[0]).toBeLessThan(
+                postMessage.mock.invocationCallOrder[poisonedCallIndex],
+            );
+            expect(emitted[poisonedIndex]).toMatchObject({
+                status: 'worker-poisoned',
+                chunkId: 17,
+                data: {
+                    reason: 'inference-timeout',
+                    gpuFailure: false,
+                    chunkId: 17,
+                    chunkLengthS: 8,
+                    elapsedMs: 300_000,
+                    budgetMs: 300_000,
+                    kind: 'cold-start',
+                    backend: 'webgpu',
+                    model,
+                },
+            });
+            expect(emitted.findIndex(message => (
+                message.status === 'error' && message.chunkId === 17
+            ))).toBeGreaterThan(poisonedIndex);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it('lengthens a warm budget from recent completed direct inference', async () => {
+        vi.useFakeTimers();
+        try {
+            const model = 'onnx-community/whisper-base_timestamped';
+            const emitted: any[] = [];
+            let invocation = 0;
+            const pipe: any = vi.fn(() => {
+                invocation++;
+                if (invocation === 1) {
+                    return new Promise(resolve => {
+                        setTimeout(() => resolve({
+                            text: '完了',
+                            chunks: [{ text: '完了', timestamp: [0, 2] }],
+                        }), 100_000);
+                    });
+                }
+                return new Promise<any>(() => {});
+            });
+            pipe.tokenizer = {};
+            const workerSelf = createTestWorker(message => emitted.push(message));
+            vi.spyOn(console, 'error').mockImplementation(() => {});
+            workerSelf.__whisperTestSetPipeline(pipe, {
+                model,
+                backend: 'webgpu',
+            });
+
+            const first = transcribeTestChunk(workerSelf, 21, {
+                model,
+                chunkLengthS: 8,
+            });
+            await Promise.resolve();
+            await Promise.resolve();
+            await vi.advanceTimersByTimeAsync(100_000);
+            await expect(first).resolves.toMatchObject({ inferenceElapsedMs: 100_000 });
+
+            const second = transcribeTestChunk(workerSelf, 22, {
+                model,
+                chunkLengthS: 8,
+            });
+            await Promise.resolve();
+            await Promise.resolve();
+            await vi.advanceTimersByTimeAsync(149_999);
+            expect(emitted).not.toContainEqual(expect.objectContaining({
+                status: 'worker-poisoned',
+                chunkId: 22,
+            }));
+            await vi.advanceTimersByTimeAsync(1);
+            await second;
+
+            expect(emitted).toContainEqual(expect.objectContaining({
+                status: 'worker-poisoned',
+                chunkId: 22,
+                data: expect.objectContaining({
+                    reason: 'inference-timeout',
+                    gpuFailure: false,
+                    model,
+                    chunkLengthS: 8,
+                    elapsedMs: 150_000,
+                    budgetMs: 150_000,
+                    kind: 'warm',
+                    observedInferenceMs: 100_000,
+                }),
+            }));
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
     it('does not retry on a pipeline whose uncancellable inference timed out', () => {
         const code = __getWhisperWorkerCodeForTests();
-        const timeoutGuard = code.indexOf("if (/inference timed out/i.test(initialMsg))");
+        const timeoutGuard = code.indexOf('if (initialTimeout)');
         const wordRetry = code.indexOf('const isWordTimestampCapabilityError');
 
         expect(timeoutGuard).toBeGreaterThan(0);
         expect(wordRetry).toBeGreaterThan(timeoutGuard);
-        expect(code.slice(timeoutGuard, wordRetry)).toContain("haltTimedOutWorker(chunkId, initialMsg, currentBackend !== 'wasm')");
+        expect(code.slice(timeoutGuard, wordRetry)).toContain(
+            'haltTimedOutWorker(chunkId, initialMsg, initialTimeout)',
+        );
         expect(code.slice(timeoutGuard, wordRetry)).toContain('return null');
         expect(code).toContain('workerPoisoned = true');
         expect(code).toContain("postDropped(queued, 'worker-poisoned')");
         expect(code).toContain('if (!workerPoisoned) processNextJob()');
+        expect(code).not.toContain('index out of bounds|timed out|reading');
     });
 
     it('loads the requested multilingual model unchanged on WASM', () => {
@@ -725,6 +892,45 @@ describe('WhisperWorkerLoader', () => {
         expect(transcribe.mock.calls.map(([msg]) => msg.chunkId)).toEqual([1, 3]);
     });
 
+    it('replaces an equal-distance live window with the newer time range', () => {
+        let onMessage: ((event: { data: any }) => void) | null = null;
+        const emitted: any[] = [];
+        const transcribe = vi.fn(() => new Promise<any>(() => {}));
+        const workerSelf: any = {
+            __whisperTestTranscribe: transcribe,
+            addEventListener: (type: string, handler: (event: { data: any }) => void) => {
+                if (type === 'message') onMessage = handler;
+            },
+            postMessage: (message: any) => emitted.push(message),
+        };
+        new Function('self', __getWhisperWorkerCodeForTests(true))(workerSelf);
+        const send = (data: any) => onMessage!({ data });
+
+        send({
+            type: 'transcribe', chunkId: 1, priority: 0,
+            playheadDistance: 8, timeOffset: 0, chunkLengthS: 6,
+        });
+        send({
+            type: 'transcribe', chunkId: 2, priority: 0,
+            playheadDistance: 8, timeOffset: 6, chunkLengthS: 8,
+        });
+        send({
+            type: 'transcribe', chunkId: 3, priority: 0,
+            playheadDistance: 8, timeOffset: 12, chunkLengthS: 8,
+        });
+
+        expect(emitted).toContainEqual(expect.objectContaining({
+            status: 'dropped',
+            chunkId: 2,
+            data: expect.objectContaining({ reason: 'queue-replaced', replacedByChunkId: 3 }),
+        }));
+        expect(emitted).not.toContainEqual(expect.objectContaining({
+            status: 'dropped',
+            chunkId: 3,
+            data: expect.objectContaining({ reason: 'queue-full' }),
+        }));
+    });
+
     it('poisons a timed-out worker and rejects every queued or later job', () => {
         let onMessage: ((event: { data: any }) => void) | null = null;
         const emitted: any[] = [];
@@ -741,11 +947,24 @@ describe('WhisperWorkerLoader', () => {
 
         send({ type: 'transcribe', chunkId: 1, priority: 0 });
         send({ type: 'transcribe', chunkId: 2, priority: 1 });
-        workerSelf.__whisperTestHalt(1, 'webgpu inference timed out after 45s', true);
+        workerSelf.__whisperTestHalt(1, 'webgpu inference timed out after 120s', {
+            chunkId: 1,
+            elapsedMs: 120_000,
+            budgetMs: 120_000,
+            kind: 'warm',
+            backend: 'webgpu',
+        });
         send({ type: 'transcribe', chunkId: 3, priority: 0 });
 
         expect(transcribe).toHaveBeenCalledTimes(1);
-        expect(emitted).toContainEqual(expect.objectContaining({ status: 'worker-poisoned' }));
+        expect(emitted).toContainEqual(expect.objectContaining({
+            status: 'worker-poisoned',
+            data: expect.objectContaining({
+                reason: 'inference-timeout',
+                gpuFailure: false,
+                kind: 'warm',
+            }),
+        }));
         expect(emitted.findIndex((message) => message.status === 'worker-poisoned')).toBeLessThan(
             emitted.findIndex((message) => message.status === 'error' && message.chunkId === 1),
         );

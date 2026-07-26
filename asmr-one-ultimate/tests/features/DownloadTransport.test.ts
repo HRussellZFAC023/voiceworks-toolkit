@@ -5,6 +5,7 @@ import {
     DownloadTransport,
     RangeRestartRequiredError,
 } from '../../src/features/downloads/DownloadTransport';
+import { createDownloadResumeFingerprint } from '../../src/features/downloads/DownloadResumeFingerprint';
 
 function response(chunks: number[][], init: ResponseInit): Response {
     return new Response(new ReadableStream({
@@ -15,9 +16,30 @@ function response(chunks: number[][], init: ResponseInit): Response {
     }), init);
 }
 
+function responseAt(url: string, chunks: number[][], init: ResponseInit): Response {
+    const result = response(chunks, init);
+    Object.defineProperty(result, 'url', { configurable: true, value: url });
+    return result;
+}
+
 describe('DownloadTransport', () => {
     afterEach(() => {
         localStorage.removeItem('jwt-token');
+    });
+
+    it('does not bind the fetch receiver to the transport instance', async () => {
+        let receiver: unknown = Symbol('not-called');
+        const fetchMock = vi.fn(function (this: unknown) {
+            receiver = this;
+            return Promise.resolve(response([[1]], {
+                status: 200,
+                headers: { 'content-length': '1' },
+            }));
+        }) as unknown as typeof fetch;
+
+        await new DownloadTransport(fetchMock).stream('https://media.example/file', 0, vi.fn());
+
+        expect(receiver).toBeUndefined();
     });
 
     it('never sends the host JWT to cross-origin manifest media', async () => {
@@ -101,6 +123,231 @@ describe('DownloadTransport', () => {
             { offset: 4, bytes: [5] },
         ]);
         expect(result.size).toBe(5);
+    });
+
+    it('requires a safe restart before requesting a validator-less persisted range', async () => {
+        const fetchMock = vi.fn();
+        const chunks = vi.fn();
+
+        await expect(new DownloadTransport(fetchMock as typeof fetch).stream(
+            'https://media.example/file',
+            2,
+            chunks,
+            { expectedTotal: 5 },
+        )).rejects.toBeInstanceOf(RangeRestartRequiredError);
+
+        expect(fetchMock).not.toHaveBeenCalled();
+        expect(chunks).not.toHaveBeenCalled();
+    });
+
+    it('resumes the trusted raw media object with persisted source, total, and Backblaze mtime', async () => {
+        const url = 'https://raw.kiko-play-niptan.one/media/download/object/track.wav?verify=token';
+        const objectIdentity = 'https://raw.kiko-play-niptan.one/media/download/object/track.wav';
+        const objectVersion = '1783777782.543';
+        const fetchMock = vi.fn().mockResolvedValue(responseAt(url, [[3, 4], [5]], {
+            status: 206,
+            headers: {
+                'content-range': 'bytes 2-4/5',
+                'content-length': '3',
+                'accept-ranges': 'bytes',
+                'x-bz-info-mtime': objectVersion,
+            },
+        }));
+        const chunks = vi.fn();
+
+        const result = await new DownloadTransport(fetchMock as typeof fetch).stream(
+            url,
+            2,
+            chunks,
+            {
+                expectedObjectVersion: objectVersion,
+                expectedObjectIdentity: objectIdentity,
+                expectedSourceUrl: url,
+                expectedTotal: 5,
+            },
+        );
+
+        expect(fetchMock.mock.calls[0][1].headers).toMatchObject({ Range: 'bytes=2-' });
+        expect(fetchMock.mock.calls[0][1].headers).not.toHaveProperty('If-Range');
+        expect(chunks).toHaveBeenCalledTimes(2);
+        expect(result).toMatchObject({
+            size: 5,
+            objectVersion,
+            objectIdentity,
+            sourceUrl: url,
+            acceptsRanges: true,
+        });
+    });
+
+    it('resumes a validator-less real-sized FLAC only after matching local and remote boundary samples', async () => {
+        const sourceUrl = 'https://api.asmr-200.com/api/media/download/flac-hash';
+        const rawUrl = 'https://raw.kiko-play-niptan.one/media/download/object/track.flac?verify=token';
+        const objectIdentity = 'https://raw.kiko-play-niptan.one/media/download/object/track.flac';
+        const total = 201_474_412;
+        const offset = total - 1;
+        const prefix = new Uint8Array(64 * 1024);
+        prefix.set([0x66, 0x4c, 0x61, 0x43]); // fLaC
+        const boundary = new Uint8Array(64 * 1024).fill(0x5a);
+        const localSamples = new Map<number, Uint8Array>([
+            [0, prefix],
+            [offset - boundary.byteLength, boundary],
+        ]);
+        const fingerprint = await createDownloadResumeFingerprint(
+            offset,
+            async sampleOffset => localSamples.get(sampleOffset)!,
+        );
+        const fetchMock = vi.fn()
+            .mockResolvedValueOnce(responseAt(rawUrl, [[...prefix]], {
+                status: 206,
+                headers: { 'content-range': `bytes 0-${prefix.byteLength - 1}/${total}` },
+            }))
+            .mockResolvedValueOnce(responseAt(rawUrl, [[...boundary]], {
+                status: 206,
+                headers: {
+                    'content-range': `bytes ${offset - boundary.byteLength}-${offset - 1}/${total}`,
+                },
+            }))
+            .mockResolvedValueOnce(responseAt(rawUrl, [[0x01]], {
+                status: 206,
+                headers: { 'content-range': `bytes ${offset}-${offset}/${total}` },
+            }));
+        const chunks = vi.fn();
+
+        const result = await new DownloadTransport(fetchMock as typeof fetch).stream(
+            sourceUrl,
+            offset,
+            chunks,
+            {
+                expectedObjectIdentity: objectIdentity,
+                expectedSourceUrl: sourceUrl,
+                expectedResumeFingerprint: fingerprint,
+                expectedTotal: total,
+            },
+        );
+
+        expect(fetchMock).toHaveBeenNthCalledWith(1, sourceUrl, expect.objectContaining({
+            headers: expect.objectContaining({ Range: `bytes=0-${prefix.byteLength - 1}` }),
+        }));
+        expect(fetchMock).toHaveBeenNthCalledWith(2, sourceUrl, expect.objectContaining({
+            headers: expect.objectContaining({
+                Range: `bytes=${offset - boundary.byteLength}-${offset - 1}`,
+            }),
+        }));
+        expect(fetchMock).toHaveBeenNthCalledWith(3, sourceUrl, expect.objectContaining({
+            headers: expect.objectContaining({ Range: `bytes=${offset}-` }),
+        }));
+        expect(chunks).toHaveBeenCalledWith(expect.objectContaining({
+            offset,
+            objectIdentity,
+            sourceUrl,
+        }));
+        expect(result).toMatchObject({ size: total, objectIdentity, sourceUrl });
+    });
+
+    it('rejects a validator-less resume before append when a remote boundary sample changed', async () => {
+        const sourceUrl = 'https://api.asmr-200.com/api/media/download/flac-hash';
+        const rawUrl = 'https://raw.kiko-play-niptan.one/media/download/object/track.flac';
+        const total = 8;
+        const offset = 4;
+        const original = new Uint8Array([1, 2, 3, 4]);
+        const fingerprint = await createDownloadResumeFingerprint(
+            offset,
+            async () => original,
+        );
+        const fetchMock = vi.fn().mockResolvedValue(responseAt(rawUrl, [[1, 2, 3, 9]], {
+            status: 206,
+            headers: { 'content-range': 'bytes 0-3/8' },
+        }));
+        const chunks = vi.fn();
+
+        await expect(new DownloadTransport(fetchMock as typeof fetch).stream(
+            sourceUrl,
+            offset,
+            chunks,
+            {
+                expectedObjectIdentity: rawUrl,
+                expectedSourceUrl: sourceUrl,
+                expectedResumeFingerprint: fingerprint,
+                expectedTotal: total,
+            },
+        )).rejects.toBeInstanceOf(RangeRestartRequiredError);
+
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(chunks).not.toHaveBeenCalled();
+    });
+
+    it('aborts a validator-less resume when a fingerprint proof body stalls', async () => {
+        const sourceUrl = 'https://api.asmr-200.com/api/media/download/flac-hash';
+        const rawUrl = 'https://raw.kiko-play-niptan.one/media/download/object/track.flac';
+        const fingerprint = await createDownloadResumeFingerprint(
+            4,
+            async () => new Uint8Array([1, 2, 3, 4]),
+        );
+        const cancelled = vi.fn();
+        const body = new ReadableStream<Uint8Array>({
+            pull: () => new Promise(() => undefined),
+            cancel: cancelled,
+        });
+        const stalled = new Response(body, {
+            status: 206,
+            headers: { 'content-range': 'bytes 0-3/8' },
+        });
+        Object.defineProperty(stalled, 'url', { configurable: true, value: rawUrl });
+        let expire!: () => void;
+        const transport = new DownloadTransport(
+            vi.fn().mockResolvedValue(stalled) as typeof fetch,
+            {
+                stallTimeoutMs: 10,
+                requestTimeoutMs: 0,
+                setTimer: callback => {
+                    expire = callback;
+                    return 1 as unknown as ReturnType<typeof setTimeout>;
+                },
+                clearTimer: vi.fn(),
+            },
+        );
+        const streaming = transport.stream(sourceUrl, 4, vi.fn(), {
+            expectedObjectIdentity: rawUrl,
+            expectedSourceUrl: sourceUrl,
+            expectedResumeFingerprint: fingerprint,
+            expectedTotal: 8,
+        });
+
+        await vi.waitFor(() => expect(expire).toBeTypeOf('function'));
+        expire();
+
+        await expect(streaming).rejects.toBeInstanceOf(DownloadStallError);
+        expect(cancelled).toHaveBeenCalledOnce();
+    });
+
+    it('rejects a trusted raw media range when Backblaze object metadata changes', async () => {
+        const url = 'https://raw.kiko-play-niptan.one/media/download/object/track.wav';
+        const cancelled = vi.fn();
+        const body = new ReadableStream<Uint8Array>({
+            start(controller) { controller.enqueue(new Uint8Array([3, 4, 5])); },
+            cancel: cancelled,
+        });
+        const changed = new Response(body, {
+            status: 206,
+            headers: {
+                'content-range': 'bytes 2-4/5',
+                'x-bz-info-mtime': '1783777783.000',
+            },
+        });
+        Object.defineProperty(changed, 'url', { configurable: true, value: url });
+        const chunks = vi.fn();
+
+        await expect(new DownloadTransport(
+            vi.fn().mockResolvedValue(changed) as typeof fetch,
+        ).stream(url, 2, chunks, {
+            expectedObjectVersion: '1783777782.543',
+            expectedObjectIdentity: url,
+            expectedSourceUrl: url,
+            expectedTotal: 5,
+        })).rejects.toBeInstanceOf(RangeRestartRequiredError);
+
+        expect(chunks).not.toHaveBeenCalled();
+        expect(cancelled).toHaveBeenCalledOnce();
     });
 
     it('retries a date-validated Cloudflare resume without If-Range and still validates the range', async () => {
@@ -354,7 +601,7 @@ describe('DownloadTransport', () => {
             cancel: cancelled,
         }), { status: 200 }));
         await expect(new DownloadTransport(fetchMock as typeof fetch).stream(
-            'https://media.example/file', 2, vi.fn(),
+            'https://media.example/file', 2, vi.fn(), { expectedEtag: 'same' },
         )).rejects.toBeInstanceOf(RangeRestartRequiredError);
         expect(cancelled).toHaveBeenCalledTimes(1);
     });
@@ -403,10 +650,10 @@ describe('DownloadTransport', () => {
 
     it('rejects a truncated unknown-total byte range using its declared end', async () => {
         const fetchMock = vi.fn().mockResolvedValue(response([[3, 4]], {
-            status: 206, headers: { 'content-range': 'bytes 2-5/*' },
+            status: 206, headers: { 'content-range': 'bytes 2-5/*', etag: 'same' },
         }));
         await expect(new DownloadTransport(fetchMock as typeof fetch).stream(
-            'https://media.example/file', 2, vi.fn(),
+            'https://media.example/file', 2, vi.fn(), { expectedEtag: 'same' },
         )).rejects.toThrow('Incomplete download: received 4 of 6 bytes');
     });
 
@@ -417,10 +664,10 @@ describe('DownloadTransport', () => {
             cancel: cancelled,
         }), {
             status: 206,
-            headers: { 'content-range': 'bytes 20-20/21' },
+            headers: { 'content-range': 'bytes 20-20/21', etag: 'same' },
         }));
         await expect(new DownloadTransport(fetchMock as typeof fetch).stream(
-            'https://media.example/file', 2, vi.fn(),
+            'https://media.example/file', 2, vi.fn(), { expectedEtag: 'same' },
         )).rejects.toBeInstanceOf(RangeRestartRequiredError);
         expect(cancelled).toHaveBeenCalledTimes(1);
     });
@@ -495,7 +742,7 @@ describe('DownloadTransport', () => {
         const ignoredRange = vi.fn().mockResolvedValue(response([[1]], { status: 200 }));
         await expect(new DownloadTransport(ignoredRange as typeof fetch, {
             sleep: vi.fn(async () => undefined),
-        }).stream('https://media.example/file', 2, vi.fn()))
+        }).stream('https://media.example/file', 2, vi.fn(), { expectedEtag: 'same' }))
             .rejects.toBeInstanceOf(RangeRestartRequiredError);
         expect(ignoredRange).toHaveBeenCalledTimes(1);
     });

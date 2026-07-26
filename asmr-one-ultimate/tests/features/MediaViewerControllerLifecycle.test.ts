@@ -114,4 +114,47 @@ describe('MediaViewerController lifecycle cleanup', () => {
         expect(injectThumbnailsMock).not.toHaveBeenCalled();
         expect(folderSpy).not.toHaveBeenCalled();
     });
+
+    it('opens a hash-only DOM row with the canonical host media metadata', async () => {
+        const canonicalItem = {
+            hash: '1052162/319502',
+            title: '03.台詞-1.jpg',
+            type: 'image',
+            mediaStreamUrl: 'https://raw.kiko-play-niptan.one/signed/image.jpg',
+            mediaDownloadUrl: 'https://raw.kiko-play-niptan.one/signed/image.jpg',
+            size: 59_550,
+        };
+        const workTree = {
+            $options: { name: 'WorkTree' },
+            onClickItem: vi.fn(),
+            fatherFolder: [canonicalItem],
+            path: [],
+        };
+        bridgeMock.findComponent.mockReturnValue(workTree as never);
+        document.body.innerHTML = `
+            <div id="work-tree">
+                <div class="q-item" data-asmr-hash="1052162/319502">
+                    <div class="q-item__label">03.台詞-1.jpg</div>
+                </div>
+            </div>
+        `;
+
+        const controller = MediaViewerController.getInstance() as unknown as {
+            enable: () => void;
+            disable: () => void;
+            showMedia: (...args: unknown[]) => Promise<void>;
+        };
+        const showMedia = vi.spyOn(controller, 'showMedia').mockResolvedValue();
+        controller.enable();
+
+        document.querySelector<HTMLElement>('.q-item')!.click();
+        await Promise.resolve();
+
+        expect(showMedia).toHaveBeenCalledWith(
+            expect.objectContaining(canonicalItem),
+            'image',
+            workTree,
+        );
+        controller.disable();
+    });
 });

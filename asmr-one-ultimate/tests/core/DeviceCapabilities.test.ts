@@ -3,8 +3,8 @@ import {
     classifyDeviceTier,
     getWhisperMinWebGpuBufferBytes,
     isAppleM1CompatibilityGpu,
+    isFirefoxMacWhisperCompatibilityProfile,
     isIntelMac,
-    shouldUseTinyWhisperModel,
 } from '../../src/core/DeviceCapabilities';
 
 describe('DeviceCapabilities', () => {
@@ -81,27 +81,27 @@ describe('DeviceCapabilities', () => {
             expect(isAppleM1CompatibilityGpu('apple m2 gpu')).toBe(false);
         });
 
-        it('uses tiny for the unknown-memory M1 compatibility profile and Firefox/Mac document-start fallback', () => {
-            expect(shouldUseTinyWhisperModel({
+        it('recognizes the unknown-memory M1 compatibility profile and Firefox/Mac document-start fallback', () => {
+            expect(isFirefoxMacWhisperCompatibilityProfile({
                 hasGpu: true,
                 memory: -1,
                 isMobile: false,
                 gpuVendor: 'mozilla apple m1, or similar',
             })).toBe(true);
 
-            expect(shouldUseTinyWhisperModel({
+            expect(isFirefoxMacWhisperCompatibilityProfile({
                 hasGpu: true,
                 memory: 8,
                 isMobile: false,
                 gpuVendor: 'mozilla apple m1, or similar',
             })).toBe(false);
-            expect(shouldUseTinyWhisperModel({
+            expect(isFirefoxMacWhisperCompatibilityProfile({
                 hasGpu: true,
                 memory: -1,
                 isMobile: false,
                 gpuVendor: 'mozilla apple m3 gpu',
             }, 'Mozilla/5.0 (Macintosh; Intel Mac OS X 14.5; rv:153.0) Gecko/20100101 Firefox/153.0', 'MacIntel')).toBe(true);
-            expect(shouldUseTinyWhisperModel({
+            expect(isFirefoxMacWhisperCompatibilityProfile({
                 hasGpu: true,
                 memory: -1,
                 isMobile: false,

@@ -14,6 +14,7 @@ interface ResumableJobItem {
     id: string;
     title: string;
     convertToOpus?: boolean;
+    needsTitleTranslation?: boolean;
 }
 
 const props = withDefaults(defineProps<{
@@ -53,6 +54,7 @@ const emit = defineEmits<{
     pause: [];
     resume: [jobId: string];
     resumeWithoutOpus: [jobId: string];
+    resumeWithOriginalTitles: [jobId: string];
 }>();
 
 const searchQuery = ref('');
@@ -310,6 +312,24 @@ function formatBytes(bytes: number): string {
     return `${value.toLocaleString(undefined, { maximumFractionDigits: 1 })} ${units[unit]}`;
 }
 
+function formatDuration(seconds: number | undefined): string {
+    if (!Number.isFinite(seconds) || Number(seconds) <= 0) return '';
+    const wholeSeconds = Math.max(0, Math.round(Number(seconds)));
+    const hours = Math.floor(wholeSeconds / 3_600);
+    const minutes = Math.floor((wholeSeconds % 3_600) / 60);
+    const remainder = wholeSeconds % 60;
+    return hours > 0
+        ? `${hours}:${String(minutes).padStart(2, '0')}:${String(remainder).padStart(2, '0')}`
+        : `${minutes}:${String(remainder).padStart(2, '0')}`;
+}
+
+function selectedFileCount(work: BackupWorkDownloadItem): number {
+    if (!work.fileCountByType) return 0;
+    return (Object.keys(filters.value) as BackupFileFilter[]).reduce((sum, category) => (
+        sum + (filters.value[category] ? work.fileCountByType?.[category] ?? 0 : 0)
+    ), 0);
+}
+
 function estimatedOpusBytes(work: BackupWorkDownloadItem): number | undefined {
     if (!convertToOpus.value || !work.durationSeconds || work.durationSeconds <= 0) return undefined;
     // Opus bitrate is kilobits/second. Include a small container/metadata allowance.
@@ -354,7 +374,18 @@ function workMeasure(work: BackupWorkDownloadItem): string {
     const bytes = displayedSizeBytes(work);
     const completeness = sizeCompleteness(work);
     if (completeness === 'loading') return props.profile.labels.loading;
-    if (completeness === 'unavailable' || bytes == null) return props.profile.labels.unknownSize;
+    if (completeness === 'unavailable' || bytes == null) {
+        const duration = filters.value.audio ? formatDuration(work.durationSeconds) : '';
+        const files = selectedFileCount(work);
+        if (duration && files > 0) {
+            return props.profile.labels.durationAndFiles
+                .replace('{duration}', duration)
+                .replace('{count}', String(files));
+        }
+        if (files > 0) return props.profile.labels.fileCount.replace('{count}', String(files));
+        if (duration) return duration;
+        return props.profile.labels.unknownSize;
+    }
     const formatted = formatBytes(bytes);
     if (completeness === 'partial') return props.profile.labels.partialSize.replace('{size}', formatted);
     return filters.value.audio && estimatedOpusBytes(work) != null
@@ -512,6 +543,7 @@ watch(() => props.profile, profile => {
                         <div v-for="job in resumableJobs" :key="job.id" class="resume-job">
                             <button type="button" :disabled="busy" :data-testid="`resume-${job.id}`" @click="emit('resume', job.id)"><i class="material-icons">resume</i>{{ job.title }}</button>
                             <button v-if="job.convertToOpus" type="button" :disabled="busy" :data-testid="`resume-without-opus-${job.id}`" @click="emit('resumeWithoutOpus', job.id)">{{ profile.labels.resumeWithoutOpus }}</button>
+                            <button v-if="job.needsTitleTranslation" type="button" :disabled="busy" :data-testid="`resume-with-original-titles-${job.id}`" @click="emit('resumeWithOriginalTitles', job.id)">{{ profile.labels.resumeWithOriginalTitles }}</button>
                         </div>
                     </section>
                 </aside>

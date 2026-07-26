@@ -206,6 +206,8 @@ export interface PluginConfig {
     whisperTask: string;
     whisperQuantized: boolean;
     whisperOverrideSubs: boolean;
+    /** Automatically choose a low-latency window for known slow live paths. */
+    whisperAdaptiveWindow: boolean;
     whisperLiveChunkSec: number;
     whisperLiveOverlapSec: number;
     whisperCacheTranscripts: boolean;

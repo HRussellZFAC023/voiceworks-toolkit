@@ -30,7 +30,7 @@ import { useConfig } from '../../composables/useConfig';
 import { DEFAULT_DLSITE_PROXY } from '../../core/Constants';
 import { useI18n } from '../../composables/useI18n';
 import { Logger, Config } from '../../core/Utils';
-import { gmRequest, retryWithBackoff } from '../../infrastructure/HttpClient';
+import { gmDownload, gmRequest, retryWithBackoff } from '../../infrastructure/HttpClient';
 import { TranslationService } from '../../services/TranslationService';
 import { isChinese } from '../../core/DomUtils';
 import type { MediaFile, TouchState, DragState } from '../media/types';
@@ -41,12 +41,22 @@ import {
     isTextExtension as isText,
     isVideoExtension as isVideo,
 } from '../media/mediaFileUtils';
-import { buildMediaStreamUrl } from '../media/mediaStreamUrlUtils';
+import {
+    buildMediaDownloadUrl,
+    buildMediaStreamUrl,
+    resolveMediaApiBaseUrl,
+} from '../media/mediaStreamUrlUtils';
 import {
     fetchVerifiedImageBlob,
     isSafeRasterImageBlob,
     normalizeImageUrl,
 } from '../media/externalImageUtils';
+import {
+    fetchSafeMediaArrayBuffer,
+    fetchSafeMediaBlob,
+    fetchSafeMediaText,
+    normalizeSafeMediaNavigationUrl,
+} from '../media/safeMediaTransport';
 
 declare const unsafeWindow: Window & typeof globalThis;
 
@@ -59,6 +69,9 @@ const ZOOM_STEP = 0.05;
 const TRANSLATE_BATCH_MAX_CHARS = 0;
 const TRANSLATE_TOTAL_MAX_CHARS = 0;
 const PDF_TEXT_MAX_PAGES = Infinity;
+const MAX_TEXT_BYTES = 4 * 1024 * 1024;
+const MAX_PDF_BYTES = 128 * 1024 * 1024;
+const MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024;
 // v3.11.174 is the last release with UMD .js builds (v4+ only ships .mjs ESM)
 const PDFJS_CDN = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js';
 const PDFJS_WORKER_CDN = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
@@ -145,6 +158,8 @@ let slideshowPaused = false;
 let recoveryTimeout: number | undefined;
 let pdfjsLoadPromise: Promise<unknown> | null = null;
 let activeRequestId = 0;
+let mediaTransportController: AbortController | null = null;
+let activePdfBlobUrl: string | null = null;
 
 // ── Computed ─────────────────────────────────────────────────────────────────
 
@@ -167,11 +182,15 @@ const currentItem = computed(() => currentMediaList.value[currentMediaIndex.valu
 
 function getMediaUrl(hash: string, item?: MediaFile): string {
     const token = localStorage.getItem('jwt-token') || '';
-    const url = buildMediaStreamUrl(hash, item, token);
-    if (url.startsWith('http') || url.startsWith('//') || url.startsWith('blob:')) {
-        return normalizeExternalUrl(url);
-    }
-    return url;
+    const apiBaseUrl = resolveMediaApiBaseUrl(bridge.axios?.defaults?.baseURL);
+    const url = buildMediaStreamUrl(hash, item, token, apiBaseUrl);
+    return normalizeSafeMediaNavigationUrl(url);
+}
+
+function getMediaDownloadUrl(hash: string, item?: MediaFile): string {
+    const token = localStorage.getItem('jwt-token') || '';
+    const apiBaseUrl = resolveMediaApiBaseUrl(bridge.axios?.defaults?.baseURL);
+    return normalizeSafeMediaNavigationUrl(buildMediaDownloadUrl(hash, item, token, apiBaseUrl));
 }
 
 function normalizeExternalUrl(url: string): string {
@@ -286,13 +305,20 @@ function clearExternalBlobCache(): void {
     preloadedImages.clear();
 }
 
+function clearActivePdfBlobUrl(): void {
+    if (!activePdfBlobUrl) return;
+    try {
+        URL.revokeObjectURL(activePdfBlobUrl);
+    } catch {
+        // Ignore invalid/revoked object URLs.
+    }
+    activePdfBlobUrl = null;
+}
+
 async function fetchMediaImageBlobUrl(item: MediaFile, primaryUrl?: string): Promise<string | null> {
     const candidates = [
         primaryUrl || getMediaUrl(item.hash, item),
-        item.mediaStreamUrl,
-        item.media_stream_url,
-        item.mediaDownloadUrl,
-        item.media_download_url,
+        getMediaDownloadUrl(item.hash, item),
     ]
         .map((value) => normalizeExternalUrl(String(value || '')))
         .filter((value, index, all) => !!value && all.indexOf(value) === index);
@@ -466,6 +492,9 @@ function hideModal(): void {
     // Cancel pending background requests
     activeRequestId++;
     mediaRenderGeneration++;
+    mediaTransportController?.abort();
+    mediaTransportController = null;
+    clearActivePdfBlobUrl();
     stopRecovery();
     clearExternalBlobCache();
 
@@ -673,24 +702,34 @@ function renderMedia(item: MediaFile, type: 'image' | 'video' | 'pdf' | 'text'):
     if (!wrapper) return;
 
     stopRecovery();
+    clearActivePdfBlobUrl();
     wrapper.innerHTML = '';
     wrapper.classList.remove('zoomed');
     isLoading.value = true;
     errorMessage.value = '';
     const renderGeneration = ++mediaRenderGeneration;
+    mediaTransportController?.abort();
+    mediaTransportController = new AbortController();
+    const transportSignal = mediaTransportController.signal;
 
     const url = getMediaUrl(item.hash, item);
 
     updateTitle(item.title);
+    if (!url) {
+        isLoading.value = false;
+        errorMessage.value = t('mediaViewerResolutionFailed');
+        errorIcon.value = 'block';
+        return;
+    }
 
     if (type === 'image') {
         void renderImage(wrapper, item, url, renderGeneration);
     } else if (type === 'video') {
         renderVideo(wrapper, item, url);
     } else if (type === 'pdf') {
-        renderPdf(wrapper, item, url, renderGeneration);
+        renderPdf(wrapper, item, url, renderGeneration, transportSignal);
     } else {
-        renderText(wrapper, item, url, renderGeneration);
+        renderText(wrapper, item, url, renderGeneration, transportSignal);
     }
 }
 
@@ -783,6 +822,8 @@ function renderVideo(wrapper: HTMLElement, item: MediaFile, url: string): void {
     video.muted = true;
     video.defaultMuted = true;
     video.playsInline = true;
+    video.crossOrigin = 'anonymous';
+    video.setAttribute('referrerpolicy', 'no-referrer');
     video.className = 'media-viewer-video';
     video.dataset.mediaHash = item.hash || '';
     video.dataset.mediaTitle = item.title || '';
@@ -948,19 +989,28 @@ function renderVideo(wrapper: HTMLElement, item: MediaFile, url: string): void {
     wrapper.appendChild(video);
 }
 
-function renderPdf(wrapper: HTMLElement, item: MediaFile, url: string, renderGeneration: number): void {
+function renderPdf(
+    wrapper: HTMLElement,
+    item: MediaFile,
+    url: string,
+    renderGeneration: number,
+    signal: AbortSignal,
+): void {
     const pdfContainer = document.createElement('div');
     pdfContainer.className = 'media-viewer-pdf-container';
     wrapper.appendChild(pdfContainer);
 
-    const renderPdfFallback = () => {
+    const renderPdfFallback = (blob: Blob) => {
         if (renderGeneration !== mediaRenderGeneration) return;
         pdfContainer.innerHTML = '';
+        clearActivePdfBlobUrl();
+        activePdfBlobUrl = URL.createObjectURL(blob);
         const iframe = document.createElement('iframe');
         iframe.className = 'media-viewer-pdf';
-        iframe.src = `${url}#toolbar=0&navpanes=0&scrollbar=1`;
+        iframe.src = `${activePdfBlobUrl}#toolbar=0&navpanes=0&scrollbar=1`;
         iframe.loading = 'lazy';
         iframe.referrerPolicy = 'no-referrer';
+        iframe.setAttribute('sandbox', '');
         iframe.onload = () => { isLoading.value = false; };
         iframe.onerror = () => {
             isLoading.value = false;
@@ -970,9 +1020,16 @@ function renderPdf(wrapper: HTMLElement, item: MediaFile, url: string, renderGen
         pdfContainer.appendChild(iframe);
     };
 
-    extractPdfText(url).then((text) => {
+    extractPdfText(url, signal).then((result) => {
         if (renderGeneration !== mediaRenderGeneration) return;
-        if (!text) { renderPdfFallback(); return; }
+        if (!result) {
+            isLoading.value = false;
+            errorMessage.value = t('mediaViewerPdfLoadFailed');
+            errorIcon.value = 'picture_as_pdf';
+            return;
+        }
+        const { text } = result;
+        if (!text) { renderPdfFallback(result.blob); return; }
 
         if (translateMode.value) {
             const targetLang = TranslationService.getUiTargetLang();
@@ -988,13 +1045,18 @@ function renderPdf(wrapper: HTMLElement, item: MediaFile, url: string, renderGen
                     pdfContainer.innerHTML = '';
                     pdfContainer.appendChild(buildTextLines(text));
                 }
-            }).catch(() => renderPdfFallback());
+            }).catch(() => renderPdfFallback(result.blob));
         } else {
             pdfContainer.innerHTML = '';
             pdfContainer.appendChild(buildTextLines(text));
             isLoading.value = false;
         }
-    }).catch(() => renderPdfFallback());
+    }).catch(() => {
+        if (renderGeneration !== mediaRenderGeneration) return;
+        isLoading.value = false;
+        errorMessage.value = t('mediaViewerPdfLoadFailed');
+        errorIcon.value = 'picture_as_pdf';
+    });
 }
 
 function buildTextLines(text: string): HTMLElement {
@@ -1009,15 +1071,24 @@ function buildTextLines(text: string): HTMLElement {
     return container;
 }
 
-function renderText(wrapper: HTMLElement, item: MediaFile, url: string, renderGeneration: number): void {
+function renderText(
+    wrapper: HTMLElement,
+    item: MediaFile,
+    url: string,
+    renderGeneration: number,
+    signal: AbortSignal,
+): void {
     const loadText = async () => {
         try {
-            const res = await retryWithBackoff(
-                () => gmRequest({ url, responseType: 'text' }),
-                { attempts: 2, backoffMs: 500 }
-            );
+            const res = await fetchSafeMediaText(url, {
+                maxBytes: MAX_TEXT_BYTES,
+                signal,
+                timeoutMs: 30_000,
+                headers: { Accept: 'text/plain,text/*;q=0.9,*/*;q=0.1' },
+            });
+            if (!res) throw new Error('Unsafe, oversized, or unavailable text response');
             if (renderGeneration !== mediaRenderGeneration) return;
-            const rawText = String(res.response || '');
+            const rawText = res.text;
             const maxChars = 400000;
             const text = rawText.length > maxChars ? rawText.slice(0, maxChars) : rawText;
 
@@ -1187,7 +1258,8 @@ async function downloadCurrentMedia(): Promise<void> {
 
     const url = getMediaUrl(item.hash, item);
 
-    const triggerDownload = (blob: Blob) => {
+    const triggerDownload = async (blob: Blob) => {
+        if (await gmDownload({ url: blob, name: item.title, saveAs: false })) return;
         const blobUrl = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = blobUrl;
@@ -1207,7 +1279,7 @@ async function downloadCurrentMedia(): Promise<void> {
         }
         try {
             const response = await fetch(verifiedUrl);
-            triggerDownload(await response.blob());
+            await triggerDownload(await response.blob());
             return;
         } catch (err) {
             Logger.warn('[MediaLightbox] Verified image download failed:', err);
@@ -1218,20 +1290,18 @@ async function downloadCurrentMedia(): Promise<void> {
     }
 
     try {
-        const res = await retryWithBackoff(
-            () => gmRequest({ url, responseType: 'blob' }),
-            { attempts: 2, backoffMs: 500 },
-        );
-        triggerDownload(res.response as Blob);
-    } catch {
-        try {
-            const response = await fetch(url, { credentials: 'include' });
-            if (!response.ok) throw new Error(`HTTP ${response.status}`);
-            triggerDownload(await response.blob());
-        } catch (err) {
-            Logger.warn('[MediaLightbox] Download failed:', err);
-            window.open(url, '_blank', 'noopener,noreferrer');
-        }
+        const downloadUrl = getMediaDownloadUrl(item.hash, item) || url;
+        const result = await fetchSafeMediaBlob(downloadUrl, {
+            maxBytes: MAX_DOWNLOAD_BYTES,
+            timeoutMs: 5 * 60_000,
+            headers: { Accept: '*/*' },
+        });
+        if (!result) throw new Error('Unsafe, oversized, or unavailable media response');
+        await triggerDownload(result.blob);
+    } catch (err) {
+        Logger.warn('[MediaLightbox] Download failed:', err);
+        errorMessage.value = t('mediaViewerDownloadFailed');
+        errorIcon.value = 'download_off';
     }
 }
 
@@ -1248,7 +1318,13 @@ async function openRawMedia(): Promise<void> {
         window.open(verifiedUrl, '_blank', 'noopener,noreferrer');
         return;
     }
-    window.open(getMediaUrl(item.hash, item), '_blank', 'noopener,noreferrer');
+    const safeUrl = getMediaUrl(item.hash, item);
+    if (!safeUrl) {
+        errorMessage.value = t('mediaViewerResolutionFailed');
+        errorIcon.value = 'block';
+        return;
+    }
+    window.open(safeUrl, '_blank', 'noopener,noreferrer');
 }
 
 // ── Player control ───────────────────────────────────────────────────────────
@@ -1394,17 +1470,40 @@ async function ensurePdfJs(): Promise<PdfjsLib | null> {
     return pdfjsLoadPromise as Promise<PdfjsLib | null>;
 }
 
-async function extractPdfText(url: string): Promise<string | null> {
+interface VerifiedPdf {
+    blob: Blob;
+    text: string | null;
+}
+
+async function extractPdfText(url: string, signal: AbortSignal): Promise<VerifiedPdf | null> {
+    const res = await fetchSafeMediaArrayBuffer(url, {
+        maxBytes: MAX_PDF_BYTES,
+        signal,
+        timeoutMs: 90_000,
+        headers: { Accept: 'application/pdf,*/*;q=0.1' },
+    });
+    if (!res) return null;
+
+    const contentType = (res.headers.get('content-type') || '')
+        .split(';', 1)[0]
+        .trim()
+        .toLowerCase();
+    const bytes = new Uint8Array(res.data);
+    const hasPdfMagic = bytes.byteLength >= 5
+        && String.fromCharCode(...bytes.slice(0, 5)) === '%PDF-';
+    if (
+        !hasPdfMagic
+        || (contentType !== 'application/pdf' && contentType !== 'application/octet-stream')
+    ) {
+        return null;
+    }
+
+    const blob = new Blob([bytes], { type: 'application/pdf' });
     const pdfjs = await ensurePdfJs();
-    if (!pdfjs) return null;
+    if (!pdfjs || signal.aborted) return { blob, text: null };
 
     try {
-        const res = await retryWithBackoff(
-            () => gmRequest({ url, responseType: 'arraybuffer' }),
-            { attempts: 2, backoffMs: 500 }
-        );
-        const data = res.response as ArrayBuffer;
-        const doc = await pdfjs.getDocument({ data }).promise;
+        const doc = await pdfjs.getDocument({ data: res.data }).promise;
         const maxPages = Math.min(doc.numPages, PDF_TEXT_MAX_PAGES);
         const pages: string[] = [];
 
@@ -1447,10 +1546,10 @@ async function extractPdfText(url: string): Promise<string | null> {
             if (splitLines.length) pages.push(splitLines.join('\n'));
         }
 
-        return pages.join('\n\n');
+        return { blob, text: pages.join('\n\n') || null };
     } catch (err) {
         Logger.warn('[MediaLightbox] PDF text extraction failed:', err);
-        return null;
+        return { blob, text: null };
     }
 }
 
@@ -1616,6 +1715,9 @@ watch([lang, translateMode, cnToJp], () => {
 
 onUnmounted(() => {
     mediaRenderGeneration++;
+    mediaTransportController?.abort();
+    mediaTransportController = null;
+    clearActivePdfBlobUrl();
     document.removeEventListener('keydown', handleKeydown);
     document.removeEventListener('mousemove', handleMouseMove);
     document.removeEventListener('mouseup', handleMouseUp);

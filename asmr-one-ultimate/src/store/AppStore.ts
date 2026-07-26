@@ -72,6 +72,7 @@ const CONFIG_DEFAULTS: PluginConfig = {
     whisperTask: 'transcribe',
     whisperQuantized: false,
     whisperOverrideSubs: true,
+    whisperAdaptiveWindow: true,
     whisperLiveChunkSec: 29,
     whisperLiveOverlapSec: 5,
     whisperCacheTranscripts: true,

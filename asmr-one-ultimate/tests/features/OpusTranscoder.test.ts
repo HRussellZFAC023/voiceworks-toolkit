@@ -92,10 +92,14 @@ describe('buildOpusArguments', () => {
         const importModule = vi.fn(async (url: string) => url.includes('@ffmpeg/util')
             ? { toBlobURL }
             : { FFmpeg: FakeFfmpeg });
-        const fetchImpl = vi.fn(async () => new Response(
-            'import { CORE_URL } from "./const.js";\nimport { ERROR_UNKNOWN_MESSAGE_TYPE } from "./errors.js";',
-            { status: 200, headers: { 'content-type': 'text/javascript' } },
-        ));
+        let fetchReceiver: unknown = Symbol('not-called');
+        const fetchImpl = vi.fn(function (this: unknown) {
+            fetchReceiver = this;
+            return Promise.resolve(new Response(
+                'import { CORE_URL } from "./const.js";\nimport { ERROR_UNKNOWN_MESSAGE_TYPE } from "./errors.js";',
+                { status: 200, headers: { 'content-type': 'text/javascript' } },
+            ));
+        });
         const runtime: FfmpegLoaderRuntime = {
             importModule,
             fetchImpl: fetchImpl as unknown as typeof fetch,
@@ -112,6 +116,7 @@ describe('buildOpusArguments', () => {
         }));
         expect(createdWorkerBlob).toBeInstanceOf(Blob);
         expect(createdWorkerBlob?.type).toBe('text/javascript');
+        expect(fetchReceiver).toBeUndefined();
         ffmpeg.terminate();
         expect(revokeObjectURL).toHaveBeenCalledWith('blob:https://asmr.one/class-worker');
         expect(terminate).toHaveBeenCalledTimes(1);

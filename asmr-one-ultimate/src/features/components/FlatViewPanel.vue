@@ -23,6 +23,11 @@ import { TranslationService } from '../../services/TranslationService';
 import { Logger } from '../../core/Logger';
 import { flattenTree, type FlatItem } from '../flatViewUtils';
 import { replaceHostPlaybackQueue } from '../audioPlayerQueueUtils';
+import {
+    buildMediaDownloadUrl,
+    buildMediaStreamUrl,
+    resolveMediaApiBaseUrl,
+} from '../media/mediaStreamUrlUtils';
 import type { TracksResponse } from '../../types/api';
 
 // ---------------------------------------------------------------------------
@@ -192,9 +197,12 @@ function getItemIcon(item: FlatItem): string {
 }
 
 function getThumbUrl(item: FlatItem): string {
-    const streamUrl = item.mediaStreamUrl || `/api/media/stream/${item.hash}`;
-    const sep = streamUrl.includes('?') ? '&' : '?';
-    return `${streamUrl}${sep}token=${token.value}`;
+    return buildMediaStreamUrl(
+        item.hash,
+        { mediaStreamUrl: item.mediaStreamUrl },
+        token.value,
+        resolveMediaApiBaseUrl(bridge.axios?.defaults?.baseURL),
+    );
 }
 
 function onThumbError(item: FlatItem): void {
@@ -410,13 +418,15 @@ function openImageInLightbox(item: FlatItem): void {
         const imageItems = items.value.filter(i => i.type === 'image');
         const startIndex = imageItems.findIndex(i => i.hash === item.hash);
 
-        const encodedToken = token.value ? encodeURIComponent(token.value) : '';
-        const urls = imageItems.map(i => {
-            const url = i.mediaStreamUrl || `/api/media/stream/${i.hash}`;
-            if (!encodedToken || url.includes('token=')) return url;
-            const separator = url.includes('?') ? '&' : '?';
-            return `${url}${separator}token=${encodedToken}`;
-        });
+        const apiBaseUrl = resolveMediaApiBaseUrl(bridge.axios?.defaults?.baseURL);
+        const urls = imageItems
+            .map(i => buildMediaStreamUrl(
+                i.hash,
+                { mediaStreamUrl: i.mediaStreamUrl },
+                token.value,
+                apiBaseUrl,
+            ))
+            .filter(Boolean);
 
         if (urls.length > 0) {
             viewer.showExternalImages(urls, Math.max(0, startIndex));
@@ -430,11 +440,13 @@ function openImageInLightbox(item: FlatItem): void {
 }
 
 function openFile(item: FlatItem): void {
-    const encodedToken = token.value ? encodeURIComponent(token.value) : '';
-    const url = item.mediaStreamUrl || `/api/media/stream/${item.hash}`;
-    const finalUrl = encodedToken && !url.includes('token=')
-        ? `${url}${url.includes('?') ? '&' : '?'}token=${encodedToken}`
-        : url;
+    const finalUrl = buildMediaStreamUrl(
+        item.hash,
+        { mediaStreamUrl: item.mediaStreamUrl },
+        token.value,
+        resolveMediaApiBaseUrl(bridge.axios?.defaults?.baseURL),
+    );
+    if (!finalUrl) return;
     const link = document.createElement('a');
     link.href = finalUrl;
     link.target = '_blank';
@@ -442,14 +454,17 @@ function openFile(item: FlatItem): void {
 }
 
 function downloadFile(item: FlatItem): void {
-    const encodedToken = token.value ? encodeURIComponent(token.value) : '';
-    const url = item.mediaDownloadUrl || `/api/media/download/${item.hash}`;
-    const finalUrl = encodedToken && !url.includes('token=')
-        ? `${url}${url.includes('?') ? '&' : '?'}token=${encodedToken}`
-        : url;
+    const finalUrl = buildMediaDownloadUrl(
+        item.hash,
+        { mediaDownloadUrl: item.mediaDownloadUrl },
+        token.value,
+        resolveMediaApiBaseUrl(bridge.axios?.defaults?.baseURL),
+    );
+    if (!finalUrl) return;
     const link = document.createElement('a');
     link.href = finalUrl;
     link.target = '_blank';
+    link.rel = 'noopener';
     link.click();
 }
 

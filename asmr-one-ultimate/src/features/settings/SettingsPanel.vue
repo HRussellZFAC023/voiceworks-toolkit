@@ -130,6 +130,7 @@ function refreshEffectiveWhisperModel() {
 }
 
 const whisperModelPreset = useConfig('whisperModelPreset');
+const whisperAutoWarmup = useConfig('whisperAutoWarmup');
 
 const whisperPresetOptions = computed(() => [
     { value: 'auto', label: t('whisperPresetAuto') },
@@ -146,6 +147,26 @@ const whisperPresetHint = computed(() => {
     if (whisperModelPreset.value === 'medium') return t('whisperPresetMediumWarning');
     if (whisperModelPreset.value === 'large-v3-turbo') return t('whisperPresetLargeTurboWarning');
     return '';
+});
+
+function resolveAutoWarmupSuppressionReason() {
+    try {
+        return Whisper.getInstance().getAutoWarmupSuppressionReason();
+    } catch (e) {
+        Logger.warn('[SettingsPanel] Failed to resolve Whisper auto-warmup policy:', e);
+        return null;
+    }
+}
+
+const whisperAutoWarmupSublabel = computed(() => {
+    // Re-evaluate when the effective backend changes, even though the policy
+    // method owns the capability details.
+    void whisperEffectiveBackend.value;
+    if (!whisperAutoWarmup.value) return t('whisperAutoWarmupSub');
+    const suppression = resolveAutoWarmupSuppressionReason();
+    if (suppression === 'force-wasm') return t('whisperAutoWarmupSuppressedWasm');
+    if (suppression === 'device-capability') return t('whisperAutoWarmupSuppressedDevice');
+    return t('whisperAutoWarmupSub');
 });
 
 const whisperLanguageOptions = computed(() => [
@@ -264,6 +285,9 @@ function updateWhisperModelStatus() {
     } else if (ui.isError) {
         whisperModelStatusText.value = ui.message;
         whisperModelStatusColor.value = '#e57373';
+    } else if (whisperAutoWarmup.value && resolveAutoWarmupSuppressionReason()) {
+        whisperModelStatusText.value = whisperAutoWarmupSublabel.value;
+        whisperModelStatusColor.value = '';
     } else {
         whisperModelStatusText.value = t('whisperReady') || 'Ready';
         whisperModelStatusColor.value = '';
@@ -468,9 +492,10 @@ on('whisper:progress', (payload) => {
     updateWhisperModelStatus();
 });
 
-// Model preset, force-WASM, and whisperModel all change the effective model.
+// Model and warmup policy changes both affect the effective status.
 on('config:change', ({ key }) => {
-    if (key === 'whisperModelPreset' || key === 'whisperModel' || key === 'forceWhisperWasm') {
+    if (key === 'whisperModelPreset' || key === 'whisperModel'
+        || key === 'forceWhisperWasm' || key === 'whisperAutoWarmup') {
         // This ref represents events for the previously effective runtime.
         // With auto-warmup disabled there may be no replacement progress event,
         // so invalidate it synchronously before resolving the new model.
@@ -824,7 +849,7 @@ const credits = [
                 <SettingsToggle
                     config-key="whisperAutoWarmup"
                     :label="t('whisperAutoWarmup')"
-                    :sublabel="t('whisperAutoWarmupSub')"
+                    :sublabel="whisperAutoWarmupSublabel"
                     icon="downloading"
                 />
                 <hr class="q-separator q-separator--horizontal asmr-settings-separator">
@@ -834,6 +859,13 @@ const credits = [
                     :sublabel="t('whisperLanguageSub')"
                     :options="whisperLanguageOptions"
                     icon="record_voice_over"
+                />
+                <hr class="q-separator q-separator--horizontal asmr-settings-separator">
+                <SettingsToggle
+                    config-key="whisperAdaptiveWindow"
+                    :label="t('whisperAdaptiveWindow')"
+                    :sublabel="t('whisperAdaptiveWindowSub')"
+                    icon="sync"
                 />
                 <hr class="q-separator q-separator--horizontal asmr-settings-separator">
                 <SettingsRangeSelect

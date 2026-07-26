@@ -372,6 +372,8 @@ test.describe('Emergency export and Download Center', () => {
     test('offers a recovered interrupted job in the header modal after refresh', async ({ injectedPage, isScriptLoaded }) => {
         await injectedPage.route('https://media.e2e/resume.wav', route => route.fulfill({ status: 206, body: Buffer.from([3, 4]), headers: {
             'content-range': 'bytes 2-3/4', 'content-length': '2', etag: 'v1', 'accept-ranges': 'bytes',
+            'access-control-allow-origin': '*',
+            'access-control-expose-headers': 'Content-Range, ETag, Accept-Ranges',
         } }));
         await helpers.gotoHome(injectedPage); await isScriptLoaded();
         await injectedPage.evaluate(async () => {

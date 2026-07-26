@@ -44,9 +44,16 @@ const SEGMENT_GAP_S = 1.0;
 const MAX_SEGMENT_CHARS = 80;
 
 /** Repetition-loop detection thresholds. */
-const MAX_REPEATS = 8;
+const MIN_PATHOLOGICAL_REPEATS = 12;
+const VISIBLE_REPEATS = 6;
 const MIN_PATTERN_LEN = 1;
 const MAX_PATTERN_LEN = 6;
+const MAX_TEXT_PATTERN_CODE_POINTS = 4;
+const MAX_ROLLING_PATTERN_CODE_POINTS = 2;
+// One hallucination may appear once per maximum-length inference window.
+// A larger break starts a new run so unrelated phrases later in the track do
+// not contribute to the threshold.
+const MAX_ROLLING_GAP_S = 35;
 
 // ── Regexes ────────────────────────────────────────────────────────────
 
@@ -67,6 +74,73 @@ const CLOSE_BRACKET_RE = /([\]）」』】〉》〕)]+)$/;
 
 function isCJKText(text: string): boolean {
     return /[\u3040-\u30ff\u4e00-\u9fff]/.test(text);
+}
+
+function codePointsMatchAt(
+    input: string[],
+    pattern: string[],
+    offset: number,
+): boolean {
+    if (offset + pattern.length > input.length) return false;
+    return pattern.every((codePoint, index) => input[offset + index] === codePoint);
+}
+
+/**
+ * Bound pathological decoder loops inside one text chunk.
+ *
+ * Short repeated vocalisations are valid ASMR speech, so a run is only capped
+ * after 12 exact repetitions of a tiny (1–4 code point) pattern. Six
+ * repetitions remain as a representative sample and an ellipsis makes the
+ * omission explicit. Text after the run is always retained.
+ */
+export function capPathologicalTextRepetition(text: string): string {
+    const input = Array.from(text);
+    if (input.length < MIN_PATHOLOGICAL_REPEATS) return text;
+
+    const output: string[] = [];
+    let offset = 0;
+
+    while (offset < input.length) {
+        let repeatedPattern: string[] | undefined;
+        let repeatedCount = 0;
+
+        for (
+            let patternLength = MIN_PATTERN_LEN;
+            patternLength <= MAX_TEXT_PATTERN_CODE_POINTS;
+            patternLength++
+        ) {
+            if (offset + patternLength * MIN_PATHOLOGICAL_REPEATS > input.length) {
+                continue;
+            }
+
+            const pattern = input.slice(offset, offset + patternLength);
+            if (!pattern.join('').trim()) continue;
+
+            let count = 1;
+            while (codePointsMatchAt(input, pattern, offset + count * patternLength)) {
+                count++;
+            }
+            if (count >= MIN_PATHOLOGICAL_REPEATS) {
+                repeatedPattern = pattern;
+                repeatedCount = count;
+                break;
+            }
+        }
+
+        if (!repeatedPattern) {
+            output.push(input[offset]);
+            offset++;
+            continue;
+        }
+
+        for (let repeat = 0; repeat < VISIBLE_REPEATS; repeat++) {
+            output.push(...repeatedPattern);
+        }
+        output.push('…');
+        offset += repeatedPattern.length * repeatedCount;
+    }
+
+    return output.join('');
 }
 
 /**
@@ -99,7 +173,8 @@ export function sanitizeWhisperText(text: string | null | undefined): string {
     // callback is still pending.
     cleaned = cleaned.replace(/\s*<\|[^<>|]{0,64}$/, '');
 
-    return cleaned.replace(/\s+/g, ' ').trim();
+    const normalized = cleaned.replace(/\s+/g, ' ').trim();
+    return capPathologicalTextRepetition(normalized);
 }
 
 // ── Hallucination filtering ────────────────────────────────────────────
@@ -131,29 +206,303 @@ export function cleanHallucinatedChunks<T extends { text?: string }>(chunks: T[]
 /**
  * Detect and truncate repetitive hallucination loops in word arrays.
  *
- * Whisper often hallucinates repeating syllables (e.g. ネンネコ×100) on
- * musical/rhythmic content.  We detect when a short pattern repeats more
- * than {@link MAX_REPEATS} times at the tail and truncate.
+ * Whisper can emit long runs of the same tiny word pattern. Short repeated
+ * vocalisations remain untouched. For a pathological run, retain samples from
+ * both its beginning and end so timestamped input keeps the run's original
+ * temporal bounds. Distinct text after a run is never dropped.
  */
 export function truncateRepetitionLoop<T extends { text?: string }>(words: T[]): T[] {
-    if (words.length < MAX_REPEATS * MIN_PATTERN_LEN) return words;
-    const texts = words.map(w => (w.text || '').trim());
+    if (words.length < MIN_PATHOLOGICAL_REPEATS * MIN_PATTERN_LEN) return words;
 
-    for (let pLen = MIN_PATTERN_LEN; pLen <= MAX_PATTERN_LEN; pLen++) {
-        if (texts.length < pLen * MAX_REPEATS) continue;
-        const pattern = texts.slice(texts.length - pLen).join('|');
-        let repeats = 0;
-        for (let i = texts.length - pLen; i >= 0; i -= pLen) {
-            if (texts.slice(i, i + pLen).join('|') === pattern) repeats++;
-            else break;
+    const texts = words.map(word => sanitizeWhisperText(word.text));
+    const output: T[] = [];
+    let offset = 0;
+
+    while (offset < words.length) {
+        let patternLength = 0;
+        let repeatedCount = 0;
+
+        for (let candidateLength = MIN_PATTERN_LEN; candidateLength <= MAX_PATTERN_LEN; candidateLength++) {
+            if (offset + candidateLength * MIN_PATHOLOGICAL_REPEATS > words.length) {
+                continue;
+            }
+
+            const pattern = texts.slice(offset, offset + candidateLength);
+            if (pattern.every(text => !text)) continue;
+
+            let count = 1;
+            while (
+                offset + (count + 1) * candidateLength <= texts.length
+                && texts
+                    .slice(offset + count * candidateLength, offset + (count + 1) * candidateLength)
+                    .every((text, index) => text === pattern[index])
+            ) {
+                count++;
+            }
+            if (count >= MIN_PATHOLOGICAL_REPEATS) {
+                patternLength = candidateLength;
+                repeatedCount = count;
+                break;
+            }
         }
-        if (repeats >= MAX_REPEATS) {
-            const repStart = texts.length - repeats * pLen;
-            const keepRepeats = Math.min(3, repeats);
-            return words.slice(0, repStart + keepRepeats * pLen);
+
+        if (patternLength === 0) {
+            output.push(words[offset]);
+            offset++;
+            continue;
         }
+
+        const leadingRepeats = Math.ceil(VISIBLE_REPEATS / 2);
+        const trailingRepeats = Math.floor(VISIBLE_REPEATS / 2);
+        const repeatedWordCount = patternLength * repeatedCount;
+        const trailingStart = offset + repeatedWordCount - trailingRepeats * patternLength;
+
+        output.push(
+            ...words.slice(offset, offset + leadingRepeats * patternLength),
+            ...words.slice(trailingStart, offset + repeatedWordCount),
+        );
+        offset += repeatedWordCount;
     }
-    return words;
+
+    return output;
+}
+
+export interface TimedTranscriptSegment {
+    text: string;
+    start: number;
+    end: number;
+}
+
+interface RollingRepetitionRun {
+    fingerprint: string;
+    runStart: number;
+    observedCount: number;
+}
+
+export interface SerializedRollingRepetitionRun {
+    fingerprint: string;
+    runStart: number;
+    observedCount: number;
+    retainedStarts: number[];
+}
+
+const ROLLING_REPETITION_RUN = Symbol('whisperRollingRepetitionRun');
+
+type RollingRepetitionTaggedSegment = TimedTranscriptSegment & {
+    [ROLLING_REPETITION_RUN]?: RollingRepetitionRun;
+};
+
+function getRollingRepetitionRun(
+    segment: TimedTranscriptSegment,
+): RollingRepetitionRun | undefined {
+    return (segment as RollingRepetitionTaggedSegment)[ROLLING_REPETITION_RUN];
+}
+
+function belongsToRollingRepetitionRun(
+    candidate: RollingRepetitionRun | undefined,
+    active: RollingRepetitionRun,
+): boolean {
+    return candidate?.fingerprint === active.fingerprint
+        && candidate.runStart === active.runStart;
+}
+
+function tagRollingRepetitionSegment<T extends TimedTranscriptSegment>(
+    segment: T,
+    run: RollingRepetitionRun,
+): T {
+    const tagged = { ...segment } as T & RollingRepetitionTaggedSegment;
+    // Keep the live-run identity out of user data, cache serialization, and
+    // ordinary equality/iteration while retaining it on the timeline objects
+    // that cumulative merges carry forward.
+    Object.defineProperty(tagged, ROLLING_REPETITION_RUN, {
+        value: run,
+        configurable: true,
+    });
+    return tagged;
+}
+
+function normalizeRollingRepetitionText(text: string): string {
+    return sanitizeWhisperText(text)
+        .toLowerCase()
+        .replace(/[\s.,!?…。！？、…'"「」『』【】（）()[\]{}]/g, '');
+}
+
+/**
+ * Serialize only the minimal sidecar needed to continue an already-verified
+ * rolling cap after a cache reload. Ordinary transcript segments stay clean.
+ */
+export function serializeRollingTranscriptRepetitionRuns(
+    segments: readonly TimedTranscriptSegment[],
+): SerializedRollingRepetitionRun[] {
+    const runs = new Map<string, SerializedRollingRepetitionRun>();
+    for (const segment of segments) {
+        const run = getRollingRepetitionRun(segment);
+        if (!run || normalizeRollingRepetitionText(segment.text) !== run.fingerprint) continue;
+        const key = `${run.fingerprint}\u0000${run.runStart}`;
+        const serialized = runs.get(key) || {
+            ...run,
+            retainedStarts: [],
+        };
+        serialized.retainedStarts.push(segment.start);
+        runs.set(key, serialized);
+    }
+    return Array.from(runs.values()).filter(run => (
+        run.observedCount >= MIN_PATHOLOGICAL_REPEATS
+        && run.retainedStarts.length === VISIBLE_REPEATS
+    ));
+}
+
+/**
+ * Restore a cache sidecar defensively. A run is reattached only when all six
+ * retained samples and their tiny fingerprint still match; stale or malformed
+ * metadata cannot cause legitimate short ASMR repetitions to be capped.
+ */
+export function restoreRollingTranscriptRepetitionRuns<T extends TimedTranscriptSegment>(
+    segments: readonly T[],
+    serializedRuns: readonly SerializedRollingRepetitionRun[] | null | undefined,
+): T[] {
+    if (!Array.isArray(serializedRuns) || serializedRuns.length === 0) {
+        return [...segments];
+    }
+
+    const restoredRuns = new Map<number, RollingRepetitionRun>();
+    for (const candidate of serializedRuns) {
+        const retainedStarts: number[] = Array.isArray(candidate?.retainedStarts)
+            ? candidate.retainedStarts.map(Number)
+            : [];
+        const observedCount = Math.floor(Number(candidate?.observedCount));
+        const runStart = Number(candidate?.runStart);
+        const fingerprint = String(candidate?.fingerprint || '');
+        if (
+            !fingerprint
+            || Array.from(fingerprint).length > MAX_ROLLING_PATTERN_CODE_POINTS
+            || !Number.isFinite(runStart)
+            || observedCount < MIN_PATHOLOGICAL_REPEATS
+            || retainedStarts.length !== VISIBLE_REPEATS
+            || retainedStarts.some((start: number) => !Number.isFinite(start))
+            || new Set(retainedStarts).size !== VISIBLE_REPEATS
+        ) {
+            continue;
+        }
+
+        const matchingIndexes = segments.flatMap((segment, index) => (
+            normalizeRollingRepetitionText(segment.text) === fingerprint
+            && retainedStarts.some((start: number) => Math.abs(start - segment.start) < 0.001)
+                ? [index]
+                : []
+        ));
+        if (
+            matchingIndexes.length !== VISIBLE_REPEATS
+            || Math.abs(segments[matchingIndexes[0]].start - runStart) >= 0.001
+        ) {
+            continue;
+        }
+
+        const run: RollingRepetitionRun = {
+            fingerprint,
+            runStart,
+            observedCount: Math.min(observedCount, 1_000_000),
+        };
+        for (const index of matchingIndexes) restoredRuns.set(index, run);
+    }
+
+    return segments.map((segment, index) => {
+        const run = restoredRuns.get(index);
+        return run ? tagRollingRepetitionSegment(segment, run) : segment;
+    });
+}
+
+function isRollingRepetitionContinuation(
+    previous: TimedTranscriptSegment,
+    next: TimedTranscriptSegment,
+): boolean {
+    if (!Number.isFinite(previous.end) || !Number.isFinite(next.start)) return false;
+    const gap = next.start - previous.end;
+    return gap >= -0.5 && gap <= MAX_ROLLING_GAP_S;
+}
+
+/**
+ * Bound a decoder loop that spans several completed inference windows.
+ *
+ * The worker-level cap cannot see disjoint results, so the host reapplies this
+ * guard to its cumulative timeline after each merge. Only 12 exact, very short,
+ * temporally-contiguous outputs qualify. Samples from both ends remain intact.
+ *
+ * Retained samples carry symbol-only live metadata. Without it, the intentional
+ * time gap between the retained beginning/end would split the next cumulative
+ * pass and let an unbounded loop grow by another trailing sample every window.
+ */
+export function capRollingTranscriptRepetition<T extends TimedTranscriptSegment>(
+    segments: readonly T[],
+): T[] {
+    if (
+        segments.length < MIN_PATHOLOGICAL_REPEATS
+        && !segments.some(segment => getRollingRepetitionRun(segment))
+    ) {
+        return [...segments];
+    }
+
+    const output: T[] = [];
+    let offset = 0;
+
+    while (offset < segments.length) {
+        const normalized = normalizeRollingRepetitionText(segments[offset].text);
+        const patternLength = Array.from(normalized).length;
+        if (!normalized || patternLength > MAX_ROLLING_PATTERN_CODE_POINTS) {
+            output.push(segments[offset]);
+            offset++;
+            continue;
+        }
+
+        const existingRun = getRollingRepetitionRun(segments[offset]);
+        let end = offset + 1;
+        let newObservations = existingRun ? 0 : 1;
+        while (
+            end < segments.length
+            && normalizeRollingRepetitionText(segments[end].text) === normalized
+        ) {
+            const candidateRun = getRollingRepetitionRun(segments[end]);
+            if (existingRun && belongsToRollingRepetitionRun(candidateRun, existingRun)) {
+                // The retained leading and trailing samples intentionally have
+                // a large time gap. Shared live-run metadata bridges only that
+                // previously verified omission.
+                end++;
+                continue;
+            }
+            if (candidateRun || !isRollingRepetitionContinuation(
+                segments[end - 1],
+                segments[end],
+            )) {
+                break;
+            }
+            newObservations++;
+            end++;
+        }
+
+        const runLength = end - offset;
+        if (!existingRun && runLength < MIN_PATHOLOGICAL_REPEATS) {
+            output.push(...segments.slice(offset, end));
+        } else {
+            const leading = Math.ceil(VISIBLE_REPEATS / 2);
+            const trailing = Math.floor(VISIBLE_REPEATS / 2);
+            const run: RollingRepetitionRun = {
+                fingerprint: normalized,
+                runStart: existingRun?.runStart ?? segments[offset].start,
+                observedCount: (existingRun?.observedCount ?? 0) + newObservations,
+            };
+            output.push(
+                ...segments
+                    .slice(offset, offset + leading)
+                    .map(segment => tagRollingRepetitionSegment(segment, run)),
+                ...segments
+                    .slice(end - trailing, end)
+                    .map(segment => tagRollingRepetitionSegment(segment, run)),
+            );
+        }
+        offset = end;
+    }
+
+    return output;
 }
 
 // ── Segment building ───────────────────────────────────────────────────
@@ -291,16 +640,17 @@ export function processRawChunks(
 
     const cleaned = cleanHallucinatedChunks(rawChunks);
     if (cleaned.length === 0) return [];
+    const capped = truncateRepetitionLoop(cleaned);
 
     let segments: ProcessedSegment[];
 
     if (granularity === 'word') {
-        segments = groupWordsToSegments(cleaned);
+        segments = groupWordsToSegments(capped);
         if (fullText) {
             restoreMissingBrackets(segments, fullText);
         }
     } else {
-        segments = formatSegmentChunks(cleaned);
+        segments = formatSegmentChunks(capped);
     }
 
     return segments;

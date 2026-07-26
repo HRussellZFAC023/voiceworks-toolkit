@@ -40,7 +40,32 @@ describe('learnerLyricsUtils', () => {
             `;
 
             const parsed = parseLyricsFromDom(document);
-            expect(parsed).toEqual([{ time: 12340, text: 'Hello world' }]);
+            expect(parsed).toEqual([{ time: 12.34, text: 'Hello world' }]);
+        });
+
+        it('keeps sub-second and exact-one-second DOM cues in seconds through normalization', () => {
+            document.body.innerHTML = `
+                <div class="lyric-content">
+                    <div class="q-item">
+                        <div class="q-item__label">
+                            <div class="q-item__label--caption">[00:00.10]</div>
+                            First cue
+                        </div>
+                    </div>
+                    <div class="q-item">
+                        <div class="q-item__label">
+                            <div class="q-item__label--caption">[00:01.00]</div>
+                            Second cue
+                        </div>
+                    </div>
+                </div>
+            `;
+
+            const source = findLyricsSource({}, document);
+            expect(normalizeLyricLines(source as Array<Record<string, unknown>>)).toEqual([
+                { time: 0.1, endTime: undefined, text: 'First cue', words: undefined },
+                { time: 1, endTime: undefined, text: 'Second cue', words: undefined },
+            ]);
         });
     });
 

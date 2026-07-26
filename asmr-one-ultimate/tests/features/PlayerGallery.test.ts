@@ -1,6 +1,6 @@
 import { flushPromises, mount } from '@vue/test-utils';
 import { ref } from 'vue';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
@@ -76,6 +76,22 @@ function deferred<T>() {
     return { promise, resolve };
 }
 
+function browserImageResponse(url: string): Response {
+    const blob = new Blob(
+        [Uint8Array.from([0xff, 0xd8, 0xff, 0xdb])],
+        { type: 'image/jpeg' },
+    );
+    const result = new Response(Uint8Array.from([0xff, 0xd8, 0xff, 0xdb]), {
+        status: 200,
+        headers: {
+            'content-length': String(blob.size),
+            'content-type': 'image/jpeg',
+        },
+    });
+    Object.defineProperty(result, 'url', { configurable: true, value: url });
+    return result;
+}
+
 describe('PlayerGallery', () => {
     beforeEach(() => {
         document.body.innerHTML = `
@@ -92,7 +108,7 @@ describe('PlayerGallery', () => {
             type: 'image',
             hash: `1409932/image-${index}.jpg`,
             title: `image-${index}.jpg`,
-            mediaStreamUrl: `https://raw.kiko-play-niptan.one/1409932/image-${index}.jpg`,
+            mediaStreamUrl: `https://api.asmr-200.com/api/media/stream/1409932/image-${index}.jpg`,
             size: 4_000_000 + index,
         })));
         mocks.gmRequest.mockImplementation(async ({ url }: { url: string }) => ({
@@ -102,6 +118,13 @@ describe('PlayerGallery', () => {
             responseHeaders: 'content-type: image/jpeg',
             response: new Blob([Uint8Array.from([0xff, 0xd8, 0xff, 0xdb])], { type: 'image/jpeg' }),
             finalUrl: url,
+        }));
+        vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request) => {
+            const url = String(input);
+            const finalUrl = url.includes('/api/media/stream/')
+                ? 'https://raw.kiko-play-niptan.one/media/stream/daily/RJ01409932/image.jpg?verify=test'
+                : url;
+            return browserImageResponse(finalUrl);
         }));
 
         Object.defineProperty(URL, 'createObjectURL', {
@@ -114,6 +137,10 @@ describe('PlayerGallery', () => {
         });
     });
 
+    afterEach(() => {
+        vi.unstubAllGlobals();
+    });
+
     it('keeps a large source inventory lazy and fetches only selected/adjacent items', async () => {
         const albumart = document.querySelector('.albumart') as HTMLElement;
         const wrapper = mount(PlayerGallery, { attachTo: albumart });
@@ -122,12 +149,14 @@ describe('PlayerGallery', () => {
         // Cover + twelve track images are inventoried, but initial load verifies
         // only the selected cover instead of downloading the whole gallery.
         expect(mocks.getTracks).toHaveBeenCalledTimes(1);
-        expect(mocks.gmRequest).toHaveBeenCalledTimes(1);
+        expect(mocks.gmRequest).not.toHaveBeenCalled();
+        expect(fetch).toHaveBeenCalledTimes(1);
         await vi.waitFor(() => expect(URL.createObjectURL).toHaveBeenCalled());
 
         await wrapper.find('.asmr-gallery-next').trigger('click');
         await flushPromises();
-        expect(mocks.gmRequest).toHaveBeenCalledTimes(2);
+        expect(mocks.gmRequest).not.toHaveBeenCalled();
+        expect(fetch).toHaveBeenCalledTimes(2);
 
         wrapper.unmount();
         expect(URL.revokeObjectURL).toHaveBeenCalled();
@@ -166,26 +195,13 @@ describe('PlayerGallery', () => {
                 mediaStreamUrl: '/api/media/stream/1409932/restricted.png',
             },
         ]);
-        mocks.gmRequest.mockImplementation(async ({ url }: { url: string }) => {
+        vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request) => {
+            const url = String(input);
             if (url.includes('/media/stream/')) {
-                return {
-                    status: 200,
-                    statusText: 'OK',
-                    responseText: '',
-                    responseHeaders: 'content-type: image/png',
-                    response: new Blob([new Uint8Array(23_983)], { type: 'image/png' }),
-                    finalUrl: 'https://www.cloudflare-terms-of-service-abuse.com/stream.png',
-                };
+                throw new TypeError('redirect blocked');
             }
-            return {
-                status: 200,
-                statusText: 'OK',
-                responseText: '',
-                responseHeaders: 'content-type: image/jpeg',
-                response: new Blob([Uint8Array.from([0xff, 0xd8, 0xff, 0xdb])], { type: 'image/jpeg' }),
-                finalUrl: url,
-            };
-        });
+            return browserImageResponse(url);
+        }));
 
         const albumart = document.querySelector('.albumart') as HTMLElement;
         const wrapper = mount(PlayerGallery, { attachTo: albumart });
@@ -210,9 +226,9 @@ describe('PlayerGallery', () => {
         const wrapper = mount(PlayerGallery, { attachTo: albumart });
 
         await vi.waitFor(() => expect(mocks.getTracks).toHaveBeenCalledOnce());
-        await vi.waitFor(() => expect(mocks.gmRequest).toHaveBeenCalledOnce());
+        await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
         await vi.waitFor(() => expect(URL.createObjectURL).toHaveBeenCalledOnce());
-        const requestsAtUnmount = mocks.gmRequest.mock.calls.length;
+        const requestsAtUnmount = vi.mocked(fetch).mock.calls.length;
         const blobsAtUnmount = vi.mocked(URL.createObjectURL).mock.calls.length;
 
         wrapper.unmount();
@@ -223,7 +239,7 @@ describe('PlayerGallery', () => {
         }]);
         await flushPromises();
 
-        expect(mocks.gmRequest).toHaveBeenCalledTimes(requestsAtUnmount);
+        expect(fetch).toHaveBeenCalledTimes(requestsAtUnmount);
         expect(URL.createObjectURL).toHaveBeenCalledTimes(blobsAtUnmount);
     });
 });
