@@ -11,11 +11,12 @@
  * published release before its installable asset exists.
  */
 
-import { readFileSync, writeFileSync } from 'fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { execFileSync } from 'child_process';
 import { createHash } from 'crypto';
-import { resolve, dirname } from 'path';
+import { resolve, dirname, join } from 'path';
 import { fileURLToPath } from 'url';
+import { tmpdir } from 'os';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const pkgPath = resolve(__dirname, '..', 'package.json');
@@ -226,6 +227,38 @@ if (!draftAlreadyPrepared) {
     ]);
 }
 run('gh', ['release', 'upload', releaseTag, storefrontArtifactPath, '--clobber']);
+
+// v172-v174 all published with zero assets, which 404s the
+// releases/latest/download install URL and fails CI at `gh release download`.
+// Publishing is gated on the asset actually being retrievable and matching the
+// verified build, so a silent upload failure can never reach users again.
+const attached = JSON.parse(capture('gh', [
+    'release', 'view', releaseTag, '--json', 'assets',
+])).assets ?? [];
+const asset = attached.find(entry => entry.name === 'asmr-one-ultimate.user.js');
+if (!asset) {
+    throw new Error(
+        `${releaseTag} has no asmr-one-ultimate.user.js asset after upload `
+        + `(found: ${attached.map(entry => entry.name).join(', ') || 'none'}). `
+        + 'Refusing to publish a release nobody can install.',
+    );
+}
+const downloadDir = mkdtempSync(join(tmpdir(), 'release-asset-'));
+run('gh', [
+    'release', 'download', releaseTag,
+    '--pattern', 'asmr-one-ultimate.user.js',
+    '--dir', downloadDir,
+]);
+const publishedHash = sha256File(join(downloadDir, 'asmr-one-ultimate.user.js'));
+rmSync(downloadDir, { recursive: true, force: true });
+if (publishedHash !== verifiedAssetHash) {
+    throw new Error(
+        `${releaseTag} asset does not match the verified build `
+        + `(published ${publishedHash}, expected ${verifiedAssetHash}).`,
+    );
+}
+console.log(`Asset verified on ${releaseTag}: ${publishedHash}`);
+
 run('gh', ['release', 'edit', releaseTag, '--draft=false']);
 
 console.log(`\nDone! ${releaseTag} release created.`);
