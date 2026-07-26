@@ -5,7 +5,11 @@ import {
     DownloadTransport,
     RangeRestartRequiredError,
 } from '../../src/features/downloads/DownloadTransport';
-import { createDownloadResumeFingerprint } from '../../src/features/downloads/DownloadResumeFingerprint';
+import {
+    createDownloadResumeFingerprint,
+    downloadResumeFingerprintCoversFullPrefix,
+    matchesDownloadResumeFingerprint,
+} from '../../src/features/downloads/DownloadResumeFingerprint';
 
 function response(chunks: number[][], init: ResponseInit): Response {
     return new Response(new ReadableStream({
@@ -179,41 +183,28 @@ describe('DownloadTransport', () => {
         });
     });
 
-    it('resumes a validator-less real-sized FLAC only after matching local and remote boundary samples', async () => {
+    it('rejects a large sampled prefix even when its first and last samples match a changed remote object', async () => {
         const sourceUrl = 'https://api.asmr-200.com/api/media/download/flac-hash';
-        const rawUrl = 'https://raw.kiko-play-niptan.one/media/download/object/track.flac?verify=token';
         const objectIdentity = 'https://raw.kiko-play-niptan.one/media/download/object/track.flac';
-        const total = 201_474_412;
-        const offset = total - 1;
-        const prefix = new Uint8Array(64 * 1024);
-        prefix.set([0x66, 0x4c, 0x61, 0x43]); // fLaC
-        const boundary = new Uint8Array(64 * 1024).fill(0x5a);
-        const localSamples = new Map<number, Uint8Array>([
-            [0, prefix],
-            [offset - boundary.byteLength, boundary],
-        ]);
+        const offset = 3 * 64 * 1024;
+        const total = offset + 4;
+        const localPrefix = new Uint8Array(offset).fill(0x5a);
+        localPrefix.set([0x66, 0x4c, 0x61, 0x43]); // fLaC
+        const changedRemotePrefix = localPrefix.slice();
+        changedRemotePrefix[96 * 1024] ^= 0xff;
         const fingerprint = await createDownloadResumeFingerprint(
             offset,
-            async sampleOffset => localSamples.get(sampleOffset)!,
+            async (sampleOffset, length) => localPrefix.slice(sampleOffset, sampleOffset + length),
         );
-        const fetchMock = vi.fn()
-            .mockResolvedValueOnce(responseAt(rawUrl, [[...prefix]], {
-                status: 206,
-                headers: { 'content-range': `bytes 0-${prefix.byteLength - 1}/${total}` },
-            }))
-            .mockResolvedValueOnce(responseAt(rawUrl, [[...boundary]], {
-                status: 206,
-                headers: {
-                    'content-range': `bytes ${offset - boundary.byteLength}-${offset - 1}/${total}`,
-                },
-            }))
-            .mockResolvedValueOnce(responseAt(rawUrl, [[0x01]], {
-                status: 206,
-                headers: { 'content-range': `bytes ${offset}-${offset}/${total}` },
-            }));
+        const fetchMock = vi.fn();
         const chunks = vi.fn();
 
-        const result = await new DownloadTransport(fetchMock as typeof fetch).stream(
+        expect(await matchesDownloadResumeFingerprint(
+            fingerprint,
+            async (sampleOffset, length) => changedRemotePrefix.slice(sampleOffset, sampleOffset + length),
+        )).toBe(true);
+        expect(downloadResumeFingerprintCoversFullPrefix(fingerprint)).toBe(false);
+        await expect(new DownloadTransport(fetchMock as typeof fetch).stream(
             sourceUrl,
             offset,
             chunks,
@@ -223,25 +214,55 @@ describe('DownloadTransport', () => {
                 expectedResumeFingerprint: fingerprint,
                 expectedTotal: total,
             },
+        )).rejects.toBeInstanceOf(RangeRestartRequiredError);
+
+        expect(fetchMock).not.toHaveBeenCalled();
+        expect(chunks).not.toHaveBeenCalled();
+    });
+
+    it('resumes a validator-less prefix only when its fingerprint covers every committed byte', async () => {
+        const sourceUrl = 'https://api.asmr-200.com/api/media/download/flac-hash';
+        const rawUrl = 'https://raw.kiko-play-niptan.one/media/download/object/track.flac';
+        const localPrefix = new Uint8Array([1, 2, 3, 4]);
+        const fingerprint = await createDownloadResumeFingerprint(
+            localPrefix.byteLength,
+            async () => localPrefix,
+        );
+        const fetchMock = vi.fn()
+            .mockResolvedValueOnce(responseAt(rawUrl, [[...localPrefix]], {
+                status: 206,
+                headers: { 'content-range': 'bytes 0-3/8' },
+            }))
+            .mockResolvedValueOnce(responseAt(rawUrl, [[5, 6, 7, 8]], {
+                status: 206,
+                headers: { 'content-range': 'bytes 4-7/8' },
+            }));
+        const chunks = vi.fn();
+
+        expect(downloadResumeFingerprintCoversFullPrefix(fingerprint)).toBe(true);
+        await new DownloadTransport(fetchMock as typeof fetch).stream(
+            sourceUrl,
+            localPrefix.byteLength,
+            chunks,
+            {
+                expectedObjectIdentity: rawUrl,
+                expectedSourceUrl: sourceUrl,
+                expectedResumeFingerprint: fingerprint,
+                expectedTotal: 8,
+            },
         );
 
         expect(fetchMock).toHaveBeenNthCalledWith(1, sourceUrl, expect.objectContaining({
-            headers: expect.objectContaining({ Range: `bytes=0-${prefix.byteLength - 1}` }),
+            headers: expect.objectContaining({ Range: 'bytes=0-3' }),
         }));
         expect(fetchMock).toHaveBeenNthCalledWith(2, sourceUrl, expect.objectContaining({
-            headers: expect.objectContaining({
-                Range: `bytes=${offset - boundary.byteLength}-${offset - 1}`,
-            }),
-        }));
-        expect(fetchMock).toHaveBeenNthCalledWith(3, sourceUrl, expect.objectContaining({
-            headers: expect.objectContaining({ Range: `bytes=${offset}-` }),
+            headers: expect.objectContaining({ Range: 'bytes=4-' }),
         }));
         expect(chunks).toHaveBeenCalledWith(expect.objectContaining({
-            offset,
-            objectIdentity,
+            offset: 4,
+            objectIdentity: rawUrl,
             sourceUrl,
         }));
-        expect(result).toMatchObject({ size: total, objectIdentity, sourceUrl });
     });
 
     it('rejects a validator-less resume before append when a remote boundary sample changed', async () => {

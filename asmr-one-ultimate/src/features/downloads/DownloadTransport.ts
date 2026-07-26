@@ -1,6 +1,6 @@
 import { getApiBaseUrl, getAuthHeader } from '../playlist/PlaylistService';
 import {
-    isDownloadResumeFingerprint,
+    downloadResumeFingerprintCoversFullPrefix,
     matchesDownloadResumeFingerprint,
     type DownloadResumeFingerprint,
 } from './DownloadResumeFingerprint';
@@ -382,7 +382,7 @@ export class DownloadTransport {
             && options.expectedSourceUrl === target.url
             && Number.isSafeInteger(options.expectedTotal)
             && canonicalTrustedObjectIdentity(options.expectedObjectIdentity) === options.expectedObjectIdentity
-            && isDownloadResumeFingerprint(options.expectedResumeFingerprint)
+            && downloadResumeFingerprintCoversFullPrefix(options.expectedResumeFingerprint)
             && options.expectedResumeFingerprint.checkpointOffset === offset;
         if (
             offset > 0

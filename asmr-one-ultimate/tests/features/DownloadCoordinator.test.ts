@@ -1022,4 +1022,69 @@ describe('DownloadCoordinator', () => {
         expect(second.write.mock.calls[0][1]).toBe(0);
         expect(repository.markFileComplete).toHaveBeenCalledWith('file', 4);
     });
+
+    it('restarts a large boundary-sampled checkpoint because its middle was never verified', async () => {
+        const sourceUrl = 'https://api.asmr-200.com/api/media/download/flac-hash';
+        const objectIdentity = 'https://raw.kiko-play-niptan.one/media/download/object/track.flac';
+        const offset = 3 * 64 * 1024;
+        const completeBytes = new Uint8Array(offset + 4).fill(0x5a);
+        const fingerprint = await createDownloadResumeFingerprint(
+            offset,
+            async (sampleOffset, length) => completeBytes.slice(sampleOffset, sampleOffset + length),
+        );
+        const file: any = {
+            id: 'file', jobId: 'job', path: 'track.flac', url: sourceUrl,
+            status: 'pending', downloadedBytes: offset, totalBytes: completeBytes.byteLength,
+        };
+        const repository: any = {
+            activateJob: vi.fn(), listFiles: vi.fn(async () => [file]), markFileActive: vi.fn(),
+            getCheckpoint: vi.fn(async () => ({
+                offset,
+                objectIdentity,
+                sourceUrl,
+                resumeFingerprint: fingerprint,
+            })),
+            checkpointFile: vi.fn(), markSourceComplete: vi.fn(),
+            resetFile: vi.fn(async () => { file.downloadedBytes = 0; }),
+            markFileComplete: vi.fn(async () => { file.status = 'completed'; }),
+            markFileFailed: vi.fn(), completeJob: vi.fn(), pauseJob: vi.fn(),
+        };
+        const resumedWriter = { write: vi.fn(), close: vi.fn(), abort: vi.fn() };
+        const freshWriter = { write: vi.fn(), close: vi.fn(), abort: vi.fn() };
+        const sink: any = {
+            open: vi.fn()
+                .mockResolvedValueOnce(resumedWriter)
+                .mockResolvedValueOnce(freshWriter),
+            readRange: vi.fn(async (_path: string[], sampleOffset: number, length: number) => (
+                completeBytes.slice(sampleOffset, sampleOffset + length)
+            )),
+        };
+        const fetchMock = vi.fn().mockResolvedValue(new Response(completeBytes, {
+            status: 200,
+            headers: {
+                'content-length': String(completeBytes.byteLength),
+                etag: 'fresh',
+            },
+        }));
+
+        await new DownloadCoordinator(
+            repository,
+            new DownloadTransport(fetchMock as typeof fetch),
+            sink,
+            1,
+        ).run('job');
+
+        expect(resumedWriter.abort).toHaveBeenCalledOnce();
+        expect(repository.resetFile).toHaveBeenCalledWith('file');
+        expect(sink.open).toHaveBeenNthCalledWith(1, ['track.flac'], offset);
+        expect(sink.open).toHaveBeenNthCalledWith(2, ['track.flac'], 0);
+        expect(fetchMock).toHaveBeenCalledOnce();
+        expect(new Headers(fetchMock.mock.calls[0][1]?.headers).has('Range')).toBe(false);
+        expect(freshWriter.write).toHaveBeenCalledTimes(1);
+        const [freshBytes, freshOffset] = freshWriter.write.mock.calls[0];
+        expect(ArrayBuffer.isView(freshBytes)).toBe(true);
+        expect(freshBytes.byteLength).toBe(completeBytes.byteLength);
+        expect(freshOffset).toBe(0);
+        expect(repository.markFileComplete).toHaveBeenCalledWith('file', completeBytes.byteLength);
+    });
 });

@@ -59,6 +59,24 @@ export function isDownloadResumeFingerprint(
     ));
 }
 
+/**
+ * A sampled fingerprint may authorize remote append only when its samples
+ * cover every committed byte. Larger prefixes retain the fingerprint solely
+ * as a local damage hint; two boundary samples cannot prove an unchanged
+ * middle.
+ */
+export function downloadResumeFingerprintCoversFullPrefix(
+    fingerprint: DownloadResumeFingerprint | undefined,
+): fingerprint is DownloadResumeFingerprint {
+    if (!isDownloadResumeFingerprint(fingerprint)) return false;
+    let coveredUntil = 0;
+    for (const sample of fingerprint.samples) {
+        if (sample.offset > coveredUntil) return false;
+        coveredUntil = Math.max(coveredUntil, sample.offset + sample.length);
+    }
+    return coveredUntil >= fingerprint.checkpointOffset;
+}
+
 export async function createDownloadResumeFingerprint(
     checkpointOffset: number,
     readRange: DownloadRangeReader,
