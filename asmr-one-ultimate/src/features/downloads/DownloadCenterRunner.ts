@@ -570,14 +570,23 @@ export class DownloadCenterRunner {
         onProgress?.({ jobId, phase: 'downloading', current: completed.size, total: files.length });
         await coordinator.run(jobId, notify);
         exportTracker?.startPending();
+        const finalFiles = await this.repository.listFiles(jobId);
+        exportTracker?.flushExportable(finalFiles);
         // Exports are already-downloaded bytes leaving the staging area. Let
         // them settle before any pause/failure is reported so a paused job
         // still hands over every work folder it finished.
         const exportFailures = (await exportTracker?.settle()) ?? 0;
-        const finalFiles = await this.repository.listFiles(jobId);
         if (!finalFiles.every(file => file.status === 'completed')) {
             const failedFiles = finalFiles.filter(file => file.error);
-            if (failedFiles.length) {
+            // A pause leaves files that neither completed nor errored. Those are
+            // still owed to the user, so a run that stopped early must report
+            // 'paused' and stay resumable even when an earlier file failed —
+            // otherwise one failure upgrades every later pause into a false
+            // 'complete' and silently abandons everything not yet fetched.
+            const unfinished = finalFiles.filter(
+                file => file.status !== 'completed' && !file.error,
+            );
+            if (failedFiles.length && !unfinished.length) {
                 for (const file of failedFiles) {
                     Logger.warn('[DownloadCenter] File download failed', file.path, file.error);
                 }
@@ -617,6 +626,7 @@ export class DownloadCenterRunner {
     ): {
         fileCompleted: (fileId: string) => void;
         startPending: () => void;
+        flushExportable: (finalFiles: readonly DownloadFile[]) => void;
         settle: () => Promise<number>;
     } {
         const folderOf = (path: string): string => path.split('/')[0] ?? '';
@@ -667,6 +677,29 @@ export class DownloadCenterRunner {
             startPending: () => {
                 for (const folder of folders) {
                     if ((remaining.get(folder) ?? 0) <= 0) enqueue(folder);
+                }
+            },
+            // `remaining` only counts down on completion, so a folder holding a
+            // failed file never reaches zero and would never be handed over —
+            // the user would receive nothing for that work even though its other
+            // files downloaded fine and the run reports success. Once the run is
+            // over, any folder with nothing left to wait for is exportable.
+            flushExportable: (finalFiles) => {
+                const byFolder = new Map<string, DownloadFile[]>();
+                for (const file of finalFiles) {
+                    const folder = folderOf(file.path);
+                    if (!folder) continue;
+                    const bucket = byFolder.get(folder);
+                    if (bucket) bucket.push(file);
+                    else byFolder.set(folder, [file]);
+                }
+                for (const [folder, folderFiles] of byFolder) {
+                    const stillPending = folderFiles.some(
+                        file => file.status !== 'completed' && !file.error,
+                    );
+                    if (stillPending) continue;
+                    if (!folderFiles.some(file => file.status === 'completed')) continue;
+                    enqueue(folder);
                 }
             },
             settle: async () => {

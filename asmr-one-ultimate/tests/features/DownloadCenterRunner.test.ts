@@ -233,6 +233,38 @@ describe('DownloadCenterRunner', () => {
         expect(String((error as Error).message)).not.toMatch(/failed/i);
     });
 
+    it('still reports paused when an earlier file failed but work remains unfetched', async () => {
+        // One failed file must not upgrade a pause into a false 'complete':
+        // that would drop every file the user had not downloaded yet.
+        const repo = repository([
+            { id: 'done', jobId: 'job', path: 'Work/a.wav', status: 'completed', downloadedBytes: 5 },
+            { id: 'bad', jobId: 'job', path: 'Work/b.wav', status: 'failed', downloadedBytes: 0, error: 'boom' },
+            { id: 'todo', jobId: 'job', path: 'Work/c.wav', status: 'paused', downloadedBytes: 0 },
+        ]);
+        const runner = new DownloadCenterRunner(repo as any);
+        const persisted = options([{ id: 'RJ2', title: 'Work' }]);
+        persisted.discovery!.complete = true;
+
+        const error = await (runner as any).prepareAndRun('job', persisted).catch((value: unknown) => value);
+
+        expect(error).toBeInstanceOf(DownloadCenterRunError);
+        expect(error).toMatchObject({ code: 'paused' });
+    });
+
+    it('completes with a skip count when failures are all that remain', async () => {
+        const repo = repository([
+            { id: 'done', jobId: 'job', path: 'Work/a.wav', status: 'completed', downloadedBytes: 5 },
+            { id: 'bad', jobId: 'job', path: 'Work/b.wav', status: 'failed', downloadedBytes: 0, error: 'boom' },
+        ]);
+        const runner = new DownloadCenterRunner(repo as any);
+        const persisted = options([{ id: 'RJ2', title: 'Work' }]);
+        persisted.discovery!.complete = true;
+
+        const result = await (runner as any).prepareAndRun('job', persisted);
+
+        expect(result).toMatchObject({ skippedFiles: 1 });
+    });
+
     it('maps coordinator conversion progress and ratio without presenting it as downloading', async () => {
         const file = { id: 'file', jobId: 'job', path: 'Work/track.wav', status: 'paused', downloadedBytes: 4 };
         const repo = repository([file]);

@@ -170,6 +170,34 @@ describe('DownloadCenterRunner staged export', () => {
         expect(repo.stored?.exportedFolders).toBeUndefined();
     });
 
+    it('still delivers a work folder whose remaining file only failed', async () => {
+        // `remaining` counts down on completion only, so without an explicit
+        // end-of-run flush a folder holding a failed file is never handed over
+        // and the user receives nothing for that work.
+        const files = [
+            { ...file('a1', 'Work A/one.wav', 'completed'), status: 'completed' },
+            { ...file('a2', 'Work A/two.wav', 'failed'), status: 'failed', error: 'boom' },
+        ];
+        const repo = repository(files);
+        const runner = new DownloadCenterRunner(repo as any);
+
+        await (runner as any).prepareAndRun('job', persisted(STAGED));
+
+        expect(mocks.exportFolder).toHaveBeenCalledWith('Work A', ['Work A/one.wav']);
+    });
+
+    it('does not deliver a folder that still has files waiting to download', async () => {
+        const files = [
+            { ...file('a1', 'Work A/one.wav', 'completed'), status: 'completed' },
+            { ...file('a2', 'Work A/two.wav', 'paused'), status: 'paused' },
+        ];
+        const runner = new DownloadCenterRunner(repository(files) as any);
+
+        await (runner as any).prepareAndRun('job', persisted(STAGED)).catch(() => undefined);
+
+        expect(mocks.exportFolder).not.toHaveBeenCalledWith('Work A', expect.anything());
+    });
+
     it('rebuilds the sink from a legacy directory handle recorded before destinations existed', async () => {
         const handle = {} as FileSystemDirectoryHandle;
         const files = [file('a1', 'Work A/one.wav', 'completed')];

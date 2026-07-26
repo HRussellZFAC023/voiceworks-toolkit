@@ -14,7 +14,7 @@ import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 type TagState = { commit: string; type: 'tag' | 'commit' };
-type ReleaseState = { isDraft: boolean };
+type ReleaseState = { isDraft: boolean; assets?: { name: string; body: string }[] };
 type HarnessState = {
     head: string;
     phase: string;
@@ -30,6 +30,8 @@ type HarnessState = {
     mismatchStorefrontMirrorAfterBuild?: boolean;
     storefrontMirrorTracked?: boolean;
     storefrontArtifactInTag?: boolean;
+    dropUploadedAsset?: boolean;
+    corruptPublishedAsset?: boolean;
 };
 
 const temporaryRoots: string[] = [];
@@ -84,7 +86,8 @@ if (command === 'gh') {
         if (state.releaseLookupError) fail('network unavailable', 2);
         const release = state.releases[tag];
         if (!release) fail('release not found', 1);
-        out(JSON.stringify({ tagName: tag, isDraft: release.isDraft }));
+        const assets = (release.assets || []).map((asset) => ({ name: asset.name }));
+        out(JSON.stringify({ tagName: tag, isDraft: release.isDraft, assets }));
         process.exit(0);
     }
     if (args[0] === 'release' && args[1] === 'create') {
@@ -96,7 +99,24 @@ if (command === 'gh') {
         save();
         process.exit(0);
     }
-    if (args[0] === 'release' && args[1] === 'upload') process.exit(0);
+    if (args[0] === 'release' && args[1] === 'upload') {
+        const source = args[3];
+        const release = state.releases[tag] || (state.releases[tag] = { isDraft: true });
+        if (!state.dropUploadedAsset) {
+            release.assets = [{ name: path.basename(source), body: fs.readFileSync(source, 'utf8') }];
+        }
+        save();
+        process.exit(0);
+    }
+    if (args[0] === 'release' && args[1] === 'download') {
+        const release = state.releases[tag];
+        const asset = ((release && release.assets) || [])[0];
+        if (!asset) fail('no assets to download', 1);
+        const dir = args[args.indexOf('--dir') + 1];
+        fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(path.join(dir, asset.name), state.corruptPublishedAsset ? 'tampered asset' : asset.body);
+        process.exit(0);
+    }
     if (args[0] === 'release' && args[1] === 'edit') {
         state.releases[tag] = { isDraft: false };
         save();
@@ -242,6 +262,26 @@ describe('release state machine', () => {
             'gh', 'release', 'upload', 'v159', realpathSync(join(harness.root, 'asmr-one-ultimate.user.js')), '--clobber',
         ]);
         expect(harness.readState().releases.v159).toEqual({ isDraft: false });
+    });
+
+    it('refuses to publish when the upload left no asset behind', () => {
+        // v172-v174 all published with zero assets, 404ing the
+        // releases/latest/download install URL and failing CI every time.
+        const harness = createHarness({ dropUploadedAsset: true });
+        const result = harness.run();
+        expect(result.status).not.toBe(0);
+        expect(result.stderr).toMatch(/no asmr-one-ultimate\.user\.js asset/i);
+        expect(commandIndex(harness.commands(), 'gh', 'release', 'edit')).toBe(-1);
+        expect(harness.readState().releases.v159.isDraft).toBe(true);
+    });
+
+    it('refuses to publish when the published asset differs from the verified build', () => {
+        const harness = createHarness({ corruptPublishedAsset: true });
+        const result = harness.run();
+        expect(result.status).not.toBe(0);
+        expect(result.stderr).toMatch(/does not match the verified build/i);
+        expect(commandIndex(harness.commands(), 'gh', 'release', 'edit')).toBe(-1);
+        expect(harness.readState().releases.v159.isDraft).toBe(true);
     });
 
     it('bumps and commits when the released package tag is an ancestor', () => {
