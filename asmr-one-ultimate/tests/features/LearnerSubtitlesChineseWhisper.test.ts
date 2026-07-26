@@ -159,7 +159,7 @@ describe('LearnerSubtitles Chinese Whisper rendering', () => {
         remounted.wrapper.unmount();
     });
 
-    it('shows canonical Whisper progress instead of a blank reserved panel', async () => {
+    it('shows calm listener copy while retaining technical Whisper progress in state', async () => {
         AppStore.setWhisperState({
             isTranscribing: true,
             isLoadingModel: false,
@@ -171,8 +171,32 @@ describe('LearnerSubtitles Chinese Whisper rendering', () => {
         await nextTick();
 
         expect(wrapper.get('.learner-subs-expanded').classes()).not.toContain('hidden');
+        const placeholder = wrapper.get('.learner-subs-expanded .learner-whisper-placeholder');
+        expect(placeholder.text()).toBe('whisperCatchingUp');
+        expect(placeholder.text()).not.toMatch(/WEBGPU|queued|realtime|analyzed|playhead/i);
+        expect(AppStore.state.whisper.progressMessage).toBe('21s behind · whisper-base · WEBGPU');
+        wrapper.unmount();
+    });
+
+    it.each([
+        ['loading', 'whisperPreparingSubtitles'],
+        ['transcribing', 'whisperListeningForSpeech'],
+        ['caught-up', 'whisperListeningForSpeech'],
+        ['behind', 'whisperCatchingUp'],
+        ['recovering', 'whisperRestartingTranscription'],
+    ] as const)('maps %s telemetry to one stable listener status', async (stage, expected) => {
+        AppStore.setWhisperState({
+            isTranscribing: stage !== 'loading',
+            isLoadingModel: stage === 'loading',
+            stage,
+            progressMessage: 'encoder_model.onnx · WEBGPU · 45% · 2 queued',
+        });
+
+        const { wrapper } = mountLearner();
+        await nextTick();
+
         expect(wrapper.get('.learner-subs-expanded .learner-whisper-placeholder').text())
-            .toBe('21s behind · whisper-base · WEBGPU');
+            .toBe(expected);
         wrapper.unmount();
     });
 

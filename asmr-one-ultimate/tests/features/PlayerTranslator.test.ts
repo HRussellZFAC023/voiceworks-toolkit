@@ -64,6 +64,7 @@ vi.mock('../../src/infrastructure/KikoeruBridge', () => ({
 
 import { PlayerTranslator } from '../../src/features/PlayerTranslator';
 import { TranslationService } from '../../src/services/TranslationService';
+import { CentralObserver } from '../../src/core/CentralObserver';
 
 describe('PlayerTranslator', () => {
     beforeEach(() => {
@@ -238,6 +239,111 @@ describe('PlayerTranslator', () => {
         expect(el.title).toContain('晚安耳语');
         (translator as any).resetTranslationState();
         expect(el.textContent).toBe('晚安耳语');
+    });
+
+    it('keeps an untranslatable mini-player title on a stable ellipsis with the full text reachable', () => {
+        document.body.innerHTML = `
+            <footer class="q-footer">
+                <div class="container">
+                    <div class="one-line-expand scrolling">
+                        <div class="ellipsis-2-lines">非常に長い作品タイトルなのでミニプレイヤーでは収まりません.mp3</div>
+                    </div>
+                </div>
+            </footer>
+        `;
+
+        const translator = new PlayerTranslator();
+        const el = document.querySelector('.ellipsis-2-lines') as HTMLElement;
+        const original = '非常に長い作品タイトルなのでミニプレイヤーでは収まりません.mp3';
+
+        // No translation is still a clipped title: the host marquee was measured
+        // against the previous track, so it hard-clips this one.
+        (translator as any).markOriginal(el, original);
+
+        expect(el.classList.contains('asmr-mini-title-ellipsis')).toBe(true);
+        expect(el.closest('.one-line-expand')?.classList.contains('asmr-mini-title-ellipsis-content')).toBe(true);
+        expect(el.title).toBe(original);
+        expect(el.getAttribute('aria-label')).toBe(original);
+        expect(el.getAttribute('tabindex')).toBe('0');
+    });
+
+    it('hands back the host title and focusability when translation state is reset', () => {
+        document.body.innerHTML = `
+            <footer class="q-footer">
+                <div class="container">
+                    <div class="one-line-expand">
+                        <div class="ellipsis-2-lines">タイトル.mp3</div>
+                    </div>
+                </div>
+            </footer>
+        `;
+
+        const translator = new PlayerTranslator();
+        const el = document.querySelector('.ellipsis-2-lines') as HTMLElement;
+        (translator as any).updateElement(el, 'タイトル.mp3', 'Title.mp3');
+        expect(el.getAttribute('tabindex')).toBe('0');
+
+        (translator as any).resetTranslationState();
+
+        expect(el.hasAttribute('title')).toBe(false);
+        expect(el.hasAttribute('aria-label')).toBe(false);
+        expect(el.hasAttribute('tabindex')).toBe(false);
+        expect(el.classList.contains('asmr-mini-title-ellipsis')).toBe(false);
+    });
+
+    it('seeds a track title with its full text available on hover', () => {
+        document.body.innerHTML = `
+            <footer class="q-footer">
+                <div class="container">
+                    <div class="one-line-expand">
+                        <div class="ellipsis-2-lines">old-track.mp4</div>
+                    </div>
+                </div>
+            </footer>
+        `;
+
+        const translator = new PlayerTranslator();
+        (translator as any).seedTrackTitle('とても長い新しいトラック名.mp3');
+
+        const el = document.querySelector('.ellipsis-2-lines') as HTMLElement;
+        expect(el.textContent).toBe('とても長い新しいトラック名.mp3');
+        expect(el.title).toBe('とても長い新しいトラック名.mp3');
+    });
+
+    it('never hands the same node to two translation passes in one sweep', async () => {
+        // A node that satisfies both the track-name and the player-title
+        // selectors would otherwise be translated twice, and the two passes
+        // strip different prefixes/extensions before writing to the same slot.
+        document.body.innerHTML = `
+            <div class="audio-player">
+                <div class="ellipsis-2-lines text-h6 text-bold q-pb-xs">01. 耳かき.mp3</div>
+            </div>
+        `;
+        const translator = new PlayerTranslator();
+        (translator as any)._enabled = true;
+        const trackNameSpy = vi.spyOn(translator as any, 'translateTrackName');
+        const elementSpy = vi.spyOn(translator as any, 'translateElement');
+
+        await (translator as any).checkPlayer();
+
+        const el = document.querySelector('.ellipsis-2-lines') as HTMLElement;
+        expect(trackNameSpy).toHaveBeenCalledTimes(1);
+        expect(trackNameSpy.mock.calls[0][0]).toBe(el);
+        expect(elementSpy).not.toHaveBeenCalled();
+    });
+
+    it('registers for every mutation and debounces its own player rescans', () => {
+        const translator = new PlayerTranslator();
+        translator.enable();
+
+        expect(CentralObserver.register).toHaveBeenCalledWith('PlayerTranslator', expect.any(Function), 0);
+        const observerCallback = vi.mocked(CentralObserver.register).mock.calls[0][1] as () => void;
+        observerCallback();
+        observerCallback();
+        expect((translator as any).refresh.pending).toBe(true);
+
+        translator.disable();
+        expect((translator as any).refresh.pending).toBe(false);
     });
 
     it('cancels and rejects a queued animation-frame translation after disable', () => {

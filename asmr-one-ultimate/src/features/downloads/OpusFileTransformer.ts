@@ -1,7 +1,7 @@
 import type { MetadataWritePolicy } from './DownloadDomain';
 import type { AudioTags, EmbeddedArtwork } from './MetadataPolicy';
 import type { DownloadFile } from './DownloadJobRepository';
-import type { DirectoryDownloadSink } from './DirectoryDownloadSink';
+import type { DownloadSink } from './DownloadSink';
 import type { OpusTranscoder } from './OpusTranscoder';
 import { canonicalDownloadPath, reserveCollisionFreePath, sanitizeRelativePath } from './DownloadPathUtils';
 import { isDownloadAudioFile } from './DownloadMediaClassifier';
@@ -96,7 +96,7 @@ export class OpusFileTransformer {
 
     async transform(
         file: DownloadFile,
-        sink: DirectoryDownloadSink,
+        sink: DownloadSink,
         signal?: AbortSignal,
         onProgress?: (ratio: number) => void,
     ): Promise<{ path: string; bytes: number }> {

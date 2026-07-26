@@ -1,5 +1,10 @@
 import { I18n } from '../../core/Config';
-import { DirectoryDownloadSink, DirectoryPermissionError, ResumeOffsetMismatchError, type DownloadWriter } from './DirectoryDownloadSink';
+import {
+    DirectoryPermissionError,
+    ResumeOffsetMismatchError,
+    type DownloadSink,
+    type DownloadWriter,
+} from './DownloadSink';
 import { DownloadJobRepository, type DownloadCheckpoint, type DownloadFile } from './DownloadJobRepository';
 import {
     createDownloadResumeFingerprint,
@@ -140,7 +145,7 @@ export class DownloadCoordinator {
     constructor(
         private readonly repository: DownloadJobRepository,
         private readonly transport: DownloadTransport,
-        private readonly sink: DirectoryDownloadSink,
+        private readonly sink: DownloadSink,
         private readonly concurrency = 2,
         private readonly transformer?: OpusFileTransformer,
         private readonly leaseOwnerId?: string,

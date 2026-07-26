@@ -6,9 +6,20 @@ import { WorkService } from '../../services/WorkService';
 import type { BackupDownloadProgress, BackupDownloadState, BackupWorkDownloadItem } from '../backupWorkDownloaderTypes';
 import { resolveDownloadWorkTranslations } from '../backupWorkDownloaderUtils';
 import { canonicalDownloadPath, reserveCollisionFreePath } from './DownloadPathUtils';
-import { DirectoryDownloadSink } from './DirectoryDownloadSink';
+import { DownloadFolderExporter } from './DownloadFolderExporter';
+import {
+    requiresDownloadExport,
+    type DownloadDestination,
+    type DownloadSink,
+} from './DownloadSink';
+import { createDownloadSink } from './DownloadSinkFactory';
 import { discoverDownloadManifest, type DownloadTreeNode } from './DownloadManifest';
-import { DOWNLOAD_JOB_LEASE_MS, DownloadJobRepository, type DownloadJob } from './DownloadJobRepository';
+import {
+    DOWNLOAD_JOB_LEASE_MS,
+    DownloadJobRepository,
+    type DownloadFile,
+    type DownloadJob,
+} from './DownloadJobRepository';
 import { DownloadTransport, resolveDownloadRequestTarget } from './DownloadTransport';
 import { DownloadCoordinator, type DownloadCoordinatorProgress } from './DownloadCoordinator';
 import { FfmpegOpusTranscoder } from './OpusTranscoder';
@@ -41,10 +52,23 @@ export interface PersistedDownloadDiscovery {
 
 export interface PersistedDownloadCenterOptions {
     state: BackupDownloadState;
-    directory: FileSystemDirectoryHandle;
+    destination: DownloadDestination;
+    /** Legacy field from jobs created before destinations became a union. */
+    directory?: FileSystemDirectoryHandle;
     enrichment: Record<string, DownloadEnrichment>;
     opusOutputPaths?: Record<string, string>;
     discovery?: PersistedDownloadDiscovery;
+    /** Work folders already handed to the browser by the export step. */
+    exportedFolders?: string[];
+}
+
+/** Jobs persisted before the destination union still carry a raw handle. */
+export function resolvePersistedDestination(
+    options: Pick<PersistedDownloadCenterOptions, 'destination' | 'directory'>,
+): DownloadDestination {
+    if (options.destination) return options.destination;
+    if (options.directory) return { kind: 'fsa', handle: options.directory };
+    throw new DownloadCenterRunError('unsupported');
 }
 
 export type DownloadCenterJob = DownloadJob<PersistedDownloadCenterOptions>;
@@ -58,6 +82,13 @@ export interface DownloadCenterResumeOptions {
     useOriginalTitles?: boolean;
 }
 
+export interface DownloadCenterRunResult {
+    jobId: string;
+    skipped: number;
+    /** Completed work folders the browser refused to receive. */
+    exportFailures: number;
+}
+
 export class DownloadCenterRunError extends Error {
     constructor(public readonly code: 'unsupported' | 'permission' | 'no-files' | 'paused' | 'title-translation' | 'already-running' | 'failed', cause?: unknown) {
         super(code);
@@ -67,7 +98,7 @@ export class DownloadCenterRunError extends Error {
 }
 
 function cloneOptions(options: PersistedDownloadCenterOptions): PersistedDownloadCenterOptions {
-    const { directory, enrichment, ...serializable } = options;
+    const { directory, destination, enrichment, ...serializable } = options;
     // Enrichment is consumed only by Opus metadata/artwork conversion. Strip
     // it before serializing non-Opus jobs so large manifests do not repeatedly
     // clone and checkpoint an ever-growing per-file metadata object.
@@ -75,9 +106,12 @@ function cloneOptions(options: PersistedDownloadCenterOptions): PersistedDownloa
         ...serializable,
         enrichment: options.state.convertToOpus ? enrichment : {},
     };
+    const resolved = resolvePersistedDestination({ destination, directory });
     return {
-        ...(JSON.parse(JSON.stringify(persistable)) as Omit<PersistedDownloadCenterOptions, 'directory'>),
-        directory,
+        ...(JSON.parse(JSON.stringify(persistable)) as Omit<PersistedDownloadCenterOptions, 'destination' | 'directory'>),
+        // A directory handle survives structured clone but not JSON, so the
+        // live object is re-attached instead of serialized.
+        destination: resolved.kind === 'fsa' ? resolved : { ...resolved },
     };
 }
 
@@ -330,10 +364,10 @@ export class DownloadCenterRunner {
     async start(
         works: readonly BackupWorkDownloadItem[],
         state: BackupDownloadState,
-        directory: FileSystemDirectoryHandle,
+        destination: DownloadDestination,
         title: string,
         onProgress?: DownloadCenterProgressListener,
-    ): Promise<{ jobId: string; skipped: number }> {
+    ): Promise<DownloadCenterRunResult> {
         if (this.activeJobId) throw new DownloadCenterRunError('already-running');
         const selected = new Set(state.selectedWorkIds.map(String));
         const snapshots = works.filter(work => selected.has(String(work.id))).map(work => ({
@@ -343,9 +377,10 @@ export class DownloadCenterRunner {
         const jobId = crypto.randomUUID();
         let options = cloneOptions({
             state,
-            directory,
+            destination,
             enrichment: {},
             opusOutputPaths: {},
+            exportedFolders: [],
             discovery: {
                 works: snapshots,
                 nextIndex: 0,
@@ -362,9 +397,9 @@ export class DownloadCenterRunner {
         job: DownloadCenterJob,
         onProgress?: DownloadCenterProgressListener,
         resumeOptions: DownloadCenterResumeOptions = {},
-    ): Promise<{ jobId: string; skipped: number }> {
+    ): Promise<DownloadCenterRunResult> {
         if (this.activeJobId) throw new DownloadCenterRunError('already-running');
-        const sink = new DirectoryDownloadSink(job.options.directory);
+        const sink = await createDownloadSink(resolvePersistedDestination(job.options));
         if (!await sink.ensurePermission(true)) throw new DownloadCenterRunError('permission');
         return this.runClaimed(job.id, job.options, onProgress, sink, resumeOptions);
     }
@@ -379,9 +414,9 @@ export class DownloadCenterRunner {
         jobId: string,
         initialOptions: PersistedDownloadCenterOptions,
         onProgress?: DownloadCenterProgressListener,
-        sink?: DirectoryDownloadSink,
+        sink?: DownloadSink,
         resumeOptions: DownloadCenterResumeOptions = {},
-    ): Promise<{ jobId: string; skipped: number }> {
+    ): Promise<DownloadCenterRunResult> {
         return this.withBrowserJobLock(jobId, async () => {
             if (!await this.repository.claimJob(jobId, this.ownerId, DOWNLOAD_JOB_LEASE_MS)) {
                 throw new DownloadCenterRunError('already-running');
@@ -432,8 +467,12 @@ export class DownloadCenterRunner {
                 if (resumeOptionsChanged) {
                     await this.repository.appendFilesAndUpdateOptions(jobId, persistedOptions, []);
                 }
-                const options = await this.prepareAndRun(jobId, persistedOptions, report, sink);
-                return { jobId, skipped: options.discovery?.skippedWorkIds.length ?? 0 };
+                const outcome = await this.prepareAndRun(jobId, persistedOptions, report, sink);
+                return {
+                    jobId,
+                    skipped: outcome.options.discovery?.skippedWorkIds.length ?? 0,
+                    exportFailures: outcome.exportFailures,
+                };
             } catch (error) {
                 const normalized = this.leaseLost && !(error instanceof DownloadCenterRunError)
                     ? new DownloadCenterRunError('paused', error)
@@ -462,16 +501,20 @@ export class DownloadCenterRunner {
         jobId: string,
         initialOptions: PersistedDownloadCenterOptions,
         onProgress?: DownloadCenterProgressListener,
-        existingSink?: DirectoryDownloadSink,
-    ): Promise<PersistedDownloadCenterOptions> {
+        existingSink?: DownloadSink,
+    ): Promise<{ options: PersistedDownloadCenterOptions; exportFailures: number }> {
+        const destination = resolvePersistedDestination(initialOptions);
+        const sink = existingSink ?? await createDownloadSink(destination);
         let options = await this.ensureTitles(jobId, initialOptions, onProgress);
-        options = await this.continueDiscovery(jobId, options, onProgress);
+        options = await this.continueDiscovery(jobId, options, onProgress, sink);
         const files = await this.repository.listFiles(jobId);
         if (!files.length) {
             await this.repository.deleteJob(jobId);
             throw new DownloadCenterRunError('no-files');
         }
-        const sink = existingSink ?? new DirectoryDownloadSink(options.directory);
+        const exporter = requiresDownloadExport(destination)
+            ? new DownloadFolderExporter(sink, destination)
+            : undefined;
         const coordinator = new DownloadCoordinator(
             this.repository,
             new DownloadTransport(),
@@ -483,6 +526,9 @@ export class DownloadCenterRunner {
             this.ownerId,
         );
         this.activeCoordinator = coordinator;
+        const exportTracker = exporter
+            ? this.createExportTracker(jobId, files, exporter, () => options, next => { options = next; })
+            : undefined;
         const completed = new Set(files.filter(file => file.status === 'completed').map(file => file.id));
         const bytes = new Map(files.map(file => [file.id, file.downloadedBytes]));
         const totals = new Map(files.filter(file => file.totalBytes != null).map(file => [file.id, file.totalBytes as number]));
@@ -501,7 +547,10 @@ export class DownloadCenterRunner {
                 totals.set(progress.fileId, progress.totalBytes);
                 knownTotalBytes += progress.totalBytes;
             }
-            if (progress.status === 'complete') completed.add(progress.fileId);
+            if (progress.status === 'complete') {
+                completed.add(progress.fileId);
+                exportTracker?.fileCompleted(progress.fileId);
+            }
             onProgress?.({
                 jobId,
                 phase: progress.status === 'paused'
@@ -517,6 +566,11 @@ export class DownloadCenterRunner {
         };
         onProgress?.({ jobId, phase: 'downloading', current: completed.size, total: files.length });
         await coordinator.run(jobId, notify);
+        exportTracker?.startPending();
+        // Exports are already-downloaded bytes leaving the staging area. Let
+        // them settle before any pause/failure is reported so a paused job
+        // still hands over every work folder it finished.
+        const exportFailures = (await exportTracker?.settle()) ?? 0;
         const finalFiles = await this.repository.listFiles(jobId);
         if (!finalFiles.every(file => file.status === 'completed')) {
             const failedFile = finalFiles.find(file => file.error);
@@ -530,7 +584,81 @@ export class DownloadCenterRunner {
             throw new DownloadCenterRunError('paused');
         }
         onProgress?.({ jobId, phase: 'complete', current: finalFiles.length, total: finalFiles.length });
-        return options;
+        return { options, exportFailures };
+    }
+
+    /**
+     * Hands each work folder to the browser as soon as its last file lands, so
+     * a long multi-work job delivers progressively instead of only at the end.
+     * Successful exports are checkpointed to keep resume idempotent.
+     */
+    private createExportTracker(
+        jobId: string,
+        files: readonly DownloadFile[],
+        exporter: DownloadFolderExporter,
+        readOptions: () => PersistedDownloadCenterOptions,
+        writeOptions: (options: PersistedDownloadCenterOptions) => void,
+    ): {
+        fileCompleted: (fileId: string) => void;
+        startPending: () => void;
+        settle: () => Promise<number>;
+    } {
+        const folderOf = (path: string): string => path.split('/')[0] ?? '';
+        const folders = new Set<string>();
+        const remaining = new Map<string, number>();
+        const fileFolders = new Map<string, string>();
+        for (const file of files) {
+            const folder = folderOf(file.path);
+            if (!folder) continue;
+            fileFolders.set(file.id, folder);
+            folders.add(folder);
+            if (file.status !== 'completed') remaining.set(folder, (remaining.get(folder) ?? 0) + 1);
+        }
+        // Paths are read back at export time rather than from this snapshot:
+        // Opus conversion rewrites a file's path when it completes.
+        const currentFolderPaths = async (folder: string): Promise<string[]> => (await this.repository.listFiles(jobId))
+            .filter(file => file.status === 'completed' && folderOf(file.path) === folder)
+            .map(file => file.path);
+        const exported = new Set(readOptions().exportedFolders ?? []);
+        const attempted = new Set(exported);
+        let chain: Promise<void> = Promise.resolve();
+        let failures = 0;
+        const enqueue = (folder: string): void => {
+            if (attempted.has(folder)) return;
+            attempted.add(folder);
+            chain = chain.then(async () => {
+                const result = await exporter.exportFolder(folder, await currentFolderPaths(folder));
+                if (!result.exported) {
+                    failures += 1;
+                    return;
+                }
+                exported.add(folder);
+                const next = cloneOptions({ ...readOptions(), exportedFolders: [...exported] });
+                writeOptions(next);
+                await this.repository.appendFilesAndUpdateOptions(jobId, next, [])
+                    .catch(error => Logger.warn('[DownloadCenter] Could not record exported folder', folder, error));
+            });
+        };
+        return {
+            fileCompleted: fileId => {
+                const folder = fileFolders.get(fileId);
+                if (!folder) return;
+                const left = (remaining.get(folder) ?? 0) - 1;
+                remaining.set(folder, left);
+                if (left <= 0) enqueue(folder);
+            },
+            // Folders finished by an earlier run that stopped before exporting.
+            startPending: () => {
+                for (const folder of folders) {
+                    if ((remaining.get(folder) ?? 0) <= 0) enqueue(folder);
+                }
+            },
+            settle: async () => {
+                let settled: Promise<void> | undefined;
+                while (settled !== chain) { settled = chain; await settled; }
+                return failures;
+            },
+        };
     }
 
     private async ensureTitles(
@@ -616,6 +744,7 @@ export class DownloadCenterRunner {
         jobId: string,
         initialOptions: PersistedDownloadCenterOptions,
         onProgress?: DownloadCenterProgressListener,
+        existingSink?: DownloadSink,
     ): Promise<PersistedDownloadCenterOptions> {
         let options = initialOptions;
         let discovery = options.discovery;
@@ -625,7 +754,8 @@ export class DownloadCenterRunner {
             .map(file => file.path.split('/')[0])
             .filter(Boolean)
             .map(folder => canonicalDownloadPath([folder])));
-        const existingRootEntries = await new DirectoryDownloadSink(options.directory).listTopLevelEntryNames();
+        const sink = existingSink ?? await createDownloadSink(resolvePersistedDestination(options));
+        const existingRootEntries = await sink.listTopLevelEntryNames();
         for (const entry of existingRootEntries) occupiedWorkFolders.add(canonicalDownloadPath([entry]));
         let pendingFiles: Array<{ id: string; path: string; url: string; sourceUrls?: string[]; totalBytes?: number }> = [];
         const enrichOpusFiles = options.state.convertToOpus;
@@ -735,28 +865,25 @@ export class DownloadCenterRunner {
                 }
                 if (enrichOpusFiles) Object.assign(enrichment, workEnrichment);
             } catch (error) {
-                if (isUnavailableWorkFailure(error)) {
-                    markWorkUnavailable(work.id);
-                    Logger.warn('[DownloadCenter] Skipping unavailable work', String(work.id), error);
-                } else {
-                    workFailure = error;
-                }
+                // Lease loss and pause requests are job-level and must abort.
+                if (error instanceof DownloadCenterRunError) throw error;
+                workFailure = error;
             }
             if (workFailure !== undefined) {
+                // One unreadable manifest must not destroy a multi-work run.
+                // The work is recorded as skipped and reported at the end; no
+                // file or metadata from it enters the resumable job.
+                markWorkUnavailable(work.id);
                 Logger.warn(
-                    '[DownloadCenter] Work manifest is incomplete; preserving it as the next resume boundary',
+                    isUnavailableWorkFailure(workFailure)
+                        ? '[DownloadCenter] Skipping unavailable work'
+                        : '[DownloadCenter] Skipping work whose file list could not be read',
                     String(work.id),
                     workFailure,
                 );
-                discovery = { ...discovery, nextIndex: index, skippedWorkIds: [...skippedWorkIds], complete: false };
-                options = cloneOptions({ ...options, enrichment, discovery });
-                // Commit only the complete ordered prefix. No file or metadata
-                // from the failed work enters the resumable job.
-                await this.assertLease(jobId);
-                await this.repository.appendFilesAndUpdateOptions(jobId, options, pendingFiles);
-                throw new DownloadCenterRunError('failed', workFailure);
+            } else {
+                pendingFiles.push(...newFiles);
             }
-            pendingFiles.push(...newFiles);
             const completedInBatch = index - discovery.nextIndex + 1;
             const pauseRequested = this.pauseRequestedJobs.has(jobId);
             const checkpointDue = pauseRequested

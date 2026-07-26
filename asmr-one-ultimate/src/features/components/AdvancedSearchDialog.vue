@@ -121,17 +121,20 @@ const language = ref('');
 const tagList = shallowRef<TagEntry[]>([]);
 const vaList = shallowRef<VAEntry[]>([]);
 const circleList = shallowRef<CircleEntry[]>([]);
-const metadataLoadState = ref<'idle' | 'loading' | 'loaded'>('idle');
+type MetadataLoadState = 'idle' | 'loading' | 'loaded' | 'error';
+const metadataLoadState = ref<MetadataLoadState>('idle');
+/** Technical detail of the last metadata failure (shown as a title tooltip). */
+const metadataErrorDetail = ref('');
 
-const tagEmptyMessage = computed(() => metadataLoadState.value === 'loading'
-    ? t('advLoadingTags')
-    : t('advNoResults'));
-const vaEmptyMessage = computed(() => metadataLoadState.value === 'loading'
-    ? t('advLoadingVA')
-    : t('advNoResults'));
-const circleEmptyMessage = computed(() => metadataLoadState.value === 'loading'
-    ? t('advLoadingCircles')
-    : t('advNoResults'));
+function emptyMessageFor(loadingKey: string): string {
+    if (metadataLoadState.value === 'loading') return t(loadingKey);
+    if (metadataLoadState.value === 'error') return t('advMetadataFailed');
+    return t('advNoResults');
+}
+
+const tagEmptyMessage = computed(() => emptyMessageFor('advLoadingTags'));
+const vaEmptyMessage = computed(() => emptyMessageFor('advLoadingVA'));
+const circleEmptyMessage = computed(() => emptyMessageFor('advLoadingCircles'));
 
 // Translation cache for VA/Circle names (original -> current UI language)
 const translationCache = ref(new Map<string, string>());
@@ -472,6 +475,12 @@ function ensureHostSortWatcher(): void {
 let metadataLoadingPromise: Promise<void> | null = null;
 let metadataTranslationGeneration = 0;
 
+/**
+ * Upper bound for a whole metadata load. Slightly above the per-request budget
+ * in MetadataApi so a normal request timeout surfaces its own error first.
+ */
+const METADATA_LOAD_WATCHDOG_MS = 25000;
+
 function looksTranslatable(text: string): boolean {
     return /[\u3040-\u30ff\u4e00-\u9faf\uac00-\ud7af]/.test(text);
 }
@@ -517,97 +526,191 @@ async function translateInBackground<T extends { name?: string; ja?: string }>(
     }
 }
 
-async function loadMetadataLists(): Promise<void> {
-    if (metadataLoadingPromise) return metadataLoadingPromise;
-    const generation = ++metadataTranslationGeneration;
-    const targetLang = TranslationService.getUiTargetLang();
-    metadataLoadState.value = 'loading';
+/**
+ * Guarantee a terminal outcome for `promise`.
+ *
+ * The API layer already bounds each request, but this dialog must never be
+ * left showing "Loading tags..." forever, whatever the API layer does.
+ */
+function withWatchdog<T>(promise: Promise<T>, ms: number): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('metadata-load-timeout')), ms);
+        promise.then(
+            (value) => { clearTimeout(timer); resolve(value); },
+            (error) => { clearTimeout(timer); reject(error); },
+        );
+    });
+}
 
-    metadataLoadingPromise = (async () => {
-        try {
-            const englishTags = TranslatedTags.getInstance();
-            const [vas, circles, apiTags] = await Promise.all([
-                MetadataApi.getVAList(),
-                MetadataApi.getCircleList(),
-                MetadataApi.getTagList(),
-            ]);
+/** Set when the host tag cache was still empty during the last load. */
+let pretranslatedTagsPending = false;
 
-            const vaArray = Array.isArray(vas) ? vas : [];
-            const circlesArray = Array.isArray(circles) ? circles : [];
-            const apiTagsArray = Array.isArray(apiTags) ? apiTags : [];
-            if (generation !== metadataTranslationGeneration) return;
+/**
+ * Fold in English tag labels that the host published after our load finished.
+ * Cheap, idempotent, and never touches the loading state.
+ */
+function mergeLateHostTagTranslations(): void {
+    if (!pretranslatedTagsPending || !tagList.value.length) return;
+    try {
+        if (TranslationService.getUiTargetLang() !== 'en') {
+            pretranslatedTagsPending = false;
+            return;
+        }
+        const hostTags = TranslatedTags.getInstance().getTagList();
+        const enMap = new Map<number, string>();
+        hostTags.forEach(tag => { if (tag.en) enMap.set(tag.id, tag.en); });
+        if (!enMap.size) return;
 
-            // Sort by count (popularity) descending
-            vaList.value = vaArray.sort((a, b) => (b.count || 0) - (a.count || 0));
-            circleList.value = circlesArray.sort((a, b) => (b.count || 0) - (a.count || 0));
-
-            // Build the fast pretranslated map only for English. Other UI
-            // languages must not inherit English-only labels.
-            const englishTagsList = englishTags.getTagList();
-            const enMap = new Map<number, string>();
-            if (targetLang === 'en') {
-                englishTagsList.forEach(t => {
-                    if (t.en) enMap.set(t.id, t.en);
-                });
-            }
-
-            // Use API tags as base, merge English translations
-            tagList.value = apiTagsArray.map(t => {
-                const id = typeof t.id === 'string' ? parseInt(t.id as unknown as string, 10) : (t.id as number);
-                return {
-                    id,
-                    name: t.name,
-                    ja: t.name,
-                    en: enMap.get(id) || '',
-                    count: t.count || 0,
-                };
-            }).sort((a, b) => (b.count || 0) - (a.count || 0));
-
-            const currentTags = new Map(tagList.value.map(tag => [String(tag.id), tag]));
-            selectedIncludes.value = selectedIncludes.value.map(tag => currentTags.get(String(tag.id)) || { ...tag, en: '' });
-            selectedExcludes.value = selectedExcludes.value.map(tag => currentTags.get(String(tag.id)) || { ...tag, en: '' });
-
-            Logger.debug('[AdvancedSearch] Metadata loaded:', vaArray.length, 'VAs,', circlesArray.length, 'circles, and', tagList.value.length, 'tags');
-
-            // Start background translation for tags without translations
-            translateInBackground(
-                tagList.value.filter(t => !t.en && looksTranslatable(t.ja || t.name)),
-                (item, en) => { item.en = en; },
-                () => { triggerRef(tagList); },
-                targetLang,
-                generation,
-            );
-
-            // Background translation for VAs and Circles
-            translateInBackground(
-                vaList.value.filter(v => looksTranslatable(v.name)),
-                (item, en) => { translationCache.value.set(item.name, en); },
-                () => { translationCache.value = new Map(translationCache.value); },
-                targetLang,
-                generation,
-            );
-            translateInBackground(
-                circleList.value.filter(c => looksTranslatable(c.name)),
-                (item, en) => { translationCache.value.set(item.name, en); },
-                () => { translationCache.value = new Map(translationCache.value); },
-                targetLang,
-                generation,
-            );
-        } catch (e) {
-            Logger.warn('[AdvancedSearch] Failed to load metadata lists:', e);
-        } finally {
-            if (generation !== metadataTranslationGeneration) return;
-            metadataLoadState.value = 'loaded';
-            // MetadataApi deliberately degrades transient startup/auth failures
-            // to empty arrays. Permit one later user-driven retry on reopen,
-            // without creating an automatic retry loop while the dialog is open.
-            if (!tagList.value.length || !vaList.value.length || !circleList.value.length) {
-                metadataLoadingPromise = null;
+        pretranslatedTagsPending = false;
+        let changed = false;
+        for (const tag of tagList.value) {
+            const en = enMap.get(tag.id);
+            if (en && tag.en !== en) {
+                tag.en = en;
+                changed = true;
             }
         }
-    })();
+        if (changed) triggerRef(tagList);
+    } catch (e) {
+        Logger.warn('[AdvancedSearch] Late host tag merge failed:', e);
+    }
+}
 
-    return metadataLoadingPromise;
+/**
+ * Runs one metadata load. Never rejects: the caller relies on the `finally`
+ * below being the single place that leaves the 'loading' state.
+ */
+async function runMetadataLoad(generation: number): Promise<void> {
+    let loadError: Error | null = null;
+    try {
+        // Kept inside the try: a throw from either singleton must land in the
+        // error state, not escape and strand the loading flag.
+        const targetLang = TranslationService.getUiTargetLang();
+        const englishTags = TranslatedTags.getInstance();
+        const [vaResult, circleResult, tagResult] = await withWatchdog(Promise.all([
+            MetadataApi.fetchVAList(),
+            MetadataApi.fetchCircleList(),
+            MetadataApi.fetchTagList(),
+        ]), METADATA_LOAD_WATCHDOG_MS);
+
+        const vas = vaResult.items;
+        const circles = circleResult.items;
+        const apiTags = tagResult.items;
+        // A failed endpoint is reported even when the other two succeeded, so
+        // the user gets a retry affordance instead of a silently short list.
+        loadError = vaResult.error || circleResult.error || tagResult.error;
+
+        const vaArray = Array.isArray(vas) ? vas : [];
+        const circlesArray = Array.isArray(circles) ? circles : [];
+        const apiTagsArray = Array.isArray(apiTags) ? apiTags : [];
+        if (generation !== metadataTranslationGeneration) return;
+
+        // Sort by count (popularity) descending
+        vaList.value = vaArray.sort((a, b) => (b.count || 0) - (a.count || 0));
+        circleList.value = circlesArray.sort((a, b) => (b.count || 0) - (a.count || 0));
+
+        // Build the fast pretranslated map only for English. Other UI
+        // languages must not inherit English-only labels.
+        const englishTagsList = englishTags.getTagList();
+        const enMap = new Map<number, string>();
+        if (targetLang === 'en') {
+            englishTagsList.forEach(t => {
+                if (t.en) enMap.set(t.id, t.en);
+            });
+        }
+        // TranslatedTags loads its host tag cache asynchronously. If it had not
+        // arrived yet, re-merge on the next dialog open rather than leaving the
+        // labels to the (much slower) per-tag background translation.
+        pretranslatedTagsPending = targetLang === 'en' && enMap.size === 0;
+
+        // Use API tags as base, merge English translations
+        tagList.value = apiTagsArray.map(t => {
+            const id = typeof t.id === 'string' ? parseInt(t.id as unknown as string, 10) : (t.id as number);
+            return {
+                id,
+                name: t.name,
+                ja: t.name,
+                en: enMap.get(id) || '',
+                count: t.count || 0,
+            };
+        }).sort((a, b) => (b.count || 0) - (a.count || 0));
+
+        const currentTags = new Map(tagList.value.map(tag => [String(tag.id), tag]));
+        selectedIncludes.value = selectedIncludes.value.map(tag => currentTags.get(String(tag.id)) || { ...tag, en: '' });
+        selectedExcludes.value = selectedExcludes.value.map(tag => currentTags.get(String(tag.id)) || { ...tag, en: '' });
+
+        Logger.debug('[AdvancedSearch] Metadata loaded:', vaArray.length, 'VAs,', circlesArray.length, 'circles, and', tagList.value.length, 'tags');
+
+        // Start background translation for tags without translations
+        translateInBackground(
+            tagList.value.filter(t => !t.en && looksTranslatable(t.ja || t.name)),
+            (item, en) => { item.en = en; },
+            () => { triggerRef(tagList); },
+            targetLang,
+            generation,
+        );
+
+        // Background translation for VAs and Circles
+        translateInBackground(
+            vaList.value.filter(v => looksTranslatable(v.name)),
+            (item, en) => { translationCache.value.set(item.name, en); },
+            () => { translationCache.value = new Map(translationCache.value); },
+            targetLang,
+            generation,
+        );
+        translateInBackground(
+            circleList.value.filter(c => looksTranslatable(c.name)),
+            (item, en) => { translationCache.value.set(item.name, en); },
+            () => { translationCache.value = new Map(translationCache.value); },
+            targetLang,
+            generation,
+        );
+    } catch (e) {
+        loadError = e instanceof Error ? e : new Error(String(e));
+        Logger.warn('[AdvancedSearch] Failed to load metadata lists:', e);
+    } finally {
+        // Every terminal outcome — success, empty, error, timeout — must clear
+        // the loading flag. Only a superseded generation may skip the write,
+        // because the generation that superseded it already set 'loading' and
+        // owns the final transition.
+        if (generation === metadataTranslationGeneration) {
+            metadataLoadState.value = loadError ? 'error' : 'loaded';
+            metadataErrorDetail.value = loadError ? (loadError.message || String(loadError)) : '';
+        }
+    }
+}
+
+function loadMetadataLists(options: { force?: boolean } = {}): Promise<void> {
+    if (metadataLoadingPromise && !options.force) return metadataLoadingPromise;
+    const generation = ++metadataTranslationGeneration;
+    metadataLoadState.value = 'loading';
+    metadataErrorDetail.value = '';
+
+    const promise = runMetadataLoad(generation);
+    metadataLoadingPromise = promise;
+
+    const release = (): void => {
+        // Only the promise still registered may release the slot; a newer load
+        // (or the language watcher) has otherwise already taken ownership.
+        if (metadataLoadingPromise !== promise) return;
+        // Permit a later user-driven retry on reopen whenever this attempt did
+        // not produce complete data, without creating an automatic retry loop
+        // while the dialog is open.
+        if (metadataLoadState.value === 'error'
+            || !tagList.value.length || !vaList.value.length || !circleList.value.length) {
+            metadataLoadingPromise = null;
+        }
+    };
+    void promise.then(release, release);
+
+    return promise;
+}
+
+/** User-driven retry from the error banner: drop caches and refetch. */
+function retryMetadata(): void {
+    MetadataApi.clearCache();
+    metadataLoadingPromise = null;
+    void loadMetadataLists({ force: true });
 }
 
 // ---------------------------------------------------------------------------
@@ -1034,14 +1137,18 @@ watch(isOpen, (open) => {
     if (open) {
         refreshSortUi();
         ensureHostSortWatcher();
+        mergeLateHostTagTranslations();
         void loadMetadataLists();
     }
 }, { immediate: true });
 
 watch(lang, () => {
+    // Bumping the generation orphans the in-flight load, so the state must be
+    // reset here: the orphaned load will not write a terminal state itself.
     metadataTranslationGeneration++;
     metadataLoadingPromise = null;
     metadataLoadState.value = 'idle';
+    metadataErrorDetail.value = '';
     translationCache.value = new Map();
     if (isOpen.value) void loadMetadataLists();
 });
@@ -1085,6 +1192,25 @@ onUnmounted(() => {
 
                 <!-- Body -->
                 <div class="asmr-dialog-body">
+                    <!-- Metadata load failure: visible and retryable -->
+                    <div
+                        v-if="metadataLoadState === 'error'"
+                        class="asmr-metadata-error"
+                        role="alert"
+                    >
+                        <i class="material-icons" aria-hidden="true">error_outline</i>
+                        <span class="asmr-metadata-error-text" :title="metadataErrorDetail">
+                            {{ t('advMetadataFailed') }}
+                        </span>
+                        <button
+                            type="button"
+                            class="asmr-metadata-retry"
+                            @click="retryMetadata"
+                        >
+                            {{ t('advRetry') }}
+                        </button>
+                    </div>
+
                     <!-- Row 1: Tags (Include/Exclude) -->
                     <div class="asmr-form-row">
                         <TagSelector
@@ -1328,3 +1454,42 @@ onUnmounted(() => {
         </div>
     </Teleport>
 </template>
+
+<style scoped>
+.asmr-metadata-error {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 12px;
+    padding: 8px 12px;
+    border: 1px solid rgba(244, 67, 54, 0.4);
+    border-radius: 4px;
+    background: rgba(244, 67, 54, 0.08);
+    color: #c62828;
+    font-size: 13px;
+}
+
+.asmr-metadata-error .material-icons {
+    font-size: 18px;
+    flex: 0 0 auto;
+}
+
+.asmr-metadata-error-text {
+    flex: 1 1 auto;
+}
+
+.asmr-metadata-retry {
+    flex: 0 0 auto;
+    padding: 4px 12px;
+    border: 1px solid currentColor;
+    border-radius: 4px;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+}
+
+.asmr-metadata-retry:hover {
+    background: rgba(244, 67, 54, 0.14);
+}
+</style>

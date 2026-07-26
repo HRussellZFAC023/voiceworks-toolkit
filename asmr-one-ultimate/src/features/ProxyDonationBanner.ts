@@ -22,6 +22,13 @@ const YOMU_URL = 'https://yomureader.com/';
 const DISMISS_KEY = 'asmr-ult:proxy-banner-dismissed-at';
 const DISMISS_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const BANNER_ID = 'asmr-ultimate-proxy-banner';
+const STYLE_ID = 'asmr-ultimate-proxy-banner-style';
+/**
+ * Above Quasar dialogs/menus (max ~7000) and above reader extensions such as
+ * Yomu, which overlay the page with their own high-z-index surfaces. A funding
+ * notice the user cannot see is a notice that does not exist.
+ */
+const BANNER_Z_INDEX = 2147483000;
 
 interface SupportGoalPayload {
     donationGoalGbp?: number;
@@ -36,6 +43,7 @@ export class ProxyDonationBanner {
     private lifecycleGeneration = 0;
     private proxyCleanup: (() => void) | null = null;
     private positionCleanup: (() => void) | null = null;
+    private dismissed = false;
 
     public enable(): void {
         if (this.armed) return;
@@ -52,6 +60,37 @@ export class ProxyDonationBanner {
         this.positionCleanup = null;
         this.banner?.remove();
         this.banner = null;
+        document.getElementById(STYLE_ID)?.remove();
+    }
+
+    /**
+     * Keep the banner on top of everything the page or a reader extension
+     * (Yomu, jpdb, …) can stack over it, and give it an entrance so it reads as
+     * a notice rather than page furniture. Injected rather than shipped in the
+     * stylesheet so `disable()` reverts the page completely.
+     */
+    private injectStyles(): void {
+        if (document.getElementById(STYLE_ID)) return;
+        const style = document.createElement('style');
+        style.id = STYLE_ID;
+        style.textContent = `
+            #${BANNER_ID} {
+                z-index: ${BANNER_Z_INDEX} !important;
+                display: block !important;
+                visibility: visible !important;
+                opacity: 1 !important;
+                pointer-events: auto !important;
+                animation: asmr-proxy-banner-in .22s ease-out both;
+            }
+            @keyframes asmr-proxy-banner-in {
+                from { transform: translateY(-100%); }
+                to { transform: translateY(0); }
+            }
+            @media (prefers-reduced-motion: reduce) {
+                #${BANNER_ID} { animation: none; }
+            }
+        `;
+        document.head.appendChild(style);
     }
 
     private trackHeaderPosition(banner: HTMLElement): void {
@@ -62,8 +101,21 @@ export class ProxyDonationBanner {
         let resizeObserver: ResizeObserver | null = null;
         const observedHeaders = new Set<HTMLElement>();
 
+        /**
+         * A host re-render, a router transition or a reader extension rewriting
+         * the document can detach the banner. Without this it never comes back
+         * and the funding notice is silently lost for the whole session.
+         */
+        const ensureAttached = () => {
+            if (disposed || this.dismissed) return;
+            if (banner.isConnected || this.banner !== banner) return;
+            if (document.getElementById(BANNER_ID)) return;
+            document.body.appendChild(banner);
+        };
+
         const updateTop = () => {
             if (disposed) return;
+            ensureAttached();
             const headers = Array.from(document.querySelectorAll<HTMLElement>('.q-header'));
             const currentHeaders = new Set(headers);
             for (const previous of observedHeaders) {
@@ -108,6 +160,11 @@ export class ProxyDonationBanner {
             ? new MutationObserver(queueUpdate)
             : null;
         mutationObserver?.observe(layoutRoot, { childList: true, subtree: true });
+        // The banner lives on <body>, outside the app root — watch that level
+        // too, otherwise a detachment is never observed and never repaired.
+        if (layoutRoot !== document.body) {
+            mutationObserver?.observe(document.body, { childList: true });
+        }
 
         this.positionCleanup = () => {
             disposed = true;
@@ -152,7 +209,7 @@ export class ProxyDonationBanner {
     }
 
     private show(): void {
-        if (this.banner?.isConnected || this.isDismissed()) return;
+        if (this.banner?.isConnected || this.dismissed || this.isDismissed()) return;
         if (document.getElementById(BANNER_ID)) return;
         const generation = this.lifecycleGeneration;
 
@@ -165,19 +222,19 @@ export class ProxyDonationBanner {
         banner.setAttribute('aria-label', t('proxyBannerTitle'));
         banner.style.cssText = [
             'position:fixed', 'left:0', 'right:0', 'top:0',
-            'z-index:9999', 'width:100%', 'box-sizing:border-box',
-            'background:linear-gradient(135deg,#1b1b2b,#242438)', 'color:#f4f4f8',
+            `z-index:${BANNER_Z_INDEX}`, 'width:100%', 'box-sizing:border-box',
+            'background:linear-gradient(135deg,#241b3a,#3b2b6b 55%,#241b3a)', 'color:#f6f5ff',
             'border-top:1px solid rgba(255,255,255,0.18)',
-            'border-bottom:1px solid rgba(255,255,255,0.18)',
-            'padding:12px max(16px,env(safe-area-inset-right)) 12px max(16px,env(safe-area-inset-left))',
-            'box-shadow:0 6px 24px rgba(0,0,0,0.48)',
+            'border-bottom:3px solid #7c6cf0',
+            'padding:14px max(16px,env(safe-area-inset-right)) 14px max(16px,env(safe-area-inset-left))',
+            'box-shadow:0 10px 32px rgba(0,0,0,0.55)',
             'font-size:14px', 'line-height:1.5',
         ].join(';');
 
         banner.innerHTML = `
             <div data-testid="proxy-banner-content" style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;max-width:1200px;margin:0 auto">
                 <div style="flex:1;min-width:min(100%,260px)">
-                    <div style="font-size:15px;font-weight:700;margin-bottom:2px">${safeT('proxyBannerTitle')}</div>
+                    <div style="font-size:17px;font-weight:800;margin-bottom:3px;letter-spacing:.01em">${safeT('proxyBannerTitle')}</div>
                     <div>${safeT('proxyBannerMsg')} <span data-testid="proxy-banner-goal" style="opacity:.9" hidden></span></div>
                     <div style="opacity:.9;margin-top:3px">${safeT('proxyBannerVpn')}</div>
                     <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:8px">
@@ -193,12 +250,17 @@ export class ProxyDonationBanner {
 
         banner.querySelector('[data-testid="proxy-banner-dismiss"]')?.addEventListener('click', () => {
             try { GM_setValue(DISMISS_KEY, Date.now()); } catch { /* storage optional */ }
+            // Set before teardown: the re-attach guard must never resurrect a
+            // banner the user just closed, even if a mutation lands first.
+            this.dismissed = true;
             this.positionCleanup?.();
             this.positionCleanup = null;
             banner.remove();
             if (this.banner === banner) this.banner = null;
+            document.getElementById(STYLE_ID)?.remove();
         });
 
+        this.injectStyles();
         this.trackHeaderPosition(banner);
         document.body.appendChild(banner);
         this.banner = banner;

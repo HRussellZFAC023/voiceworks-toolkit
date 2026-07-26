@@ -30,6 +30,7 @@ import {
     isSafeRasterImageBlob,
     normalizeImageUrl,
 } from '../media/externalImageUtils';
+import { readHostAuthToken } from '../../core/hostAuthToken';
 import {
     buildMediaStreamUrl,
     resolveMediaApiBaseUrl,
@@ -600,7 +601,7 @@ function flattenTracks(nodes: (TrackFolder | TrackItem)[]): TrackItem[] {
 }
 
 function extractImageUrls(items: (TrackItem | TrackFolder)[], add: (url: string) => void): void {
-    const token = localStorage.getItem('jwt-token') || '';
+    const token = readHostAuthToken();
     for (const item of items) {
         if (item.type === 'folder') continue;
         if (!isImageItem(item)) continue;

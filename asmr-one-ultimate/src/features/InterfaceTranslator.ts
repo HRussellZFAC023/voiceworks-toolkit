@@ -3,6 +3,7 @@ import { I18n, Logger } from '../core/Utils';
 import { TIMING } from '../core/Constants';
 import { AppStore } from '../store/AppStore';
 import { EventBus } from '../core/EventBus';
+import { createTranslationRefreshScheduler } from './translationRefresh';
 
 export class InterfaceTranslator {
     private static instance: InterfaceTranslator | null = null;
@@ -123,11 +124,20 @@ export class InterfaceTranslator {
 
     private _enabled = false;
     private cleanups: Array<() => void> = [];
+    /**
+     * CentralObserver silently drops a run whose debounce window has not
+     * elapsed, so a burst that ends inside the window leaves late DOM
+     * untranslated. Register with no debounce and guarantee a trailing pass.
+     */
+    private refresh = createTranslationRefreshScheduler(
+        () => this.translate(),
+        TIMING.OBSERVER_REGISTER_DEBOUNCE_MS,
+    );
 
     public enable(): void {
         if (this._enabled) return;
         this._enabled = true;
-        CentralObserver.register('InterfaceTranslator', () => this.translate(), TIMING.OBSERVER_REGISTER_DEBOUNCE_MS);
+        CentralObserver.register('InterfaceTranslator', () => this.refresh.schedule(), 0);
         this.cleanups.push(EventBus.on('lang:change', () => this.resetAndTranslate()));
         this.cleanups.push(EventBus.on('config:change', ({ key }) => {
             if (key === 'translateMode' || key === 'translateCnToJp') this.resetAndTranslate();
@@ -139,6 +149,7 @@ export class InterfaceTranslator {
     public disable(): void {
         this._enabled = false;
         CentralObserver.unregister('InterfaceTranslator');
+        this.refresh.cancel();
         this.cleanups.forEach((cleanup) => cleanup());
         this.cleanups = [];
         this.resetTranslations();

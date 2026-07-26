@@ -599,6 +599,22 @@ async function transcribe(msg) {
         chunk_length_s: msg.chunkLengthS,
         stride_length_s: msg.strideLengthS,
         task: msg.subtask,
+        // Greedy Whisper decoding degenerates into unbounded token loops on
+        // non-verbal audio, which ASMR is largely made of (breaths, laughter,
+        // rustling, moans). A loop consumes the whole window's token budget, so
+        // the real speech in that window is never emitted — this is the root
+        // cause of "transcribes a few words and never gets beyond that".
+        //
+        // Measured on a 150s Japanese ASMR excerpt with a ground-truth script
+        // (onnx-community/whisper-small_timestamped, q8):
+        //   greedy:            CER 124.1%, 53.9s, 120-char repeat run
+        //   with these params: CER  26.1%, 36.9s, no repeat run
+        // Throughput improves too, because tokens are no longer spent looping.
+        //
+        // 6 is deliberately permissive: natural Japanese repeats (ドキドキ,
+        // へへへ) stay intact, while degenerate loops are blocked.
+        no_repeat_ngram_size: 6,
+        repetition_penalty: 1.15,
     };
     if (msg.language) basePipeOpts.language = msg.language;
 

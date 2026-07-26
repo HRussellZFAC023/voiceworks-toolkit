@@ -189,7 +189,7 @@ test.describe('Settings Input Fields', () => {
     await expect(section.locator('input[data-key="translationApiKey"]')).toHaveAttribute('type', 'password');
   });
 
-  test('Google Drive client ID input exists in Emergency Backup section', async ({ injectedPage, isScriptLoaded }) => {
+  test('Emergency Backup uses the bundled Google client without exposing its ID', async ({ injectedPage, isScriptLoaded }) => {
     await helpers.gotoSettings(injectedPage);
     await isScriptLoaded();
     await injectedPage.waitForTimeout(1500);
@@ -197,8 +197,9 @@ test.describe('Settings Input Fields', () => {
     const section = injectedPage.locator('#asmr-emergency-export-section');
     const input = section.locator('input[data-key="googleDriveClientId"]');
 
-    await expect(input).toBeVisible();
-    await expect(input).toHaveValue(/^166564421003-[a-z0-9]+\.apps\.googleusercontent\.com$/);
+    await expect(input).toHaveCount(0);
+    await expect.poll(() => helpers.getConfig(injectedPage, 'googleDriveClientId'))
+      .toMatch(/^166564421003-[a-z0-9]+\.apps\.googleusercontent\.com$/);
     await expect.poll(() => injectedPage.evaluate(() => Boolean(
       (window as typeof window & { google?: { accounts?: { oauth2?: unknown } } })
         .google?.accounts?.oauth2,
@@ -346,5 +347,53 @@ test.describe('Settings Theme Support', () => {
     expect(surfaces.light.inputBg).not.toBe(surfaces.dark.inputBg);
     expect(surfaces.light.separatorBg).not.toBe(surfaces.dark.separatorBg);
     expect(surfaces.light.actionBg).not.toBe(surfaces.dark.actionBg);
+  });
+});
+
+test.describe('Settings Row Layout', () => {
+  test('no settings row overlaps or overflows its section at any panel width', async ({ injectedPage, isScriptLoaded }) => {
+    await helpers.gotoSettings(injectedPage);
+    await isScriptLoaded();
+    await injectedPage.waitForTimeout(1500);
+
+    for (const theme of ['light', 'dark'] as const) {
+      await injectedPage.evaluate((mode) => {
+        document.body.classList.toggle('body--dark', mode === 'dark');
+      }, theme);
+
+      for (const width of [360, 480, 768, 1024, 1440]) {
+        await injectedPage.setViewportSize({ width, height: 900 });
+        await injectedPage.waitForTimeout(150);
+
+        const problems = await injectedPage.evaluate(() => {
+          const EPSILON = 0.5;
+          const overlaps: string[] = [];
+          const overflow: string[] = [];
+          for (const section of document.querySelectorAll('.asmr-settings-section')) {
+            const bounds = section.getBoundingClientRect();
+            const rows = Array.from(section.children);
+            for (let index = 0; index < rows.length - 1; index++) {
+              const current = rows[index].getBoundingClientRect();
+              const next = rows[index + 1].getBoundingClientRect();
+              if (current.height === 0 || next.height === 0) continue;
+              if (next.top < current.bottom - EPSILON) {
+                overlaps.push(`${(rows[index].textContent || '').trim().slice(0, 40)} / ${(rows[index + 1].textContent || '').trim().slice(0, 40)}`);
+              }
+            }
+            for (const label of section.querySelectorAll('.q-item__label, .asmr-range-ticks button')) {
+              const rect = label.getBoundingClientRect();
+              if (rect.width === 0) continue;
+              if (rect.right > bounds.right + EPSILON || rect.left < bounds.left - EPSILON) {
+                overflow.push((label.textContent || '').trim().slice(0, 40));
+              }
+            }
+          }
+          return { overlaps, overflow };
+        });
+
+        expect(problems.overlaps, `${theme} @ ${width}px`).toEqual([]);
+        expect(problems.overflow, `${theme} @ ${width}px`).toEqual([]);
+      }
+    }
   });
 });

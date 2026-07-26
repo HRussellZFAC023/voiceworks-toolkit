@@ -16,7 +16,9 @@ const mocks = vi.hoisted(() => ({
     runnerResume: vi.fn(),
     runnerPause: vi.fn(),
     loadSettledJob: vi.fn(),
-    chooseDirectory: vi.fn(),
+    canCreateDestination: vi.fn(),
+    createDestination: vi.fn(),
+    supportsPicker: vi.fn(),
     getAuthHeader: vi.fn(),
 }));
 
@@ -39,7 +41,12 @@ vi.mock('../../src/api', () => ({ WorksApi: { searchWorks: mocks.searchWorks } }
 vi.mock('../../src/services/WorkService', () => ({
     WorkService: { getTracks: mocks.getTracks, getWorkInfo: mocks.getWorkInfo },
 }));
-vi.mock('../../src/features/downloads/DirectoryDownloadSink', () => ({ chooseDownloadDirectory: mocks.chooseDirectory }));
+vi.mock('../../src/features/downloads/DownloadSinkFactory', () => ({
+    canCreateDownloadDestination: mocks.canCreateDestination,
+    createDownloadDestination: mocks.createDestination,
+    supportsDirectoryPicker: mocks.supportsPicker,
+    DownloadDestinationCancelledError: class DownloadDestinationCancelledError extends Error {},
+}));
 vi.mock('../../src/features/downloads/DownloadCenterRunner', () => ({
     DownloadCenterRunError: class DownloadCenterRunError extends Error {
         constructor(public code: string, cause?: unknown) {
@@ -84,7 +91,9 @@ describe('DownloadCenter', () => {
         mocks.semanticSearch.mockResolvedValue([]);
         mocks.recover.mockResolvedValue([]);
         mocks.loadSettledJob.mockResolvedValue(undefined);
-        mocks.chooseDirectory.mockResolvedValue({});
+        mocks.canCreateDestination.mockReturnValue(true);
+        mocks.supportsPicker.mockReturnValue(true);
+        mocks.createDestination.mockResolvedValue({ kind: 'fsa', handle: {} });
         mocks.getAuthHeader.mockReturnValue({ Authorization: 'Bearer unit-test' });
         mocks.searchWorks.mockResolvedValue({ works: [], pagination: { currentPage: 1, pageSize: 20, totalCount: 0 } });
         mocks.getTracks.mockResolvedValue([]);
@@ -261,8 +270,8 @@ describe('DownloadCenter', () => {
         await flushPromises();
         (document.querySelector('[data-testid="search-all-works"]') as HTMLButtonElement).click();
         await flushPromises();
-        expect(mocks.semanticSearch).toHaveBeenCalledWith('Direct', 20);
-        expect(mocks.searchWorks).toHaveBeenCalledWith('Direct', { page: 1 });
+        expect(mocks.semanticSearch).toHaveBeenCalledWith('Direct', 200);
+        expect(mocks.searchWorks).toHaveBeenCalledWith('Direct', { page: 1, pageSize: 100, limit: 100 });
         expect(document.querySelector('[data-testid="search-work-RJ000042"]')?.textContent).toContain('添い寝音声');
         expect(document.querySelector('[data-testid="search-work-RJ000043"]')?.textContent).toContain('Newest live result');
         wrapper.unmount();
@@ -289,6 +298,10 @@ describe('DownloadCenter', () => {
         await flushPromises();
         (document.querySelector('[data-testid="search-all-works"]') as HTMLButtonElement).click();
 
+        await vi.waitFor(() => expect(document.querySelector('[data-testid="search-work-RJ000046"]')).not.toBeNull());
+        // The list view never reads a file manifest; selecting the row does.
+        expect(mocks.getTracks).not.toHaveBeenCalled();
+        (document.querySelector('[data-testid="search-work-RJ000046"] input') as HTMLInputElement).click();
         await vi.waitFor(() => expect(document.querySelector('[data-testid="search-work-RJ000046"]')?.textContent).toContain('1.5 MB'));
         const image = document.querySelector('[data-testid="search-work-RJ000046"] .work-cover img') as HTMLImageElement;
         expect(image.src).toBe('https://images.example.test/46.jpg');
@@ -318,10 +331,14 @@ describe('DownloadCenter', () => {
         await flushPromises();
         (document.querySelector('[data-testid="search-all-works"]') as HTMLButtonElement).click();
         await vi.waitFor(() => expect(document.querySelector('[data-testid="search-work-RJ000047"]')).not.toBeNull());
+        (document.querySelector('[data-testid="search-work-RJ000047"] input') as HTMLInputElement).click();
+        await flushPromises();
 
         input.value = 'second'; input.dispatchEvent(new Event('input', { bubbles: true }));
         await flushPromises();
         (document.querySelector('[data-testid="search-all-works"]') as HTMLButtonElement).click();
+        await vi.waitFor(() => expect(document.querySelector('[data-testid="search-work-RJ000048"]')).not.toBeNull());
+        (document.querySelector('[data-testid="search-work-RJ000048"] input') as HTMLInputElement).click();
         await vi.waitFor(() => expect(document.querySelector('[data-testid="search-work-RJ000048"]')?.textContent).toContain('2 KB'));
         firstTracks.resolve([{ type: 'audio', title: 'first.wav', size: 999999, mediaDownloadUrl: 'https://media.example.test/first.wav' }]);
         await flushPromises();
@@ -381,9 +398,12 @@ describe('DownloadCenter', () => {
         input.value = 'partial'; input.dispatchEvent(new Event('input', { bubbles: true }));
         await flushPromises();
         (document.querySelector('[data-testid="search-all-works"]') as HTMLButtonElement).click();
+        await vi.waitFor(() => expect(document.querySelector('[data-testid="search-work-RJ000049"]')).not.toBeNull());
+        (document.querySelector('[data-testid="search-work-RJ000049"] input') as HTMLInputElement).click();
         await vi.waitFor(() => expect(document.querySelector('[data-testid="search-work-RJ000049"]')?.textContent).toContain('at least 1 KB'));
 
-        (document.querySelector('[data-testid="search-all-works"]') as HTMLButtonElement).click();
+        (document.querySelector('[data-testid="search-work-RJ000049"] input') as HTMLInputElement).click();
+        (document.querySelector('[data-testid="search-work-RJ000049"] input') as HTMLInputElement).click();
         await flushPromises();
 
         expect(document.querySelector('[data-testid="search-work-RJ000049"]')?.textContent).toContain('at least 1 KB');
@@ -414,6 +434,11 @@ describe('DownloadCenter', () => {
         input.dispatchEvent(new Event('input', { bubbles: true }));
         await flushPromises();
         (document.querySelector('[data-testid="search-all-works"]') as HTMLButtonElement).click();
+        await vi.waitFor(() => expect(document.querySelector('[data-testid^="search-work-"]')).not.toBeNull());
+        // Duration is available immediately; file counts arrive with the
+        // manifest that selecting the row requests.
+        expect(document.querySelector('[data-testid^="search-work-"]')?.textContent).toContain('13:35');
+        (document.querySelector('[data-testid^="search-work-"] input') as HTMLInputElement).click();
 
         await vi.waitFor(() => {
             expect(document.querySelector('[data-testid^="search-work-"]')?.textContent)
@@ -424,29 +449,64 @@ describe('DownloadCenter', () => {
         wrapper.unmount();
     });
 
-    it('stops queued work enrichment when the component unmounts', async () => {
-        const tracks = [deferred<any[]>(), deferred<any[]>(), deferred<any[]>()];
+    it('never strands a row on Loading when the dialog closes mid-enrichment', async () => {
+        const pending = deferred<any[]>();
         mocks.searchWorks.mockResolvedValue({
-            works: [50, 51, 52, 53].map(id => ({
-                id, title: `Work ${id}`, duration: 60,
-                thumbnailCoverUrl: `https://images.example.test/${id}.jpg`, tags: [{ name: 'Test' }],
-            })),
-            pagination: { currentPage: 1, pageSize: 20, totalCount: 4 },
+            works: [{ id: 50, title: 'Interrupted', duration: 60, thumbnailCoverUrl: 'https://images.example.test/50.jpg', tags: [{ name: 'Test' }] }],
+            pagination: { currentPage: 1, pageSize: 20, totalCount: 1 },
         });
-        mocks.getTracks.mockImplementation((_id: string) => tracks[mocks.getTracks.mock.calls.length - 1]?.promise ?? Promise.resolve([]));
+        mocks.getTracks.mockReturnValue(pending.promise);
         const wrapper = mount(DownloadCenter, { attachTo: document.body });
         await wrapper.get('[data-testid="download-center-open"]').trigger('click');
         const input = document.querySelector('[data-testid="search"]') as HTMLInputElement;
         input.value = 'queue'; input.dispatchEvent(new Event('input', { bubbles: true }));
         await flushPromises();
         (document.querySelector('[data-testid="search-all-works"]') as HTMLButtonElement).click();
-        await vi.waitFor(() => expect(mocks.getTracks).toHaveBeenCalledTimes(3));
+        await vi.waitFor(() => expect(document.querySelector('[data-testid="search-work-RJ000050"]')).not.toBeNull());
+        (document.querySelector('[data-testid="search-work-RJ000050"] input') as HTMLInputElement).click();
+        await vi.waitFor(() => expect(document.querySelector('[data-testid="search-work-RJ000050"]')?.textContent).toContain('Loading'));
 
-        wrapper.unmount();
-        tracks.forEach(item => item.resolve([]));
+        // Close the dialog mid-request, let it settle, then come back to the
+        // same row: it must reach a terminal state instead of keeping the
+        // spinner forever with no retry path.
+        (document.querySelector('[data-testid="close"]') as HTMLButtonElement).click();
+        await flushPromises();
+        pending.resolve([]);
         await flushPromises();
 
-        expect(mocks.getTracks).toHaveBeenCalledTimes(3);
+        await wrapper.get('[data-testid="download-center-open"]').trigger('click');
+        const reopened = document.querySelector('[data-testid="search"]') as HTMLInputElement;
+        reopened.value = 'queue'; reopened.dispatchEvent(new Event('input', { bubbles: true }));
+        await flushPromises();
+        (document.querySelector('[data-testid="search-all-works"]') as HTMLButtonElement).click();
+        await vi.waitFor(() => expect(document.querySelector('[data-testid="search-work-RJ000050"]')).not.toBeNull());
+
+        expect(document.querySelector('[data-testid="search-work-RJ000050"]')?.textContent).not.toContain('Loading');
+        wrapper.unmount();
+    });
+
+    it('reads no file manifest for rows the user has not selected', async () => {
+        mocks.searchWorks.mockResolvedValue({
+            works: [60, 61, 62].map(id => ({
+                id, title: `Work ${id}`, duration: 60,
+                thumbnailCoverUrl: `https://images.example.test/${id}.jpg`, tags: [{ name: 'Test' }],
+            })),
+            pagination: { currentPage: 1, pageSize: 20, totalCount: 3 },
+        });
+        const wrapper = mount(DownloadCenter, { attachTo: document.body });
+        await wrapper.get('[data-testid="download-center-open"]').trigger('click');
+        const input = document.querySelector('[data-testid="search"]') as HTMLInputElement;
+        input.value = 'queue'; input.dispatchEvent(new Event('input', { bubbles: true }));
+        await flushPromises();
+        (document.querySelector('[data-testid="search-all-works"]') as HTMLButtonElement).click();
+        await vi.waitFor(() => expect(document.querySelector('[data-testid="search-work-RJ000062"]')).not.toBeNull());
+        await flushPromises();
+
+        expect(mocks.getTracks).not.toHaveBeenCalled();
+        (document.querySelector('[data-testid="search-work-RJ000061"] input') as HTMLInputElement).click();
+        await flushPromises();
+        expect(mocks.getTracks.mock.calls.map((call: unknown[]) => call[0])).toEqual(['RJ000061']);
+        wrapper.unmount();
     });
 
     it('keeps semantic results when the live site search is unavailable', async () => {
@@ -881,6 +941,181 @@ describe('DownloadCenter', () => {
         expect(document.querySelector('[data-testid="download-error"]')?.textContent).not.toContain('cdn.example.test');
         expect(document.querySelector('[data-testid="progress-count"]')?.textContent).toContain('2 / 5');
         expect(document.querySelector('[data-testid="download-progress"]')?.textContent).not.toContain('0 / 0');
+        wrapper.unmount();
+    });
+
+    it('keeps every live result and reports the real catalogue total', async () => {
+        mocks.semanticSearch.mockResolvedValue([]);
+        mocks.searchWorks.mockResolvedValue({
+            works: Array.from({ length: 45 }, (_, index) => ({ id: 1000 + index, title: `Result ${index}` })),
+            pagination: { currentPage: 1, pageSize: 45, totalCount: 1234 },
+        });
+        const wrapper = mount(DownloadCenter, { attachTo: document.body });
+        await wrapper.get('[data-testid="download-center-open"]').trigger('click');
+        const input = document.querySelector('[data-testid="search"]') as HTMLInputElement;
+        input.value = 'many'; input.dispatchEvent(new Event('input', { bubbles: true }));
+        await flushPromises();
+        (document.querySelector('[data-testid="search-all-works"]') as HTMLButtonElement).click();
+        await flushPromises();
+
+        // The old code truncated every result set to 30 rows and dropped the
+        // reported total entirely.
+        expect(document.querySelectorAll('[data-testid^="search-work-"]')).toHaveLength(45);
+        expect(document.querySelector('[data-testid="search-result-count"]')?.textContent).toBe('Showing 45 of 1,234');
+        expect(document.querySelector('[data-testid="load-more"]')).not.toBeNull();
+        wrapper.unmount();
+    });
+
+    it('appends the next catalogue page without dropping the current selection', async () => {
+        mocks.semanticSearch.mockResolvedValue([]);
+        mocks.searchWorks
+            .mockResolvedValueOnce({
+                works: [{ id: 2001, title: 'Page one' }],
+                pagination: { currentPage: 1, pageSize: 1, totalCount: 2 },
+            })
+            .mockResolvedValueOnce({
+                works: [{ id: 2002, title: 'Page two' }],
+                pagination: { currentPage: 2, pageSize: 1, totalCount: 2 },
+            });
+        const wrapper = mount(DownloadCenter, { attachTo: document.body });
+        await wrapper.get('[data-testid="download-center-open"]').trigger('click');
+        const input = document.querySelector('[data-testid="search"]') as HTMLInputElement;
+        input.value = 'paged'; input.dispatchEvent(new Event('input', { bubbles: true }));
+        await flushPromises();
+        (document.querySelector('[data-testid="search-all-works"]') as HTMLButtonElement).click();
+        await vi.waitFor(() => expect(document.querySelector('[data-testid="search-work-RJ002001"]')).not.toBeNull());
+        (document.querySelector('[data-testid="search-work-RJ002001"] input') as HTMLInputElement).click();
+        await flushPromises();
+
+        (document.querySelector('[data-testid="load-more"]') as HTMLButtonElement).click();
+        await vi.waitFor(() => expect(document.querySelector('[data-testid="search-work-RJ002002"]')).not.toBeNull());
+
+        expect(mocks.searchWorks).toHaveBeenLastCalledWith('paged', { page: 2, pageSize: 100, limit: 100 });
+        expect(document.querySelector('[data-testid="search-work-RJ002001"]')).not.toBeNull();
+        expect((document.querySelector('[data-testid="search-work-RJ002001"] input') as HTMLInputElement).checked).toBe(true);
+        expect(document.querySelector('[data-testid="load-more"]')).toBeNull();
+        wrapper.unmount();
+    });
+
+    it('links each result row to its work page outside the selection control', async () => {
+        mocks.semanticSearch.mockResolvedValue([]);
+        mocks.searchWorks.mockResolvedValue({
+            works: [{ id: 3001, title: 'Linked result' }],
+            pagination: { currentPage: 1, pageSize: 1, totalCount: 1 },
+        });
+        const wrapper = mount(DownloadCenter, { attachTo: document.body });
+        await wrapper.get('[data-testid="download-center-open"]').trigger('click');
+        const input = document.querySelector('[data-testid="search"]') as HTMLInputElement;
+        input.value = 'linked'; input.dispatchEvent(new Event('input', { bubbles: true }));
+        await flushPromises();
+        (document.querySelector('[data-testid="search-all-works"]') as HTMLButtonElement).click();
+        await vi.waitFor(() => expect(document.querySelector('[data-testid="open-work-RJ003001"]')).not.toBeNull());
+
+        const link = document.querySelector('[data-testid="open-work-RJ003001"]') as HTMLAnchorElement;
+        expect(link.getAttribute('href')).toBe('/work/RJ003001');
+        expect(link.target).toBe('_blank');
+        expect(link.rel).toBe('noopener');
+        // Outside the label so opening the work never toggles the checkbox.
+        expect(link.closest('label')).toBeNull();
+        link.click();
+        await flushPromises();
+        expect((document.querySelector('[data-testid="search-work-RJ003001"] input') as HTMLInputElement).checked).toBe(false);
+        wrapper.unmount();
+    });
+
+    it('starts a staged download in a browser without a folder picker', async () => {
+        mocks.supportsPicker.mockReturnValue(false);
+        mocks.canCreateDestination.mockReturnValue(true);
+        mocks.createDestination.mockResolvedValue({ kind: 'gm', subfolder: 'asmr-one-downloads' });
+        mocks.runnerStart.mockResolvedValue({ jobId: 'job-firefox', skipped: 0, exportFailures: 0 });
+        mocks.fetchOwn.mockResolvedValue([{ id: 'mine', name: 'Mine', privacy: 0, works: ['RJ123456'], works_count: 1 }]);
+        mocks.fetchPlaylist.mockResolvedValue({
+            id: 'mine', name: 'Mine', description: '', worksCount: 1,
+            works: [{ rjCode: 'RJ123456', title: 'Selected work' }],
+        });
+        const wrapper = mount(DownloadCenter, { attachTo: document.body });
+        await wrapper.get('[data-testid="download-center-open"]').trigger('click');
+        (document.querySelector('[data-testid="source-own"]') as HTMLButtonElement).click();
+        await flushPromises();
+        expect(document.querySelector('[data-testid="staged-destination-hint"]')).not.toBeNull();
+        (document.querySelector('[data-testid="playlist-check-mine"]') as HTMLInputElement).click();
+        await flushPromises();
+        (document.querySelector('[data-testid="start"]') as HTMLButtonElement).click();
+        await flushPromises();
+
+        expect(document.querySelector('[data-testid="download-error"]')).toBeNull();
+        expect(mocks.runnerStart).toHaveBeenCalledWith(
+            expect.anything(),
+            expect.anything(),
+            { kind: 'gm', subfolder: 'asmr-one-downloads' },
+            expect.any(String),
+            expect.any(Function),
+        );
+        wrapper.unmount();
+    });
+
+    it('reports downloads as unsupported only when no destination can be built', async () => {
+        mocks.canCreateDestination.mockReturnValue(false);
+        mocks.supportsPicker.mockReturnValue(false);
+        mocks.fetchOwn.mockResolvedValue([{ id: 'mine', name: 'Mine', privacy: 0, works: ['RJ123456'], works_count: 1 }]);
+        mocks.fetchPlaylist.mockResolvedValue({
+            id: 'mine', name: 'Mine', description: '', worksCount: 1,
+            works: [{ rjCode: 'RJ123456', title: 'Selected work' }],
+        });
+        const wrapper = mount(DownloadCenter, { attachTo: document.body });
+        await wrapper.get('[data-testid="download-center-open"]').trigger('click');
+        (document.querySelector('[data-testid="source-own"]') as HTMLButtonElement).click();
+        await flushPromises();
+        (document.querySelector('[data-testid="playlist-check-mine"]') as HTMLInputElement).click();
+        await flushPromises();
+        (document.querySelector('[data-testid="start"]') as HTMLButtonElement).click();
+        await flushPromises();
+
+        expect(document.querySelector('[data-testid="download-error"]')?.textContent)
+            .toContain('no writable download storage');
+        expect(mocks.createDestination).not.toHaveBeenCalled();
+        wrapper.unmount();
+    });
+
+    it('surfaces an unclassified failure cause instead of the bare failure wall', async () => {
+        mocks.runnerStart.mockRejectedValue(new Error('IndexedDB is not available in this context'));
+        mocks.fetchOwn.mockResolvedValue([{ id: 'mine', name: 'Mine', privacy: 0, works: ['RJ123456'], works_count: 1 }]);
+        mocks.fetchPlaylist.mockResolvedValue({
+            id: 'mine', name: 'Mine', description: '', worksCount: 1,
+            works: [{ rjCode: 'RJ123456', title: 'Selected work' }],
+        });
+        const wrapper = mount(DownloadCenter, { attachTo: document.body });
+        await wrapper.get('[data-testid="download-center-open"]').trigger('click');
+        (document.querySelector('[data-testid="source-own"]') as HTMLButtonElement).click();
+        await flushPromises();
+        (document.querySelector('[data-testid="playlist-check-mine"]') as HTMLInputElement).click();
+        await flushPromises();
+        (document.querySelector('[data-testid="start"]') as HTMLButtonElement).click();
+        await flushPromises();
+
+        expect(document.querySelector('[data-testid="download-error"]')?.textContent)
+            .toContain('IndexedDB is not available');
+        wrapper.unmount();
+    });
+
+    it('reports work folders the browser refused to receive', async () => {
+        mocks.runnerStart.mockResolvedValue({ jobId: 'job-export', skipped: 0, exportFailures: 2 });
+        mocks.fetchOwn.mockResolvedValue([{ id: 'mine', name: 'Mine', privacy: 0, works: ['RJ123456'], works_count: 1 }]);
+        mocks.fetchPlaylist.mockResolvedValue({
+            id: 'mine', name: 'Mine', description: '', worksCount: 1,
+            works: [{ rjCode: 'RJ123456', title: 'Selected work' }],
+        });
+        const wrapper = mount(DownloadCenter, { attachTo: document.body });
+        await wrapper.get('[data-testid="download-center-open"]').trigger('click');
+        (document.querySelector('[data-testid="source-own"]') as HTMLButtonElement).click();
+        await flushPromises();
+        (document.querySelector('[data-testid="playlist-check-mine"]') as HTMLInputElement).click();
+        await flushPromises();
+        (document.querySelector('[data-testid="start"]') as HTMLButtonElement).click();
+        await flushPromises();
+
+        expect(document.querySelector('[data-testid="download-progress"]')?.textContent)
+            .toContain('2 work folders could not be handed to the browser');
         wrapper.unmount();
     });
 

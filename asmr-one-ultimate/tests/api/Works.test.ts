@@ -15,7 +15,7 @@ vi.mock('../../src/infrastructure/HttpClient', () => ({
     },
 }));
 
-import { WorksApi } from '../../src/api/Works';
+import { hasMoreWorkPages, readWorksTotalCount, WorksApi, type WorksResponse } from '../../src/api/Works';
 
 const MOCK_RESPONSE = {
     data: {
@@ -238,5 +238,39 @@ describe('WorksApi', () => {
                 }),
             );
         });
+    });
+});
+
+describe('work pagination helpers', () => {
+    const response = (works: number, totalCount: number): WorksResponse => ({
+        works: Array.from({ length: works }, (_, index) => ({ id: index } as never)),
+        pagination: { currentPage: 1, pageSize: works, totalCount },
+    });
+
+    it('reports the catalogue total the API advertises', () => {
+        expect(readWorksTotalCount(response(20, 1234))).toBe(1234);
+    });
+
+    it('never advertises a total smaller than the rows already loaded', () => {
+        expect(readWorksTotalCount(response(20, 5), 100)).toBe(120);
+    });
+
+    it('falls back to the loaded count when the API omits a usable total', () => {
+        expect(readWorksTotalCount({ works: [{} as never], pagination: undefined as never }, 10)).toBe(11);
+    });
+
+    it('offers another page only while loaded rows trail the total', () => {
+        expect(hasMoreWorkPages(response(20, 100), 20)).toBe(true);
+        expect(hasMoreWorkPages(response(20, 20), 20)).toBe(false);
+        expect(hasMoreWorkPages(response(0, 100), 20)).toBe(false);
+    });
+
+    it('forwards page-size hints to the search endpoint', async () => {
+        mockGetAxios.mockReturnValue({ defaults: { baseURL: 'https://api.asmr-100.com' } });
+        await WorksApi.searchWorks('query', { page: 2, pageSize: 100, limit: 100 });
+        expect(mockGetJsonViaCors).toHaveBeenCalledWith(
+            'https://api.asmr-100.com/api/search/query',
+            expect.objectContaining({ params: { page: 2, pageSize: 100, limit: 100 } }),
+        );
     });
 });

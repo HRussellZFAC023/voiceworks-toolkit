@@ -1,7 +1,7 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import { TranslatedTags } from '../../src/features/TranslatedTags';
 import { KikoeruBridge } from '../../src/infrastructure/KikoeruBridge';
-import { Config } from '../../src/core/Config';
+import { Config, I18n } from '../../src/core/Config';
 import { TranslationService } from '../../src/services/TranslationService';
 import { EventBus } from '../../src/core/EventBus';
 import { CentralObserver } from '../../src/core/CentralObserver';
@@ -143,6 +143,7 @@ describe('TranslatedTags', () => {
         vi.mocked(TranslationService.translateBatch).mockReset();
         vi.mocked(TranslationService.translateBatch).mockResolvedValue([]);
         vi.mocked(TranslationService.cancelPending).mockClear();
+        vi.mocked(TranslationService.translateForDisplayBatch).mockClear();
         vi.mocked(TranslationService.isUserLang).mockReset();
         vi.mocked(TranslationService.isUserLang).mockReturnValue(false);
         vi.mocked(TranslationService.isTargetLanguage).mockReset();
@@ -150,6 +151,13 @@ describe('TranslatedTags', () => {
         vi.mocked(EventBus.on).mockClear();
         vi.mocked(CentralObserver.register).mockClear();
         vi.mocked(CentralObserver.unregister).mockClear();
+        (I18n as { lang: string }).lang = 'en';
+        window.history.pushState({}, '', '/');
+    });
+
+    afterEach(() => {
+        (I18n as { lang: string }).lang = 'en';
+        window.history.pushState({}, '', '/');
     });
 
     it('should suppress translation during keydown on input fields', async () => {
@@ -605,6 +613,309 @@ describe('TranslatedTags', () => {
         expect((translatedTags as any).isEnabled).toBe(false);
         expect(CentralObserver.register).not.toHaveBeenCalled();
         expect(EventBus.on).not.toHaveBeenCalled();
+    });
+
+    // =========================================================================
+    // Keeping up with the host: mutation bursts, route changes, card recycling
+    // =========================================================================
+
+    it('takes every mutation signal and coalesces it into a guaranteed pass', async () => {
+        await bridge.initialize();
+        (bridge as any)._apiClient = { getTags: vi.fn().mockResolvedValue({ data: [] }) };
+        const translatedTags = TranslatedTags.getInstance();
+        await translatedTags.enable();
+
+        // A per-feature debounce on CentralObserver silently drops runs inside
+        // its window, which is why late content stayed untranslated. Own the
+        // debouncing instead so no signal is ever discarded.
+        expect(CentralObserver.register).toHaveBeenCalledWith('TranslatedTags', expect.any(Function), 0);
+        const observerCallback = vi.mocked(CentralObserver.register).mock.calls[0][1] as () => void;
+        const augmentSpy = vi.spyOn(translatedTags as any, 'augmentTags');
+
+        observerCallback();
+        observerCallback();
+        observerCallback();
+        expect(augmentSpy).not.toHaveBeenCalled();
+
+        await vi.waitFor(() => expect(augmentSpy).toHaveBeenCalledTimes(1));
+    });
+
+    it('re-translates after a route change instead of waiting for an unrelated mutation', async () => {
+        await bridge.initialize();
+        (bridge as any)._apiClient = { getTags: vi.fn().mockResolvedValue({ data: [] }) };
+        let routeWatcher: ((next: string, prev: string) => void) | null = null;
+        (bridge as any).$watch = vi.fn((_getter: unknown, callback: (next: string, prev: string) => void) => {
+            routeWatcher = callback;
+            return () => {};
+        });
+        const translatedTags = TranslatedTags.getInstance();
+        await translatedTags.enable();
+
+        const augmentSpy = vi.spyOn(translatedTags as any, 'augmentTags');
+        expect(routeWatcher).toBeTruthy();
+        (routeWatcher as unknown as (next: string, prev: string) => void)(
+            'RJ2|/work/RJ2',
+            'RJ1|/work/RJ1',
+        );
+
+        // The route change cancels every in-flight batch, so without an explicit
+        // re-run the new page renders untranslated.
+        await vi.waitFor(() => expect(augmentSpy).toHaveBeenCalled());
+    });
+
+    it('reacts to an in-place text rewrite when Vue recycles a card', async () => {
+        await bridge.initialize();
+        (bridge as any)._apiClient = { getTags: vi.fn().mockResolvedValue({ data: [] }) };
+        const translatedTags = TranslatedTags.getInstance();
+        await translatedTags.enable();
+
+        const qApp = document.getElementById('q-app') as HTMLElement;
+        qApp.insertAdjacentHTML('beforeend', `
+            <div class="q-card">
+                <div class="ellipsis-3-lines"><a href="/work/RJ000001">耳かき</a></div>
+            </div>
+        `);
+        const link = qApp.querySelector('a[href*="/work/"]') as HTMLElement;
+        (translatedTags as any).refresh.cancel();
+        expect((translatedTags as any).refresh.pending).toBe(false);
+
+        // Vue 2 patches a re-used node by writing to the existing text node.
+        // That emits characterData and nothing else — CentralObserver only
+        // watches childList, so this is the recycling case it cannot see.
+        (link.firstChild as Text).data = '囁き';
+
+        await vi.waitFor(() => expect((translatedTags as any).refresh.pending).toBe(true));
+    });
+
+    it('stops watching in-place text edits after disable', async () => {
+        await bridge.initialize();
+        (bridge as any)._apiClient = { getTags: vi.fn().mockResolvedValue({ data: [] }) };
+        const translatedTags = TranslatedTags.getInstance();
+        await translatedTags.enable();
+        expect((translatedTags as any).textObserver).not.toBeNull();
+
+        translatedTags.disable();
+
+        expect((translatedTags as any).textObserver).toBeNull();
+        expect((translatedTags as any).refresh.pending).toBe(false);
+    });
+
+    // =========================================================================
+    // One translation per label
+    // =========================================================================
+
+    it('gives a list-view work row exactly one translation', async () => {
+        await bridge.initialize();
+        window.history.pushState({}, '', '/works');
+        vi.mocked(TranslationService.translateBatch).mockResolvedValue(['Ear cleaning']);
+
+        document.body.insertAdjacentHTML('beforeend', `
+            <div class="q-list">
+                <div class="q-item">
+                    <a href="/work/RJ000001"></a>
+                    <div class="q-item__label text-body2">耳かき</div>
+                </div>
+            </div>
+        `);
+
+        const translatedTags = TranslatedTags.getInstance();
+        (translatedTags as any).isEnabled = true;
+        (translatedTags as any).augmentTags();
+
+        await vi.waitFor(() => {
+            expect(document.querySelector('.asmr-card-translation')).not.toBeNull();
+        });
+
+        const label = document.querySelector('.q-item__label.text-body2') as HTMLElement;
+        // The generic list pass would have rewritten the label to
+        // "耳かき (Ear cleaning)" while the work-title pass added the subtitle,
+        // rendering the translation twice.
+        expect(label.textContent).toBe('耳かき');
+        expect(document.querySelectorAll('.asmr-card-translation')).toHaveLength(1);
+        expect(label.title).toBe('耳かき (Ear cleaning)');
+    });
+
+    it('leaves player queue rows to PlayerTranslator', async () => {
+        await bridge.initialize();
+        window.history.pushState({}, '', '/works');
+
+        document.body.insertAdjacentHTML('beforeend', `
+            <div class="current-play-list">
+                <div class="q-list">
+                    <div class="q-item">
+                        <div class="q-item__label">安眠用耳かき.wav</div>
+                    </div>
+                </div>
+            </div>
+        `);
+
+        const translatedTags = TranslatedTags.getInstance();
+        (translatedTags as any).isEnabled = true;
+        (translatedTags as any).augmentTags();
+        await new Promise(resolve => setTimeout(resolve, 20));
+
+        const label = document.querySelector('.current-play-list .q-item__label') as HTMLElement;
+        expect(label.hasAttribute('data-asmrtag')).toBe(false);
+        expect(label.textContent?.trim()).toBe('安眠用耳かき.wav');
+        expect(TranslationService.translateForDisplayBatch).not.toHaveBeenCalled();
+    });
+
+    it('queues an element at most once even when several selectors match it', async () => {
+        await bridge.initialize();
+        const translatedTags = TranslatedTags.getInstance();
+        (translatedTags as any).isEnabled = true;
+        window.history.pushState({}, '', '/works');
+
+        document.body.insertAdjacentHTML('beforeend', `
+            <div class="q-list">
+                <div class="q-item">
+                    <a href="/work/RJ000002"></a>
+                    <div class="q-item__label text-body2">耳かき</div>
+                </div>
+            </div>
+        `);
+
+        (translatedTags as any).augmentTags();
+
+        const requestedTexts = vi.mocked(TranslationService.translateForDisplayBatch).mock.calls
+            .flatMap(([texts]) => texts as string[]);
+        expect(requestedTexts).toEqual(['耳かき']);
+    });
+
+    // =========================================================================
+    // Full text stays reachable
+    // =========================================================================
+
+    it('keeps the untruncated original and translation reachable on a clamped card title', async () => {
+        await bridge.initialize();
+        vi.mocked(TranslationService.translateBatch).mockResolvedValue(['Sweet whispered ear cleaning for a restful night']);
+
+        document.body.insertAdjacentHTML('beforeend', `
+            <div class="q-card">
+                <div class="ellipsis-3-lines"><a href="/work/RJ000003">安眠のための甘い囁き耳かき</a></div>
+            </div>
+        `);
+
+        const translatedTags = TranslatedTags.getInstance();
+        (translatedTags as any).isEnabled = true;
+        (translatedTags as any).augmentTags();
+
+        await vi.waitFor(() => {
+            expect(document.querySelector('.asmr-card-translation')).not.toBeNull();
+        });
+
+        const link = document.querySelector('.q-card a') as HTMLElement;
+        const sub = document.querySelector('.asmr-card-translation') as HTMLElement;
+        // Host clamps both lines, so neither the original nor the translation is
+        // fully readable from the rendered text alone.
+        expect(link.title).toBe('安眠のための甘い囁き耳かき (Sweet whispered ear cleaning for a restful night)');
+        expect(sub.title).toBe('Sweet whispered ear cleaning for a restful night');
+        expect(sub.getAttribute('aria-expanded')).toBe('false');
+        expect(sub.tagName).toBe('BUTTON');
+    });
+
+    it('drops a tooltip left over from a recycled label', () => {
+        const translatedTags = TranslatedTags.getInstance();
+        const el = document.createElement('div');
+        el.textContent = '耳かき';
+        document.body.appendChild(el);
+
+        (translatedTags as any).markTranslationPending(el, '耳かき');
+        (translatedTags as any).finalizeTranslation(el, '耳かき', 'Ear cleaning', (value: string) => {
+            el.textContent = value;
+            el.title = value;
+        });
+        expect(el.title).toBe('Ear cleaning');
+
+        (translatedTags as any).clearTranslationPending(el, true);
+        expect(el.hasAttribute('title')).toBe(false);
+    });
+
+    // =========================================================================
+    // Chinese as a first-class reading language
+    // =========================================================================
+
+    it('uses the official Chinese tag name for a Chinese reader instead of a machine round-trip', async () => {
+        await bridge.initialize();
+        (I18n as { lang: string }).lang = 'zh';
+
+        document.body.insertAdjacentHTML('beforeend', `
+            <div class="q-chip"><div class="q-chip__content">耳かき</div></div>
+        `);
+
+        const translatedTags = TranslatedTags.getInstance();
+        (translatedTags as any).isEnabled = true;
+        (translatedTags as any).tags = [{
+            id: 53,
+            ja: '耳かき',
+            en: 'Ear Cleaning',
+            i18n: { 'zh-cn': { name: '掏耳' }, 'en-us': { name: 'Ear Cleaning' } },
+        }];
+
+        (translatedTags as any).augmentTags();
+
+        const chipContent = document.querySelector('.q-chip__content') as HTMLElement;
+        const chip = document.querySelector('.q-chip') as HTMLElement;
+        expect(chipContent.textContent).toBe('耳かき (掏耳)');
+        // Chips are clipped to a fixed max-width; the tag must stay readable.
+        expect(chip.title).toBe('耳かき (掏耳)');
+        expect(TranslationService.translateForDisplayBatch).not.toHaveBeenCalled();
+    });
+
+    it('targets Chinese for a Chinese reader and sends the Japanese source hint', async () => {
+        await bridge.initialize();
+        (I18n as { lang: string }).lang = 'zh';
+        vi.mocked(TranslationService.translateBatch).mockResolvedValue(['掏耳朵']);
+
+        document.body.insertAdjacentHTML('beforeend', `
+            <div class="q-card">
+                <div class="ellipsis-3-lines"><a href="/work/RJ000004">耳かき</a></div>
+            </div>
+        `);
+
+        const translatedTags = TranslatedTags.getInstance();
+        (translatedTags as any).isEnabled = true;
+        expect((translatedTags as any).targetLang).toBe('zh-CN');
+        (translatedTags as any).augmentTags();
+
+        await vi.waitFor(() => {
+            expect(document.querySelector('.asmr-card-translation')?.textContent).toContain('掏耳朵');
+        });
+        expect(TranslationService.translateForDisplayBatch).toHaveBeenCalledWith(
+            ['耳かき'],
+            'zh-CN',
+            expect.objectContaining({ sourceLanguageHint: 'ja' }),
+        );
+        // The Japanese original is preserved; the Chinese lane is additive.
+        expect(document.querySelector('.q-card a')?.textContent).toBe('耳かき');
+    });
+
+    it('replaces a Chinese-edition title with Japanese and carries the Chinese lane off it', async () => {
+        await bridge.initialize();
+        (I18n as { lang: string }).lang = 'zh';
+        vi.mocked(TranslationService.translateForDisplayBatch).mockResolvedValueOnce([{
+            sourceText: '晚安耳语',
+            sourceLanguage: 'zh',
+            primaryText: 'おやすみ耳語り',
+            primaryLanguage: 'ja',
+            secondaryText: '晚安低语',
+            secondaryLanguage: 'zh',
+        }]);
+
+        document.body.insertAdjacentHTML('beforeend', `
+            <div class="q-card" lang="zh-CN">
+                <div class="ellipsis-3-lines"><a href="/work/RJ000005">晚安耳语</a></div>
+            </div>
+        `);
+
+        const translatedTags = TranslatedTags.getInstance();
+        (translatedTags as any).isEnabled = true;
+        (translatedTags as any).augmentTags();
+
+        await vi.waitFor(() => {
+            expect(document.querySelector('.q-card a')?.textContent).toBe('おやすみ耳語り');
+        });
+        expect(document.querySelector('.asmr-card-translation')?.textContent).toContain('晚安低语');
     });
 
     it('rejects captured observer and animation-frame callbacks after disable', async () => {

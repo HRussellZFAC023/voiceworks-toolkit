@@ -27,17 +27,11 @@ The downloader stores playlist discovery checkpoints, a per-file byte checkpoint
 
 The script requests only `https://www.googleapis.com/auth/drive.file`. It may create and manage files it created, but cannot browse unrelated Drive files.
 
-Release 154 includes the maintained ASMR.one Ultimate Web OAuth client, so normal users can authorize a backup directly. The client ID is public configuration; no client secret is included or required.
+The maintained ASMR.one Ultimate Web OAuth client is configured inside the script, so **Settings → Emergency Backup → Google Drive** authorizes a backup directly with no setup. There is no client-ID field in the settings panel and none is needed; the client ID is public configuration and no client secret is included or required.
 
-To use a separate Google Cloud project instead, override the client ID in **Settings → Emergency Backup → Google Drive OAuth Client ID**:
+Maintainers who need to rotate or replace that client edit the `googleDriveClientId` default in `src/store/AppStore.ts`. The replacement must be an OAuth client of type **Web application** whose authorized JavaScript origins cover `https://asmr.one`, `https://www.asmr.one`, `https://asmr-100.com`, `https://asmr-200.com`, and `https://asmr-300.com`, with the Google Drive API and the `drive.file` scope enabled.
 
-1. In Google Cloud Console, create or select a project and configure the Google Auth Platform consent screen.
-2. Add the Google Drive API and the `drive.file` scope. If the app remains in testing, add the Google accounts that will use it as test users.
-3. Create an OAuth client of type **Web application**.
-4. Add the origins on which the userscript is used: `https://asmr.one`, `https://www.asmr.one`, `https://asmr-100.com`, `https://asmr-200.com`, and `https://asmr-300.com`.
-5. Copy the client ID (not a client secret) into the settings field.
-
-The client ID is public configuration. Never put a Google client secret in the userscript or repository.
+Never put a Google client secret in the userscript or repository.
 
 ## Region-gate recovery and API fallback
 

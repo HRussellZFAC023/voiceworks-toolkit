@@ -192,6 +192,34 @@ function normalizeTargetLang(lang: string): string {
     return base;
 }
 
+const TRADITIONAL_CHINESE_LOCALE = /^zh[-_](?:tw|hk|mo|hant)/i;
+
+/**
+ * Chinese is a single language identity ('zh') for source/target comparison,
+ * but Simplified and Traditional are different scripts on the wire. Resolve the
+ * reader's script from their browser locale so a zh-TW/zh-HK install receives
+ * Traditional Chinese instead of silently falling back to Simplified.
+ */
+function preferredChineseCode(): 'zh-CN' | 'zh-TW' {
+    const candidates: string[] = [];
+    try {
+        if (Array.isArray(navigator.languages)) candidates.push(...navigator.languages);
+        if (navigator.language) candidates.push(navigator.language);
+    } catch {
+        // Non-browser host: fall through to Simplified.
+    }
+    for (const locale of candidates) {
+        if (!/^zh/i.test(locale)) continue;
+        return TRADITIONAL_CHINESE_LOCALE.test(locale) ? 'zh-TW' : 'zh-CN';
+    }
+    return 'zh-CN';
+}
+
+/** Wire/storage code for a normalized target language. */
+function remoteTargetCode(targetLang: string): string {
+    return normalizeTargetLang(targetLang) === 'zh' ? preferredChineseCode() : targetLang;
+}
+
 function detectSourceLanguage(text: string): 'ja' | 'zh' | 'en' {
     const hasKana = /[\u3040-\u309f\u30a0-\u30ff]/.test(text);
     const hasCJK = /[\u4e00-\u9fff]/.test(text);
@@ -412,12 +440,14 @@ const cacheInput = (
     providerId: string,
     sourceLanguageHint?: TranslationTaskOptions['sourceLanguageHint'],
 ): string => `${TRANSLATION_CACHE_SCHEMA_VERSION}:${sourceContext(sourceLanguageHint)}:${providerId}:${text}`;
+// Key on the wire code, not the language identity: a Traditional reader and a
+// Simplified reader must never share a cached 'zh' entry.
 const cacheKey = (
     text: string,
     lang: string,
     providerId: string,
     sourceLanguageHint?: TranslationTaskOptions['sourceLanguageHint'],
-): string => CacheKeys.translation(cacheInput(text, providerId, sourceLanguageHint), lang, 'remote');
+): string => CacheKeys.translation(cacheInput(text, providerId, sourceLanguageHint), remoteTargetCode(lang), 'remote');
 const noopCacheKey = (
     text: string,
     lang: string,
@@ -544,9 +574,10 @@ async function translateGoogleSingle(text: string, targetLang: string, options?:
 
     try {
         const sourceLang = sourceContext(options?.sourceLanguageHint);
+        const wireTarget = remoteTargetCode(targetLang);
         const res = await retryWithBackoff(
             () => gmRequest({
-                url: `https://${host}/translate_a/single?client=gtx&sl=${sourceLang}&tl=${targetLang}&dt=t&q=${encodeURIComponent(text)}`,
+                url: `https://${host}/translate_a/single?client=gtx&sl=${sourceLang}&tl=${wireTarget}&dt=t&q=${encodeURIComponent(text)}`,
             }),
             {
                 attempts: 2,
@@ -630,7 +661,7 @@ async function translateCustomSingle(
                     messages: [
                         {
                             role: 'system',
-                            content: `Translate the user text${sourceInstruction} into ${targetLang}. Preserve meaning, names, tone, and line breaks. Return only the translation, with no notes or quotation marks.`,
+                            content: `Translate the user text${sourceInstruction} into ${remoteTargetCode(targetLang)}. Preserve meaning, names, tone, and line breaks. Return only the translation, with no notes or quotation marks.`,
                         },
                         { role: 'user', content: text },
                     ],
@@ -697,6 +728,14 @@ export const TranslationService = {
     /** Target used for user-facing translations. Search/indexing callers may still request English explicitly. */
     getUiTargetLang(): string {
         return normalizeTargetLang(I18n.lang || 'en') || 'en';
+    },
+
+    /**
+     * Regional code actually sent to translation providers for the UI target.
+     * 'zh' resolves to zh-CN or zh-TW from the reader's browser locale.
+     */
+    getUiRegionalTargetLang(): string {
+        return remoteTargetCode(this.getUiTargetLang());
     },
 
     isUserLang(text: string): boolean {
@@ -1057,7 +1096,7 @@ export const TranslationService = {
             for (const requestedTarget of targetLangs) {
                 const targetLang = resolveEffectiveTargetLang(text, requestedTarget, sourceLanguageHint);
                 const input = cacheInput(text, providerId, sourceLanguageHint);
-                SharedCache.set(CacheKeys.translation(input, targetLang, 'remote'), null, 0);
+                SharedCache.set(cacheKey(text, targetLang, providerId, sourceLanguageHint), null, 0);
                 SharedCache.set(CacheKeys.translation(input, targetLang, 'auto'), null, 0);
                 SharedCache.setMemory(
                     noopCacheKey(text, targetLang, providerId, sourceLanguageHint),
@@ -1130,4 +1169,6 @@ export const _testExports = {
     extractCustomTranslation,
     glossaryPreProcess,
     resetRemoteStateForTests,
+    preferredChineseCode,
+    remoteTargetCode,
 };

@@ -38,13 +38,15 @@ import { gmRequest } from '../infrastructure/HttpClient';
 import { GpuScheduler, Priority } from '../core/GpuScheduler';
 import {
     DeviceCapabilities,
+    getWebGpuComputeProfile,
     getWhisperMinWebGpuBufferBytes,
     isFirefoxMacWhisperCompatibilityProfile,
+    probeWebGpuComputeProfile,
 } from '../core/DeviceCapabilities';
 import { CentralObserver } from '../core/CentralObserver';
 import { buildLrcFromSegments, buildVttFromSegments } from './transcriptFileUtils';
 import { correctWhisperText } from '../data/nsfw-glossary';
-import { connectAudioPcmTap, hasSharedSourceNode } from '../core/AudioAnalysis';
+import { connectAudioPcmTap, downmixSpeechPreserving, hasSharedSourceNode } from '../core/AudioAnalysis';
 import { resolveLearnerSecondaryLanguage } from './learnerSubtitleMode';
 import {
     getWhisperStallWatchdogMs,
@@ -68,6 +70,7 @@ import {
     buildWhisperPartialState,
     buildWhisperProgressDispatch,
     buildWhisperRuntimeProgress,
+    resolveWhisperListenerStatusKey,
 } from './whisperProgressPolicy';
 import type { WhisperProgressPhase } from './whisperProgressPolicy';
 import { selectWhisperSchedulingWindow } from './whisperSchedulingPolicy';
@@ -82,11 +85,13 @@ const TARGET_SAMPLE_RATE = 16000;
 // FIFO that later looks stalled.
 const DEFAULT_MAX_PENDING_CHUNKS = 3;
 const DEFAULT_MODEL = 'onnx-community/whisper-small_timestamped';
-// Base is the quality/performance sweet spot for Firefox on Apple M1. Use the
-// timestamped export so Auto can provide real word-aligned karaoke; adaptive
-// eight-second foreground windows keep first-caption latency bounded.
+// Base is the conservative quality/performance default for Firefox on Apple
+// M1. Use the timestamped export so Auto can provide real word-aligned karaoke.
 const M1_AUTO_MODEL = 'onnx-community/whisper-base_timestamped';
-const TINY_MODEL = 'onnx-community/whisper-tiny';
+// Use the timestamped export: word-level karaoke needs the cross_attentions
+// graph outputs, which only the `_timestamped` builds expose, and it costs
+// nothing (119.7 MB vs 119.6 MB for the same encoder fp32 + decoder q4 pair).
+const TINY_MODEL = 'onnx-community/whisper-tiny_timestamped';
 
 // Discoverable, browser-compatible Whisper model presets. `auto` defers to the
 // legacy `whisperModel` config (safe adaptive behavior). Explicit presets map to
@@ -101,12 +106,28 @@ const WHISPER_PRESET_MODELS: Record<Exclude<WhisperModelPreset, 'auto'>, string>
     'large-v3-turbo': 'onnx-community/whisper-large-v3-turbo_timestamped',
 };
 
+const MANUAL_PREPARATION_PRESETS = new Set<WhisperModelPreset>([
+    'medium',
+    'large-v3-turbo',
+]);
+
+function normalizeWhisperModelPreset(value: unknown): WhisperModelPreset {
+    const normalized = String(value || 'auto').trim().toLowerCase();
+    return normalized === 'auto' || normalized in WHISPER_PRESET_MODELS
+        ? normalized as WhisperModelPreset
+        : 'auto';
+}
+
+function requiresManualModelPreparation(preset: WhisperModelPreset): boolean {
+    return MANUAL_PREPARATION_PRESETS.has(preset);
+}
+
 /**
  * Resolve a model-preset config value to a concrete model ID. `auto` (or any
  * unknown value) resolves to the configured `whisperModel` compatibility value.
  */
 export function resolveWhisperModelPreset(preset: string, configuredModel: string): string {
-    const normalized = String(preset || 'auto').trim().toLowerCase();
+    const normalized = normalizeWhisperModelPreset(preset);
     if (normalized in WHISPER_PRESET_MODELS) {
         return WHISPER_PRESET_MODELS[normalized as keyof typeof WHISPER_PRESET_MODELS];
     }
@@ -124,6 +145,16 @@ const CACHE_CHECKPOINT_INTERVAL_MS = 10_000;
 const MODEL_READY_TTL_MS = 1000 * 60 * 60 * 24 * 30; // 30 days
 // No lookahead limit — transcribe the entire audio from start to finish.
 // DEFAULT_MAX_PENDING_CHUNKS provides natural backpressure (one active + one queued).
+// First window after a start/scrub. Short enough that a caption appears within
+// a few seconds; full-length windows take over immediately afterwards.
+const BOOTSTRAP_CHUNK_LENGTH_S = 8;
+// ~-55 dBFS. Above room tone and handling noise, below quiet ASMR speech, so a
+// "no text" window is only retried when it plausibly contained something.
+const QUIET_RETRY_MIN_RMS = 0.0018;
+// Backlog past which live transcription abandons the gap and re-anchors to the
+// playhead. Deliberately generous: a couple of slow windows must not cause a
+// visible skip, but a minute of drift must not become permanent.
+const LIVE_RESYNC_MIN_BACKLOG_SEC = 60;
 const INITIAL_BACKFILL_SEC = 30;
 const SEEK_BACKFILL_SEC = 15;
 const DEFAULT_POLL_INTERVAL_MS = 250;
@@ -131,7 +162,6 @@ const DEFAULT_WORKER_UPDATE_INTERVAL_MS = 200;
 const AUDIO_DECODE_TIMEOUT_MIN_MS = 90_000;
 const AUDIO_DECODE_TIMEOUT_MAX_MS = 600_000;
 const AUDIO_DECODE_TIMEOUT_PER_MIB_MS = 3_000;
-const INITIAL_BOOTSTRAP_CHUNK_LENGTH_S = 6;
 const MAX_LIVE_PCM_SECONDS = 180;
 const LIVE_PCM_TRIM_SECONDS = 30;
 const INITIAL_LIVE_PCM_SECONDS = 12;
@@ -363,7 +393,10 @@ interface WhisperSettings {
     minWebgpuBufferBytes: number;
 }
 
-export type WhisperAutoWarmupSuppressionReason = 'force-wasm' | 'device-capability';
+export type WhisperAutoWarmupSuppressionReason =
+    | 'force-wasm'
+    | 'device-capability'
+    | 'manual-model-preparation';
 
 interface WhisperLoadedPlan {
     model: string;
@@ -553,6 +586,14 @@ export class Whisper {
     private liveCaptureCleanup: (() => void) | null = null;
     private liveCaptureActive = false;
     private liveCaptureEnded = false;
+    // True until the first window of a fresh live buffer has been dispatched.
+    private bootstrapWindowPending = true;
+    // Most recent backlog measurement, used to suppress optional re-work while
+    // the transcriber is already behind the playhead.
+    private lastBacklogSeconds = 0;
+    // Window offsets that have already been retried as "quiet", so a region can
+    // never be re-examined indefinitely.
+    private readonly quietRetriedOffsets = new Set<number>();
     private transcribedUpTo = 0; // how far we've sent chunks to worker (seconds)
     private processingLoopId: number | null = null;
 
@@ -661,6 +702,15 @@ export class Whisper {
         if (this.enabled) return;
         this.enabled = true;
         Logger.log('[Whisper] Enabling Whisper...');
+
+        // Measure GPU compute capability up front so Auto can pick a model tier
+        // from what this adapter can actually do. Fire-and-forget: selection
+        // falls back to the conservative profile until it resolves.
+        void probeWebGpuComputeProfile().then((computeProfile) => {
+            if (computeProfile) {
+                Logger.log('[Whisper] WebGPU compute profile', computeProfile);
+            }
+        });
 
         // Mount the no-flow status overlay as soon as the host player exists,
         // not when model loading begins.
@@ -847,6 +897,13 @@ export class Whisper {
             this.failPinnedSelection(I18n.t('whisperGpuCrashed'), `device-lost-broadcast:${source}`);
         }));
 
+        this.eventCleanups.push(EventBus.on('fullscreen:enter', () => {
+            this.clearStatus();
+        }));
+        this.eventCleanups.push(EventBus.on('fullscreen:exit', () => {
+            this.reserveStatusSlot();
+        }));
+
         this.eventCleanups.push(EventBus.on('config:change', ({ key, value }) => {
             if (key === 'subtitleLang' || key === 'learnerSubtitleMode' || key === 'translateMode' || key === 'translateCnToJp') {
                 this.resetTranslationAheadState();
@@ -898,13 +955,15 @@ export class Whisper {
                 stage: 'idle',
             });
 
-            if (wasTranscribing) {
+            const settings = this.getWhisperSettings();
+            const requiresManualPreparation = key === 'whisperModelPreset'
+                && requiresManualModelPreparation(settings.preset);
+            if (wasTranscribing && !requiresManualPreparation) {
                 const audio = getAudioElement();
                 if (audio && !audio.paused) {
                     this.startTranscription().catch(err => Logger.error('[Whisper] Restart after settings change failed:', err));
                 }
             } else {
-                const settings = this.getWhisperSettings();
                 if (settings.autoWarmup) {
                     this.autoWarmupStarted = true;
                     this.initWorker(settings);
@@ -1232,11 +1291,27 @@ export class Whisper {
         audio.addEventListener('play', this.handlePlay);
         audio.addEventListener('ended', this.handleEnded);
 
-        // Prefer bounded live PCM from the already-playing element. This avoids a
-        // second download entirely and begins transcription after the first short
-        // chunk is captured. Cross-origin elements without an existing CORS-safe
-        // Web Audio route are intentionally excluded so playback is never silenced.
-        if (this.startLiveAudioCapture(
+        const fallbackSource = this.resolveFallbackAudioSource(bridgeTrack, src);
+        const trackUrl = fallbackSource.url;
+        const preferDecodedLowQuality = fallbackSource.preferBoundedStreaming;
+
+        // A host-provided low-quality track is small enough for the bounded
+        // compatibility reader and gives Whisper a durable, seekable timeline.
+        // Keep live PCM attached while it downloads so a transport failure can
+        // continue immediately without losing the audio heard in the meantime.
+        const liveCaptureStandby = preferDecodedLowQuality
+            ? this.startLiveAudioCapture(
+                audio,
+                startGeneration,
+                cacheTranscribedUpTo,
+                hasCachedCheckpoint,
+            )
+            : false;
+
+        // Without a bounded low-quality source, prefer PCM from the playing
+        // element. Unknown and large full-quality files must never trigger an
+        // unbounded background download.
+        if (!preferDecodedLowQuality && this.startLiveAudioCapture(
             audio,
             startGeneration,
             cacheTranscribedUpTo,
@@ -1247,12 +1322,6 @@ export class Whisper {
             Logger.debug('[Whisper] Live transcription started.', { src, settings });
             return;
         }
-
-        // Live capture is unavailable. A compatibility decode is allowed only for
-        // an existing small cache entry or a host-reported small file; unknown and
-        // large files never trigger an unbounded background download.
-        const fallbackSource = this.resolveFallbackAudioSource(bridgeTrack, src);
-        const trackUrl = fallbackSource.url;
 
         if (this.isHlsUrl(trackUrl)) {
             Logger.warn('[Whisper] HLS streams are not supported for transcription:', trackUrl);
@@ -1280,6 +1349,7 @@ export class Whisper {
                 return;
             }
 
+            if (liveCaptureStandby) this.stopLiveAudioCapture();
             this.pcmBuffer = pcmBuffer;
             this.pcmSourceUrl = trackUrl;
             this.pcmBufferStartTime = 0;
@@ -1314,6 +1384,12 @@ export class Whisper {
             if (err instanceof DOMException && err.name === 'AbortError') {
                 Logger.debug('[Whisper] Audio fetch aborted (track changed)');
                 this.stopTranscription('fetch-aborted');
+                return;
+            }
+            if (liveCaptureStandby && this.liveCaptureActive && this.pcmBuffer) {
+                Logger.warn('[Whisper] Bounded low-quality decode failed; continuing from buffered live audio', err);
+                this.startProcessingLoop();
+                this.dispatchProgress(I18n.t('whisperTranscribing'), 0, 'transcribing');
                 return;
             }
             if (hasCachedCheckpoint
@@ -1809,6 +1885,10 @@ export class Whisper {
         this.droppedBufferSeconds = 0;
         this.finalizeOnIdle = false;
         this.liveCaptureEnded = false;
+        // A full 29s window would otherwise have to fill before anything can be
+        // shown — after start and after every scrub. Emit one short window
+        // first so a caption appears promptly.
+        this.bootstrapWindowPending = true;
     }
 
     private appendLivePcm(samples: Float32Array): void {
@@ -2356,19 +2436,28 @@ export class Whisper {
             signal,
         );
 
-        // Downmix to mono + resample to 16kHz in one native call
+        // Resample to 16kHz natively (band-limited by the browser), but keep the
+        // channels separate: connecting a stereo buffer to a mono destination
+        // invokes the spec down-mix 0.5*(L+R), which comb-filters or cancels
+        // anti-phase binaural content — exactly the quiet whisper that matters.
+        // The correlation-aware downmixer is applied afterwards so the decoded
+        // path and the live capture path agree.
         const totalSamples = Math.ceil(audioBuffer.duration * TARGET_SAMPLE_RATE);
         if (!Number.isFinite(totalSamples) || totalSamples <= 0) {
             throw new Error(I18n.t('whisperDecodeInvalidAudio'));
         }
-        const offlineCtx = new OfflineAudioContext(1, totalSamples, TARGET_SAMPLE_RATE);
+        const renderChannels = Math.min(2, Math.max(1, audioBuffer.numberOfChannels));
+        const offlineCtx = new OfflineAudioContext(renderChannels, totalSamples, TARGET_SAMPLE_RATE);
         const source = offlineCtx.createBufferSource();
         source.buffer = audioBuffer;
         source.connect(offlineCtx.destination);
         source.start(0);
         const rendered = await this.waitForAudioOperation(offlineCtx.startRendering(), timeoutMs, signal);
 
-        return rendered.getChannelData(0);
+        if (rendered.numberOfChannels < 2) return rendered.getChannelData(0);
+        const channels: Float32Array[] = [];
+        for (let i = 0; i < rendered.numberOfChannels; i++) channels.push(rendered.getChannelData(i));
+        return downmixSpeechPreserving(channels);
     }
 
     // ------------------------------------------------------------------------
@@ -2460,13 +2549,13 @@ export class Whisper {
             ? Math.min(settings.maxPendingChunks, 2)
             : 1;
         if (this.pendingChunks >= maxPending) return;
-        const bootstrapMode = !this.hasWorkerChunkActivity;
         const playhead = audio.currentTime;
         const runtimeCoverage = summarizeWhisperCoverage({
             origin: this.runtimeProgressOrigin,
             processed: this.processedRanges,
             unavailable: this.unavailableRanges,
         }, playhead, Math.max(this.pcmDuration, playhead));
+        this.lastBacklogSeconds = runtimeCoverage.backlogSeconds;
         const schedulingWindow = selectWhisperSchedulingWindow({
             adaptive: settings.adaptiveCatchUp === true,
             foregroundChunkSeconds: settings.chunkLengthS,
@@ -2476,15 +2565,60 @@ export class Whisper {
             backlogSeconds: runtimeCoverage.backlogSeconds,
             throughputRatio: this.throughputRatio,
         });
-        const chunkLengthS = bootstrapMode
-            ? Math.min(settings.chunkLengthS, INITIAL_BOOTSTRAP_CHUNK_LENGTH_S)
+        // The first window after a start or a scrub is deliberately short and
+        // non-overlapping: a full-length window costs the same encoder pass but
+        // makes the user wait its entire duration before any text appears, which
+        // reads as "stuck after decoding". Subsequent windows use the full
+        // context, which is what actually drives accuracy.
+        // Only worth doing when it actually shortens the wait; if the configured
+        // window is already short, the normal path is already responsive and
+        // keeping its overlap is better for accuracy.
+        const useBootstrapWindow = this.bootstrapWindowPending
+            && this.liveCaptureActive
+            && !this.liveCaptureEnded
+            && schedulingWindow.chunkLengthSeconds > BOOTSTRAP_CHUNK_LENGTH_S;
+        const chunkLengthS = useBootstrapWindow
+            ? Math.min(schedulingWindow.chunkLengthSeconds, BOOTSTRAP_CHUNK_LENGTH_S)
             : schedulingWindow.chunkLengthSeconds;
-        const overlapSec = bootstrapMode
+        const overlapSec = useBootstrapWindow
             ? 0
-            : Math.min(schedulingWindow.overlapSeconds, Math.max(1, chunkLengthS - 1));
+            : Math.min(
+                schedulingWindow.overlapSeconds,
+                Math.max(1, chunkLengthS - 1),
+            );
         const chunkSamples = Math.floor(chunkLengthS * TARGET_SAMPLE_RATE);
 
         this.transcribedUpTo = this.clampResumeToAvailablePcm(this.transcribedUpTo).resumeFrom;
+
+        // Live transcription is only useful if it tracks what is being heard.
+        // The cursor otherwise only ever advances one window at a time, so lag
+        // acquired while the model loaded — or during one slow stretch — is
+        // permanent for the rest of the track, and the user sees subtitles for
+        // audio that played a minute ago. (Scrubbing was the only reset, which
+        // is exactly the workaround users reported.)
+        //
+        // Once the backlog is beyond recovery, jump to the playhead and record
+        // the skipped span as unavailable rather than pretending it was covered,
+        // so coverage reporting stays honest and the gap can be backfilled.
+        if (this.liveCaptureActive && !this.liveCaptureEnded) {
+            const resyncThreshold = Math.max(LIVE_RESYNC_MIN_BACKLOG_SEC, chunkLengthS * 2);
+            if (playhead - this.transcribedUpTo > resyncThreshold) {
+                const resyncTarget = Math.max(this.transcribedUpTo, playhead - overlapSec);
+                if (resyncTarget > this.transcribedUpTo) {
+                    this.unavailableRanges = addWhisperCoverage(
+                        this.unavailableRanges,
+                        this.transcribedUpTo,
+                        resyncTarget,
+                    );
+                    Logger.debug('[Whisper] Re-anchoring to the playhead after falling behind', {
+                        from: this.transcribedUpTo,
+                        to: resyncTarget,
+                        backlogSeconds: runtimeCoverage.backlogSeconds,
+                    });
+                    this.transcribedUpTo = resyncTarget;
+                }
+            }
+        }
 
         // Don't process past currently available audio. A live buffer is not
         // complete until the media element actually ends.
@@ -2520,6 +2654,7 @@ export class Whisper {
         const priority = distFromPlayhead <= 30 ? 0 : 1;
         this.sendChunk(chunk, this.transcribedUpTo, settings, priority, chunkLengthS, overlapSec, distFromPlayhead);
         this.transcribedUpTo += chunkLengthS - overlapSec;
+        this.bootstrapWindowPending = false;
     }
 
     private getChunkStallTimeoutMs(settings: WhisperSettings, chunkId?: number): number {
@@ -3387,22 +3522,6 @@ export class Whisper {
                 // "started" and token heartbeats can precede another timeout.
                 this.chunkStallRecoveryCount = 0;
                 this.consecutiveInferenceTimeouts = 0;
-                if (typeof completeOffset === 'number' && typeof completeAdvance === 'number') {
-                    const completedEnd = Math.min(
-                        this.pcmDuration,
-                        completeOffset + completeAdvance,
-                    );
-                    this.processedRanges = addWhisperCoverage(
-                        this.processedRanges,
-                        completeOffset,
-                        completedEnd,
-                    );
-                    this.unavailableRanges = subtractWhisperCoverage(
-                        this.unavailableRanges,
-                        completeOffset,
-                        completedEnd,
-                    );
-                }
                 this.markChunkActivity();
                 // Worker sends raw chunks + fullText; host processes
                 const fullText = this.cleanText(complete.data?.text || '');
@@ -3415,6 +3534,51 @@ export class Whisper {
                     this.timingQuality = timingQuality;
                 }
                 const segments = this.parseSegments(processed, timingQuality);
+                if (typeof completeOffset === 'number' && typeof completeAdvance === 'number') {
+                    const inputRms = Number(complete.data?.inputRms) || 0;
+                    // A non-silent window that produced no usable text is not
+                    // equivalent to proven silence, so advance only halfway and
+                    // let a later full-length window retry with more context.
+                    //
+                    // This must stay strictly bounded. The window still cost a
+                    // full encoder pass, so crediting half of it means the model
+                    // has to sustain >2x realtime just to break even — and ASMR
+                    // is mostly non-speech (breathing, tapping, ambience), so an
+                    // unbounded version of this rule collapses throughput and
+                    // ultimately makes the ring buffer drop audio. Hence: only
+                    // above an ambience-level RMS floor, only once per region,
+                    // and never while already behind the playhead.
+                    const retryQuietRegion = !safeFullText
+                        && segments.length === 0
+                        && inputRms > QUIET_RETRY_MIN_RMS
+                        && this.lastBacklogSeconds <= 0
+                        && !this.quietRetriedOffsets.has(completeOffset);
+                    const coveredAdvance = retryQuietRegion
+                        ? Math.max(1, completeAdvance / 2)
+                        : completeAdvance;
+                    const completedEnd = Math.min(
+                        this.pcmDuration,
+                        completeOffset + coveredAdvance,
+                    );
+                    this.processedRanges = addWhisperCoverage(
+                        this.processedRanges,
+                        completeOffset,
+                        completedEnd,
+                    );
+                    this.unavailableRanges = subtractWhisperCoverage(
+                        this.unavailableRanges,
+                        completeOffset,
+                        completedEnd,
+                    );
+                    if (retryQuietRegion) {
+                        this.quietRetriedOffsets.add(completeOffset);
+                        this.transcribedUpTo = Math.min(this.transcribedUpTo, completedEnd);
+                        Logger.debug('[Whisper] Retrying a quiet window with wider neighbouring context', {
+                            retryFrom: completedEnd,
+                            inputRms,
+                        });
+                    }
+                }
                 Logger.debug(`[Whisper] Complete chunk ${complete.chunkId}: ${segments.length} segments, text="${fullText?.slice(0, 50)}"`);
                 const chunkText = safeFullText;
                 if (chunkText) {
@@ -4386,6 +4550,8 @@ export class Whisper {
      */
     public getAutoWarmupSuppressionReason(): WhisperAutoWarmupSuppressionReason | null {
         if (Config.get('whisperAutoWarmup') === false) return null;
+        const preset = normalizeWhisperModelPreset(Config.get('whisperModelPreset'));
+        if (requiresManualModelPreparation(preset)) return 'manual-model-preparation';
         if (this.shouldForceWasm()) return 'force-wasm';
         if (!DeviceCapabilities.shouldWarmup) return 'device-capability';
         return null;
@@ -4435,10 +4601,7 @@ export class Whisper {
         maxPendingChunks = Math.min(DEFAULT_MAX_PENDING_CHUNKS, Math.max(1, maxPendingChunks));
 
         const configuredModel = String(Config.get('whisperModel') || DEFAULT_MODEL).trim() || DEFAULT_MODEL;
-        const presetRaw = String(Config.get('whisperModelPreset') || 'auto').trim().toLowerCase();
-        const preset: WhisperModelPreset = (presetRaw === 'auto' || presetRaw in WHISPER_PRESET_MODELS)
-            ? presetRaw as WhisperModelPreset
-            : 'auto';
+        const preset = normalizeWhisperModelPreset(Config.get('whisperModelPreset'));
         const isExplicitPreset = preset !== 'auto';
         const requestedModel = resolveWhisperModelPreset(preset, configuredModel);
 
@@ -4453,17 +4616,27 @@ export class Whisper {
         // materially better Japanese recognition and exact word timing.
         // Explicit presets opt out.
         const firefoxMacCompatibility = isFirefoxMacWhisperCompatibilityProfile(profile);
+        // Measured adapter capability, not a user-agent guess. A GPU exposing
+        // subgroups runs ORT's fast matmul kernels and comfortably sustains the
+        // configured model; one without them is ~25x slower and needs a
+        // conservative tier to stay near the playhead. Capable browsers must not
+        // be downgraded just because another browser lacks the feature.
+        const computeProfile = getWebGpuComputeProfile();
+        const hasFastGpuCompute = computeProfile?.subgroups === true;
+        const knownSlowGpuCompute = computeProfile !== null && !computeProfile.subgroups;
 
         const model = isExplicitPreset
             ? requestedModel
             : backend === 'wasm' || profile.tier === 'constrained'
                 ? TINY_MODEL
-                : firefoxMacCompatibility
-                    // The renderer may still be blank at document start.
-                    // Device tier distinguishes likely Apple Silicon (`full`)
-                    // from the already-limited Intel Mac path.
-                    ? profile.tier === 'full' ? M1_AUTO_MODEL : TINY_MODEL
-                    : requestedModel;
+                : hasFastGpuCompute
+                    // Proven-fast compute: honour the configured/default model.
+                    ? requestedModel
+                    : knownSlowGpuCompute || firefoxMacCompatibility
+                        // Either measured slow, or an unknown-memory Firefox/mac
+                        // profile probed before the adapter resolved.
+                        ? profile.tier === 'full' ? M1_AUTO_MODEL : TINY_MODEL
+                        : requestedModel;
         minWebgpuBufferBytes = getWhisperMinWebGpuBufferBytes(model);
         const configuredLanguage = String(Config.get('whisperLanguage') || 'auto');
         let currentWork: WhisperWorkLanguageContext;
@@ -4487,32 +4660,16 @@ export class Whisper {
         const configuredOverlap = Number(configuredOverlapValue);
         const maxOverlap = Math.max(0, Math.min(8, chunkLengthS / 3));
         const hasConfiguredOverlap = typeof configuredOverlapValue === 'number';
-        let strideLengthS = hasConfiguredOverlap && Number.isFinite(configuredOverlap)
+        const strideLengthS = hasConfiguredOverlap && Number.isFinite(configuredOverlap)
             ? Math.max(0, Math.min(maxOverlap, configuredOverlap))
             : Math.min(5, maxOverlap);
         const catchUpChunkLengthS = chunkLengthS;
         const catchUpStrideLengthS = strideLengthS;
-        const adaptiveWindow = Config.get('whisperAdaptiveWindow') !== false;
-        const adaptiveCatchUp = adaptiveWindow
-            && preset === 'auto'
-            && backend === 'webgpu'
-            && firefoxMacCompatibility;
-        if (adaptiveCatchUp) {
-            // A complete 29-second gate leaves live captions structurally late
-            // on Firefox's privacy-preserving M1 profile. Keep the resolved
-            // Base/WebGPU plan exact and start with a responsive playhead
-            // window. The scheduler may restore the configured longer context
-            // only when measured throughput and playhead-local lag warrant it.
-            // Turning adaptive mode off pins the user-visible controls.
-            chunkLengthS = 8;
-            strideLengthS = 2;
-            // One active + one queued job cannot expose a newer candidate to
-            // the worker's replaceable queue. Permit one transient candidate
-            // so a lagging queued window can be superseded.
-            if (memoryPressure === 'low') {
-                maxPendingChunks = DEFAULT_MAX_PENDING_CHUNKS;
-            }
-        }
+        // Whisper pads short inputs to its fixed 30-second encoder window.
+        // Short foreground chunks therefore repeat nearly the same encoder
+        // cost while advancing less audio and losing Japanese context. The
+        // user-selected context is authoritative for the whole run.
+        const adaptiveCatchUp = false;
         const autoWarmupConfigured = Config.get('whisperAutoWarmup') !== false;
         const cacheTranscripts = Config.get('whisperCacheTranscripts') !== false;
         const idleUnloadMs = DeviceCapabilities.budget.whisperIdleMs;
@@ -4530,7 +4687,10 @@ export class Whisper {
             catchUpChunkLengthS,
             catchUpStrideLengthS,
             cacheTranscripts,
-            autoWarmup: autoWarmupConfigured && DeviceCapabilities.shouldWarmup && !forceWasm,
+            autoWarmup: autoWarmupConfigured
+                && DeviceCapabilities.shouldWarmup
+                && !forceWasm
+                && !requiresManualModelPreparation(preset),
             maxPendingChunks,
             pollIntervalMs,
             workerUpdateIntervalMs,
@@ -4649,10 +4809,13 @@ export class Whisper {
         AppStore.setWhisperState(progress.state);
         if (!this.transcribing) return;
 
-        // This class is two-line clamped inside the no-flow cover overlay.
-        const klass = 'whisper-loading-indicator';
-        const status = `${this.escapeHtml(progress.displayMessage)}${progress.percentSuffix}`;
-        this.showStatus(`<span class="${klass}" aria-label="${status}">${status}</span>`);
+        const listenerKey = resolveWhisperListenerStatusKey(progress.stage);
+        if (!listenerKey) {
+            this.clearStatus();
+            return;
+        }
+        const status = this.escapeHtml(I18n.t(listenerKey));
+        this.showStatus(`<span class="whisper-loading-indicator">${status}</span>`);
     }
 
     private dispatchError(message: string): void {
@@ -4678,6 +4841,10 @@ export class Whisper {
 
     private reserveStatusSlot(): void {
         if (!this.enabled || this.statusEl?.isConnected) return;
+        if (this.hasDedicatedStatusSurface()) {
+            this.clearStatus();
+            return;
+        }
         // Reserve only inside the expanded player. Reserving against the global
         // footer would leave a permanent blank 72px strip on unrelated routes.
         const mount = document.querySelector('.audio-player');
@@ -4726,7 +4893,16 @@ export class Whisper {
         return this.statusEl;
     }
 
+    private hasDedicatedStatusSurface(): boolean {
+        return document.getElementById('asmr-learner-subs-root')?.isConnected === true
+            || document.querySelector('.audio-player.asmr-player-fullscreen') !== null;
+    }
+
     private showStatus(html: string): void {
+        if (this.hasDedicatedStatusSurface()) {
+            this.clearStatus();
+            return;
+        }
         const el = this.ensureStatusEl();
         if (el.innerHTML === html) return;
         el.innerHTML = html;

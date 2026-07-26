@@ -190,6 +190,96 @@ describe('ProxyDonationBanner', () => {
         banner.disable();
     });
 
+    it('sits above host dialogs and reader-extension overlays', async () => {
+        const banner = createBanner();
+        banner.enable();
+        mocks.proxyListener?.();
+        await flush();
+
+        const element = document.getElementById('asmr-ultimate-proxy-banner') as HTMLElement;
+        const style = document.getElementById('asmr-ultimate-proxy-banner-style');
+        expect(Number(element.style.zIndex)).toBeGreaterThan(1_000_000);
+        // Quasar dialogs sit near 7000 and reader extensions stack their own
+        // overlays on top; an invisible funding notice is no notice at all.
+        expect(style?.textContent).toContain('z-index: 2147483000 !important');
+        expect(style?.textContent).toContain('visibility: visible !important');
+
+        banner.disable();
+        expect(document.getElementById('asmr-ultimate-proxy-banner-style')).toBeNull();
+    });
+
+    it('reattaches itself when a host re-render detaches it', async () => {
+        const qApp = document.createElement('div');
+        qApp.id = 'q-app';
+        document.body.appendChild(qApp);
+        const banner = createBanner();
+        banner.enable();
+        mocks.proxyListener?.();
+        await flush();
+
+        const element = document.getElementById('asmr-ultimate-proxy-banner') as HTMLElement;
+        expect(element).not.toBeNull();
+
+        // A router transition, a layout swap or an extension rewriting the
+        // document can drop a body-level node. Without repair it is gone for
+        // the whole session.
+        element.remove();
+        expect(document.getElementById('asmr-ultimate-proxy-banner')).toBeNull();
+
+        window.dispatchEvent(new Event('resize'));
+        expect(document.getElementById('asmr-ultimate-proxy-banner')).toBe(element);
+
+        banner.disable();
+    });
+
+    it('never resurrects a banner the user dismissed', async () => {
+        const banner = createBanner();
+        banner.enable();
+        mocks.proxyListener?.();
+        await flush();
+
+        document.querySelector<HTMLButtonElement>('[data-testid="proxy-banner-dismiss"]')?.click();
+        expect(document.getElementById('asmr-ultimate-proxy-banner')).toBeNull();
+
+        window.dispatchEvent(new Event('resize'));
+        await flush();
+        mocks.proxyListener?.();
+        await flush();
+
+        expect(document.getElementById('asmr-ultimate-proxy-banner')).toBeNull();
+    });
+
+    it('stays dismissible after a reader extension annotates its text', async () => {
+        const banner = createBanner();
+        banner.enable();
+        mocks.proxyListener?.();
+        await flush();
+
+        const element = document.getElementById('asmr-ultimate-proxy-banner') as HTMLElement;
+        // Yomu / jpdb wrap CJK text nodes in their own elements. The controls
+        // must keep working because handlers are bound to elements, not text.
+        const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+        const textNodes: Text[] = [];
+        while (walker.nextNode()) textNodes.push(walker.currentNode as Text);
+        for (const node of textNodes) {
+            if (!node.data.trim()) continue;
+            const wrapper = document.createElement('span');
+            wrapper.className = 'yomu-word';
+            wrapper.textContent = node.data;
+            node.replaceWith(wrapper);
+        }
+
+        const donate = element.querySelector<HTMLAnchorElement>('[data-testid="proxy-banner-donate"]');
+        expect(donate?.href).toBe('https://support.yomureader.com/donate');
+
+        element.querySelector<HTMLButtonElement>('[data-testid="proxy-banner-dismiss"]')?.click();
+        expect(mocks.gmSetValue).toHaveBeenCalledWith(
+            'asmr-ult:proxy-banner-dismissed-at',
+            expect.any(Number),
+        );
+        expect(document.getElementById('asmr-ultimate-proxy-banner')).toBeNull();
+    });
+
     it('remembers dismissal for seven days', async () => {
         const banner = createBanner();
         banner.enable();

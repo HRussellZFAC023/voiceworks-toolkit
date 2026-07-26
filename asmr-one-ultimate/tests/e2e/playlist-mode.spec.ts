@@ -11,6 +11,10 @@ import { test, expect, helpers } from './fixtures';
 // Helper: open dialog and wait for metadata to load
 async function openDialog(page: import('@playwright/test').Page) {
     await helpers.getPlaylistMakerButton(page).click();
+    // Synchronise on the dialog actually mounting instead of assuming the click
+    // took effect. Without this every later locator times out individually and
+    // the reported failure points at an inner control rather than the open.
+    await expect(helpers.getAdvancedSearchDialog(page)).toBeVisible({ timeout: 15000 });
     await page.waitForTimeout(2000); // Wait for metadata + translations
 }
 

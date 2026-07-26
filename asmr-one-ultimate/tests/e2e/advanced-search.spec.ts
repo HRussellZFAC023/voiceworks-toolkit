@@ -33,7 +33,7 @@ test.describe('Advanced Search Dialog', () => {
         await expect(dialog).toBeVisible({ timeout: 5000 });
     });
 
-    test('loads metadata on open and retries an empty transient response on reopen', async ({ injectedPage, isScriptLoaded, waitForBridge }) => {
+    test('surfaces a retryable error when metadata fails, and recovers on reopen', async ({ injectedPage, isScriptLoaded, waitForBridge }) => {
         const attempts: Record<'tags' | 'vas' | 'circles', number> = { tags: 0, vas: 0, circles: 0 };
         let armed = false;
         await injectedPage.route(/\/api\/(tags|vas|circles)\/?(?:\?|$)/, async route => {
@@ -65,7 +65,13 @@ test.describe('Advanced Search Dialog', () => {
 
         await helpers.openAdvancedSearch(injectedPage);
         const dialog = helpers.getAdvancedSearchDialog(injectedPage);
-        await expect(dialog.getByText('No results found')).toHaveCount(4, { timeout: 5000 });
+        // A failed load must never leave the selectors spinning: the loading
+        // placeholders are replaced by a visible, retryable error.
+        await expect(dialog.locator('.asmr-metadata-error')).toBeVisible({ timeout: 5000 });
+        await expect(dialog.locator('.asmr-metadata-retry')).toBeVisible();
+        await expect(dialog.getByText('Loading tags...')).toHaveCount(0);
+        await expect(dialog.getByText('Loading voice actors...')).toHaveCount(0);
+        await expect(dialog.getByText('Loading circles...')).toHaveCount(0);
         expect(attempts).toEqual({ tags: 1, vas: 1, circles: 1 });
 
         await dialog.locator('.asmr-close-btn').click();
@@ -73,6 +79,7 @@ test.describe('Advanced Search Dialog', () => {
         await expect(dialog.getByRole('listbox', { name: /include tags/i }).getByRole('option', { name: /Whisper/ })).toBeVisible();
         await expect(dialog.getByRole('listbox', { name: /voice actor/i }).getByRole('option', { name: /Test VA/ })).toBeVisible();
         await expect(dialog.getByRole('listbox', { name: /circle/i }).getByRole('option', { name: /Test Circle/ })).toBeVisible();
+        await expect(dialog.locator('.asmr-metadata-error')).toHaveCount(0);
         expect(attempts).toEqual({ tags: 2, vas: 2, circles: 2 });
     });
 

@@ -5,6 +5,7 @@ import { HttpClient, HttpError } from '../../infrastructure/HttpClient';
 import { DEFAULT_API_SERVER, DEFAULT_API_PROXY } from '../../core/Constants';
 import { Config } from '../../core/Config';
 import { recordProxyUse } from '../../core/ProxyUsage';
+import { readHostAuthToken } from '../../core/hostAuthToken';
 
 export { hasUsedProxy, onProxyUse } from '../../core/ProxyUsage';
 
@@ -37,14 +38,8 @@ export function getAuthHeader(): Record<string, string> {
     } catch {
         // ignore
     }
-    try {
-        const token = localStorage.getItem('jwt-token');
-        if (token && token.trim()) {
-            return { Authorization: `Bearer ${token.trim()}` };
-        }
-    } catch {
-        // ignore
-    }
+    const token = readHostAuthToken();
+    if (token) return { Authorization: `Bearer ${token}` };
     return {};
 }
 

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
     buildMediaDownloadUrl,
+    buildMediaPathFromHash,
     buildMediaStreamUrl,
     resolveMediaApiBaseUrl,
 } from '../../src/features/media/mediaStreamUrlUtils';
@@ -15,6 +16,34 @@ describe('mediaStreamUrlUtils', () => {
             .toBe(`${DEFAULT_API}/api/media/stream/1052162/319502`);
         expect(buildMediaStreamUrl('作品 1/画像.jpg', undefined, 'jwt'))
             .toBe(`${DEFAULT_API}/api/media/stream/%E4%BD%9C%E5%93%81%201/%E7%94%BB%E5%83%8F.jpg`);
+    });
+
+    it('keeps hash separators intact when building host-relative media paths', () => {
+        // `<workId>/<trackIndex>` hashes must not collapse into a single
+        // percent-encoded segment: `%2F` is rejected by the host-API URL guards
+        // that native subtitle discovery relies on.
+        expect(buildMediaPathFromHash('12345/7', 'stream')).toBe('/api/media/stream/12345/7');
+        expect(buildMediaPathFromHash('opaque-hash', 'stream')).toBe('/api/media/stream/opaque-hash');
+        expect(buildMediaPathFromHash('12345/7', 'download')).toBe('/api/media/download/12345/7');
+        expect(buildMediaPathFromHash('作品 1/画像.jpg', 'stream'))
+            .toBe('/api/media/stream/%E4%BD%9C%E5%93%81%201/%E7%94%BB%E5%83%8F.jpg');
+        expect(buildMediaPathFromHash('12345/7', 'stream')).not.toContain('%2F');
+
+        for (const unsafe of [
+            '',
+            '../secret',
+            '12345/../../admin',
+            '%2e%2e/secret',
+            'safe/%2fetc',
+            'safe//image',
+            '/leading',
+            'trailing/',
+            'safe\\image',
+            'safe?token=bad',
+            'safe#fragment',
+        ]) {
+            expect(buildMediaPathFromHash(unsafe, 'stream')).toBe('');
+        }
     });
 
     it('canonicalizes both media stream path forms onto the selected API origin', () => {

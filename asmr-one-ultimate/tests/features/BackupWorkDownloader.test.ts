@@ -159,9 +159,14 @@ describe('BackupWorkDownloader', () => {
         wrapper.unmount();
     });
 
-    it('hides results from the previous query until the next search completes', async () => {
+    it('filters the last completed results client-side instead of hiding them while typing', async () => {
         const searchAllWorks = vi.fn(async (query: string) => {
-            const direct = query === 'first' ? [{ id: 'RJ9', title: 'First result', directSearchResult: true }] : [];
+            const direct = query === 'first'
+                ? [
+                    { id: 'RJ9', title: 'First result', directSearchResult: true },
+                    { id: 'RJ10', title: 'Second result', directSearchResult: true },
+                ]
+                : [];
             await (wrapper as any).setProps({ works: direct });
         });
         const wrapper = mount(BackupWorkDownloader, { props: { playlists: [], works: [], profile: profile(), searchAllWorks } });
@@ -169,10 +174,19 @@ describe('BackupWorkDownloader', () => {
         await wrapper.get('[data-testid="search-all-works"]').trigger('click');
         await vi.waitFor(() => expect(wrapper.find('[data-testid="search-work-RJ9"]').exists()).toBe(true));
 
-        await wrapper.get('[data-testid="search"]').setValue('second');
-        expect(wrapper.find('[data-testid="search-work-RJ9"]').exists()).toBe(false);
+        // Typing one more character narrows the visible rows rather than
+        // clearing the panel, which previously read as a broken search.
+        await wrapper.get('[data-testid="search"]').setValue('first r');
+        expect(wrapper.find('[data-testid="search-work-RJ9"]').exists()).toBe(true);
+        expect(wrapper.find('[data-testid="search-work-RJ10"]').exists()).toBe(false);
+
+        // A refinement that matches no title text keeps the result set visible
+        // because hosted semantic hits rarely contain the literal query.
+        await wrapper.get('[data-testid="search"]').setValue('zzzz');
+        expect(wrapper.find('[data-testid="search-work-RJ9"]').exists()).toBe(true);
+
         await wrapper.get('[data-testid="search-all-works"]').trigger('click');
-        await vi.waitFor(() => expect(searchAllWorks).toHaveBeenLastCalledWith('second'));
+        await vi.waitFor(() => expect(searchAllWorks).toHaveBeenLastCalledWith('zzzz'));
         expect(wrapper.find('[data-testid="search-work-RJ9"]').exists()).toBe(false);
     });
 
@@ -281,7 +295,7 @@ describe('BackupWorkDownloader', () => {
         },
     );
 
-    it('keeps source and job errors outside progress and never prints 0 / 0', async () => {
+    it('keeps source and job errors outside progress and shows preparing instead of 0 / 0', async () => {
         const wrapper = mount(BackupWorkDownloader, {
             props: {
                 playlists: [], works: [], profile: profile(), ownLoadFailed: true,
@@ -293,7 +307,7 @@ describe('BackupWorkDownloader', () => {
         await wrapper.get('[data-testid="source-own"]').trigger('click');
         expect(wrapper.get('[data-testid="source-load-error"]').text()).toBe('Unavailable');
         expect(wrapper.get('[data-testid="download-error"]').text()).toContain('Folder access is unavailable');
-        expect(wrapper.find('[data-testid="progress-count"]').exists()).toBe(false);
+        expect(wrapper.get('[data-testid="progress-count"]').text()).toBe('Preparing…');
         expect(wrapper.get('[data-testid="download-progress"]').text()).not.toContain('0 / 0');
     });
 

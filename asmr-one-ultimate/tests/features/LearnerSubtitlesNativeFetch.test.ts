@@ -320,6 +320,55 @@ describe('LearnerSubtitles native subtitle discovery', () => {
         mounted.wrapper.unmount();
     });
 
+    it('fetches a native LRC hash that carries the work/track separator', async () => {
+        // Media hashes look like `<workId>/<trackIndex>`. Percent-encoding the
+        // whole hash produced `%2F`, which the host-API URL guard rejects, so
+        // every check-lrc discovery threw and works without availableLyrics
+        // rendered no native subtitles at all (GitHub issue #3).
+        const initialTrack = track('A', 'https://media.example/A.vtt');
+        initialTrack.availableLyrics = [];
+        const axiosGet = vi.fn((url: string) => {
+            if (url.includes('/api/media/check-lrc/')) {
+                return Promise.resolve({ data: { result: true, hash: '12345/7' } });
+            }
+            if (url === 'https://media.example/api/media/stream/12345/7') {
+                return Promise.resolve({ data: '[00:00.00]ネイティブ字幕\n[00:30.00]次の行\n' });
+            }
+            return Promise.resolve({ data: { result: false } });
+        });
+        const mounted = mountWithTrack(initialTrack, axiosGet);
+
+        await flushPromises();
+        await renderCurrentTime();
+
+        const requestedUrls = axiosGet.mock.calls.map(([url]) => String(url));
+        expect(requestedUrls).toContain('https://media.example/api/media/stream/12345/7');
+        expect(requestedUrls.some(url => /%2f/i.test(url))).toBe(false);
+        expect(mounted.wrapper.get('.learner-jp').text()).toBe('ネイティブ字幕');
+        mounted.wrapper.unmount();
+    });
+
+    it('skips a native LRC hash that cannot be expressed as safe path segments', async () => {
+        const initialTrack = track('A', 'https://media.example/A.vtt');
+        initialTrack.availableLyrics = [];
+        const axiosGet = vi.fn((url: string) => {
+            if (url.includes('/api/media/check-lrc/')) {
+                return Promise.resolve({ data: { result: true, hash: '12345/../../admin' } });
+            }
+            return Promise.resolve({ data: { result: false } });
+        });
+        const mounted = mountWithTrack(initialTrack, axiosGet);
+
+        await flushPromises();
+        await renderCurrentTime();
+
+        expect(axiosGet.mock.calls.some(([url]) => (
+            String(url).includes('/api/media/stream/')
+        ))).toBe(false);
+        expect(mounted.wrapper.get('.learner-jp').text()).toBe('');
+        mounted.wrapper.unmount();
+    });
+
     it('aborts an oversized native-hash subtitle before parsing the response', async () => {
         const initialTrack = track('A', 'https://media.example/A.vtt');
         initialTrack.availableLyrics = [];

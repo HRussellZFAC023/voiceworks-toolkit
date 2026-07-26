@@ -79,7 +79,7 @@ function state(overrides: Partial<BackupDownloadState> = {}): BackupDownloadStat
 
 function options(works: BackupWorkDownloadItem[], nextIndex = 0, overrides: Partial<BackupDownloadState> = {}): PersistedDownloadCenterOptions {
     return {
-        state: state(overrides), directory: testDirectory().handle, enrichment: {}, opusOutputPaths: {},
+        state: state(overrides), destination: { kind: 'fsa', handle: testDirectory().handle }, enrichment: {}, opusOutputPaths: {},
         discovery: { works, nextIndex, skippedWorkIds: [], titlesReady: true, complete: false },
     };
 }
@@ -169,7 +169,7 @@ async function beginHeldRun(runner: DownloadCenterRunner) {
     const run = runner.start(
         [{ id: 'RJ2', title: 'Work' }],
         state(),
-        {} as FileSystemDirectoryHandle,
+        { kind: 'fsa', handle: {} as FileSystemDirectoryHandle },
         'Held job',
     );
     await entered.promise;
@@ -362,7 +362,7 @@ describe('DownloadCenterRunner', () => {
         expect(file.sourceUrls).not.toContain('https://media.test/low.mp3');
     });
 
-    it('keeps a mixed complete/preview-only work retryable without staging a partial folder', async () => {
+    it('skips a mixed complete/preview-only work without staging a partial folder', async () => {
         mocks.getValidatedLiveTracks.mockResolvedValue([{
             type: 'audio',
             hash: 'complete-audio',
@@ -382,37 +382,42 @@ describe('DownloadCenterRunner', () => {
             filters: { audio: true, video: false, image: false, text: true, other: false },
             includeArtwork: false,
         });
-        const error = await (runner as any).continueDiscovery('job', persisted)
-            .catch((value: unknown) => value);
+        const result = await (runner as any).continueDiscovery('job', persisted);
 
         const additions = repo.appendFilesAndUpdateOptions.mock.calls.flatMap(call => call[2] as any[]);
         expect(additions).toEqual([]);
-        expect(error).toMatchObject({ code: 'failed' });
-        expect(repo.storedOptions?.discovery).toMatchObject({
-            nextIndex: 0,
-            complete: false,
-            skippedWorkIds: [],
+        expect(result.discovery).toMatchObject({
+            nextIndex: 1,
+            complete: true,
+            skippedWorkIds: ['RJ2'],
         });
+    });
 
-        mocks.getValidatedLiveTracks.mockResolvedValue([{
-            type: 'audio',
-            hash: 'complete-audio',
-            title: 'complete.wav',
-            mediaDownloadUrl: 'https://media.test/complete.wav',
-        }, {
-            type: 'audio',
-            hash: 'preview-audio',
-            title: 'preview.mp3',
-            mediaDownloadUrl: 'https://media.test/preview.mp3',
-        }]);
-        const resumed = await (runner as any).continueDiscovery('job', repo.storedOptions!);
-        const resumedFiles = repo.appendFilesAndUpdateOptions.mock.calls.flatMap(call => call[2] as any[]);
+    it('records a transient per-work discovery failure as a skip instead of aborting the run', async () => {
+        mocks.getValidatedLiveTracks
+            .mockRejectedValueOnce(new Error('[WorkService] Failed for 2: HTTP 500: Server Error'))
+            .mockResolvedValue([{
+                type: 'audio',
+                hash: 'available',
+                title: 'track.wav',
+                mediaDownloadUrl: 'https://media.test/available.wav',
+            }]);
+        mocks.getWorkInfo.mockResolvedValue(info(''));
+        const repo = repository();
+        const runner = new DownloadCenterRunner(repo as any);
 
-        expect(resumed.discovery).toMatchObject({ nextIndex: 1, complete: true });
-        expect(resumedFiles.map(file => file.path)).toEqual([
-            'Work/complete.wav',
-            'Work/preview.mp3',
-        ]);
+        const result = await (runner as any).continueDiscovery('job', options([
+            { id: 'RJ2', title: 'Broken work' },
+            { id: 'RJ3', title: 'Healthy work' },
+        ]));
+
+        const additions = repo.appendFilesAndUpdateOptions.mock.calls.flatMap(call => call[2] as any[]);
+        expect(additions.map(file => file.path)).toEqual(['Healthy work/track.wav']);
+        expect(result.discovery).toMatchObject({
+            nextIndex: 2,
+            complete: true,
+            skippedWorkIds: ['RJ2'],
+        });
     });
 
     it('skips a definitively unavailable work while preserving the remaining selection', async () => {
@@ -849,7 +854,7 @@ describe('DownloadCenterRunner', () => {
     it.each(['directory', 'file'] as const)('suffixes a new work folder instead of touching a pre-existing root %s', async kind => {
         const root = testDirectory([{ name: 'Work', kind }]);
         const persisted = options([{ id: 'RJ2', title: 'Work' }]);
-        persisted.directory = root.handle;
+        persisted.destination = { kind: 'fsa', handle: root.handle };
         const repo = repository();
         const runner = new DownloadCenterRunner(repo as any);
 
@@ -866,7 +871,7 @@ describe('DownloadCenterRunner', () => {
         const runner = new DownloadCenterRunner(repo as any);
         const persisted = options([{ id: 'RJ1', title: 'Same' }, { id: 'RJ2', title: 'Same' }], 1);
         const root = testDirectory([{ name: 'Same', kind: 'directory' }]);
-        persisted.directory = root.handle;
+        persisted.destination = { kind: 'fsa', handle: root.handle };
 
         await (runner as any).continueDiscovery('job', persisted);
 
@@ -882,7 +887,7 @@ describe('DownloadCenterRunner', () => {
         const repo = repository([file]);
         const runner = new DownloadCenterRunner(repo as any);
         const persisted = options([{ id: 'RJ2', title: 'Work' }]);
-        persisted.directory = root.handle;
+        persisted.destination = { kind: 'fsa', handle: root.handle };
         persisted.discovery!.complete = true;
 
         const result = await (runner as any).continueDiscovery('job', persisted);
@@ -928,7 +933,7 @@ describe('DownloadCenterRunner', () => {
         await repo.createJob({ id: 'job', title: 'Interrupted', options: persisted });
         const job = (await repo.loadJob())!.job as DownloadCenterJob;
         const prepare = vi.spyOn(runner as any, 'prepareAndRun')
-            .mockImplementation(async (...args: unknown[]) => args[1] as PersistedDownloadCenterOptions);
+            .mockImplementation(async (...args: unknown[]) => ({ options: args[1] as PersistedDownloadCenterOptions, exportFailures: 0 }));
 
         await runner.resume(job, undefined, { disableOpus: true });
 
@@ -958,11 +963,13 @@ describe('DownloadCenterRunner', () => {
         await repo.createJob({ id: 'job', title: 'Waiting for titles', options: persisted });
         const job = (await repo.loadJob())!.job as DownloadCenterJob;
         const prepare = vi.spyOn(runner as any, 'prepareAndRun')
-            .mockImplementation(async (...args: unknown[]) =>
-                (runner as any).ensureTitles(
+            .mockImplementation(async (...args: unknown[]) => ({
+                options: await (runner as any).ensureTitles(
                     args[0] as string,
                     args[1] as PersistedDownloadCenterOptions,
-                ));
+                ),
+                exportFailures: 0,
+            }));
 
         await runner.resume(job, undefined, { useOriginalTitles: true });
 
@@ -1195,13 +1202,13 @@ describe('DownloadCenterRunner', () => {
     it('persists only selected playlist/direct-search works and never polls listJobs while active', async () => {
         const repo = repository();
         const runner = new DownloadCenterRunner(repo as any);
-        vi.spyOn(runner as any, 'prepareAndRun').mockImplementation(async (...args: unknown[]) => args[1] as PersistedDownloadCenterOptions);
+        vi.spyOn(runner as any, 'prepareAndRun').mockImplementation(async (...args: unknown[]) => ({ options: args[1] as PersistedDownloadCenterOptions, exportFailures: 0 }));
         const allWorks = [
             { id: 'RJ1', title: 'Playlist work', playlistIds: ['mine'] },
             { id: 'RJ2', title: 'Direct search result' },
         ];
 
-        await runner.start(allWorks, state({ selectedWorkIds: ['RJ2'] }), {} as FileSystemDirectoryHandle, 'Job');
+        await runner.start(allWorks, state({ selectedWorkIds: ['RJ2'] }), { kind: 'fsa', handle: {} as FileSystemDirectoryHandle }, 'Job');
 
         const created = repo.createJob.mock.calls[0][0];
         expect(created.options.discovery.works).toEqual([{ id: 'RJ2', title: 'Direct search result', playlistIds: undefined }]);
@@ -1282,7 +1289,7 @@ describe('DownloadCenterRunner', () => {
             expect(stale).toMatchObject({ id: held.jobId, status: 'paused' });
 
             const recoveringPrepare = vi.spyOn(recoveryAfterExpiry as any, 'prepareAndRun')
-                .mockImplementation(async (...args: unknown[]) => args[1] as PersistedDownloadCenterOptions);
+                .mockImplementation(async (...args: unknown[]) => ({ options: args[1] as PersistedDownloadCenterOptions, exportFailures: 0 }));
             await expect(recoveryAfterExpiry.resume(stale!)).resolves.toMatchObject({ jobId: held.jobId });
             expect(recoveringPrepare).toHaveBeenCalledTimes(1);
         } finally {
@@ -1302,7 +1309,7 @@ describe('DownloadCenterRunner', () => {
         await expect(first.start(
             [{ id: 'RJ2', title: 'Work' }],
             state(),
-            {} as FileSystemDirectoryHandle,
+            { kind: 'fsa', handle: {} as FileSystemDirectoryHandle },
             'Failed job',
         )).rejects.toBe(failure);
         expect(first.runningJobId).toBeNull();
@@ -1311,7 +1318,7 @@ describe('DownloadCenterRunner', () => {
         const [released] = await next.recoverInterruptedJobs();
         expect(released).toMatchObject({ status: 'paused' });
         const nextPrepare = vi.spyOn(next as any, 'prepareAndRun')
-            .mockImplementation(async (...args: unknown[]) => args[1] as PersistedDownloadCenterOptions);
+            .mockImplementation(async (...args: unknown[]) => ({ options: args[1] as PersistedDownloadCenterOptions, exportFailures: 0 }));
         await expect(next.resume(released)).resolves.toMatchObject({ jobId: released.id });
         expect(nextPrepare).toHaveBeenCalledTimes(1);
         expect(next.runningJobId).toBeNull();

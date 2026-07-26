@@ -86,7 +86,16 @@ export default defineConfig({
             name: 'firefox',
             use: {
                 ...devices['Desktop Firefox'],
-                launchOptions: { slowMo },
+                launchOptions: {
+                    slowMo,
+                    // Firefox does not expose navigator.gpu by default in the
+                    // automation profile, so WebGPU-backed specs would report
+                    // "no usable adapter" and mask real regressions.
+                    firefoxUserPrefs: {
+                        'dom.webgpu.enabled': true,
+                        'dom.webgpu.workers.enabled': true,
+                    },
+                },
             },
         }] : []),
     ],

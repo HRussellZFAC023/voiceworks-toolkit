@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { WorksApi } from '../../api';
+import { hasMoreWorkPages, readWorksTotalCount, WORKS_MAX_PAGE_SIZE, type WorksResponse } from '../../api/Works';
 import type { PlaylistEntry } from '../../api/Playlist';
 import { useI18n } from '../../composables/useI18n';
 import { Logger } from '../../core/Utils';
@@ -18,7 +19,13 @@ import type {
     BackupWorkDownloadItem,
 } from '../backupWorkDownloaderTypes';
 import { discoverDownloadManifest, type DownloadTreeNode } from '../downloads/DownloadManifest';
-import { chooseDownloadDirectory } from '../downloads/DirectoryDownloadSink';
+import type { DownloadDestination } from '../downloads/DownloadSink';
+import {
+    canCreateDownloadDestination,
+    createDownloadDestination,
+    DownloadDestinationCancelledError,
+    supportsDirectoryPicker,
+} from '../downloads/DownloadSinkFactory';
 import {
     DownloadCenterRunError,
     DownloadCenterRunner,
@@ -52,10 +59,20 @@ const discoveryService = PlaylistDiscoveryService.getInstance();
 const ownSeeds = new Map<string, PlaylistEntry>();
 const resolving = new Map<string, Promise<void>>();
 const enrichingWorks = new Map<string, Promise<void>>();
+const searchTotal = ref(0);
+const searchHasMore = ref(false);
 let unsubscribeRunner: (() => void) | undefined;
-let enrichmentGeneration = 0;
+let disposed = false;
+/** Invalidates results merged by a query the user has already replaced. */
+let searchGeneration = 0;
+let livePages: { query: string; page: number; loaded: number; total: number } | null = null;
 const DOWNLOAD_CENTER_LIVE_SEARCH_WAIT_MS = 30_000;
 const DOWNLOAD_CENTER_SEMANTIC_SEARCH_WAIT_MS = 30_000;
+/** The hosted index allows up to 200; the old value of 20 hid most matches. */
+const DOWNLOAD_CENTER_SEMANTIC_SEARCH_LIMIT = 200;
+const DOWNLOAD_CENTER_ENRICH_CONCURRENCY = 3;
+/** True when finished works must be exported instead of written to a folder. */
+const stagedDestination = computed(() => canCreateDownloadDestination() && !supportsDirectoryPicker());
 
 function withSearchDeadline<T>(request: Promise<T>, timeoutMs: number, label: string): Promise<T> {
     return new Promise<T>((resolve, reject) => {
@@ -288,17 +305,14 @@ function open(): void {
     // the modal is already available to the user.
     visible.value = true;
     signedIn.value = hasAuthenticatedSession();
-    enrichmentGeneration += 1;
     void refreshResumableJobs();
 }
 
 function close(): void {
     visible.value = false;
-    enrichmentGeneration += 1;
 }
 
 function handleSourceChange(source: BackupPlaylistSourceFilter): void {
-    enrichmentGeneration += 1;
     if (source === 'public') void loadCommunity();
     else if (source === 'own' && signedIn.value) void loadOwn();
 }
@@ -356,13 +370,16 @@ async function resolvePlaylist(playlist: BackupPlaylistDownloadItem): Promise<vo
                     title: item.title || current?.title || id,
                     coverUrl: current?.coverUrl || buildCoverUrl(id, '240x240', getApiBaseUrl()),
                     sizeBytes: item.sizeBytes ?? current?.sizeBytes,
-                    sizeState: item.sizeBytes ? 'resolved' : current?.sizeState ?? 'loading',
+                    // Rows start on their payload duration/file counts, never a
+                    // spinner: exact sizes are only read on demand.
+                    sizeState: item.sizeBytes ? 'resolved' : current?.sizeState ?? 'unavailable',
                     durationSeconds: item.durationSeconds ?? current?.durationSeconds,
                     playlistIds: [...playlistIds],
                 });
             }
             works.value = [...nextWorks.values()];
-            void enrichWorkItems(ids, enrichmentGeneration);
+            // Rows enrich themselves once they scroll into view; resolving a
+            // playlist must not fan out one manifest request per work.
             playlists.value = playlists.value.map(item => item.source === playlist.source && String(item.id) === String(playlist.id)
                 ? { ...item, workIds: ids, worksCount: Math.max(playlist.worksCount ?? 0, resolvedWorksCount, ids.length), error: resolvedError }
                 : item);
@@ -411,7 +428,7 @@ function mergeDirectWork(
         title: (typeof result.title === 'string' && result.title) || fallbackTitle || current?.title || id,
         coverUrl: coverUrl || current?.coverUrl || buildCoverUrl(id, '240x240', getApiBaseUrl()),
         sizeBytes: sizeBytes ?? current?.sizeBytes,
-        sizeState: sizeBytes ? 'resolved' : current?.sizeState ?? 'loading',
+        sizeState: sizeBytes ? 'resolved' : current?.sizeState ?? 'unavailable',
         durationSeconds: durationSeconds ?? current?.durationSeconds,
         tags,
         playlistIds: current?.playlistIds,
@@ -423,30 +440,33 @@ function updateWork(id: string, update: Partial<BackupWorkDownloadItem>): void {
     works.value = works.value.map(work => String(work.id) === id ? { ...work, ...update } : work);
 }
 
-async function enrichWorkItem(id: string, generation: number): Promise<void> {
-    if (!visible.value || generation !== enrichmentGeneration) return;
-    const key = `${generation}:${id}`;
+/**
+ * Fills in what a list row is missing.
+ *
+ * `detailed` is reserved for user-driven work (an explicitly selected row) and
+ * is the only mode that reads the full file manifest. Viewport rows ask for
+ * cheap metadata only, so scrolling a large result set never fans out into a
+ * manifest download per row. Every path writes a terminal state, so a row can
+ * never be stranded showing a spinner.
+ */
+async function enrichWorkItem(id: string, detailed = false): Promise<void> {
+    const key = `${detailed ? 'full' : 'basic'}:${id}`;
     const existing = enrichingWorks.get(key);
     if (existing) return existing;
+    const work = works.value.find(item => String(item.id) === id);
+    if (!work) return;
+    const needsSizes = detailed && !work.sizeBytesByType;
+    const needsInfo = !work.durationSeconds || !work.tags?.length || !work.coverUrl;
+    if (!needsSizes && !needsInfo) return;
+    const previousSizeState = work.sizeState;
+    if (needsSizes) updateWork(id, { sizeState: 'loading' });
     const request = (async () => {
-        const work = works.value.find(item => String(item.id) === id);
-        if (!work) return;
-        if (work.sizeBytesByType && work.durationSeconds != null && work.coverUrl) {
-            return;
-        }
-        updateWork(id, {
-            sizeState: work.sizeState === 'partial'
-                ? 'partial'
-                : work.sizeBytes != null ? 'resolved' : 'loading',
-        });
-        const needsInfo = !work.durationSeconds || !work.tags?.length || !work.coverUrl;
         const [tracksResult, infoResult] = await Promise.allSettled([
-            WorkService.getTracks(id),
+            needsSizes ? WorkService.getTracks(id) : Promise.resolve(null),
             needsInfo ? WorkService.getWorkInfo(id) : Promise.resolve(null),
         ]);
-        if (!visible.value || generation !== enrichmentGeneration) return;
         const update: Partial<BackupWorkDownloadItem> = {};
-        if (tracksResult.status === 'fulfilled') {
+        if (tracksResult.status === 'fulfilled' && tracksResult.value) {
             const manifest = discoverDownloadManifest(tracksResult.value as unknown as DownloadTreeNode[]);
             const byType: Partial<Record<BackupFileFilter, number>> = {};
             const fileCountByType: Partial<Record<BackupFileFilter, number>> = {};
@@ -480,32 +500,70 @@ async function enrichWorkItem(id: string, generation: number): Promise<void> {
             update.durationSeconds = work.durationSeconds || info.duration;
             if (!work.tags?.length) update.tags = info.tags?.map(tag => tag.name).filter(Boolean);
         }
-        if (update.sizeState == null && work.sizeBytes == null) update.sizeState = 'unavailable';
+        if (update.sizeState == null) {
+            update.sizeState = needsSizes
+                ? (work.sizeBytes != null ? 'resolved' : 'unavailable')
+                : previousSizeState ?? (work.sizeBytes != null ? 'resolved' : 'unavailable');
+        }
         updateWork(id, update);
     })().catch(error => {
-        if (!visible.value || generation !== enrichmentGeneration) return;
-        Logger.warn('[DownloadCenter] Could not calculate work size', id, error);
-        updateWork(id, { sizeState: 'unavailable' });
+        Logger.warn('[DownloadCenter] Could not enrich work', id, error);
+        // Roll the row back instead of leaving it on the spinner forever; the
+        // next viewport pass or selection can retry it.
+        updateWork(id, { sizeState: needsSizes ? 'unavailable' : previousSizeState ?? 'unavailable' });
     }).finally(() => { enrichingWorks.delete(key); });
     enrichingWorks.set(key, request);
     return request;
 }
 
-async function enrichWorkItems(ids: string[], generation: number): Promise<void> {
-    const queue = [...new Set(ids)];
+async function enrichWorkItems(ids: readonly (string | number)[], detailed = false): Promise<void> {
+    const queue = [...new Set(ids.map(String))].filter(Boolean);
     let cursor = 0;
-    const workers = Array.from({ length: Math.min(3, queue.length) }, async () => {
+    const workers = Array.from({ length: Math.min(DOWNLOAD_CENTER_ENRICH_CONCURRENCY, queue.length) }, async () => {
         for (;;) {
             const id = queue[cursor++];
-            if (!id || !visible.value || generation !== enrichmentGeneration) return;
-            await enrichWorkItem(id, generation);
+            // Requests already in flight still write their terminal state; only
+            // the not-yet-started remainder is abandoned once the feature ends.
+            if (!id || disposed) return;
+            await enrichWorkItem(id, detailed);
         }
     });
     await Promise.all(workers);
 }
 
+function requestWorkEnrichment(ids: readonly (string | number)[], detailed = false): void {
+    void enrichWorkItems(ids, detailed);
+}
+
+function mergeSearchResults(
+    source: 'semantic' | 'live',
+    results: readonly Record<string, unknown>[],
+    previousWorks: ReadonlyMap<string, BackupWorkDownloadItem>,
+): void {
+    const merged = new Map(works.value.map(work => [normalizeWorkId(work.id), work]));
+    for (const result of results) {
+        mergeDirectWork(
+            merged,
+            result,
+            source === 'semantic' && typeof result.title === 'string' ? result.title : '',
+            previousWorks,
+        );
+    }
+    works.value = [...merged.values()];
+    const availableIds = new Set(works.value.map(work => String(work.id)));
+    const previousSelection = options.value.selectedWorkIds ?? [];
+    const selectedWorkIds = previousSelection.filter(id => availableIds.has(String(id)));
+    if (selectedWorkIds.length !== previousSelection.length) {
+        options.value = { ...options.value, selectedWorkIds };
+    }
+}
+
+function countDirectResults(): number {
+    return works.value.filter(work => work.directSearchResult).length;
+}
+
 async function searchAllWorks(query: string): Promise<void> {
-    const generation = ++enrichmentGeneration;
+    const generation = ++searchGeneration;
     const previousWorks = new Map(works.value.map(work => [normalizeWorkId(work.id), work]));
     // A direct-only result belongs to the query that produced it. Keeping it
     // after a later query would leave an invisible selected work in the
@@ -516,43 +574,40 @@ async function searchAllWorks(query: string): Promise<void> {
         .map(work => ({ ...work, directSearchResult: false }));
     works.value = retainedWorks;
     const retainedIds = new Set(retainedWorks.map(work => String(work.id)));
-    const retainedSelectedWorkIds = options.value.selectedWorkIds.filter(id => retainedIds.has(String(id)));
-    if (retainedSelectedWorkIds.length !== options.value.selectedWorkIds.length) {
+    const previousSelection = options.value.selectedWorkIds ?? [];
+    const retainedSelectedWorkIds = previousSelection.filter(id => retainedIds.has(String(id)));
+    if (retainedSelectedWorkIds.length !== previousSelection.length) {
         options.value = { ...options.value, selectedWorkIds: retainedSelectedWorkIds };
     }
+    livePages = null;
+    searchTotal.value = 0;
+    searchHasMore.value = false;
 
     const applyResults = (
         source: 'semantic' | 'live',
         results: readonly Record<string, unknown>[],
     ): void => {
-        if (!visible.value || generation !== enrichmentGeneration) return;
-        const merged = new Map(works.value.map(work => [normalizeWorkId(work.id), work]));
-        for (const result of results) {
-            mergeDirectWork(
-                merged,
-                result,
-                source === 'semantic' && typeof result.title === 'string' ? result.title : '',
-                previousWorks,
-            );
-        }
-        const mergedWorks = [...merged.values()];
-        const retained = mergedWorks.filter(work => !work.directSearchResult);
-        const directWorks = mergedWorks.filter(work => work.directSearchResult).slice(0, 30);
-        works.value = [...retained, ...directWorks];
-        const availableIds = new Set(works.value.map(work => String(work.id)));
-        const selectedWorkIds = options.value.selectedWorkIds.filter(id => availableIds.has(String(id)));
-        if (selectedWorkIds.length !== options.value.selectedWorkIds.length) {
-            options.value = { ...options.value, selectedWorkIds };
-        }
-        const resultIds = results
-            .map(result => normalizeWorkId(result.source_id ?? result.sourceId ?? result.id))
-            .filter(Boolean);
-        void enrichWorkItems(resultIds, generation);
+        if (generation !== searchGeneration) return;
+        mergeSearchResults(source, results, previousWorks);
+        searchTotal.value = Math.max(searchTotal.value, countDirectResults(), livePages?.total ?? 0);
+    };
+
+    const recordLivePage = (response: WorksResponse): void => {
+        if (generation !== searchGeneration) return;
+        const loaded = (livePages?.loaded ?? 0) + response.works.length;
+        livePages = {
+            query,
+            page: (livePages?.page ?? 0) + 1,
+            loaded,
+            total: readWorksTotalCount(response, loaded - response.works.length),
+        };
+        searchHasMore.value = hasMoreWorkPages(response, loaded);
+        searchTotal.value = Math.max(searchTotal.value, livePages.total, countDirectResults());
     };
 
     const exactRj = /^[A-Za-z]{2}\d+$/.test(query.trim());
     const liveRequest = settleSearch(withSearchDeadline(
-        WorksApi.searchWorks(query, { page: 1 }),
+        WorksApi.searchWorks(query, { page: 1, pageSize: WORKS_MAX_PAGE_SIZE, limit: WORKS_MAX_PAGE_SIZE }),
         DOWNLOAD_CENTER_LIVE_SEARCH_WAIT_MS,
         'Live site search',
     ));
@@ -562,12 +617,13 @@ async function searchAllWorks(query: string): Promise<void> {
             Logger.warn('[DownloadCenter] Live work search unavailable', live.reason);
             throw live.reason;
         }
+        recordLivePage(live.value);
         applyResults('live', live.value.works as unknown as Record<string, unknown>[]);
         return;
     }
 
     const semanticRequest = settleSearch(withSearchDeadline(
-        semanticWorkSearch(query, 20),
+        semanticWorkSearch(query, DOWNLOAD_CENTER_SEMANTIC_SEARCH_LIMIT),
         DOWNLOAD_CENTER_SEMANTIC_SEARCH_WAIT_MS,
         'Hosted semantic search',
     ));
@@ -577,11 +633,11 @@ async function searchAllWorks(query: string): Promise<void> {
     const primary = await Promise.race([
         liveRequest.then(async live => {
             if (live.status === 'fulfilled' && live.value.works.length > 0) {
-                return { source: 'live' as const, results: live.value.works };
+                return { source: 'live' as const, results: live.value.works, response: live.value };
             }
             const semantic = await semanticRequest;
             if (semantic.status === 'fulfilled') return { source: 'semantic' as const, results: semantic.value };
-            if (live.status === 'fulfilled') return { source: 'live' as const, results: live.value.works };
+            if (live.status === 'fulfilled') return { source: 'live' as const, results: live.value.works, response: live.value };
             Logger.warn('[DownloadCenter] Live work search unavailable', live.reason);
             Logger.warn('[DownloadCenter] Hosted semantic work search unavailable', semantic.reason);
             throw live.reason;
@@ -591,13 +647,14 @@ async function searchAllWorks(query: string): Promise<void> {
                 return { source: 'semantic' as const, results: semantic.value };
             }
             const live = await liveRequest;
-            if (live.status === 'fulfilled') return { source: 'live' as const, results: live.value.works };
+            if (live.status === 'fulfilled') return { source: 'live' as const, results: live.value.works, response: live.value };
             if (semantic.status === 'fulfilled') return { source: 'semantic' as const, results: semantic.value };
             Logger.warn('[DownloadCenter] Live work search unavailable', live.reason);
             Logger.warn('[DownloadCenter] Hosted semantic work search unavailable', semantic.reason);
             throw live.reason;
         }),
     ]);
+    if (primary.source === 'live') recordLivePage(primary.response);
     applyResults(primary.source, primary.results as unknown as Record<string, unknown>[]);
 
     if (primary.source !== 'semantic') {
@@ -612,6 +669,7 @@ async function searchAllWorks(query: string): Promise<void> {
     if (primary.source !== 'live') {
         void liveRequest.then(live => {
             if (live.status === 'fulfilled') {
+                recordLivePage(live.value);
                 applyResults('live', live.value.works as unknown as Record<string, unknown>[]);
             } else {
                 Logger.warn('[DownloadCenter] Live work search unavailable', live.reason);
@@ -620,15 +678,56 @@ async function searchAllWorks(query: string): Promise<void> {
     }
 }
 
+/** Appends the next live-catalogue page, keeping every loaded row selectable. */
+async function loadMoreWorks(): Promise<void> {
+    const pages = livePages;
+    if (!pages || !searchHasMore.value) return;
+    const generation = searchGeneration;
+    const response = await withSearchDeadline(
+        WorksApi.searchWorks(pages.query, {
+            page: pages.page + 1,
+            pageSize: WORKS_MAX_PAGE_SIZE,
+            limit: WORKS_MAX_PAGE_SIZE,
+        }),
+        DOWNLOAD_CENTER_LIVE_SEARCH_WAIT_MS,
+        'Live site search',
+    );
+    if (generation !== searchGeneration || livePages !== pages) return;
+    const loaded = pages.loaded + response.works.length;
+    livePages = {
+        query: pages.query,
+        page: pages.page + 1,
+        loaded,
+        total: readWorksTotalCount(response, pages.loaded),
+    };
+    searchHasMore.value = hasMoreWorkPages(response, loaded);
+    mergeSearchResults('live', response.works as unknown as Record<string, unknown>[], new Map());
+    searchTotal.value = Math.max(searchTotal.value, livePages.total, countDirectResults());
+}
+
 function setRunnerProgress(next: BackupDownloadProgress & { jobId?: string }): void {
     progress.value = next;
+}
+
+/** A run error's own message is a machine code, never user-facing detail. */
+function failureText(value: unknown): string {
+    if (value instanceof DownloadCenterRunError) return '';
+    if (value instanceof Error) return value.message;
+    if (typeof value === 'string') return value;
+    if (value && typeof value === 'object' && 'message' in value) {
+        return String((value as { message?: unknown }).message ?? '');
+    }
+    return '';
 }
 
 function sanitizeDownloadFailureDetail(error: unknown): string {
     const cause = error instanceof Error
         ? (error as Error & { cause?: unknown }).cause
         : undefined;
-    const raw = cause instanceof Error ? cause.message : typeof cause === 'string' ? cause : '';
+    // Unclassified failures (an IndexedDB refusal under strict privacy, for
+    // example) arrive with no cause at all, so fall back to the error itself
+    // rather than showing the generic "download failed" wall.
+    const raw = failureText(cause) || failureText(error);
     if (!raw) return '';
     return raw
         .replace(/https?:\/\/[^\s)]+/gi, t('downloadCenterRemoteSource'))
@@ -646,14 +745,11 @@ function friendlyError(error: unknown): string {
         if (error.code === 'paused') return t('downloadCenterPaused');
         if (error.code === 'title-translation') return t('backupDownloaderTitleTranslationRequired');
         if (error.code === 'already-running') return t('downloadCenterAlreadyRunning');
-        if (error.code === 'failed') {
-            const detail = sanitizeDownloadFailureDetail(error);
-            return detail
-                ? format('backupDownloaderFailedDetail', { detail })
-                : t('backupDownloaderFailed');
-        }
     }
-    return t('backupDownloaderFailed');
+    const detail = sanitizeDownloadFailureDetail(error);
+    return detail
+        ? format('backupDownloaderFailedDetail', { detail })
+        : t('backupDownloaderFailed');
 }
 
 function needsTitleTranslation(job: DownloadCenterJob): boolean {
@@ -676,14 +772,21 @@ async function refreshResumableJobs(): Promise<void> {
     catch (error) { Logger.warn('[DownloadCenter] Could not recover interrupted downloads', error); }
 }
 
-function markDownloadComplete(result: { jobId: string; skipped: number }): void {
+function completionLabel(result: { skipped: number; exportFailures?: number }): string {
+    if (result.exportFailures) {
+        return format('backupDownloaderDoneWithExportFailures', { count: result.exportFailures });
+    }
+    return result.skipped
+        ? format('backupDownloaderDoneWithSkipped', { count: result.skipped })
+        : t('backupDownloaderDone');
+}
+
+function markDownloadComplete(result: { jobId: string; skipped: number; exportFailures?: number }): void {
     resumableJobs.value = resumableJobs.value.filter(job => job.id !== result.jobId);
     progress.value = {
         ...(progress.value ?? { current: 1, total: 1 }),
         phase: 'complete',
-        label: result.skipped
-            ? format('backupDownloaderDoneWithSkipped', { count: result.skipped })
-            : t('backupDownloaderDone'),
+        label: completionLabel(result),
     };
 }
 
@@ -703,14 +806,21 @@ function markDownloadFailed(error: unknown): void {
 async function startDownload(state: BackupDownloadState): Promise<void> {
     if (busy.value) return;
     jobError.value = '';
-    if (typeof (window as Window & { showDirectoryPicker?: unknown }).showDirectoryPicker !== 'function') {
+    // The gate is "no sink can be constructed at all", not "this browser lacks
+    // the Chromium folder picker": Firefox stages into private browser storage.
+    if (!canCreateDownloadDestination()) {
         progress.value = null;
         jobError.value = t('backupDownloaderUnsupported');
         return;
     }
-    let directory: FileSystemDirectoryHandle;
-    try { directory = await chooseDownloadDirectory(); }
-    catch { return; }
+    let destination: DownloadDestination;
+    try { destination = await createDownloadDestination(); }
+    catch (error) {
+        if (error instanceof DownloadDestinationCancelledError) return;
+        progress.value = null;
+        jobError.value = friendlyError(error);
+        return;
+    }
     busy.value = true;
     progress.value = { phase: 'discovering', current: 0, total: state.selectedWorkIds.length };
     let activeJobId: string | undefined;
@@ -718,7 +828,7 @@ async function startDownload(state: BackupDownloadState): Promise<void> {
         const result = await runner.start(
             works.value,
             state,
-            directory,
+            destination,
             format('backupDownloaderJobTitle', { date: new Date().toLocaleString() }),
             next => { activeJobId = next.jobId ?? activeJobId; setRunnerProgress(next); },
         );
@@ -776,7 +886,7 @@ onMounted(() => {
 });
 onUnmounted(() => {
     visible.value = false;
-    enrichmentGeneration += 1;
+    disposed = true;
     unsubscribeRunner?.();
 });
 
@@ -786,6 +896,6 @@ defineExpose({ open });
 <template>
     <button class="q-btn q-btn-flat q-btn-dense asmr-download-center-btn text-white" data-testid="download-center-open" :title="t('downloadCenterButton')" :aria-label="t('downloadCenterButton')" @click="open"><span class="q-btn__content"><i class="q-icon material-icons" aria-hidden="true">download_for_offline</i></span></button>
     <Teleport to="body">
-        <BackupWorkDownloader v-if="visible" :playlists="playlists" :works="works" :profile="profile" :show-own="signedIn" :loading-own="loadingOwn" :loading-public="loadingPublic" :own-load-failed="ownLoadFailed" :public-load-failed="publicLoadFailed" :busy="busy" :progress="displayProgress" :error-message="jobError" :resumable-jobs="resumableJobs.map(job => ({ id: job.id, title: job.title, convertToOpus: job.options.state.convertToOpus, needsTitleTranslation: needsTitleTranslation(job) }))" :resolve-playlist="resolvePlaylist" :search-all-works="searchAllWorks" @close="close" @source-change="handleSourceChange" @update="updateProfile" @start="startDownload" @pause="pauseDownload" @resume="resumeDownload" @resume-without-opus="resumeDownloadWithoutOpus" @resume-with-original-titles="resumeDownloadWithOriginalTitles" />
+        <BackupWorkDownloader v-if="visible" :playlists="playlists" :works="works" :profile="profile" :show-own="signedIn" :loading-own="loadingOwn" :loading-public="loadingPublic" :own-load-failed="ownLoadFailed" :public-load-failed="publicLoadFailed" :busy="busy" :progress="displayProgress" :error-message="jobError" :resumable-jobs="resumableJobs.map(job => ({ id: job.id, title: job.title, convertToOpus: job.options.state.convertToOpus, needsTitleTranslation: needsTitleTranslation(job) }))" :resolve-playlist="resolvePlaylist" :search-all-works="searchAllWorks" :load-more-works="loadMoreWorks" :enrich-works="requestWorkEnrichment" :search-total="searchTotal" :search-has-more="searchHasMore" :staged-destination="stagedDestination" @close="close" @source-change="handleSourceChange" @update="updateProfile" @start="startDownload" @pause="pauseDownload" @resume="resumeDownload" @resume-without-opus="resumeDownloadWithoutOpus" @resume-with-original-titles="resumeDownloadWithOriginalTitles" />
     </Teleport>
 </template>

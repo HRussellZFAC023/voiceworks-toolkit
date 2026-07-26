@@ -51,6 +51,7 @@ import {
     isSafeRasterImageBlob,
     normalizeImageUrl,
 } from '../media/externalImageUtils';
+import { readHostAuthToken } from '../../core/hostAuthToken';
 import {
     fetchSafeMediaArrayBuffer,
     fetchSafeMediaBlob,
@@ -151,6 +152,12 @@ let preloadedImages = new Map<string, string>();
 let externalBlobUrlCache = new Map<string, string>();
 let externalBlobFetchInFlight = new Map<string, Promise<string | null>>();
 const thumbnailBlobUrls = ref(new Map<string, string>());
+/**
+ * Entries whose bytes could not be verified. They stay in the gallery so one
+ * broken image cannot shorten or reorder the list; the strip marks them and the
+ * viewer shows a per-image error instead.
+ */
+const failedImageHashes = ref(new Set<string>());
 let imageFetchControllers = new Set<AbortController>();
 let imageFetchGeneration = 0;
 let slideshowTimer: ReturnType<typeof setInterval> | null = null;
@@ -181,14 +188,14 @@ const currentItem = computed(() => currentMediaList.value[currentMediaIndex.valu
 // ── URL utility ──────────────────────────────────────────────────────────────
 
 function getMediaUrl(hash: string, item?: MediaFile): string {
-    const token = localStorage.getItem('jwt-token') || '';
+    const token = readHostAuthToken();
     const apiBaseUrl = resolveMediaApiBaseUrl(bridge.axios?.defaults?.baseURL);
     const url = buildMediaStreamUrl(hash, item, token, apiBaseUrl);
     return normalizeSafeMediaNavigationUrl(url);
 }
 
 function getMediaDownloadUrl(hash: string, item?: MediaFile): string {
-    const token = localStorage.getItem('jwt-token') || '';
+    const token = readHostAuthToken();
     const apiBaseUrl = resolveMediaApiBaseUrl(bridge.axios?.defaults?.baseURL);
     return normalizeSafeMediaNavigationUrl(buildMediaDownloadUrl(hash, item, token, apiBaseUrl));
 }
@@ -280,6 +287,18 @@ function getThumbnailUrl(item: MediaFile): string {
     return thumbnailBlobUrls.value.get(item.hash) || '';
 }
 
+function isImageFailed(item: MediaFile): boolean {
+    return failedImageHashes.value.has(item.hash);
+}
+
+function markImageFailed(item: MediaFile, failed: boolean): void {
+    if (failed === failedImageHashes.value.has(item.hash)) return;
+    const next = new Set(failedImageHashes.value);
+    if (failed) next.add(item.hash);
+    else next.delete(item.hash);
+    failedImageHashes.value = next;
+}
+
 function onThumbnailError(item: MediaFile, event: Event): void {
     const target = event.target as HTMLImageElement | null;
     if (!target) return;
@@ -302,6 +321,7 @@ function clearExternalBlobCache(): void {
     externalBlobUrlCache.clear();
     externalBlobFetchInFlight.clear();
     thumbnailBlobUrls.value = new Map();
+    failedImageHashes.value = new Set();
     preloadedImages.clear();
 }
 
@@ -766,7 +786,9 @@ async function renderImage(
     thumbnailBlobUrls.value.set(item.hash, displayUrl);
     thumbnailBlobUrls.value = new Map(thumbnailBlobUrls.value);
     img.onload = () => {
-        if (renderGeneration === mediaRenderGeneration) isLoading.value = false;
+        if (renderGeneration !== mediaRenderGeneration) return;
+        markImageFailed(item, false);
+        isLoading.value = false;
     };
     img.onerror = () => {
         if (renderGeneration !== mediaRenderGeneration) return;
@@ -775,24 +797,42 @@ async function renderImage(
     img.src = displayUrl;
 }
 
+/**
+ * Recover from an image whose bytes could not be verified.
+ *
+ * The gallery list is never mutated here: removing entries used to renumber
+ * every following slide and could collapse a whole folder because one file was
+ * unavailable. The failed entry is marked instead, the viewer moves on to the
+ * next loadable neighbour, and a per-image error is shown when none loads.
+ */
 async function handleUnavailableImage(item: MediaFile, renderGeneration: number): Promise<void> {
     if (renderGeneration !== mediaRenderGeneration) return;
 
-    const originalList = currentMediaList.value;
-    const failedIndex = Math.max(0, originalList.findIndex((candidate) => candidate === item || candidate.hash === item.hash));
-    const orderedAlternates = [
-        ...originalList.slice(failedIndex + 1),
-        ...originalList.slice(0, failedIndex),
-    ].filter((candidate) => candidate !== item && candidate.hash !== item.hash);
+    markImageFailed(item, true);
 
-    for (const candidate of orderedAlternates.slice(0, 2)) {
+    const list = currentMediaList.value;
+    const failedIndex = list.findIndex((candidate) => candidate === item || candidate.hash === item.hash);
+    const orderedAlternates = failedIndex >= 0
+        ? [...list.slice(failedIndex + 1), ...list.slice(0, failedIndex)]
+        : [];
+    const alternates = orderedAlternates.filter((candidate) => (
+        candidate !== item
+        && candidate.hash !== item.hash
+        && !failedImageHashes.value.has(candidate.hash)
+    ));
+
+    for (const candidate of alternates.slice(0, 2)) {
         const displayUrl = await fetchMediaImageBlobUrl(candidate);
         if (renderGeneration !== mediaRenderGeneration) return;
-        if (!displayUrl) continue;
+        if (!displayUrl) {
+            markImageFailed(candidate, true);
+            continue;
+        }
 
-        const remaining = originalList.filter((entry) => entry !== item && entry.hash !== item.hash);
-        const nextIndex = Math.max(0, remaining.findIndex((entry) => entry === candidate || entry.hash === candidate.hash));
-        currentMediaList.value = remaining;
+        const nextIndex = currentMediaList.value.findIndex((entry) => (
+            entry === candidate || entry.hash === candidate.hash
+        ));
+        if (nextIndex < 0) continue;
         currentMediaIndex.value = nextIndex;
         preloadedImages.set(candidate.hash, displayUrl);
         resetZoom();
@@ -803,8 +843,6 @@ async function handleUnavailableImage(item: MediaFile, renderGeneration: number)
     }
 
     if (renderGeneration !== mediaRenderGeneration) return;
-    currentMediaList.value = originalList.filter((entry) => entry !== item && entry.hash !== item.hash);
-    currentMediaIndex.value = 0;
     isLoading.value = false;
     errorMessage.value = t('mediaViewerImageUnavailable');
     errorIcon.value = 'block';
@@ -1918,9 +1956,13 @@ defineExpose({
                         v-for="(item, index) in currentMediaList"
                         :key="item.hash + '_' + index"
                         class="media-viewer-thumb-item"
-                        :class="{ active: index === currentMediaIndex }"
-                        :aria-label="item.title"
-                        :title="item.title"
+                        :class="{ active: index === currentMediaIndex, failed: isImageFailed(item) }"
+                        :aria-label="isImageFailed(item)
+                            ? `${item.title} — ${t('mediaViewerImageUnavailable')}`
+                            : item.title"
+                        :title="isImageFailed(item)
+                            ? `${item.title} — ${t('mediaViewerImageUnavailable')}`
+                            : item.title"
                         @click.stop="goToIndex(index)"
                     >
                         <img
@@ -1931,6 +1973,7 @@ defineExpose({
                             referrerpolicy="no-referrer"
                             @error="onThumbnailError(item, $event)"
                         >
+                        <span v-else-if="isImageFailed(item)" class="material-icons">broken_image</span>
                         <span v-else class="material-icons">{{ getThumbnailIcon(currentMediaType) }}</span>
                     </button>
                 </div>

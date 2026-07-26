@@ -143,7 +143,6 @@ const whisperPresetOptions = computed(() => [
 
 const whisperPresetHint = computed(() => {
     if (whisperModelPreset.value === 'tiny') return t('whisperPresetTinyWarning');
-    if (whisperModelPreset.value === 'base') return t('whisperPresetBaseWarning');
     if (whisperModelPreset.value === 'medium') return t('whisperPresetMediumWarning');
     if (whisperModelPreset.value === 'large-v3-turbo') return t('whisperPresetLargeTurboWarning');
     return '';
@@ -164,6 +163,7 @@ const whisperAutoWarmupSublabel = computed(() => {
     void whisperEffectiveBackend.value;
     if (!whisperAutoWarmup.value) return t('whisperAutoWarmupSub');
     const suppression = resolveAutoWarmupSuppressionReason();
+    if (suppression === 'manual-model-preparation') return t('whisperAutoWarmupSuppressedManualModel');
     if (suppression === 'force-wasm') return t('whisperAutoWarmupSuppressedWasm');
     if (suppression === 'device-capability') return t('whisperAutoWarmupSuppressedDevice');
     return t('whisperAutoWarmupSub');
@@ -268,7 +268,7 @@ const whisperDownloadDisabled = computed(() => {
 });
 
 const whisperDownloadLabelColor = computed(() => {
-    return computeWhisperUiState().isError ? '#e57373' : '';
+    return computeWhisperUiState().isError ? 'var(--asmr-settings-error)' : '';
 });
 
 function updateWhisperModelStatus() {
@@ -284,7 +284,7 @@ function updateWhisperModelStatus() {
         whisperModelStatusColor.value = '';
     } else if (ui.isError) {
         whisperModelStatusText.value = ui.message;
-        whisperModelStatusColor.value = '#e57373';
+        whisperModelStatusColor.value = 'var(--asmr-settings-error)';
     } else if (whisperAutoWarmup.value && resolveAutoWarmupSuppressionReason()) {
         whisperModelStatusText.value = whisperAutoWarmupSublabel.value;
         whisperModelStatusColor.value = '';
@@ -324,7 +324,7 @@ const externalAccessIcon = computed(() => {
 });
 
 const externalAccessDisabled = computed(() => externalAccessStatus.value === 'requesting');
-const externalAccessMessageColor = computed(() => externalAccessStatus.value === 'failed' ? '#e57373' : '');
+const externalAccessMessageColor = computed(() => externalAccessStatus.value === 'failed' ? 'var(--asmr-settings-error)' : '');
 
 async function requestExternalPageAccess() {
     externalAccessStatus.value = 'requesting';
@@ -405,7 +405,7 @@ async function emergencyDriveBackup() {
     if (emergencyExportBusy.value) return;
     const clientId = String(googleDriveClientId.value || '').trim();
     if (!clientId) {
-        emergencyExportStatus.value = t('emergencyDriveClientIdRequired');
+        emergencyExportStatus.value = t('emergencyDriveUnavailable');
         return;
     }
     if (!googleDriveIdentityReady.value) {
@@ -842,7 +842,7 @@ const credits = [
                     :sublabel="t('whisperModelPresetSub')"
                     :options="whisperPresetOptions"
                     :hint="whisperPresetHint"
-                    hint-color="#e0a030"
+                    hint-color="var(--asmr-settings-warning)"
                     icon="tune"
                 />
                 <hr class="q-separator q-separator--horizontal asmr-settings-separator">
@@ -861,13 +861,6 @@ const credits = [
                     icon="record_voice_over"
                 />
                 <hr class="q-separator q-separator--horizontal asmr-settings-separator">
-                <SettingsToggle
-                    config-key="whisperAdaptiveWindow"
-                    :label="t('whisperAdaptiveWindow')"
-                    :sublabel="t('whisperAdaptiveWindowSub')"
-                    icon="sync"
-                />
-                <hr class="q-separator q-separator--horizontal asmr-settings-separator">
                 <SettingsRangeSelect
                     config-key="whisperLiveChunkSec"
                     :label="t('whisperContextWindow')"
@@ -883,10 +876,6 @@ const credits = [
                     :options="whisperOverlapOptions"
                     icon="join_inner"
                 />
-                <div class="q-px-md q-pb-md asmr-settings-hint">
-                    <div class="text-caption asmr-settings-muted asmr-settings-hint-text">{{ t('whisperSilencePolicy') }}</div>
-                </div>
-                <hr class="q-separator q-separator--horizontal asmr-settings-separator">
                 <SettingsToggle config-key="forceWhisperWasm" :label="t('forceWhisperWasm')" :sublabel="t('forceWhisperWasmSub')" icon="developer_board_off" />
             </div>
         </template>
@@ -1069,7 +1058,6 @@ const credits = [
                     <div class="q-item__label q-item__label--caption text-caption">{{ t('emergencyExportSub') }}</div>
                 </div>
             </div>
-            <SettingsInput config-key="googleDriveClientId" :label="t('emergencyDriveClientId')" :sublabel="t('emergencyDriveClientIdSub')" placeholder="1234567890-….apps.googleusercontent.com" icon="cloud" />
             <div class="q-px-md q-pb-md row q-gutter-sm">
                 <button type="button" data-testid="emergency-export-json" class="q-btn q-btn-item non-selectable no-outline q-btn--standard q-btn--rectangle q-btn--actionable q-focusable q-hoverable q-btn--dense" :disabled="emergencyExportBusy" @click="emergencyExport('json')">
                     <span class="q-btn__content text-center col items-center q-anchor--skip justify-center row">

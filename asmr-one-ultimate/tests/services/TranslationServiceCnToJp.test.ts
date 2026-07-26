@@ -103,8 +103,8 @@ describe('TranslationService CN->JP preference', () => {
         expect(TranslationService.getUiTargetLang()).toBe('zh');
         const out = await TranslationService.translate('今日は雨です', TranslationService.getUiTargetLang());
 
-        expect(out).toBe('translated:zh');
-        expect(mocks.gmRequestMock.mock.calls[0][0].url).toContain('tl=zh');
+        expect(out).toBe('translated:zh-CN');
+        expect(mocks.gmRequestMock.mock.calls[0][0].url).toContain('tl=zh-CN');
     });
 
     it('uses a Japanese source hint to reject a Han-only echo before accepting fallback', async () => {
@@ -268,8 +268,49 @@ describe('TranslationService CN->JP preference', () => {
 
     it('translates Japanese into Chinese when zh-CN is selected', async () => {
         const out = await TranslationService.translate('今日は雨です', 'zh-CN');
-        expect(out).toBe('translated:zh');
-        expect(mocks.gmRequestMock.mock.calls[0][0].url).toContain('tl=zh');
+        expect(out).toBe('translated:zh-CN');
+        expect(mocks.gmRequestMock.mock.calls[0][0].url).toContain('tl=zh-CN');
+    });
+
+    it('sends the Japanese-to-Chinese request with an explicit Japanese source hint', async () => {
+        mocks.i18nState.lang = 'zh-CN';
+        mocks.gmRequestMock.mockResolvedValueOnce({
+            responseText: JSON.stringify([[['抓耳朵和窃窃私语', '', '']]]),
+            response: undefined as unknown,
+        });
+
+        const display = await TranslationService.translateForDisplay('耳かきと囁き', 'zh-CN', {
+            sourceLanguageHint: 'ja',
+        });
+
+        expect(display).toMatchObject({
+            sourceLanguage: 'ja',
+            primaryText: '耳かきと囁き',
+            primaryLanguage: 'ja',
+            secondaryText: '抓耳朵和窃窃私语',
+        });
+        expect(mocks.gmRequestMock).toHaveBeenCalledOnce();
+        expect(mocks.gmRequestMock.mock.calls[0][0].url).toContain('sl=ja');
+        expect(mocks.gmRequestMock.mock.calls[0][0].url).toContain('tl=zh-CN');
+    });
+
+    it('serves Traditional Chinese to a zh-TW reader and caches it apart from Simplified', async () => {
+        const original = Object.getOwnPropertyDescriptor(navigator, 'languages');
+        Object.defineProperty(navigator, 'languages', { value: ['zh-TW', 'en'], configurable: true });
+        try {
+            const out = await TranslationService.translate('今日は雨です', 'zh-CN');
+            expect(out).toBe('translated:zh-TW');
+            expect(mocks.gmRequestMock.mock.calls[0][0].url).toContain('tl=zh-TW');
+
+            // A Simplified reader must not be served the Traditional cache entry.
+            Object.defineProperty(navigator, 'languages', { value: ['zh-CN'], configurable: true });
+            const simplified = await TranslationService.translate('今日は雨です', 'zh-CN');
+            expect(simplified).toBe('translated:zh-CN');
+            expect(mocks.gmRequestMock).toHaveBeenCalledTimes(2);
+        } finally {
+            if (original) Object.defineProperty(navigator, 'languages', original);
+            else Object.defineProperty(navigator, 'languages', { value: ['en'], configurable: true });
+        }
     });
 
     it('recognizes normalized same-language targets while preserving CN-to-JA mode', () => {

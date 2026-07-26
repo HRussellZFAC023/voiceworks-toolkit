@@ -1,8 +1,15 @@
-export interface DownloadWriter {
-    write(bytes: Uint8Array, offset: number): Promise<void>;
-    close(): Promise<void>;
-    abort(reason?: unknown): Promise<void>;
-}
+import {
+    DirectoryPermissionError,
+    ResumeOffsetMismatchError,
+    type DownloadRemoveOptions,
+    type DownloadSink,
+    type DownloadWriter,
+} from './DownloadSink';
+
+// Re-exported so existing importers keep working after the sink contract moved
+// into its own module.
+export { DirectoryPermissionError, ResumeOffsetMismatchError };
+export type { DownloadRemoveOptions, DownloadSink, DownloadWriter };
 
 type PermissionStateLike = 'granted' | 'denied' | 'prompt';
 type PermissionHandle = FileSystemDirectoryHandle & {
@@ -14,20 +21,6 @@ type EnumerableDirectoryHandle = FileSystemDirectoryHandle & {
     values?: () => AsyncIterableIterator<FileSystemHandle>;
 };
 
-export class DirectoryPermissionError extends Error {
-    constructor() {
-        super('Download directory permission is required to resume');
-        this.name = 'DirectoryPermissionError';
-    }
-}
-
-export class ResumeOffsetMismatchError extends Error {
-    constructor(public readonly expectedOffset: number, public readonly actualSize: number) {
-        super(`Partial file size ${actualSize} does not match checkpoint ${expectedOffset}`);
-        this.name = 'ResumeOffsetMismatchError';
-    }
-}
-
 class DirectoryInspectionError extends Error {
     constructor() {
         super('Download directory entries cannot be inspected safely');
@@ -35,8 +28,13 @@ class DirectoryInspectionError extends Error {
     }
 }
 
-/** Chromium directory sink that recreates nested folders and supports seek-on-resume. */
-export class DirectoryDownloadSink {
+/**
+ * Directory sink that recreates nested folders and supports seek-on-resume.
+ *
+ * Backed by any `FileSystemDirectoryHandle`, so it serves both the Chromium
+ * folder picker and the origin private file system available in Firefox.
+ */
+export class DirectoryDownloadSink implements DownloadSink {
     constructor(private readonly root: FileSystemDirectoryHandle) {}
 
     async ensurePermission(request = false): Promise<boolean> {
@@ -65,7 +63,7 @@ export class DirectoryDownloadSink {
         throw new DirectoryInspectionError();
     }
 
-    async open(path: string[], offset: number): Promise<DownloadWriter> {
+    async open(path: readonly string[], offset: number): Promise<DownloadWriter> {
         if (!await this.ensurePermission(false)) throw new DirectoryPermissionError();
         if (!path.length) throw new Error('A destination filename is required');
         let directory = this.root;
@@ -90,7 +88,7 @@ export class DirectoryDownloadSink {
         };
     }
 
-    private async resolve(path: string[], createDirectories = false): Promise<{ directory: FileSystemDirectoryHandle; filename: string }> {
+    private async resolve(path: readonly string[], createDirectories = false): Promise<{ directory: FileSystemDirectoryHandle; filename: string }> {
         if (!path.length) throw new Error('A destination filename is required');
         let directory = this.root;
         for (const segment of path.slice(0, -1)) {
@@ -99,14 +97,14 @@ export class DirectoryDownloadSink {
         return { directory, filename: path[path.length - 1] };
     }
 
-    async read(path: string[]): Promise<Uint8Array> {
+    async read(path: readonly string[]): Promise<Uint8Array> {
         const { directory, filename } = await this.resolve(path);
         const file = await (await directory.getFileHandle(filename)).getFile();
         return new Uint8Array(await file.arrayBuffer());
     }
 
     /** Read a bounded range without materializing a large partial file. */
-    async readRange(path: string[], offset: number, length: number): Promise<Uint8Array> {
+    async readRange(path: readonly string[], offset: number, length: number): Promise<Uint8Array> {
         if (!await this.ensurePermission(false)) throw new DirectoryPermissionError();
         if (
             !Number.isSafeInteger(offset)
@@ -120,20 +118,27 @@ export class DirectoryDownloadSink {
     }
 
     /** Inspect a source without materializing its contents in browser memory. */
-    async size(path: string[]): Promise<number> {
+    async size(path: readonly string[]): Promise<number> {
         const { directory, filename } = await this.resolve(path);
         return (await (await directory.getFileHandle(filename)).getFile()).size;
     }
 
-    async writeAll(path: string[], bytes: Uint8Array): Promise<void> {
+    /** Disk-backed handle so exports can stream instead of buffering. */
+    async file(path: readonly string[]): Promise<Blob> {
+        const { directory, filename } = await this.resolve(path);
+        return (await directory.getFileHandle(filename)).getFile();
+    }
+
+    async writeAll(path: readonly string[], bytes: Uint8Array): Promise<void> {
         const writer = await this.open(path, 0);
         try { await writer.write(bytes, 0); await writer.close(); }
         catch (error) { await writer.abort(error); throw error; }
     }
 
-    async remove(path: string[]): Promise<void> {
+    async remove(path: readonly string[], options: DownloadRemoveOptions = {}): Promise<void> {
         const { directory, filename } = await this.resolve(path);
-        await directory.removeEntry(filename);
+        if (options.recursive) await directory.removeEntry(filename, { recursive: true });
+        else await directory.removeEntry(filename);
     }
 }
 

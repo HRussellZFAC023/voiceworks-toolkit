@@ -2,7 +2,7 @@
   "name": "asmr-one-ultimate",
   "description": "Upgrade asmr.one with on-device Whisper, cached/custom translation, semantic search, radio and learner modes, playlist backups, JPDB vocabulary mining, media tools, and automatic language-gate recovery.",
   "private": false,
-  "version": "171",
+  "version": "172",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -31,7 +31,7 @@
     "vue": "^3.5.0"
   },
   "devDependencies": {
-    "@huggingface/transformers": "4.0.0-next.4",
+    "@huggingface/transformers": "^4.2.0",
     "@playwright/test": "^1.50.0",
     "@types/jsdom": "^27.0.0",
     "@types/node": "^25.1.0",

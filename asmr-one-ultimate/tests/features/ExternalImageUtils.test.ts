@@ -236,6 +236,116 @@ describe('externalImageUtils', () => {
         }
     });
 
+    it('retries an official media route through the privileged bridge when CORS blocks the browser', async () => {
+        const originalFetch = globalThis.fetch;
+        const mediaUrl = 'https://api.asmr-200.com/api/media/stream/1052162/319502';
+        const rawUrl = 'https://raw.kiko-play-niptan.one/media/stream/daily/RJ01052162/image.jpg?verify=signed';
+        globalThis.fetch = vi.fn(async () => {
+            throw new TypeError('CORS blocked: no Access-Control-Allow-Origin');
+        }) as typeof fetch;
+        const request = vi.fn(async () => response({
+            finalUrl: rawUrl,
+            response: new Blob([Uint8Array.from([0xff, 0xd8, 0xff, 0xdb])], { type: 'image/jpeg' }),
+            responseHeaders: 'content-type: image/jpeg',
+        }));
+        localStorage.setItem('jwt-token', 'host-session-token');
+
+        try {
+            const verified = await fetchVerifiedImageBlob(mediaUrl, {
+                proxyBaseUrl: 'https://relay.example.com',
+                request,
+                headers: { Accept: 'image/avif,image/webp,image/*' },
+            });
+
+            expect(verified?.blob.type).toBe('image/jpeg');
+            expect(verified?.finalUrl).toBe(rawUrl);
+            expect(request).toHaveBeenCalledWith(expect.objectContaining({
+                url: mediaUrl,
+                responseType: 'blob',
+                anonymous: false,
+                redirect: 'follow',
+                headers: {
+                    Accept: 'image/avif,image/webp,image/*',
+                    Authorization: 'Bearer host-session-token',
+                },
+            }));
+        } finally {
+            localStorage.removeItem('jwt-token');
+            globalThis.fetch = originalFetch;
+        }
+    });
+
+    it('recovers an authenticated official media image after an HTTP 401 browser response', async () => {
+        const originalFetch = globalThis.fetch;
+        const mediaUrl = 'https://api.asmr-100.com/api/media/stream/abc123';
+        const denied = new Response('', { status: 401, statusText: 'Unauthorized' });
+        Object.defineProperty(denied, 'url', { configurable: true, value: mediaUrl });
+        globalThis.fetch = vi.fn(async () => denied) as typeof fetch;
+        const request = vi.fn(async () => response({
+            finalUrl: mediaUrl,
+            response: new Blob([Uint8Array.from([0xff, 0xd8, 0xff, 0xdb])], { type: 'image/jpeg' }),
+            responseHeaders: 'content-type: image/jpeg',
+        }));
+
+        try {
+            await expect(fetchVerifiedImageBlob(mediaUrl, {
+                proxyBaseUrl: 'https://relay.example.com',
+                request,
+            })).resolves.toMatchObject({ finalUrl: mediaUrl });
+            expect(request).toHaveBeenCalledOnce();
+        } finally {
+            globalThis.fetch = originalFetch;
+        }
+    });
+
+    it('rejects a privileged official response that lands outside the trusted raw media origin', async () => {
+        const originalFetch = globalThis.fetch;
+        const mediaUrl = 'https://api.asmr-200.com/api/media/stream/1052162/319502';
+        globalThis.fetch = vi.fn(async () => {
+            throw new TypeError('CORS blocked');
+        }) as typeof fetch;
+        const request = vi.fn(async () => response({
+            finalUrl: 'https://www.cloudflare-terms-of-service-abuse.com/stream.png',
+        }));
+
+        try {
+            await expect(fetchVerifiedImageBlob(mediaUrl, {
+                proxyBaseUrl: 'https://relay.example.com',
+                request,
+            })).resolves.toBeNull();
+            expect(request).toHaveBeenCalledOnce();
+        } finally {
+            globalThis.fetch = originalFetch;
+        }
+    });
+
+    it('never sends the host session to a DLsite relay or any other image host', async () => {
+        const originalFetch = globalThis.fetch;
+        globalThis.fetch = vi.fn(async () => {
+            throw new TypeError('CORS blocked');
+        }) as typeof fetch;
+        const request = vi.fn();
+        localStorage.setItem('jwt-token', 'host-session-token');
+
+        try {
+            for (const url of [
+                'https://img.dlsite.jp/modpub/images2/work/sample.jpg',
+                'https://relay.example.com/modpub/images2/work/sample.jpg',
+                'https://cdn.example.com/public.jpg',
+                'https://api.asmr-200.com/statics/cover.jpg',
+            ]) {
+                await expect(fetchVerifiedImageBlob(url, {
+                    proxyBaseUrl: 'https://relay.example.com',
+                    request,
+                })).resolves.toBeNull();
+            }
+            expect(request).not.toHaveBeenCalled();
+        } finally {
+            localStorage.removeItem('jwt-token');
+            globalThis.fetch = originalFetch;
+        }
+    });
+
     it('never escalates another no-ACAO image host to the privileged bridge', async () => {
         const originalFetch = globalThis.fetch;
         globalThis.fetch = vi.fn(async () => {

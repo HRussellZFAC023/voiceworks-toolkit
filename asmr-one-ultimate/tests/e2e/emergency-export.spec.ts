@@ -252,6 +252,10 @@ test.describe('Emergency export and Download Center', () => {
         await injectedPage.getByTestId('search-all-works').click();
         await expect(injectedPage.getByTestId('search-work-RJ999999')).toBeVisible();
         await expect(injectedPage.getByTestId('search-work-RJ999999').locator('.work-cover img')).toHaveAttribute('src', 'https://media.e2e/direct-cover.jpg');
+        await expect(injectedPage.getByTestId('open-work-RJ999999')).toHaveAttribute('href', '/work/RJ999999');
+        // Exact sizes are read on demand, so selecting the row is what asks for
+        // the file manifest.
+        await injectedPage.getByTestId('search-work-RJ999999').locator('input').check();
         await expect(injectedPage.getByTestId('search-work-RJ999999')).toContainText('1.5 MB');
         await injectedPage.getByTestId('source-public').click();
         await expect(injectedPage.getByTestId(`playlist-${PUBLIC_ID}`)).toBeVisible();

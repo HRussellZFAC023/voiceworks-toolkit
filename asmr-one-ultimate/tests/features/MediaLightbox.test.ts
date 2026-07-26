@@ -222,6 +222,102 @@ describe('MediaLightbox verified image loading', () => {
         wrapper.unmount();
     });
 
+    it('recovers a work-folder image through the privileged bridge when CORS blocks the browser', async () => {
+        const rawUrl = 'https://raw.kiko-play-niptan.one/media/stream/daily/RJ01052162/image.jpg?verify=test';
+        vi.stubGlobal('fetch', vi.fn(async () => {
+            throw new TypeError('CORS blocked: no Access-Control-Allow-Origin');
+        }));
+        mocks.gmRequest.mockImplementation(async () => ({
+            ...validResponse(rawUrl),
+        }));
+
+        const wrapper = mount(MediaLightbox, { props: { visible: false }, attachTo: document.body });
+        const item = {
+            hash: '1052162/319502',
+            title: '03.台詞-1.jpg',
+            type: 'image' as const,
+        };
+
+        await (wrapper.vm as unknown as LightboxExposed).showMedia(item, 'image', [item], 0);
+        await flushPromises();
+
+        await vi.waitFor(() => {
+            expect(document.querySelector<HTMLImageElement>('.media-viewer-image')?.src)
+                .toMatch(/^blob:verified-/);
+        });
+        expect(mocks.gmRequest).toHaveBeenCalledWith(expect.objectContaining({
+            url: 'https://api.asmr-100.com/api/media/stream/1052162/319502',
+            anonymous: false,
+            redirect: 'follow',
+        }));
+        expect(document.body.textContent).not.toContain('mediaViewerImageUnavailable');
+        wrapper.unmount();
+    });
+
+    it('keeps every gallery entry when a single image cannot be verified', async () => {
+        vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request) => {
+            if (String(input).includes('319503')) throw new TypeError('CORS blocked');
+            return browserImageResponse(String(input));
+        }));
+        // A restricted image answers HTTP 200 from Cloudflare's abuse host, so
+        // the privileged retry is refused by the final-URL policy too.
+        mocks.gmRequest.mockImplementation(async ({ url }: { url: string }) => validResponse(
+            url.includes('319503')
+                ? 'https://www.cloudflare-terms-of-service-abuse.com/stream.png'
+                : url,
+        ));
+
+        const wrapper = mount(MediaLightbox, { props: { visible: false }, attachTo: document.body });
+        const list = ['319502', '319503', '319504'].map(index => ({
+            hash: `1052162/${index}`,
+            title: `${index}.jpg`,
+            type: 'image' as const,
+        }));
+
+        await (wrapper.vm as unknown as LightboxExposed).showMedia(list[1], 'image', list, 1);
+        await flushPromises();
+        await vi.waitFor(() => {
+            expect(document.querySelector<HTMLImageElement>('.media-viewer-image')?.src)
+                .toMatch(/^blob:verified-/);
+        });
+
+        // The broken entry is marked, not deleted: the strip keeps all three
+        // slides and the counter still reports a three-image gallery.
+        expect(document.querySelectorAll('.media-viewer-thumb-item')).toHaveLength(3);
+        expect(document.querySelector('.media-viewer-total')?.textContent).toBe('3');
+        expect(document.querySelectorAll('.media-viewer-thumb-item.failed')).toHaveLength(1);
+        expect(document.querySelector('.media-viewer-title')?.textContent).toContain('319504.jpg');
+        wrapper.unmount();
+    });
+
+    it('shows a per-image error without shrinking the gallery when nothing loads', async () => {
+        vi.stubGlobal('fetch', vi.fn(async () => {
+            throw new TypeError('CORS blocked');
+        }));
+        mocks.gmRequest.mockImplementation(async () => validResponse(
+            'https://www.cloudflare-terms-of-service-abuse.com/stream.png',
+        ));
+
+        const wrapper = mount(MediaLightbox, { props: { visible: false }, attachTo: document.body });
+        const list = ['319502', '319503', '319504'].map(index => ({
+            hash: `1052162/${index}`,
+            title: `${index}.jpg`,
+            type: 'image' as const,
+        }));
+
+        await (wrapper.vm as unknown as LightboxExposed).showMedia(list[1], 'image', list, 1);
+        await flushPromises();
+        await vi.waitFor(() => {
+            expect(document.querySelector('.media-viewer-error')?.textContent)
+                .toContain('mediaViewerImageUnavailable');
+        });
+
+        expect(document.querySelectorAll('.media-viewer-thumb-item')).toHaveLength(3);
+        expect(document.querySelector('.media-viewer-total')?.textContent).toBe('3');
+        expect(document.querySelector('.media-viewer-current')?.textContent).toBe('2');
+        wrapper.unmount();
+    });
+
     it('uses the Firefox userscript download API for a verified image Blob', async () => {
         const downloadedBlob = new Blob(
             [Uint8Array.from([0xff, 0xd8, 0xff, 0xdb])],

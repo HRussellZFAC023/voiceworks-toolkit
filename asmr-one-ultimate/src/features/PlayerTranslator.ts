@@ -1,11 +1,14 @@
 import { CentralObserver } from '../core/CentralObserver';
-import { TIMING } from '../core/Constants';
 import { TranslationService } from '../services/TranslationService';
 import { I18n } from '../core/Utils';
 import { PLAYER_BAR_SELECTOR, isChinese, getCleanText, stripJpdbAnnotations } from '../core/DomUtils';
 import { AppStore } from '../store/AppStore';
 import { EventBus } from '../core/EventBus';
 import { KikoeruBridge } from '../infrastructure/KikoeruBridge';
+import { createTranslationRefreshScheduler } from './translationRefresh';
+
+/** Debounce for observer-driven player rescans. Short: the player is always on screen. */
+const PLAYER_REFRESH_DELAY_MS = 250;
 
 export class PlayerTranslator {
     private bridge = KikoeruBridge.getInstance();
@@ -19,12 +22,22 @@ export class PlayerTranslator {
     private retryFrame: number | null = null;
     /** Incremented on every track/work change to invalidate stale async callbacks */
     private _epoch = 0;
+    /**
+     * CentralObserver drops (never re-queues) a run inside its debounce window.
+     * The player mounts/re-renders in short bursts, so those dropped runs are
+     * exactly why player text is sometimes never translated. Take every signal
+     * and guarantee a trailing pass instead.
+     */
+    private refresh = createTranslationRefreshScheduler(
+        () => { void this.checkPlayer(); },
+        PLAYER_REFRESH_DELAY_MS,
+    );
 
     public enable(): void {
         if (this._enabled) return;
         this._enabled = true;
         // Register with central observer instead of own MutationObserver
-        CentralObserver.register('PlayerTranslator', () => this.checkPlayer(), TIMING.OBSERVER_REGISTER_DEBOUNCE_MS);
+        CentralObserver.register('PlayerTranslator', () => this.refresh.schedule(), 0);
 
         // Translate immediately on track change instead of waiting for observer debounce
         this.trackChangeCleanup = EventBus.on('track:change', ({ track }) => {
@@ -83,6 +96,7 @@ export class PlayerTranslator {
         this.configChangeCleanup = undefined;
         this.langChangeCleanup?.();
         this.langChangeCleanup = undefined;
+        this.refresh.cancel();
         this.clearRetryTimers();
         for (const cleanup of this.storeWatchCleanups) cleanup();
         this.storeWatchCleanups = [];
@@ -167,7 +181,7 @@ export class PlayerTranslator {
                 }
                 // With ::after approach we never modify textContent for translations,
                 // so no need to restore — just clear our data attributes and class.
-                el.title = '';
+                this.releaseTitleAffordance(el);
                 el.classList.remove('asmr-translation-pair');
                 delete el.dataset.asmrTranslated;
                 delete el.dataset.asmrSource;
@@ -196,6 +210,8 @@ export class PlayerTranslator {
                 delete el.dataset.asmrtagScope;
                 delete el.dataset.asmrtagTranslation;
                 delete el.dataset.asmrtagSuffix;
+                if (el.dataset.asmrtagTitled === 'true') el.removeAttribute('title');
+                delete el.dataset.asmrtagTitled;
                 el.classList.remove('asmr-translated');
                 el.classList.remove('asmr-worktree-translation');
             }
@@ -209,6 +225,7 @@ export class PlayerTranslator {
                     'asmr-mini-title-ellipsis-content',
                     'asmr-mini-title-ellipsis-container',
                 );
+                this.releaseTitleAffordance(stableTitleEl);
             }
         }
     }
@@ -233,6 +250,16 @@ export class PlayerTranslator {
 
         const cnOnlyMode = !translateMode && cnToJp;
         const tasks: Promise<void>[] = [];
+        // One element must never be handed to two translation passes in the
+        // same sweep: each pass writes its own translation into the same
+        // `data-asmr-translated-text` slot, which renders the label twice
+        // whenever the passes disagree on how the text should be split.
+        const claimed = new Set<HTMLElement>();
+        const claim = (el: HTMLElement | null): el is HTMLElement => {
+            if (!el || claimed.has(el)) return false;
+            claimed.add(el);
+            return true;
+        };
 
         // Process all player surfaces (miniplayer bar + expanded player)
         const containers = document.querySelectorAll<HTMLElement>(
@@ -240,12 +267,13 @@ export class PlayerTranslator {
         );
         for (const playerBar of containers) {
             const trackNameEl = this.findTrackNameElement(playerBar);
-            const titleEl = playerBar.querySelector('.q-toolbar__title, .text-h6, .text-weight-bold.text-body1') as HTMLElement;
+            const titleEl = playerBar.querySelector('.q-toolbar__title, .text-h6, .text-weight-bold.text-body1') as HTMLElement | null;
             const artistEl = this.findSubtitleElement(playerBar, trackNameEl);
 
-            if (titleEl) tasks.push(this.translateElement(titleEl, 'title', cnOnlyMode));
-            if (artistEl) tasks.push(this.translateElement(artistEl, 'artist', cnOnlyMode));
-            if (trackNameEl) tasks.push(this.translateTrackName(trackNameEl, cnOnlyMode));
+            // The track name is the most specific reading of a node, so claim it first.
+            if (claim(trackNameEl)) tasks.push(this.translateTrackName(trackNameEl, cnOnlyMode));
+            if (claim(titleEl)) tasks.push(this.translateElement(titleEl, 'title', cnOnlyMode));
+            if (claim(artistEl)) tasks.push(this.translateElement(artistEl, 'artist', cnOnlyMode));
         }
 
         // Queue dialog items (only when the dialog is visible/rendered)
@@ -253,10 +281,10 @@ export class PlayerTranslator {
         if (queueList) {
             const queueItems = queueList.querySelectorAll<HTMLElement>('.q-item');
             for (const item of queueItems) {
-                const titleLabel = item.querySelector('.q-item__label:not(.q-item__label--caption)') as HTMLElement;
-                const captionLabel = item.querySelector('.q-item__label--caption') as HTMLElement;
-                if (titleLabel) tasks.push(this.translateTrackName(titleLabel, cnOnlyMode));
-                if (captionLabel) tasks.push(this.translateElement(captionLabel, 'title', cnOnlyMode));
+                const titleLabel = item.querySelector('.q-item__label:not(.q-item__label--caption)') as HTMLElement | null;
+                const captionLabel = item.querySelector('.q-item__label--caption') as HTMLElement | null;
+                if (claim(titleLabel)) tasks.push(this.translateTrackName(titleLabel, cnOnlyMode));
+                if (claim(captionLabel)) tasks.push(this.translateElement(captionLabel, 'title', cnOnlyMode));
             }
         }
 
@@ -344,7 +372,9 @@ export class PlayerTranslator {
             if (!rawText || rawText === nextTrackTitle) continue;
 
             el.textContent = nextTrackTitle;
-            el.title = '';
+            // The seeded title is usually longer than the mini-player slot.
+            // Keep the untruncated text reachable until translation resolves.
+            this.claimTitleAffordance(el, nextTrackTitle);
         }
     }
 
@@ -359,7 +389,7 @@ export class PlayerTranslator {
             const rawText = getCleanText(subtitleEl);
             if (!rawText || rawText === nextWorkTitle || rawText.includes(nextWorkTitle)) continue;
             subtitleEl.textContent = nextWorkTitle;
-            subtitleEl.title = '';
+            this.claimTitleAffordance(subtitleEl, nextWorkTitle);
         }
     }
 
@@ -459,9 +489,9 @@ export class PlayerTranslator {
                     el.dataset.asmrPrimaryText = display.primaryText;
                     el.dataset.asmrTranslatedText = translated || '';
                     el.classList.toggle('asmr-translation-pair', !!translated);
-                    el.title = translated
+                    this.claimTitleAffordance(el, translated
                         ? `${text} (${display.primaryText} — ${translated})`
-                        : `${text} (${display.primaryText})`;
+                        : `${text} (${display.primaryText})`);
                     this.applyStableMiniTitleLayout(el);
             } else if (translated && translated !== text) {
                 this.updateElement(el, text, translated);
@@ -531,9 +561,9 @@ export class PlayerTranslator {
                     el.dataset.asmrPrimaryText = el.textContent;
                     el.dataset.asmrTranslatedText = translated ? TranslationService.cleanQuotes(translated) : '';
                     el.classList.toggle('asmr-translation-pair', !!translated);
-                    el.title = translated
+                    this.claimTitleAffordance(el, translated
                         ? `${rawText} (${el.textContent} — ${translated})`
-                        : `${rawText} (${el.textContent})`;
+                        : `${rawText} (${el.textContent})`);
                     this.applyStableMiniTitleLayout(el);
             } else if (translated && translated !== stripped) {
                 this.updateElement(el, rawText, TranslationService.cleanQuotes(translated));
@@ -561,6 +591,12 @@ export class PlayerTranslator {
         el.dataset.asmrSource = original;
         el.dataset.asmrTranslatedText = '';
         delete el.dataset.asmrPrimaryText;
+        // No translation does not mean no truncation: the host marquee was
+        // measured against the *previous* track, so an untranslated long title
+        // is still mis-clipped. Give it the same stable ellipsis + full text.
+        el.classList.remove('asmr-translation-pair');
+        this.claimTitleAffordance(el, original);
+        this.applyStableMiniTitleLayout(el);
     }
 
     private updateElement(el: HTMLElement, original: string, translated: string) {
@@ -569,8 +605,38 @@ export class PlayerTranslator {
         el.dataset.asmrTranslatedText = translated;
         delete el.dataset.asmrPrimaryText;
         el.classList.add('asmr-translation-pair');
-        el.title = `${original} (${translated})`;
+        this.claimTitleAffordance(el, `${original} (${translated})`);
         this.applyStableMiniTitleLayout(el);
+    }
+
+    /**
+     * Expose the complete text of a title we clip. `title` covers pointer
+     * users, `aria-label` covers assistive tech, and `tabindex` makes the
+     * clipped label reachable by keyboard rather than silently unreadable.
+     * Ownership is recorded so reset/disable restores the host's own markup.
+     */
+    private claimTitleAffordance(el: HTMLElement, fullText: string): void {
+        if (!fullText) return;
+        el.dataset.asmrTitleOwned = 'true';
+        el.title = fullText;
+        el.setAttribute('aria-label', fullText);
+        if (!el.hasAttribute('tabindex') && el.closest(PLAYER_BAR_SELECTOR)) {
+            el.dataset.asmrTabindexOwned = 'true';
+            el.setAttribute('tabindex', '0');
+        }
+    }
+
+    private releaseTitleAffordance(el: HTMLElement): void {
+        // A title we did not add belongs to the host — blanking it would strip
+        // a tooltip the site provides on its own.
+        if (el.dataset.asmrTitleOwned !== 'true') return;
+        delete el.dataset.asmrTitleOwned;
+        el.removeAttribute('title');
+        el.removeAttribute('aria-label');
+        if (el.dataset.asmrTabindexOwned === 'true') {
+            delete el.dataset.asmrTabindexOwned;
+            el.removeAttribute('tabindex');
+        }
     }
 
     /**

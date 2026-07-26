@@ -1,3 +1,5 @@
+import { Logger } from '../../core/Logger';
+
 const OFFICIAL_ASMR_API_ORIGINS = new Set([
     'https://api.asmr.one',
     'https://api.asmr-100.com',
@@ -9,11 +11,27 @@ const MAX_DECODE_PASSES = 16;
 
 type OfficialMediaRoute = 'stream' | 'download';
 
+/**
+ * Why a media request produced no usable payload. Callers use this to decide
+ * whether a privileged retry is appropriate: a transport/status failure means
+ * the browser never got an answer it could read, while a blocked final URL or
+ * an invalid body means the response was seen and deliberately refused.
+ */
+export type SafeMediaFailureReason =
+    | 'unsupported-url'
+    | 'aborted'
+    | 'transport-error'
+    | 'http-error'
+    | 'blocked-final-url'
+    | 'invalid-body';
+
 export interface SafeMediaFetchOptions {
     maxBytes: number;
     signal?: AbortSignal;
     timeoutMs?: number;
     headers?: Record<string, string>;
+    /** Diagnostic hook invoked once whenever the request yields no payload. */
+    onFailure?: (reason: SafeMediaFailureReason, detail?: unknown) => void;
 }
 
 export interface SafeMediaBlob {
@@ -32,7 +50,7 @@ export interface SafeMediaArrayBuffer {
     statusText: string;
 }
 
-interface SafeMediaFetchPolicy {
+export interface SafeMediaFetchPolicy {
     url: string;
     redirect: RequestRedirect;
     acceptsFinalUrl(finalUrl: string): boolean;
@@ -197,6 +215,54 @@ function isTrustedOfficialFinalUrl(source: URL, route: OfficialMediaRoute, value
     return segments.length > 0 && segments.every(segment => fullyDecodePathSegment(segment) !== null);
 }
 
+function parseTrustedRawMediaRoute(url: URL): OfficialMediaRoute | null {
+    if (url.origin !== TRUSTED_RAW_MEDIA_ORIGIN || url.hash) return null;
+    const match = url.pathname.match(/^\/media\/(stream|download)\/(.+)$/);
+    if (!match) return null;
+    if (Array.from(url.searchParams.keys()).some(key => key !== 'verify')) return null;
+    const segments = match[2].split('/');
+    if (segments.some(segment => fullyDecodePathSegment(segment) === null)) return null;
+    return match[1] as OfficialMediaRoute;
+}
+
+/**
+ * Request policy for the exact official ASMR media routes (API media routes and
+ * the trusted raw-media origin they redirect to).
+ *
+ * The official media API does not answer cross-origin `fetch` with CORS
+ * headers on every deployment, so the anonymous browser transport can fail on
+ * URLs that a plain `<img src>` loads fine. Callers use this policy to retry
+ * such URLs through the privileged userscript bridge — and only for these
+ * origins. Every other host stays on ordinary credentialless CORS.
+ */
+export function getOfficialMediaRequestPolicy(value: string): SafeMediaFetchPolicy | null {
+    const normalized = normalizeSafeMediaUrl(value);
+    if (!normalized) return null;
+    const source = new URL(normalized);
+
+    const apiRoute = parseOfficialMediaRoute(source);
+    if (apiRoute) {
+        return {
+            url: normalized,
+            redirect: 'follow',
+            acceptsFinalUrl: finalUrl => isTrustedOfficialFinalUrl(source, apiRoute, finalUrl),
+        };
+    }
+
+    if (parseTrustedRawMediaRoute(source)) {
+        return {
+            url: normalized,
+            redirect: 'error',
+            acceptsFinalUrl: (finalUrl) => {
+                const normalizedFinal = normalizeSafeMediaUrl(finalUrl);
+                return !!normalizedFinal && sameNetworkUrl(source, new URL(normalizedFinal));
+            },
+        };
+    }
+
+    return null;
+}
+
 function getSafeMediaFetchPolicy(value: string): SafeMediaFetchPolicy | null {
     const normalized = normalizeSafeMediaUrl(value);
     if (!normalized) return null;
@@ -294,9 +360,19 @@ async function fetchSafeMediaChunks(
     value: string,
     options: SafeMediaFetchOptions,
 ): Promise<SafeMediaChunks | null> {
+    // A single reporting path so no media failure is silently swallowed: every
+    // `null` below is preceded by a debug log and an `onFailure` notification.
+    const fail = (reason: SafeMediaFailureReason, detail?: unknown): null => {
+        Logger.debug('[SafeMediaTransport] Media request produced no payload:', value, reason, detail);
+        options.onFailure?.(reason, detail);
+        return null;
+    };
+
     const policy = getSafeMediaFetchPolicy(value);
     const maxBytes = Math.floor(options.maxBytes);
-    if (!policy || !Number.isSafeInteger(maxBytes) || maxBytes <= 0 || options.signal?.aborted) return null;
+    if (!policy) return fail('unsupported-url');
+    if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) return fail('unsupported-url', maxBytes);
+    if (options.signal?.aborted) return fail('aborted', options.signal.reason);
 
     const controller = new AbortController();
     const abort = () => controller.abort(options.signal?.reason);
@@ -316,13 +392,21 @@ async function fetchSafeMediaChunks(
             redirect: policy.redirect,
             referrerPolicy: 'no-referrer',
         });
-        if (!response.ok || !policy.acceptsFinalUrl(response.url || policy.url)) {
+        if (!response.ok) {
             try {
                 await response.body?.cancel();
             } catch {
                 // Best-effort connection cleanup.
             }
-            return null;
+            return fail('http-error', response.status);
+        }
+        if (!policy.acceptsFinalUrl(response.url || policy.url)) {
+            try {
+                await response.body?.cancel();
+            } catch {
+                // Best-effort connection cleanup.
+            }
+            return fail('blocked-final-url', response.url || policy.url);
         }
         const body = await readResponseChunks(response, maxBytes);
         return body
@@ -334,9 +418,10 @@ async function fetchSafeMediaChunks(
                 status: response.status,
                 statusText: response.statusText,
             }
-            : null;
-    } catch {
-        return null;
+            : fail('invalid-body');
+    } catch (error) {
+        // A caller-driven abort is not a transport failure; a timeout is.
+        return fail(options.signal?.aborted ? 'aborted' : 'transport-error', error);
     } finally {
         options.signal?.removeEventListener('abort', abort);
         if (timeout !== undefined) globalThis.clearTimeout(timeout);

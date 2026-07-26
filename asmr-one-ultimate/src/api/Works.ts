@@ -28,12 +28,35 @@ export type WorkOrder =
 
 export interface WorksParams {
     page?: number;
+    /** Results per page. The API clamps its own maximum. */
+    pageSize?: number;
+    /** Alias accepted by some deployments; sent alongside pageSize. */
+    limit?: number;
     sort?: 'desc' | 'asc';
     order?: WorkOrder;
     seed?: number;
     tags?: string; // Comma separated IDs
     exclude_tags?: string; // Comma separated IDs
     query?: string; // Search query (title, circle, VA name)
+}
+
+/** Largest page the API is asked for; it may still return fewer. */
+export const WORKS_MAX_PAGE_SIZE = 100;
+
+/**
+ * Total results reported by the API, falling back to what actually arrived so
+ * callers never advertise a total smaller than the rows they are showing.
+ */
+export function readWorksTotalCount(response: WorksResponse, alreadyLoaded = 0): number {
+    const total = Number(response?.pagination?.totalCount);
+    const loaded = alreadyLoaded + (response?.works?.length ?? 0);
+    return Number.isSafeInteger(total) && total >= 0 ? Math.max(total, loaded) : loaded;
+}
+
+/** True when another page is worth requesting. */
+export function hasMoreWorkPages(response: WorksResponse, loadedCount: number): boolean {
+    if (!response?.works?.length) return false;
+    return loadedCount < readWorksTotalCount(response, loadedCount - response.works.length);
 }
 
 /**

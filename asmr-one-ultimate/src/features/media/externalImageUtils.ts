@@ -1,7 +1,9 @@
 import type { GmRequestConfig, GmResponse } from '../../infrastructure/HttpClient';
 import {
     fetchSafeMediaBlob,
+    getOfficialMediaRequestPolicy,
     normalizeSafeMediaUrl,
+    type SafeMediaFailureReason,
 } from './safeMediaTransport';
 
 export const CLOUDFLARE_RESTRICTED_IMAGE_HOST = 'www.cloudflare-terms-of-service-abuse.com';
@@ -52,7 +54,12 @@ async function normalizeBlob(blob: BlobLike): Promise<Blob> {
 
 interface VerifiedImageRequestOptions {
     proxyBaseUrl: string;
-    /** Used only for the exact imgbox raster allowlist, anonymously and with redirects blocked. */
+    /**
+     * Privileged userscript bridge, used only after the ordinary browser
+     * transport fails, and only for the official ASMR media origins or the
+     * exact imgbox raster allowlist. Every other host stays on credentialless
+     * CORS with no privileged retry.
+     */
     request: ImageRequest;
     /** @deprecated Other image requests remain ordinary credentialless CORS. */
     allowCorsFallback?: boolean;
@@ -60,6 +67,16 @@ interface VerifiedImageRequestOptions {
     headers?: Record<string, string>;
     dlsiteHeaders?: Record<string, string>;
 }
+
+/**
+ * Failures that mean the browser never received a readable answer. A blocked
+ * final URL or a refused body was a deliberate rejection, so those must not be
+ * retried through the privileged bridge.
+ */
+const PRIVILEGED_RETRY_FAILURES: ReadonlySet<SafeMediaFailureReason> = new Set<SafeMediaFailureReason>([
+    'transport-error',
+    'http-error',
+]);
 
 async function normalizeVerifiedRaster(response: GmResponse): Promise<Blob | null> {
     if (!isVerifiedImageResponse(response)) return null;
@@ -110,29 +127,92 @@ function isSameNetworkUrl(left: string, right: string): boolean {
     return leftUrl.toString() === rightUrl.toString();
 }
 
-async function requestTrustedNoCorsImage(
+interface PrivilegedImagePolicy {
+    url: string;
+    redirect: 'follow' | 'error';
+    /** Official ASMR media may carry the host session; foreign rasters stay anonymous. */
+    anonymous: boolean;
+    headers: Record<string, string>;
+    /** Managers that never report a final URL are only trusted when redirects are blocked. */
+    requiresFinalUrl: boolean;
+    acceptsFinalUrl(finalUrl: string): boolean;
+}
+
+/**
+ * Authorization for the official ASMR media API only. The token travels in a
+ * request header on the privileged (CORS-exempt) bridge, never in a URL.
+ */
+function getOfficialMediaAuthHeaders(): Record<string, string> {
+    try {
+        const token = String(globalThis.localStorage?.getItem('jwt-token') || '').trim();
+        // Header values must stay printable ASCII; anything else is not a JWT.
+        if (token && /^[\x21-\x7e]+$/.test(token)) return { Authorization: `Bearer ${token}` };
+    } catch {
+        // Storage can be unavailable in restricted contexts.
+    }
+    return {};
+}
+
+function resolvePrivilegedImagePolicy(candidateUrl: string): PrivilegedImagePolicy | null {
+    const official = getOfficialMediaRequestPolicy(candidateUrl);
+    if (official) {
+        return {
+            url: official.url,
+            redirect: official.redirect === 'follow' ? 'follow' : 'error',
+            anonymous: false,
+            headers: getOfficialMediaAuthHeaders(),
+            // The API legitimately redirects to the trusted raw-media origin,
+            // so a missing final URL is read as "no redirect happened" and is
+            // still validated against the same policy below.
+            requiresFinalUrl: false,
+            acceptsFinalUrl: official.acceptsFinalUrl,
+        };
+    }
+
+    if (isTrustedNoCorsImageUrl(candidateUrl)) {
+        const normalized = normalizeSafeMediaUrl(candidateUrl);
+        return {
+            url: normalized,
+            redirect: 'error',
+            anonymous: true,
+            headers: {},
+            requiresFinalUrl: true,
+            acceptsFinalUrl: finalUrl => isTrustedNoCorsImageUrl(finalUrl)
+                && isSameNetworkUrl(normalized, finalUrl),
+        };
+    }
+
+    return null;
+}
+
+async function requestPrivilegedImage(
     candidateUrl: string,
     options: VerifiedImageRequestOptions,
 ): Promise<GmResponse | null> {
-    if (!isTrustedNoCorsImageUrl(candidateUrl) || options.signal?.aborted) return null;
+    const policy = resolvePrivilegedImagePolicy(candidateUrl);
+    if (!policy || options.signal?.aborted) return null;
 
     const controller = new AbortController();
     let exceededLimit = false;
     const abort = () => controller.abort(options.signal?.reason);
     const accept = Object.entries(options.headers || {})
         .find(([key]) => key.toLowerCase() === 'accept')?.[1];
+    const headers: Record<string, string> = {
+        ...(accept ? { Accept: accept } : {}),
+        ...policy.headers,
+    };
     options.signal?.addEventListener('abort', abort, { once: true });
     if (options.signal?.aborted) abort();
 
     try {
         const response = await options.request({
-            url: candidateUrl,
+            url: policy.url,
             responseType: 'blob',
             timeout: 45_000,
-            anonymous: true,
-            redirect: 'error',
+            anonymous: policy.anonymous,
+            redirect: policy.redirect,
             signal: controller.signal,
-            headers: accept ? { Accept: accept } : undefined,
+            headers: Object.keys(headers).length > 0 ? headers : undefined,
             onprogress: ({ loaded, total, lengthComputable }) => {
                 if (
                     loaded > MAX_VERIFIED_IMAGE_BYTES
@@ -143,15 +223,9 @@ async function requestTrustedNoCorsImage(
                 }
             },
         });
-        const finalUrl = String(response.finalUrl || '');
-        if (
-            exceededLimit
-            || !finalUrl
-            || !isTrustedNoCorsImageUrl(finalUrl)
-            || !isSameNetworkUrl(candidateUrl, finalUrl)
-        ) {
-            return null;
-        }
+        const reportedFinalUrl = String(response.finalUrl || '');
+        if (exceededLimit || (policy.requiresFinalUrl && !reportedFinalUrl)) return null;
+        if (!policy.acceptsFinalUrl(reportedFinalUrl || policy.url)) return null;
         return response;
     } catch {
         return null;
@@ -342,11 +416,13 @@ export async function fetchVerifiedImageBlob(
         if (options.signal?.aborted) return null;
         if (candidateUrl.startsWith('blob:') || candidateUrl.startsWith('data:')) return null;
 
+        const failures: SafeMediaFailureReason[] = [];
         const result = await fetchSafeMediaBlob(candidateUrl, {
             maxBytes: MAX_VERIFIED_IMAGE_BYTES,
             signal: options.signal,
             timeoutMs: 45_000,
             headers: options.headers,
+            onFailure: reason => failures.push(reason),
         });
         let response: GmResponse | null = null;
         if (result) {
@@ -360,8 +436,11 @@ export async function fetchVerifiedImageBlob(
                 responseHeaders: responseHeaders.join('\r\n'),
                 finalUrl: result.finalUrl,
             };
-        } else {
-            response = await requestTrustedNoCorsImage(candidateUrl, options);
+        } else if (failures.every(reason => PRIVILEGED_RETRY_FAILURES.has(reason))) {
+            // The browser could not read an answer at all (missing CORS headers
+            // or an authenticated 4xx). Retry through the privileged bridge for
+            // the allowlisted origins only.
+            response = await requestPrivilegedImage(candidateUrl, options);
         }
         if (!response) continue;
         const blob = await normalizeVerifiedRaster(response);

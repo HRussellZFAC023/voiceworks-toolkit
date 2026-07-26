@@ -44,6 +44,7 @@ import {
     restoreMediaViewerWorkTreePatch,
     type WorkTreeClickHandler,
 } from './media/mediaViewerWorkTreePatchUtils';
+import { readHostAuthToken } from '../core/hostAuthToken';
 import {
     type ViewerMediaType,
     type Vue2MediaElement,
@@ -843,7 +844,7 @@ export class MediaViewerController {
     // =========================================================================
 
     private getMediaUrl(hash: string, item?: MediaFile): string {
-        const token = localStorage.getItem('jwt-token') || '';
+        const token = readHostAuthToken();
         const apiBaseUrl = resolveMediaApiBaseUrl(this.bridge.axios?.defaults?.baseURL);
         return buildMediaStreamUrl(hash, item, token, apiBaseUrl);
     }

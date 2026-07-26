@@ -117,7 +117,16 @@ function encodeOpaquePathSegments(value: string): string | null {
     return encoded.join('/');
 }
 
-function buildMediaPathFromHash(hash: string, route: PublicMediaRoute): string {
+/**
+ * Build the host-relative media path for an opaque media hash.
+ *
+ * Media hashes are `<workId>/<trackIndex>` style values (see `src/api/Media.ts`),
+ * so each segment is encoded individually and the `/` separators are preserved.
+ * `encodeURIComponent` on the whole hash would emit `%2F`, which the host API
+ * and the subtitle URL guards both reject. Returns '' for any hash that cannot
+ * be represented as safe, non-traversing path segments.
+ */
+export function buildMediaPathFromHash(hash: string, route: PublicMediaRoute): string {
     const encoded = encodeOpaquePathSegments(hash);
     return encoded ? `/api/media/${route}/${encoded}` : '';
 }

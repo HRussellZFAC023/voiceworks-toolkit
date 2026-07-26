@@ -29,6 +29,7 @@ import {
     resolveMediaApiBaseUrl,
 } from '../media/mediaStreamUrlUtils';
 import type { TracksResponse } from '../../types/api';
+import { readHostAuthToken } from '../../core/hostAuthToken';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -97,7 +98,7 @@ const itemCount = computed(() => items.value.length);
 const fileCountText = computed(() => format('fileListCount', { count: itemCount.value }));
 const token = computed(() => {
     try {
-        return localStorage.getItem('jwt-token') || '';
+        return readHostAuthToken();
     } catch {
         return '';
     }

@@ -202,6 +202,19 @@ describe('PlayerGallery', () => {
             }
             return browserImageResponse(url);
         }));
+        // The privileged bridge is retried for official media routes, so it has
+        // to reproduce the restriction as well: Cloudflare answers HTTP 200 from
+        // its own abuse host, which the final-URL policy must refuse.
+        mocks.gmRequest.mockImplementation(async ({ url }: { url: string }) => ({
+            status: 200,
+            statusText: 'OK',
+            responseText: '',
+            responseHeaders: 'content-type: image/png',
+            response: new Blob([Uint8Array.from([0xff, 0xd8, 0xff, 0xdb])], { type: 'image/png' }),
+            finalUrl: url.includes('restricted')
+                ? 'https://www.cloudflare-terms-of-service-abuse.com/stream.png'
+                : url,
+        }));
 
         const albumart = document.querySelector('.albumart') as HTMLElement;
         const wrapper = mount(PlayerGallery, { attachTo: albumart });
@@ -211,6 +224,8 @@ describe('PlayerGallery', () => {
         expect(coverSrc).toMatch(/^blob:verified-/);
 
         await wrapper.find('.asmr-gallery-next').trigger('click');
+        await flushPromises();
+        await vi.waitFor(() => expect(mocks.gmRequest).toHaveBeenCalled());
         await flushPromises();
 
         expect(wrapper.find('.asmr-gallery-img').attributes('src')).toBe(coverSrc);

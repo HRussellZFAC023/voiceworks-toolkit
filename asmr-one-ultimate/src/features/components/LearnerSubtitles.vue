@@ -54,7 +54,9 @@ import {
     resolveLearnerSecondaryLanguage,
     subtitleLanguageAttribute,
 } from '../learnerSubtitleMode';
+import { resolveWhisperListenerStatusKey } from '../whisperProgressPolicy';
 import { fetchSafeMediaText } from '../media/safeMediaTransport';
+import { buildMediaPathFromHash } from '../media/mediaStreamUrlUtils';
 
 // ---------------------------------------------------------------------------
 // Composables
@@ -238,19 +240,11 @@ const showCollapsed = computed(() => isPlayerMinimized.value && hasContent.value
 const whisperPlaceholderText = computed(() => {
     if (primaryText.value || secondaryText.value || !whisperStatusSessionActive.value) return '';
     const state = whisperUiState.value;
-    switch (state.stage) {
-        case 'loading':
-            return state.progressMessage || t('whisperLoading');
-        case 'transcribing':
-        case 'behind':
-            return state.progressMessage || t('whisperTranscribing');
-        case 'recovering':
-            return state.progressMessage || t('whisperRecovering');
-        case 'error':
-            return state.progressMessage || t('whisperUnknownError');
-        default:
-            return '';
+    if (state.stage === 'error') {
+        return state.progressMessage || t('whisperUnknownError');
     }
+    const listenerKey = resolveWhisperListenerStatusKey(state.stage);
+    return listenerKey ? t(listenerKey) : '';
 });
 const secondaryLanguage = computed(() => resolveLearnerSecondaryLanguage(
     learnerSubtitleMode.value,
@@ -1204,8 +1198,19 @@ async function fetchLrcByHash(
     expectedTrackKey: string,
     signal: AbortSignal,
 ): Promise<boolean> {
+    // Media hashes are `<workId>/<trackIndex>` (see src/api/Media.ts). Encoding
+    // the whole hash would turn the separator into `%2F`, which the host-API URL
+    // guard rejects as an ambiguous path — so every native LRC lookup threw and
+    // works without `availableLyrics` showed no subtitles at all. The shared
+    // builder encodes each segment while preserving the `/` separators.
+    const streamPath = buildMediaPathFromHash(hash, 'stream');
+    if (!streamPath) {
+        Logger.debug('[LearnerMode] Skipping unsafe native LRC hash:', hash);
+        return false;
+    }
+
     try {
-        const content = await fetchSubtitleText(`/api/media/stream/${encodeURIComponent(hash)}`, signal);
+        const content = await fetchSubtitleText(streamPath, signal);
         if (!isCurrentTrackRequest(generation, expectedTrackKey)) return false;
         if (!content) return false;
         const lyrics = parseLrcContent(content);
@@ -2887,7 +2892,7 @@ watch(
                 :furigana-all="furiganaAll"
             />
         </div>
-        <p v-if="whisperPlaceholderText" class="learner-whisper-placeholder" role="status">
+        <p v-if="whisperPlaceholderText" class="learner-whisper-placeholder">
             {{ whisperPlaceholderText }}
         </p>
         <span v-if="whisperCaptionDelayed" class="learner-whisper-delayed">
@@ -2943,7 +2948,7 @@ watch(
                     :furigana-all="furiganaAll"
                 />
             </div>
-            <p v-if="whisperPlaceholderText" class="learner-whisper-placeholder" role="status">
+            <p v-if="whisperPlaceholderText" class="learner-whisper-placeholder">
                 {{ whisperPlaceholderText }}
             </p>
             <span v-if="whisperCaptionDelayed" class="learner-whisper-delayed">

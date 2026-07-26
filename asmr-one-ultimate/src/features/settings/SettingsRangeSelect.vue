@@ -87,6 +87,7 @@ function onInput(event: Event): void {
 .asmr-range-selected {
     color: var(--asmr-accent);
     margin-bottom: 2px;
+    overflow-wrap: anywhere;
 }
 
 .asmr-range-input {
@@ -105,21 +106,24 @@ function onInput(event: Event): void {
 .asmr-range-ticks {
     display: grid;
     grid-auto-flow: column;
-    grid-auto-columns: 1fr;
+    grid-auto-columns: minmax(0, 1fr);
+    align-items: start;
     gap: 6px;
+    margin-top: 4px;
     color: var(--asmr-text-secondary);
 }
 
 .asmr-range-ticks button {
     appearance: none;
     border: 0;
-    padding: 2px;
+    min-width: 0;
+    padding: 4px 2px;
     overflow-wrap: anywhere;
     background: transparent;
     color: inherit;
     font: inherit;
     font-size: 0.7rem;
-    line-height: 1.2;
+    line-height: 1.25;
     text-align: center;
     cursor: pointer;
 }

@@ -7,6 +7,17 @@
    ============================================ */
 .asmr-settings-panel {
     color: var(--asmr-text-primary);
+
+    /* Status colors for inline hint/error copy. Both themes are declared here
+       because the panel renders inside the host surface, where a single fixed
+       hex is unreadable in one of the two themes. */
+    --asmr-settings-warning: #8a5300;
+    --asmr-settings-error: #b3261e;
+}
+
+:is(.body--dark, .q-dark) .asmr-settings-panel {
+    --asmr-settings-warning: #ffcc80;
+    --asmr-settings-error: #ef9a9a;
 }
 
 .asmr-settings-section {
@@ -37,6 +48,51 @@
 
 .asmr-settings-section .q-item__label {
     color: var(--asmr-text-primary);
+}
+
+/* Row geometry — rows must never overlap or clip at any panel width.
+   The host rows are `row no-wrap` flex containers, so the text column keeps
+   its automatic min-content floor unless it is cleared here; without it a long
+   label pushes the action column out of the panel instead of wrapping. */
+.asmr-settings-section .q-item__section--main {
+    min-width: 0;
+}
+
+/* Icon/action columns keep their intrinsic size so a long label cannot squash
+   a button. Sides that opt into `col-grow` (text inputs, selects) still grow,
+   but may shrink instead of overflowing the panel. */
+.asmr-settings-section .q-item__section--side:not(.col-grow) {
+    flex: 0 0 auto;
+}
+
+/* Quasar's `col-grow` is `flex: 1 0 auto`, so the control column could not
+   shrink and a text input ran past the right edge of the panel at every width.
+   Allow it to shrink and let the control track the column instead. */
+.asmr-settings-section .q-item__section--side.col-grow {
+    min-width: 0;
+    flex-shrink: 1;
+}
+
+.asmr-settings-section :is(.asmr-input, .asmr-hotkey-input, .asmr-select) {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+}
+
+.asmr-settings-section .q-item__label,
+.asmr-settings-section .q-item__label--caption {
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+    overflow-wrap: anywhere;
+    line-height: 1.35;
+}
+
+/* Quasar only spaces adjacent labels. Helper copy that follows a control
+   (range ticks, selects) needs the same separation or it touches the row
+   above it. */
+.asmr-settings-section .q-item__label + .q-item__label {
+    margin-top: 4px;
 }
 
 .asmr-settings-section .q-item__label--caption,
@@ -136,6 +192,13 @@
 
 .asmr-settings-select-hint {
     margin-top: 4px;
+}
+
+/* The range hint follows the tick row, not another label, so Quasar's adjacent
+   label spacing never applies to it. Without this it sits flush against the
+   tick buttons. */
+.asmr-settings-range-hint {
+    margin-top: 8px;
 }
 
 .asmr-settings-muted {
@@ -253,8 +316,11 @@
 /* ============================================
    Hint Text (API key links)
    ============================================ */
+/* A negative margin here pulled the status line into the padding of the row
+   above, so the two blocks touched. Keep the offset non-negative so rows can
+   never overlap. */
 .asmr-settings-hint {
-    margin-top: -8px;
+    margin-top: 0;
 }
 
 .asmr-settings-hint-text {

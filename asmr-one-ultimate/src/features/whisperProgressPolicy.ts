@@ -4,6 +4,38 @@ import type { WhisperCoverageRange } from './whisperCoverage';
 
 export type WhisperProgressPhase = 'loading' | 'model' | 'transcribing';
 
+export type WhisperListenerStatusKey =
+    | 'whisperPreparingSubtitles'
+    | 'whisperListeningForSpeech'
+    | 'whisperCatchingUp'
+    | 'whisperRestartingTranscription';
+
+/**
+ * Map canonical runtime state to calm listener-facing copy.
+ *
+ * The detailed progress message intentionally remains available in AppStore
+ * and EventBus for diagnostics. It combines several scopes (current playhead
+ * lag, whole-session coverage, and active work), so it does not belong in the
+ * player subtitle lane.
+ */
+export function resolveWhisperListenerStatusKey(
+    stage: WhisperState['stage'],
+): WhisperListenerStatusKey | null {
+    switch (stage) {
+        case 'loading':
+            return 'whisperPreparingSubtitles';
+        case 'transcribing':
+        case 'caught-up':
+            return 'whisperListeningForSpeech';
+        case 'behind':
+            return 'whisperCatchingUp';
+        case 'recovering':
+            return 'whisperRestartingTranscription';
+        default:
+            return null;
+    }
+}
+
 interface RuntimeProgressInput {
     model: string;
     backend: 'webgpu' | 'wasm';

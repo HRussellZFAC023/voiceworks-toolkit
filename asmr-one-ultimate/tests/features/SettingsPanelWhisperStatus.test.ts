@@ -26,7 +26,11 @@ const mocks = vi.hoisted(() => ({
     },
     effectiveModel: 'onnx-community/whisper-small_timestamped',
     effectiveBackend: 'webgpu' as 'webgpu' | 'wasm',
-    autoWarmupSuppression: null as 'force-wasm' | 'device-capability' | null,
+    autoWarmupSuppression: null as
+        | 'force-wasm'
+        | 'device-capability'
+        | 'manual-model-preparation'
+        | null,
     warmupModel: vi.fn(),
 }));
 
@@ -113,14 +117,22 @@ describe('SettingsPanel Whisper download status', () => {
         wrapper = undefined;
     });
 
-    it('warns that Base may need a shorter live context on integrated GPUs', () => {
-        mocks.configs.whisperModelPreset = 'base';
+    it('labels Medium as experimental and manual preparation only', () => {
+        mocks.configs.whisperModelPreset = 'medium';
+        mocks.configs.whisperAutoWarmup = true;
+        mocks.autoWarmupSuppression = 'manual-model-preparation';
         wrapper = shallowMount(SettingsPanel);
 
         const modelControl = wrapper
             .findAllComponents({ name: 'SettingsRangeSelect' })
             .find(control => control.props('configKey') === 'whisperModelPreset');
-        expect(modelControl?.props('hint')).toBe('whisperPresetBaseWarning');
+        const warmupToggle = wrapper
+            .findAllComponents({ name: 'SettingsToggle' })
+            .find(control => control.props('configKey') === 'whisperAutoWarmup');
+
+        expect(modelControl?.props('hint')).toBe('whisperPresetMediumWarning');
+        expect(warmupToggle?.props('sublabel'))
+            .toBe('whisperAutoWarmupSuppressedManualModel');
     });
 
     it.each([

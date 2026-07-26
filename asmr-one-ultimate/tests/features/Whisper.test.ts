@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { Whisper, resolveWhisperLanguage, resolveWhisperModelPreset } from '../../src/features/Whisper';
-import { DeviceCapabilities } from '../../src/core/DeviceCapabilities';
+import { DeviceCapabilities, __setWebGpuComputeProfileForTests } from '../../src/core/DeviceCapabilities';
 import { GpuScheduler, Priority } from '../../src/core/GpuScheduler';
 import { Config, I18n, Logger } from '../../src/core/Utils';
 import { EventBus } from '../../src/core/EventBus';
@@ -81,7 +81,7 @@ describe('Whisper', () => {
 
     function createCompatibilityWhisperSettings(overrides: Record<string, unknown> = {}) {
         return {
-            model: 'onnx-community/whisper-tiny',
+            model: 'onnx-community/whisper-tiny_timestamped',
             subtask: 'transcribe',
             language: 'ja',
             multilingual: true,
@@ -337,7 +337,7 @@ describe('Whisper', () => {
             (whisper as any).stopTranscription('test');
         });
 
-        it('uses bounded low-quality fallback without touching the oversized full source', async () => {
+        it('prefers bounded low-quality decode over live capture without touching the oversized full source', async () => {
             const whisper = new Whisper();
             const audio = document.createElement('audio');
             document.body.appendChild(audio);
@@ -355,7 +355,8 @@ describe('Whisper', () => {
             });
             vi.spyOn((whisper as any).bridge, 'currentWorkId', 'get').mockReturnValue('RJ01503719');
             const settings = createCompatibilityWhisperSettings();
-            stubTranscriptionRuntime(whisper, settings, false);
+            stubTranscriptionRuntime(whisper, settings, true);
+            const stopLiveCapture = vi.spyOn(whisper as any, 'stopLiveAudioCapture');
             const fetchAudio = vi.spyOn(whisper as any, 'fetchAndDecodeAudio')
                 .mockResolvedValue(new Float32Array(6 * 16_000));
 
@@ -375,6 +376,43 @@ describe('Whisper', () => {
                 expect.anything(),
                 expect.anything(),
             );
+            expect((whisper as any).startLiveAudioCapture).toHaveBeenCalledTimes(1);
+            expect(stopLiveCapture).toHaveBeenCalled();
+            (whisper as any).stopTranscription('test');
+        });
+
+        it('continues from standby live PCM when bounded low-quality decode fails', async () => {
+            const whisper = new Whisper();
+            const audio = document.createElement('audio');
+            document.body.appendChild(audio);
+            const lowUrl = 'https://raw.kiko-play-niptan.one/low/fallback-track.m4a';
+            vi.spyOn((whisper as any).bridge, 'currentTrack', 'get').mockReturnValue({
+                type: 'audio',
+                hash: 'fallback-track',
+                title: 'Fallback Track',
+                streamLowQualityUrl: lowUrl,
+                mediaStreamUrl: 'https://raw.kiko-play-niptan.one/full/fallback-track.flac',
+                size: 80 * 1024 * 1024,
+            });
+            vi.spyOn((whisper as any).bridge, 'currentWorkId', 'get').mockReturnValue('RJ000003');
+            const settings = createCompatibilityWhisperSettings();
+            stubTranscriptionRuntime(whisper, settings, true);
+            vi.mocked((whisper as any).startLiveAudioCapture).mockImplementation(() => {
+                (whisper as any).liveCaptureActive = true;
+                (whisper as any).pcmBuffer = new Float32Array(12 * 16_000);
+                (whisper as any).pcmSampleLength = 12 * 16_000;
+                (whisper as any).pcmDuration = 12;
+                return true;
+            });
+            vi.spyOn(whisper as any, 'fetchAndDecodeAudio')
+                .mockRejectedValue(new Error('bounded source unavailable'));
+            const startLoop = vi.mocked((whisper as any).startProcessingLoop);
+
+            await (whisper as any).startTranscription();
+
+            expect(startLoop).toHaveBeenCalledTimes(1);
+            expect((whisper as any).transcribing).toBe(true);
+            expect((whisper as any).liveCaptureActive).toBe(true);
             (whisper as any).stopTranscription('test');
         });
 
@@ -536,6 +574,68 @@ describe('Whisper', () => {
 
             whisper.disable();
             expect(status.isConnected).toBe(false);
+        });
+
+        it('suppresses the legacy cover status when the Vue learner surface is mounted', () => {
+            const player = document.createElement('div');
+            player.className = 'audio-player';
+            const albumArt = document.createElement('div');
+            albumArt.className = 'albumart';
+            player.appendChild(albumArt);
+            document.body.appendChild(player);
+
+            const whisper = new Whisper();
+            vi.spyOn((whisper as any).bridge, 'store', 'get').mockReturnValue({
+                state: {},
+                watch: vi.fn().mockReturnValue(vi.fn()),
+            });
+            vi.spyOn(Config, 'get').mockReturnValue(false);
+
+            whisper.enable();
+            const legacyStatus = document.querySelector('.whisper-status') as HTMLElement;
+            expect(legacyStatus).not.toBeNull();
+
+            const learnerRoot = document.createElement('div');
+            learnerRoot.id = 'asmr-learner-subs-root';
+            player.appendChild(learnerRoot);
+            (whisper as any).showStatus('<span>encoder_model.onnx · WEBGPU · 45%</span>');
+
+            expect(legacyStatus.style.display).toBe('none');
+            expect(legacyStatus.style.visibility).toBe('hidden');
+            expect(legacyStatus.textContent).toBe('');
+
+            whisper.disable();
+        });
+
+        it('hides the legacy cover status while the player is fullscreen', () => {
+            const player = document.createElement('div');
+            player.className = 'audio-player';
+            const albumArt = document.createElement('div');
+            albumArt.className = 'albumart';
+            player.appendChild(albumArt);
+            document.body.appendChild(player);
+
+            const whisper = new Whisper();
+            vi.spyOn((whisper as any).bridge, 'store', 'get').mockReturnValue({
+                state: {},
+                watch: vi.fn().mockReturnValue(vi.fn()),
+            });
+            vi.spyOn(Config, 'get').mockReturnValue(false);
+
+            whisper.enable();
+            const legacyStatus = document.querySelector('.whisper-status') as HTMLElement;
+            (whisper as any).showStatus('<span>Listening for speech…</span>');
+            expect(legacyStatus.style.visibility).toBe('visible');
+
+            player.classList.add('asmr-player-fullscreen');
+            EventBus.emit('fullscreen:enter', undefined);
+            (whisper as any).showStatus('<span>Listening for speech…</span>');
+
+            expect(legacyStatus.style.display).toBe('none');
+            expect(legacyStatus.style.visibility).toBe('hidden');
+            expect(legacyStatus.textContent).toBe('');
+
+            whisper.disable();
         });
 
         it('coalesces trailing transcript checkpoints into one delayed write', () => {
@@ -1059,7 +1159,7 @@ describe('Whisper', () => {
             vi.spyOn(whisper as any, 'showStatus').mockImplementation(() => {});
             (whisper as any).worker = worker;
             (whisper as any).loadedPlan = Object.freeze({
-                model: 'onnx-community/whisper-tiny',
+                model: 'onnx-community/whisper-tiny_timestamped',
                 backend: 'wasm',
                 multilingual: true,
             });
@@ -1070,7 +1170,7 @@ describe('Whisper', () => {
                 data: {
                     status: 'load-failed',
                     backend: 'wasm',
-                    model: 'onnx-community/whisper-tiny',
+                    model: 'onnx-community/whisper-tiny_timestamped',
                     dtype: 'q8-basic',
                     data: {
                         message: 'WASM session creation failed',
@@ -1155,7 +1255,7 @@ describe('Whisper', () => {
             (whisper as any).worker = oldWorker;
             (whisper as any).modelReady = true;
             (whisper as any).loadedPlan = Object.freeze({
-                model: 'onnx-community/whisper-tiny',
+                model: 'onnx-community/whisper-tiny_timestamped',
                 backend: 'webgpu',
                 multilingual: true,
             });
@@ -1245,7 +1345,7 @@ describe('Whisper', () => {
             vi.spyOn(whisper as any, 'getWhisperSettings').mockReturnValue(liveSettings);
             const send = vi.spyOn(whisper as any, 'sendChunk').mockImplementation(() => {});
 
-            const capacity = 12 * 16_000;
+            const capacity = Math.max(29, validSeconds) * 16_000;
             const validLength = validSeconds * 16_000;
             const buffer = new Float32Array(capacity);
             buffer.fill(0.5, 0, validLength);
@@ -1310,16 +1410,33 @@ describe('Whisper', () => {
         });
 
         it('indexes a nonzero live window from its start and ignores spare capacity', () => {
-            const { whisper, send } = setupLiveBuffer(100, 6);
+            const { whisper, send } = setupLiveBuffer(100, 29);
 
             (whisper as any).maybeProcessNextChunk();
 
+            // The first window after a fresh buffer is the short bootstrap
+            // window, so a caption appears without waiting a full 29s.
             expect(send).toHaveBeenCalledTimes(1);
             const chunk = send.mock.calls[0][0] as Float32Array;
             expect(send.mock.calls[0][1]).toBe(100);
-            expect(chunk.length).toBe(6 * 16_000);
+            expect(chunk.length).toBe(8 * 16_000);
             expect(chunk[0]).toBe(0.5);
             expect(chunk[chunk.length - 1]).toBe(0.5);
+        });
+
+        it('uses the full context window immediately after the bootstrap window', () => {
+            // Needs enough buffered audio for a full window after the bootstrap
+            // advance, otherwise the scheduler correctly waits for more.
+            const { whisper, send } = setupLiveBuffer(100, 60);
+
+            (whisper as any).maybeProcessNextChunk();
+            (whisper as any).pendingChunks = 0;
+            (whisper as any).maybeProcessNextChunk();
+
+            expect(send).toHaveBeenCalledTimes(2);
+            // Bootstrap advanced 8s with no overlap; the next window is full length.
+            expect(send.mock.calls[1][1]).toBe(108);
+            expect((send.mock.calls[1][0] as Float32Array).length).toBe(29 * 16_000);
         });
 
         it('waits on a paused partial chunk, then pads it only after the track ends', () => {
@@ -1333,7 +1450,7 @@ describe('Whisper', () => {
             expect((whisper as any).liveCaptureEnded).toBe(true);
             expect(send).toHaveBeenCalledTimes(1);
             const chunk = send.mock.calls[0][0] as Float32Array;
-            expect(chunk.length).toBe(6 * 16_000);
+            expect(chunk.length).toBe(29 * 16_000);
             expect(chunk[2 * 16_000 - 1]).toBe(0.5);
             expect(chunk[2 * 16_000]).toBe(0);
         });
@@ -1484,9 +1601,9 @@ describe('Whisper', () => {
             expect(settings.model).toBe('onnx-community/whisper-base_timestamped');
             expect(settings.forceWasm).toBe(false);
             expect(settings.preferLowPowerAdapter).toBe(false);
-            expect(settings.maxPendingChunks).toBe(3);
-            expect(settings.chunkLengthS).toBe(8);
-            expect(settings.strideLengthS).toBe(2);
+            expect(settings.maxPendingChunks).toBe(2);
+            expect(settings.chunkLengthS).toBe(29);
+            expect(settings.strideLengthS).toBe(5);
             expect(settings.autoWarmup).toBe(true);
         });
 
@@ -1607,7 +1724,7 @@ describe('Whisper', () => {
 
             const settings = (new Whisper() as any).getWhisperSettings();
 
-            expect(settings.model).toBe('onnx-community/whisper-tiny');
+            expect(settings.model).toBe('onnx-community/whisper-tiny_timestamped');
             expect(settings.maxPendingChunks).toBe(2);
             expect(settings.autoWarmup).toBe(false);
         });
@@ -2245,7 +2362,7 @@ describe('Whisper', () => {
             const { whisper, resetWorkerSpy, initSpy, stopSpy } = setupTerminalPoisonRecovery();
             vi.spyOn(whisper as any, 'persistCache').mockImplementation(() => {});
             (whisper as any).activeRunSettings = Object.freeze({
-                model: 'onnx-community/whisper-tiny',
+                model: 'onnx-community/whisper-tiny_timestamped',
                 backend: 'webgpu',
                 multilingual: true,
             });
@@ -2259,7 +2376,7 @@ describe('Whisper', () => {
 
             loseDevice();
             expect(initSpy).toHaveBeenCalledWith(expect.objectContaining({
-                model: 'onnx-community/whisper-tiny',
+                model: 'onnx-community/whisper-tiny_timestamped',
                 backend: 'webgpu',
             }));
             expect(stopSpy).not.toHaveBeenCalled();
@@ -2300,7 +2417,7 @@ describe('Whisper', () => {
             (whisper as any).handleWorkerMessage({
                 data: {
                     status: 'ready',
-                    model: 'onnx-community/whisper-tiny',
+                    model: 'onnx-community/whisper-tiny_timestamped',
                     backend: 'wasm',
                     dtype: 'q8',
                     chunkId: 77,
@@ -2315,7 +2432,7 @@ describe('Whisper', () => {
             const whisper = new Whisper();
             const failSpy = vi.spyOn(whisper as any, 'failPinnedSelection').mockImplementation(() => {});
             (whisper as any).loadedPlan = Object.freeze({
-                model: 'onnx-community/whisper-tiny',
+                model: 'onnx-community/whisper-tiny_timestamped',
                 backend: 'webgpu',
                 multilingual: true,
             });
@@ -2323,7 +2440,7 @@ describe('Whisper', () => {
             (whisper as any).handleWorkerMessage({
                 data: {
                     status: 'initiate',
-                    model: 'onnx-community/whisper-tiny',
+                    model: 'onnx-community/whisper-tiny_timestamped',
                     backend: 'cuda',
                 },
             } as any);
@@ -2347,14 +2464,14 @@ describe('Whisper', () => {
             (whisper as any).handleWorkerMessage({
                 data: {
                     status: 'ready',
-                    model: 'onnx-community/whisper-tiny',
+                    model: 'onnx-community/whisper-tiny_timestamped',
                     backend: 'wasm',
                     dtype: 'q8',
                 },
             } as any);
 
             expect(failSpy).toHaveBeenCalledWith(
-                expect.stringContaining('onnx-community/whisper-tiny / wasm'),
+                expect.stringContaining('onnx-community/whisper-tiny_timestamped / wasm'),
                 'worker-ready-selection-mismatch',
             );
             expect((whisper as any).modelReady).toBe(false);
@@ -2447,7 +2564,7 @@ describe('Whisper', () => {
             (whisper as any).timingQuality = input.timingQuality || null;
             (whisper as any).throughputRatio = input.throughputRatio ?? null;
             (whisper as any).activeRunSettings = Object.freeze({
-                model: 'onnx-community/whisper-tiny',
+                model: 'onnx-community/whisper-tiny_timestamped',
                 backend: 'webgpu',
                 chunkLengthS: 6,
             });
@@ -2465,7 +2582,7 @@ describe('Whisper', () => {
             (whisper as any).processedRanges = [{ start: 0, end: 6 }];
             (whisper as any).pcmDuration = 12;
             (whisper as any).activeRunSettings = Object.freeze({
-                model: 'onnx-community/whisper-tiny',
+                model: 'onnx-community/whisper-tiny_timestamped',
                 backend: 'webgpu',
                 chunkLengthS: 6,
             });
@@ -2522,7 +2639,7 @@ describe('Whisper', () => {
 
             expect(AppStore.state.whisper).toMatchObject({
                 stage: 'behind',
-                model: 'whisper-tiny',
+                model: 'whisper-tiny_timestamped',
                 backend: 'webgpu',
                 processedSeconds: 20,
                 totalSeconds: 100,
@@ -2532,7 +2649,7 @@ describe('Whisper', () => {
                 timingQuality: 'segment',
                 progress: 20,
             });
-            expect(AppStore.state.whisper.progressMessage).toContain('whisper-tiny');
+            expect(AppStore.state.whisper.progressMessage).toContain('whisper-tiny_timestamped');
             expect(AppStore.state.whisper.progressMessage).toContain('WEBGPU');
             expect(AppStore.state.whisper.progressMessage).toMatch(/^30s behind/);
         });
@@ -2761,6 +2878,80 @@ describe('Whisper', () => {
             expect((whisper as any).segments).toEqual([]);
             expect((whisper as any).processedRanges).toEqual([{ start: 0, end: 2 }]);
             expect(persist).toHaveBeenCalledOnce();
+        });
+
+        it('retries a speech-level filtered window with wider neighbouring context', () => {
+            const { whisper } = setupProgressiveWhisper(24);
+            stubFinalChunkPipeline(whisper);
+            ownChunk(whisper, 70, 0, 24);
+            (whisper as any).transcribedUpTo = 24;
+
+            (whisper as any).handleWorkerMessage(completeChunk(70, {
+                text: 'ご視聴ありがとうございました',
+                rawChunks: [{ text: 'ご視聴ありがとうございました', timestamp: [0, 24] }],
+                // ~-45 dBFS: a quiet ASMR whisper, well above room tone.
+                inputRms: 0.006,
+            }));
+
+            expect((whisper as any).segments).toEqual([]);
+            expect((whisper as any).processedRanges).toEqual([{ start: 0, end: 12 }]);
+            expect((whisper as any).transcribedUpTo).toBe(12);
+        });
+
+        it('does not re-examine an ambience-level window, which would halve throughput', () => {
+            const { whisper } = setupProgressiveWhisper(24);
+            stubFinalChunkPipeline(whisper);
+            ownChunk(whisper, 71, 0, 24);
+            (whisper as any).transcribedUpTo = 24;
+
+            (whisper as any).handleWorkerMessage(completeChunk(71, {
+                text: 'ご視聴ありがとうございました',
+                rawChunks: [{ text: 'ご視聴ありがとうございました', timestamp: [0, 24] }],
+                // ~-86 dBFS: below any plausible speech, so the window is final.
+                inputRms: 0.00005,
+            }));
+
+            expect((whisper as any).processedRanges).toEqual([{ start: 0, end: 24 }]);
+            expect((whisper as any).transcribedUpTo).toBe(24);
+        });
+
+        it('retries a quiet region at most once so it cannot loop', () => {
+            const { whisper } = setupProgressiveWhisper(24);
+            stubFinalChunkPipeline(whisper);
+            ownChunk(whisper, 72, 0, 24);
+            (whisper as any).transcribedUpTo = 24;
+
+            const quiet = () => completeChunk(72, {
+                text: 'ご視聴ありがとうございました',
+                rawChunks: [{ text: 'ご視聴ありがとうございました', timestamp: [0, 24] }],
+                inputRms: 0.006,
+            });
+
+            (whisper as any).handleWorkerMessage(quiet());
+            expect((whisper as any).transcribedUpTo).toBe(12);
+
+            ownChunk(whisper, 72, 0, 24);
+            (whisper as any).transcribedUpTo = 24;
+            (whisper as any).handleWorkerMessage(quiet());
+
+            // Second pass over the same offset is credited in full.
+            expect((whisper as any).transcribedUpTo).toBe(24);
+        });
+
+        it('does not re-examine a quiet window while already behind the playhead', () => {
+            const { whisper } = setupProgressiveWhisper(24);
+            stubFinalChunkPipeline(whisper);
+            ownChunk(whisper, 73, 0, 24);
+            (whisper as any).transcribedUpTo = 24;
+            (whisper as any).lastBacklogSeconds = 45;
+
+            (whisper as any).handleWorkerMessage(completeChunk(73, {
+                text: 'ご視聴ありがとうございました',
+                rawChunks: [{ text: 'ご視聴ありがとうございました', timestamp: [0, 24] }],
+                inputRms: 0.006,
+            }));
+
+            expect((whisper as any).transcribedUpTo).toBe(24);
         });
 
         it('strips complete and split timestamp tokens from provisional heartbeat text', () => {
@@ -3463,13 +3654,13 @@ describe('Whisper', () => {
             expect(sendChunk).not.toHaveBeenCalled();
         });
 
-        it('uses a shorter bootstrap chunk before first worker activity', () => {
+        it('uses the configured authoritative context before first worker activity', () => {
             const { whisper, sendChunk } = setupReadyChunkPipeline(0);
 
             (whisper as any).maybeProcessNextChunk();
 
             expect(sendChunk).toHaveBeenCalledTimes(1);
-            expect(sendChunk.mock.calls[0]?.[4]).toBe(6);
+            expect(sendChunk.mock.calls[0]?.[4]).toBe(29);
         });
 
         it('preserves every oldest missing live window across repeated slow worker cycles', async () => {
@@ -3600,17 +3791,17 @@ describe('Whisper', () => {
             }
 
             expect(sendChunk.mock.calls.map(call => call[1])).toEqual([
-                20, 26, 32, 38, 44, 50, 56, 62, 68, 80,
+                20, 44, 68, 92, 116,
             ]);
         });
 
-        it('uses the same bootstrap chunk size on WebGPU', () => {
+        it('uses the same authoritative context on WebGPU', () => {
             const { whisper, sendChunk } = setupReadyChunkPipeline(0);
 
             (whisper as any).maybeProcessNextChunk();
 
             expect(sendChunk).toHaveBeenCalledTimes(1);
-            expect(sendChunk.mock.calls[0]?.[4]).toBe(6);
+            expect(sendChunk.mock.calls[0]?.[4]).toBe(29);
         });
 
         it('transfers a compact PCM copy without detaching the live ring', () => {
@@ -4007,7 +4198,7 @@ describe('Whisper', () => {
     describe('cached hallucination sanitation', () => {
         const cachedSettings = {
             preset: 'tiny',
-            model: 'onnx-community/whisper-tiny',
+            model: 'onnx-community/whisper-tiny_timestamped',
             backend: 'webgpu',
             subtask: 'transcribe',
             language: 'japanese',
@@ -4203,7 +4394,7 @@ describe('Whisper', () => {
     describe('resolveWhisperModelPreset', () => {
         it('maps explicit presets to official browser-compatible model IDs', () => {
             expect(resolveWhisperModelPreset('tiny', 'ignored'))
-                .toBe('onnx-community/whisper-tiny');
+                .toBe('onnx-community/whisper-tiny_timestamped');
             expect(resolveWhisperModelPreset('base', 'ignored'))
                 .toBe('onnx-community/whisper-base_timestamped');
             expect(resolveWhisperModelPreset('small', 'ignored'))
@@ -4217,8 +4408,8 @@ describe('Whisper', () => {
         it('defers auto (or unknown) to the configured compatibility model', () => {
             expect(resolveWhisperModelPreset('auto', 'onnx-community/whisper-small_timestamped'))
                 .toBe('onnx-community/whisper-small_timestamped');
-            expect(resolveWhisperModelPreset('auto', 'onnx-community/whisper-tiny'))
-                .toBe('onnx-community/whisper-tiny');
+            expect(resolveWhisperModelPreset('auto', 'onnx-community/whisper-tiny_timestamped'))
+                .toBe('onnx-community/whisper-tiny_timestamped');
             expect(resolveWhisperModelPreset('bogus', 'onnx-community/custom-model'))
                 .toBe('onnx-community/custom-model');
             expect(resolveWhisperModelPreset('', '')).toBe('onnx-community/whisper-small_timestamped');
@@ -4286,7 +4477,7 @@ describe('Whisper', () => {
                 .toBe('onnx-community/whisper-large-v3-turbo_timestamped');
         });
 
-        it('uses timestamped Base for Auto on the M1 profile with adaptive word timing', () => {
+        it('uses timestamped Base and full context for Auto on the M1 profile', () => {
             mockConfig({ whisperModelPreset: 'auto' });
             mockDevice({
                 tier: 'full', hasGpu: true, memory: -1, cores: 10,
@@ -4295,12 +4486,12 @@ describe('Whisper', () => {
             });
             const settings = (new Whisper() as any).getWhisperSettings();
             expect(settings.model).toBe('onnx-community/whisper-base_timestamped');
-            expect(settings.chunkLengthS).toBe(8);
-            expect(settings.strideLengthS).toBe(2);
+            expect(settings.chunkLengthS).toBe(29);
+            expect(settings.strideLengthS).toBe(5);
             expect(settings.catchUpChunkLengthS).toBe(29);
             expect(settings.catchUpStrideLengthS).toBe(5);
-            expect(settings.adaptiveCatchUp).toBe(true);
-            expect(settings.maxPendingChunks).toBe(3);
+            expect(settings.adaptiveCatchUp).toBe(false);
+            expect(settings.maxPendingChunks).toBe(2);
 
             mockConfig({ whisperModelPreset: 'base' });
             const manualSettings = (new Whisper() as any).getWhisperSettings();
@@ -4341,8 +4532,49 @@ describe('Whisper', () => {
                 gpuVendor: '', reason: 'limited, GPU, intel-mac',
             });
             const settings = (new Whisper() as any).getWhisperSettings();
-            expect(settings.model).toBe('onnx-community/whisper-tiny');
+            expect(settings.model).toBe('onnx-community/whisper-tiny_timestamped');
             expect(settings.backend).toBe('webgpu');
+        });
+
+        it('does not downgrade a GPU that exposes subgroups, even on Firefox/mac', () => {
+            // Chromium-class compute must not be held back because another
+            // browser lacks the feature. Measured: subgroups => 3.6-5.5x
+            // realtime; without => 0.15-0.22x on the same M1.
+            mockConfig({ whisperModelPreset: 'auto' });
+            vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(
+                'Mozilla/5.0 (Macintosh; Intel Mac OS X 14.5; rv:153.0) Gecko/20100101 Firefox/153.0',
+            );
+            vi.spyOn(navigator, 'platform', 'get').mockReturnValue('MacIntel');
+            __setWebGpuComputeProfileForTests({
+                subgroups: true, subgroupMatrix: true, shaderF16: true, maxBufferBytes: 4 * 1024 ** 3,
+            });
+            mockDevice(fullProfile);
+
+            const settings = (new Whisper() as any).getWhisperSettings();
+            expect(settings.model).toBe('onnx-community/whisper-small_timestamped');
+            expect(settings.backend).toBe('webgpu');
+        });
+
+        it('uses the conservative tier when the adapter is measured to lack subgroups', () => {
+            mockConfig({ whisperModelPreset: 'auto' });
+            __setWebGpuComputeProfileForTests({
+                subgroups: false, subgroupMatrix: false, shaderF16: true, maxBufferBytes: 1024 ** 3,
+            });
+            mockDevice(fullProfile);
+
+            const settings = (new Whisper() as any).getWhisperSettings();
+            expect(settings.model).toBe('onnx-community/whisper-base_timestamped');
+        });
+
+        it('keeps an explicit preset pinned regardless of measured GPU capability', () => {
+            mockConfig({ whisperModelPreset: 'small' });
+            __setWebGpuComputeProfileForTests({
+                subgroups: false, subgroupMatrix: false, shaderF16: false, maxBufferBytes: 1024 ** 3,
+            });
+            mockDevice(fullProfile);
+
+            const settings = (new Whisper() as any).getWhisperSettings();
+            expect(settings.model).toBe('onnx-community/whisper-small_timestamped');
         });
 
         it('force-WASM keeps an explicit model exact and changes only the selected backend', () => {
@@ -4475,9 +4707,15 @@ describe('Whisper', () => {
             mockDevice(fullProfile, true);
             expect(new Whisper().getAutoWarmupSuppressionReason())
                 .toBe('force-wasm');
+
+            vi.restoreAllMocks();
+            mockConfig({ whisperAutoWarmup: true, whisperModelPreset: 'medium' });
+            mockDevice(fullProfile, true);
+            expect(new Whisper().getAutoWarmupSuppressionReason())
+                .toBe('manual-model-preparation');
         });
 
-        it('clears stale ready UI and warms the newly selected idle model', () => {
+        it('clears stale ready UI without auto-loading a newly selected experimental model', () => {
             const config = mockConfig({
                 whisperAutoWarmup: true,
                 whisperModelPreset: 'small',
@@ -4507,9 +4745,10 @@ describe('Whisper', () => {
                 expect(worker.postMessage).toHaveBeenCalledWith({ type: 'reset' });
                 expect(AppStore.state.whisper.progress).toBe(0);
                 expect((whisper as any).modelReady).toBe(false);
-                expect(initSpy).toHaveBeenCalledWith(expect.objectContaining({
+                expect(initSpy).not.toHaveBeenCalled();
+                expect((whisper as any).getWhisperSettings()).toEqual(expect.objectContaining({
                     model: 'onnx-community/whisper-medium_timestamped',
-                    autoWarmup: true,
+                    autoWarmup: false,
                 }));
             } finally {
                 (whisper as any).eventCleanups.splice(0).forEach((cleanup: () => void) => cleanup());

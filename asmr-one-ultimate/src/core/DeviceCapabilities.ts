@@ -124,6 +124,71 @@ export function isFirefoxMacWhisperCompatibilityProfile(profile: Pick<
         && (isAppleM1CompatibilityGpu(profile.gpuVendor) || isUnknownMemoryFirefoxMac);
 }
 
+/**
+ * Compute-relevant WebGPU adapter capabilities, measured rather than inferred
+ * from the user agent.
+ *
+ * `subgroups` is the decisive one for transcription throughput: ONNX Runtime
+ * Web's fast matmul kernels require it, and without it ORT falls back to naive
+ * shaders. Measured on an Apple M1 with whisper-small (encoder fp32 +
+ * decoder q4), same model and same code in both browsers:
+ *   Chromium (subgroups + subgroup-matrix): 3.6-5.5x realtime
+ *   Firefox  (neither)                    : 0.15-0.22x realtime
+ * That is a ~25x gap, so it must drive model choice — otherwise capable GPUs
+ * get held back to protect browsers that would fall behind anyway.
+ */
+export interface WebGpuComputeProfile {
+    subgroups: boolean;
+    subgroupMatrix: boolean;
+    shaderF16: boolean;
+    maxBufferBytes: number;
+}
+
+let cachedWebGpuComputeProfile: WebGpuComputeProfile | null = null;
+let webGpuComputeProbe: Promise<WebGpuComputeProfile | null> | null = null;
+
+/** Last probed compute profile, or null if it has not resolved yet. */
+export function getWebGpuComputeProfile(): WebGpuComputeProfile | null {
+    return cachedWebGpuComputeProfile;
+}
+
+/** Probe once and cache. Safe to call repeatedly; never throws. */
+export function probeWebGpuComputeProfile(): Promise<WebGpuComputeProfile | null> {
+    if (cachedWebGpuComputeProfile) return Promise.resolve(cachedWebGpuComputeProfile);
+    if (webGpuComputeProbe) return webGpuComputeProbe;
+    const gpu = (navigator as Navigator & { gpu?: { requestAdapter?: (o?: unknown) => Promise<unknown> } }).gpu;
+    const requestAdapter = gpu?.requestAdapter?.bind(gpu);
+    if (!requestAdapter) return Promise.resolve(null);
+    webGpuComputeProbe = (async () => {
+        try {
+            const adapter = await requestAdapter({ powerPreference: 'high-performance' }) as {
+                features?: { has?: (f: string) => boolean };
+                limits?: { maxBufferSize?: number };
+            } | null;
+            if (!adapter) return null;
+            const has = (feature: string): boolean => adapter.features?.has?.(feature) === true;
+            cachedWebGpuComputeProfile = {
+                subgroups: has('subgroups'),
+                subgroupMatrix: has('chromium-experimental-subgroup-matrix') || has('subgroup-matrix'),
+                shaderF16: has('shader-f16'),
+                maxBufferBytes: Number(adapter.limits?.maxBufferSize) || 0,
+            };
+            return cachedWebGpuComputeProfile;
+        } catch {
+            return null;
+        } finally {
+            webGpuComputeProbe = null;
+        }
+    })();
+    return webGpuComputeProbe;
+}
+
+/** Test seam. */
+export function __setWebGpuComputeProfileForTests(profile: WebGpuComputeProfile | null): void {
+    cachedWebGpuComputeProfile = profile;
+    webGpuComputeProbe = null;
+}
+
 const WEBGPU_CORE_MIN_BUFFER_BYTES = 256 * 1024 * 1024;
 
 /**
