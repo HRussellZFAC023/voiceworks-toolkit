@@ -1,6 +1,7 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
     AsyncSerialQueue,
+    FfmpegOpusTranscoder,
     buildOpusArguments,
     encodeMetadataBlockPicture,
     hasOpusContainerSignature,
@@ -120,5 +121,78 @@ describe('buildOpusArguments', () => {
         ffmpeg.terminate();
         expect(revokeObjectURL).toHaveBeenCalledWith('blob:https://asmr.one/class-worker');
         expect(terminate).toHaveBeenCalledTimes(1);
+    });
+});
+
+describe('FfmpegOpusTranscoder instance lifecycle', () => {
+    // jsdom exposes neither Worker nor WebAssembly, and isSupported() gates on
+    // both, so stub them to reach the lifecycle logic under test.
+    beforeEach(() => {
+        vi.stubGlobal('Worker', class {});
+        if (typeof WebAssembly === 'undefined') vi.stubGlobal('WebAssembly', {});
+    });
+    afterEach(() => { vi.unstubAllGlobals(); });
+
+    /**
+     * ffmpeg.wasm never returns memory to the host, and a trapped module stays
+     * trapped. Reported live: a 32-file job died at 7/32 with
+     * "RuntimeError: index out of bounds", and every remaining file inherited
+     * the poisoned instance.
+     */
+    function createFakeFfmpeg(behaviour: { failOn?: number } = {}) {
+        let calls = 0;
+        const terminated = { count: 0 };
+        const instance = {
+            calls: () => calls,
+            terminated,
+            on: vi.fn(), off: vi.fn(),
+            writeFile: vi.fn(async () => {}),
+            readFile: vi.fn(async () => new Uint8Array()),
+            deleteFile: vi.fn(async () => {}),
+            ffprobe: vi.fn(async () => 0),
+            exec: vi.fn(async () => {
+                calls += 1;
+                if (behaviour.failOn && calls === behaviour.failOn) {
+                    throw new Error('RuntimeError: index out of bounds');
+                }
+                return 0;
+            }),
+            terminate: vi.fn(() => { terminated.count += 1; }),
+        };
+        return instance;
+    }
+
+    it('retires a trapped module instead of reusing it for the next file', async () => {
+        const created: ReturnType<typeof createFakeFfmpeg>[] = [];
+        const transcoder = new FfmpegOpusTranscoder();
+        // Force a fresh fake per load so instance reuse is observable.
+        (transcoder as unknown as { loadInstance: () => Promise<unknown> }).loadInstance = async () => {
+            const fake = createFakeFfmpeg({ failOn: 1 });
+            created.push(fake);
+            return fake;
+        };
+
+        await expect(transcoder.transcode({
+            input: new Uint8Array(16), inputExtension: '.mp3', bitrateKbps: 96,
+        } as never)).rejects.toThrow(/index out of bounds/);
+
+        // The failed module must have been terminated and dropped, so a second
+        // conversion loads a brand new one rather than inheriting the trap.
+        expect(created).toHaveLength(1);
+        expect(created[0].terminated.count).toBeGreaterThan(0);
+        expect((transcoder as unknown as { ffmpeg?: unknown }).ffmpeg).toBeUndefined();
+    });
+
+    it('does not touch the virtual filesystem of a trapped module', async () => {
+        const fake = createFakeFfmpeg({ failOn: 1 });
+        const transcoder = new FfmpegOpusTranscoder();
+        (transcoder as unknown as { loadInstance: () => Promise<unknown> }).loadInstance = async () => fake;
+
+        await expect(transcoder.transcode({
+            input: new Uint8Array(16), inputExtension: '.mp3', bitrateKbps: 96,
+        } as never)).rejects.toThrow();
+
+        // deleteFile on a corrupt module throws again and masks the real error.
+        expect(fake.deleteFile).not.toHaveBeenCalled();
     });
 });

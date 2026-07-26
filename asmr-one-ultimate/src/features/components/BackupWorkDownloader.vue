@@ -37,6 +37,8 @@ const props = withDefaults(defineProps<{
     /** Demand-driven metadata fetch; `detailed` also reads the file manifest. */
     enrichWorks?: (ids: Array<string | number>, detailed?: boolean) => void;
     searchTotal?: number;
+    /** How far `searchTotal` can be trusted; 'unknown' hides it entirely. */
+    searchTotalKind?: 'unknown' | 'exact' | 'approximate';
     searchHasMore?: boolean;
     stagedDestination?: boolean;
 }>(), {
@@ -54,6 +56,7 @@ const props = withDefaults(defineProps<{
     loadMoreWorks: undefined,
     enrichWorks: undefined,
     searchTotal: 0,
+    searchTotalKind: 'unknown',
     searchHasMore: false,
     stagedDestination: false,
 });
@@ -242,9 +245,15 @@ const searchResultSummary = computed(() => {
     const shown = standaloneWorks.value.length;
     if (!shown) return '';
     const total = Math.max(props.searchTotal, shown);
-    return total > shown
-        ? format('downloadCenterResultCount', { shown: shown.toLocaleString(), total: total.toLocaleString() })
-        : format('downloadCenterResultCountUnknown', { shown: shown.toLocaleString() });
+    // A bare "Showing 200" is only honest when no source could report how many
+    // matches exist; every other case says how much is still out there.
+    if (props.searchTotalKind === 'unknown') {
+        return format('downloadCenterResultCountUnknown', { shown: shown.toLocaleString() });
+    }
+    const key = props.searchTotalKind === 'approximate'
+        ? 'downloadCenterResultCountApprox'
+        : 'downloadCenterResultCount';
+    return format(key, { shown: shown.toLocaleString(), total: total.toLocaleString() });
 });
 const selectedMeasuredBytes = computed(() => selectedWorks.value.reduce((sum, work) => sum + Math.max(0, displayedSizeBytes(work) ?? 0), 0));
 const hasUnknownSelectedBytes = computed(() => selectedWorks.value.some(work => sizeCompleteness(work) === 'unavailable' || sizeCompleteness(work) === 'loading'));

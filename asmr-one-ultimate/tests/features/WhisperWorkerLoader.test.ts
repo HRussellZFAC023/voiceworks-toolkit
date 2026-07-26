@@ -980,3 +980,32 @@ describe('WhisperWorkerLoader', () => {
         }));
     });
 });
+
+describe('split-device session options', () => {
+    it('applies basic graph optimization when the decoder is split onto WASM', () => {
+        const workerSelf = createTestWorker();
+        const device = workerSelf.__whisperTestResolveDeviceForModules(true);
+
+        // Firefox's timer-polled readback always selects the split layout.
+        expect(device).toEqual({ encoder_model: 'webgpu', decoder_model_merged: 'wasm' });
+        // Without this, ORT's extended optimizer fails session creation with
+        // `qdq_actions.cc TransposeDQWeightsForMatMulNBits` on the q8 decoder.
+        expect(workerSelf.__whisperTestGetSessionOptionsForDevice(device)).toEqual({
+            graphOptimizationLevel: 'basic',
+        });
+    });
+
+    it('leaves an all-WebGPU layout on the extended optimizer', () => {
+        const workerSelf = createTestWorker();
+        const device = workerSelf.__whisperTestResolveDeviceForModules(false);
+
+        expect(device).toBe('webgpu');
+        expect(workerSelf.__whisperTestGetSessionOptionsForDevice(device)).toBeNull();
+    });
+
+    it('wires the split session options into the WebGPU pipeline call', () => {
+        const code = __getWhisperWorkerCodeForTests(true);
+        expect(code).toContain('const splitSessionOptions = getSessionOptionsForDevice(resolvedDevice);');
+        expect(code).toContain('...(splitSessionOptions ? { session_options: splitSessionOptions } : {})');
+    });
+});

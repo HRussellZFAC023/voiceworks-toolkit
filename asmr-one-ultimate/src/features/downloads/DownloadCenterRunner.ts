@@ -87,6 +87,8 @@ export interface DownloadCenterRunResult {
     skipped: number;
     /** Completed work folders the browser refused to receive. */
     exportFailures: number;
+    /** Individual files that failed but did not abort the surrounding job. */
+    skippedFiles: number;
 }
 
 export class DownloadCenterRunError extends Error {
@@ -472,6 +474,7 @@ export class DownloadCenterRunner {
                     jobId,
                     skipped: outcome.options.discovery?.skippedWorkIds.length ?? 0,
                     exportFailures: outcome.exportFailures,
+                    skippedFiles: outcome.skippedFiles ?? 0,
                 };
             } catch (error) {
                 const normalized = this.leaseLost && !(error instanceof DownloadCenterRunError)
@@ -502,7 +505,7 @@ export class DownloadCenterRunner {
         initialOptions: PersistedDownloadCenterOptions,
         onProgress?: DownloadCenterProgressListener,
         existingSink?: DownloadSink,
-    ): Promise<{ options: PersistedDownloadCenterOptions; exportFailures: number }> {
+    ): Promise<{ options: PersistedDownloadCenterOptions; exportFailures: number; skippedFiles?: number }> {
         const destination = resolvePersistedDestination(initialOptions);
         const sink = existingSink ?? await createDownloadSink(destination);
         let options = await this.ensureTitles(jobId, initialOptions, onProgress);
@@ -573,18 +576,31 @@ export class DownloadCenterRunner {
         const exportFailures = (await exportTracker?.settle()) ?? 0;
         const finalFiles = await this.repository.listFiles(jobId);
         if (!finalFiles.every(file => file.status === 'completed')) {
-            const failedFile = finalFiles.find(file => file.error);
-            if (failedFile?.error) {
-                Logger.warn('[DownloadCenter] File download failed', failedFile.path, failedFile.error);
-                throw new DownloadCenterRunError(
-                    'failed',
-                    new Error(`${failedFile.path}: ${failedFile.error}`),
-                );
+            const failedFiles = finalFiles.filter(file => file.error);
+            if (failedFiles.length) {
+                for (const file of failedFiles) {
+                    Logger.warn('[DownloadCenter] File download failed', file.path, file.error);
+                }
+                // One unreadable or unconvertible file must not destroy a whole
+                // multi-work job. A 32-file run that died at file 7 and reported
+                // only "Work download failed" was the single worst reported
+                // downloader behaviour. Failed files keep their error and stay
+                // resumable; the run reports how many were skipped.
+                const completedFiles = finalFiles.filter(file => file.status === 'completed');
+                if (!completedFiles.length) {
+                    const first = failedFiles[0];
+                    throw new DownloadCenterRunError(
+                        'failed',
+                        new Error(`${first.path}: ${first.error}`),
+                    );
+                }
+                onProgress?.({ jobId, phase: 'complete', current: completedFiles.length, total: finalFiles.length });
+                return { options, exportFailures, skippedFiles: failedFiles.length };
             }
             throw new DownloadCenterRunError('paused');
         }
         onProgress?.({ jobId, phase: 'complete', current: finalFiles.length, total: finalFiles.length });
-        return { options, exportFailures };
+        return { options, exportFailures, skippedFiles: 0 };
     }
 
     /**

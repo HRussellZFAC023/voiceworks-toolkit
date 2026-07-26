@@ -36,7 +36,12 @@ import { fetchCachedCommunityPlaylist } from '../playlist/CommunityPlaylistDetai
 import { PlaylistDiscoveryService } from '../playlist/PlaylistDiscoveryService';
 import { getApiBaseUrl, getAuthHeader } from '../playlist/PlaylistService';
 import type { CommunityPlaylistSummary } from '../playlist/types';
-import { semanticWorkSearch } from '../SemanticWorkSearchService';
+import {
+    clearSemanticWorkSearchCache,
+    SEMANTIC_WORK_SEARCH_PAGE_SIZE,
+    semanticWorkSearch,
+    type SemanticWorkSearchPage,
+} from '../SemanticWorkSearchService';
 import BackupWorkDownloader from './BackupWorkDownloader.vue';
 
 const { t, format } = useI18n();
@@ -60,16 +65,34 @@ const ownSeeds = new Map<string, PlaylistEntry>();
 const resolving = new Map<string, Promise<void>>();
 const enrichingWorks = new Map<string, Promise<void>>();
 const searchTotal = ref(0);
+/**
+ * How much the reported total can be trusted. `exact` when it is derived from
+ * one lane (or from lanes that are fully loaded), `approximate` while two
+ * overlapping lanes still have unread pages, `unknown` before any lane answers.
+ */
+const searchTotalKind = ref<'unknown' | 'exact' | 'approximate'>('unknown');
 const searchHasMore = ref(false);
 let unsubscribeRunner: (() => void) | undefined;
 let disposed = false;
 /** Invalidates results merged by a query the user has already replaced. */
 let searchGeneration = 0;
-let livePages: { query: string; page: number; loaded: number; total: number } | null = null;
+interface LiveSearchLane {
+    query: string; page: number; loaded: number; total: number; hasMore: boolean;
+    /**
+     * Whether the API actually sent pagination.totalCount. readWorksTotalCount
+     * falls back to the page length, which is a defensive guess — presenting
+     * that as an exact total ('Showing 5 of 5') states a non-fact.
+     */
+    reportedTotal: boolean;
+}
+/** The semantic lane pages by rank, so its next offset is what it has loaded. */
+interface SemanticSearchLane { query: string; loaded: number; total: number; hasMore: boolean }
+let livePages: LiveSearchLane | null = null;
+let semanticPages: SemanticSearchLane | null = null;
 const DOWNLOAD_CENTER_LIVE_SEARCH_WAIT_MS = 30_000;
 const DOWNLOAD_CENTER_SEMANTIC_SEARCH_WAIT_MS = 30_000;
-/** The hosted index allows up to 200; the old value of 20 hid most matches. */
-const DOWNLOAD_CENTER_SEMANTIC_SEARCH_LIMIT = 200;
+/** One page of semantic hits; paging replaced the old silent 200-hit ceiling. */
+const DOWNLOAD_CENTER_SEMANTIC_PAGE_SIZE = SEMANTIC_WORK_SEARCH_PAGE_SIZE;
 const DOWNLOAD_CENTER_ENRICH_CONCURRENCY = 3;
 /** True when finished works must be exported instead of written to a folder. */
 const stagedDestination = computed(() => canCreateDownloadDestination() && !supportsDirectoryPicker());
@@ -562,6 +585,69 @@ function countDirectResults(): number {
     return works.value.filter(work => work.directSearchResult).length;
 }
 
+function nextLiveLane(query: string, response: WorksResponse, previous: LiveSearchLane | null): LiveSearchLane {
+    const loaded = (previous?.loaded ?? 0) + response.works.length;
+    return {
+        query,
+        page: (previous?.page ?? 0) + 1,
+        loaded,
+        // Never let a later page shrink the reported total. Recomputing it from
+        // the newest response alone made "Showing 3 of 900" become
+        // "Showing 6 of 6" on the next click.
+        total: Math.max(
+            previous?.total ?? 0,
+            readWorksTotalCount(response, loaded - response.works.length),
+        ),
+        reportedTotal: (previous?.reportedTotal ?? false)
+            || typeof response.pagination?.totalCount === 'number',
+        // An empty page ends the lane even when the reported total disagrees,
+        // so "load more" can never loop on a catalogue that has run out.
+        hasMore: hasMoreWorkPages(response, loaded),
+    };
+}
+
+function nextSemanticLane(query: string, page: SemanticWorkSearchPage, previous: SemanticSearchLane | null): SemanticSearchLane {
+    const loaded = (previous?.loaded ?? 0) + page.results.length;
+    const total = Math.max(page.total, loaded);
+    return { query, loaded, total, hasMore: page.results.length > 0 && loaded < total };
+}
+
+/**
+ * Recomputes the combined total from both lanes.
+ *
+ * The lanes overlap and only the duplicates among already-delivered rows are
+ * observable, so the combined figure is both lane totals minus the duplicates
+ * seen so far. That can only ever over-count works nobody has loaded yet, it
+ * never drops below what is on screen, and it converges on the exact number
+ * once every page has been read — which is why a two-lane result set in
+ * progress is labelled as approximate rather than presented as fact.
+ */
+function updateSearchTotals(): void {
+    const shown = countDirectResults();
+    searchHasMore.value = (livePages?.hasMore ?? false) || (semanticPages?.hasMore ?? false);
+    if (!livePages && !semanticPages) {
+        searchTotal.value = shown;
+        searchTotalKind.value = 'unknown';
+        return;
+    }
+    const liveTotal = livePages?.total ?? 0;
+    const semanticTotal = semanticPages?.total ?? 0;
+    const delivered = (livePages?.loaded ?? 0) + (semanticPages?.loaded ?? 0);
+    const duplicates = Math.max(0, delivered - shown);
+    searchTotal.value = Math.max(shown, liveTotal + semanticTotal - duplicates);
+    const pending = (liveTotal - (livePages?.loaded ?? 0)) + (semanticTotal - (semanticPages?.loaded ?? 0));
+    // If the only lane that answered never actually reported a total, we are
+    // showing a fallback derived from the page length. Say "unknown" rather
+    // than dressing a defensive guess up as an exact count.
+    const liveTotalIsReal = !livePages || livePages.reportedTotal;
+    if (!liveTotalIsReal && semanticTotal === 0) {
+        searchTotal.value = shown;
+        searchTotalKind.value = 'unknown';
+        return;
+    }
+    searchTotalKind.value = liveTotal > 0 && semanticTotal > 0 && pending > 0 ? 'approximate' : 'exact';
+}
+
 async function searchAllWorks(query: string): Promise<void> {
     const generation = ++searchGeneration;
     const previousWorks = new Map(works.value.map(work => [normalizeWorkId(work.id), work]));
@@ -580,7 +666,9 @@ async function searchAllWorks(query: string): Promise<void> {
         options.value = { ...options.value, selectedWorkIds: retainedSelectedWorkIds };
     }
     livePages = null;
+    semanticPages = null;
     searchTotal.value = 0;
+    searchTotalKind.value = 'unknown';
     searchHasMore.value = false;
 
     const applyResults = (
@@ -589,20 +677,17 @@ async function searchAllWorks(query: string): Promise<void> {
     ): void => {
         if (generation !== searchGeneration) return;
         mergeSearchResults(source, results, previousWorks);
-        searchTotal.value = Math.max(searchTotal.value, countDirectResults(), livePages?.total ?? 0);
+        updateSearchTotals();
     };
 
     const recordLivePage = (response: WorksResponse): void => {
         if (generation !== searchGeneration) return;
-        const loaded = (livePages?.loaded ?? 0) + response.works.length;
-        livePages = {
-            query,
-            page: (livePages?.page ?? 0) + 1,
-            loaded,
-            total: readWorksTotalCount(response, loaded - response.works.length),
-        };
-        searchHasMore.value = hasMoreWorkPages(response, loaded);
-        searchTotal.value = Math.max(searchTotal.value, livePages.total, countDirectResults());
+        livePages = nextLiveLane(query, response, livePages);
+    };
+
+    const recordSemanticPage = (page: SemanticWorkSearchPage): void => {
+        if (generation !== searchGeneration) return;
+        semanticPages = nextSemanticLane(query, page, semanticPages);
     };
 
     const exactRj = /^[A-Za-z]{2}\d+$/.test(query.trim());
@@ -623,44 +708,48 @@ async function searchAllWorks(query: string): Promise<void> {
     }
 
     const semanticRequest = settleSearch(withSearchDeadline(
-        semanticWorkSearch(query, DOWNLOAD_CENTER_SEMANTIC_SEARCH_LIMIT),
+        semanticWorkSearch(query, { limit: DOWNLOAD_CENTER_SEMANTIC_PAGE_SIZE, offset: 0 }),
         DOWNLOAD_CENTER_SEMANTIC_SEARCH_WAIT_MS,
         'Hosted semantic search',
     ));
+    const fromLive = (response: WorksResponse) => ({ source: 'live' as const, response });
+    const fromSemantic = (page: SemanticWorkSearchPage) => ({ source: 'semantic' as const, page });
     // Return as soon as either the live catalogue succeeds or semantic search
     // has a non-empty answer. The slower source continues in the background and
     // is merged only if this is still the active query.
     const primary = await Promise.race([
         liveRequest.then(async live => {
-            if (live.status === 'fulfilled' && live.value.works.length > 0) {
-                return { source: 'live' as const, results: live.value.works, response: live.value };
-            }
+            if (live.status === 'fulfilled' && live.value.works.length > 0) return fromLive(live.value);
             const semantic = await semanticRequest;
-            if (semantic.status === 'fulfilled') return { source: 'semantic' as const, results: semantic.value };
-            if (live.status === 'fulfilled') return { source: 'live' as const, results: live.value.works, response: live.value };
+            if (semantic.status === 'fulfilled') return fromSemantic(semantic.value);
+            if (live.status === 'fulfilled') return fromLive(live.value);
             Logger.warn('[DownloadCenter] Live work search unavailable', live.reason);
             Logger.warn('[DownloadCenter] Hosted semantic work search unavailable', semantic.reason);
             throw live.reason;
         }),
         semanticRequest.then(async semantic => {
-            if (semantic.status === 'fulfilled' && semantic.value.length > 0) {
-                return { source: 'semantic' as const, results: semantic.value };
-            }
+            if (semantic.status === 'fulfilled' && semantic.value.results.length > 0) return fromSemantic(semantic.value);
             const live = await liveRequest;
-            if (live.status === 'fulfilled') return { source: 'live' as const, results: live.value.works, response: live.value };
-            if (semantic.status === 'fulfilled') return { source: 'semantic' as const, results: semantic.value };
+            if (live.status === 'fulfilled') return fromLive(live.value);
+            if (semantic.status === 'fulfilled') return fromSemantic(semantic.value);
             Logger.warn('[DownloadCenter] Live work search unavailable', live.reason);
             Logger.warn('[DownloadCenter] Hosted semantic work search unavailable', semantic.reason);
             throw live.reason;
         }),
     ]);
-    if (primary.source === 'live') recordLivePage(primary.response);
-    applyResults(primary.source, primary.results as unknown as Record<string, unknown>[]);
+    if (primary.source === 'live') {
+        recordLivePage(primary.response);
+        applyResults('live', primary.response.works as unknown as Record<string, unknown>[]);
+    } else {
+        recordSemanticPage(primary.page);
+        applyResults('semantic', primary.page.results as unknown as Record<string, unknown>[]);
+    }
 
     if (primary.source !== 'semantic') {
         void semanticRequest.then(semantic => {
             if (semantic.status === 'fulfilled') {
-                applyResults('semantic', semantic.value as unknown as Record<string, unknown>[]);
+                recordSemanticPage(semantic.value);
+                applyResults('semantic', semantic.value.results as unknown as Record<string, unknown>[]);
             } else {
                 Logger.warn('[DownloadCenter] Hosted semantic work search unavailable', semantic.reason);
             }
@@ -678,31 +767,71 @@ async function searchAllWorks(query: string): Promise<void> {
     }
 }
 
-/** Appends the next live-catalogue page, keeping every loaded row selectable. */
+/**
+ * Appends the next page of every lane that still has results.
+ *
+ * Both lanes advance together and merge into the same collection, so results
+ * beyond the first semantic page are reachable, duplicates across lanes
+ * collapse onto one row, and an existing selection is never disturbed. A lane
+ * that fails keeps its unread pages, so the button can simply be pressed again.
+ */
 async function loadMoreWorks(): Promise<void> {
-    const pages = livePages;
-    if (!pages || !searchHasMore.value) return;
+    if (!searchHasMore.value) return;
     const generation = searchGeneration;
-    const response = await withSearchDeadline(
-        WorksApi.searchWorks(pages.query, {
-            page: pages.page + 1,
-            pageSize: WORKS_MAX_PAGE_SIZE,
-            limit: WORKS_MAX_PAGE_SIZE,
-        }),
-        DOWNLOAD_CENTER_LIVE_SEARCH_WAIT_MS,
-        'Live site search',
-    );
-    if (generation !== searchGeneration || livePages !== pages) return;
-    const loaded = pages.loaded + response.works.length;
-    livePages = {
-        query: pages.query,
-        page: pages.page + 1,
-        loaded,
-        total: readWorksTotalCount(response, pages.loaded),
-    };
-    searchHasMore.value = hasMoreWorkPages(response, loaded);
-    mergeSearchResults('live', response.works as unknown as Record<string, unknown>[], new Map());
-    searchTotal.value = Math.max(searchTotal.value, livePages.total, countDirectResults());
+    const live = livePages;
+    const semantic = semanticPages;
+    const liveRequest = live?.hasMore
+        ? settleSearch(withSearchDeadline(
+            WorksApi.searchWorks(live.query, {
+                page: live.page + 1,
+                pageSize: WORKS_MAX_PAGE_SIZE,
+                limit: WORKS_MAX_PAGE_SIZE,
+            }),
+            DOWNLOAD_CENTER_LIVE_SEARCH_WAIT_MS,
+            'Live site search',
+        ))
+        : undefined;
+    const semanticRequest = semantic?.hasMore
+        ? settleSearch(withSearchDeadline(
+            semanticWorkSearch(semantic.query, {
+                limit: DOWNLOAD_CENTER_SEMANTIC_PAGE_SIZE,
+                offset: semantic.loaded,
+            }),
+            DOWNLOAD_CENTER_SEMANTIC_SEARCH_WAIT_MS,
+            'Hosted semantic search',
+        ))
+        : undefined;
+    const [liveOutcome, semanticOutcome] = await Promise.all([liveRequest, semanticRequest]);
+    // Only a NEW SEARCH invalidates this page. Do not compare both lane refs:
+    // searchAllWorks merges the slower lane's first page in the background, so
+    // that lane's ref changes for reasons unrelated to this request, and
+    // comparing it discarded a perfectly good page — a dead "Load more" click
+    // with no error and no spinner, during the ordinary first-search window.
+    // Each lane is instead validated against the ref it actually paged from,
+    // just before it is applied.
+    if (generation !== searchGeneration) return;
+    let advanced = false;
+    let failure: unknown;
+    if (live && livePages === live && liveOutcome?.status === 'fulfilled') {
+        livePages = nextLiveLane(live.query, liveOutcome.value, live);
+        mergeSearchResults('live', liveOutcome.value.works as unknown as Record<string, unknown>[], new Map());
+        advanced = true;
+    } else if (liveOutcome?.status === 'rejected') {
+        Logger.warn('[DownloadCenter] Could not load another live search page', liveOutcome.reason);
+        failure = liveOutcome.reason;
+    }
+    if (semantic && semanticPages === semantic && semanticOutcome?.status === 'fulfilled') {
+        semanticPages = nextSemanticLane(semantic.query, semanticOutcome.value, semantic);
+        mergeSearchResults('semantic', semanticOutcome.value.results as unknown as Record<string, unknown>[], new Map());
+        advanced = true;
+    } else if (semanticOutcome?.status === 'rejected') {
+        Logger.warn('[DownloadCenter] Could not load another semantic search page', semanticOutcome.reason);
+        failure ??= semanticOutcome.reason;
+    }
+    updateSearchTotals();
+    // One lane answering is a usable page; only a page that added nothing at
+    // all is a failure the user has to be told about.
+    if (!advanced && failure) throw failure;
 }
 
 function setRunnerProgress(next: BackupDownloadProgress & { jobId?: string }): void {
@@ -772,16 +901,21 @@ async function refreshResumableJobs(): Promise<void> {
     catch (error) { Logger.warn('[DownloadCenter] Could not recover interrupted downloads', error); }
 }
 
-function completionLabel(result: { skipped: number; exportFailures?: number }): string {
+function completionLabel(result: { skipped: number; exportFailures?: number; skippedFiles?: number }): string {
     if (result.exportFailures) {
         return format('backupDownloaderDoneWithExportFailures', { count: result.exportFailures });
+    }
+    // A file that fails no longer aborts the job, so the count has to be
+    // reported or the run would look completely clean.
+    if (result.skippedFiles) {
+        return format('backupDownloaderDoneWithSkippedFiles', { count: result.skippedFiles });
     }
     return result.skipped
         ? format('backupDownloaderDoneWithSkipped', { count: result.skipped })
         : t('backupDownloaderDone');
 }
 
-function markDownloadComplete(result: { jobId: string; skipped: number; exportFailures?: number }): void {
+function markDownloadComplete(result: { jobId: string; skipped: number; exportFailures?: number; skippedFiles?: number }): void {
     resumableJobs.value = resumableJobs.value.filter(job => job.id !== result.jobId);
     progress.value = {
         ...(progress.value ?? { current: 1, total: 1 }),
@@ -887,6 +1021,9 @@ onMounted(() => {
 onUnmounted(() => {
     visible.value = false;
     disposed = true;
+    // The paging cache holds a whole ranked index in memory; nothing can page
+    // once this feature is gone, so release it.
+    clearSemanticWorkSearchCache();
     unsubscribeRunner?.();
 });
 
@@ -894,8 +1031,8 @@ defineExpose({ open });
 </script>
 
 <template>
-    <button class="q-btn q-btn-flat q-btn-dense asmr-download-center-btn text-white" data-testid="download-center-open" :title="t('downloadCenterButton')" :aria-label="t('downloadCenterButton')" @click="open"><span class="q-btn__content"><i class="q-icon material-icons" aria-hidden="true">download_for_offline</i></span></button>
+    <button class="q-btn q-btn-flat q-btn-dense asmr-download-center-btn text-white" data-testid="download-center-open" :title="t('downloadCenterButton')" :aria-label="t('downloadCenterButton')" @click="open"><span class="q-btn__content"><i class="q-icon material-icons" aria-hidden="true">download</i></span></button>
     <Teleport to="body">
-        <BackupWorkDownloader v-if="visible" :playlists="playlists" :works="works" :profile="profile" :show-own="signedIn" :loading-own="loadingOwn" :loading-public="loadingPublic" :own-load-failed="ownLoadFailed" :public-load-failed="publicLoadFailed" :busy="busy" :progress="displayProgress" :error-message="jobError" :resumable-jobs="resumableJobs.map(job => ({ id: job.id, title: job.title, convertToOpus: job.options.state.convertToOpus, needsTitleTranslation: needsTitleTranslation(job) }))" :resolve-playlist="resolvePlaylist" :search-all-works="searchAllWorks" :load-more-works="loadMoreWorks" :enrich-works="requestWorkEnrichment" :search-total="searchTotal" :search-has-more="searchHasMore" :staged-destination="stagedDestination" @close="close" @source-change="handleSourceChange" @update="updateProfile" @start="startDownload" @pause="pauseDownload" @resume="resumeDownload" @resume-without-opus="resumeDownloadWithoutOpus" @resume-with-original-titles="resumeDownloadWithOriginalTitles" />
+        <BackupWorkDownloader v-if="visible" :playlists="playlists" :works="works" :profile="profile" :show-own="signedIn" :loading-own="loadingOwn" :loading-public="loadingPublic" :own-load-failed="ownLoadFailed" :public-load-failed="publicLoadFailed" :busy="busy" :progress="displayProgress" :error-message="jobError" :resumable-jobs="resumableJobs.map(job => ({ id: job.id, title: job.title, convertToOpus: job.options.state.convertToOpus, needsTitleTranslation: needsTitleTranslation(job) }))" :resolve-playlist="resolvePlaylist" :search-all-works="searchAllWorks" :load-more-works="loadMoreWorks" :enrich-works="requestWorkEnrichment" :search-total="searchTotal" :search-total-kind="searchTotalKind" :search-has-more="searchHasMore" :staged-destination="stagedDestination" @close="close" @source-change="handleSourceChange" @update="updateProfile" @start="startDownload" @pause="pauseDownload" @resume="resumeDownload" @resume-without-opus="resumeDownloadWithoutOpus" @resume-with-original-titles="resumeDownloadWithOriginalTitles" />
     </Teleport>
 </template>

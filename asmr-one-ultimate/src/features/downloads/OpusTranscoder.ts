@@ -215,11 +215,36 @@ export function hasOpusContainerSignature(bytes: Uint8Array): boolean {
 }
 
 /** Dynamically loaded to keep the userscript below its distribution size cap. */
+/**
+ * ffmpeg.wasm never returns memory to the host: its linear heap only grows, and
+ * deleting files from the virtual filesystem does not compact it. Converting a
+ * long run of works — especially WAV sources, which are an order of magnitude
+ * larger than the MP3s — eventually traps the module with
+ * "RuntimeError: index out of bounds" partway through a job.
+ *
+ * Recycle the instance once a run has pushed this many bytes through it. The
+ * core is fetched through blob URLs that stay cached, so a restart costs far
+ * less than losing the job.
+ */
+const FFMPEG_RECYCLE_AFTER_BYTES = 512 * 1024 * 1024;
+
 export class FfmpegOpusTranscoder implements OpusTranscoder {
     private ffmpeg?: Promise<FfmpegInstance>;
     private readonly transcodes = new AsyncSerialQueue();
+    private bytesSinceLoad = 0;
 
     isSupported(): boolean { return typeof WebAssembly !== 'undefined' && typeof Worker !== 'undefined'; }
+
+    /**
+     * Drop the cached instance so the next conversion starts on a clean heap.
+     * Safe to call on an already-dead module: terminate() may itself throw once
+     * the WASM memory is corrupt, and that must not mask the original failure.
+     */
+    private discardInstance(instance?: FfmpegInstance): void {
+        this.ffmpeg = undefined;
+        this.bytesSinceLoad = 0;
+        try { instance?.terminate(); } catch { /* already dead */ }
+    }
 
     private async instance(): Promise<FfmpegInstance> {
         if (!this.ffmpeg) this.ffmpeg = this.loadInstance().catch(error => {
@@ -255,14 +280,25 @@ export class FfmpegOpusTranscoder implements OpusTranscoder {
 
     private async transcodeExclusive(request: OpusTranscodeRequest): Promise<Uint8Array> {
         if (!this.isSupported()) throw new Error('Opus conversion is not supported in this browser');
+        // Restart before the heap is exhausted rather than after it traps.
+        if (this.bytesSinceLoad >= FFMPEG_RECYCLE_AFTER_BYTES) {
+            const stale = await this.ffmpeg?.catch(() => undefined);
+            this.discardInstance(stale);
+        }
         const ffmpeg = await this.instance();
+        this.bytesSinceLoad += request.input.byteLength;
         const suffix = crypto.randomUUID();
         const inputPath = `input-${suffix}.${request.inputExtension.replace(/^\./, '') || 'audio'}`;
         const outputPath = `output-${suffix}.opus`;
         const probePath = `probe-${suffix}.json`;
         const verifyPath = `verify-${suffix}.json`;
         let extractedCoverPath = '';
-        const abort = () => { ffmpeg.terminate(); this.ffmpeg = undefined; };
+        const abort = () => { this.discardInstance(ffmpeg); };
+        // A WASM trap ("RuntimeError: index out of bounds") leaves the module
+        // unusable. Reusing it makes one bad file fail every remaining file in
+        // the job, which reads as "the downloader broke" rather than "one file
+        // failed", so any failure retires the instance.
+        let failed = false;
         const progress = ({ progress }: { progress: number }) => request.onProgress?.(Math.max(0, Math.min(1, progress)));
         request.signal?.addEventListener('abort', abort, { once: true });
         ffmpeg.on('progress', progress);
@@ -327,15 +363,26 @@ export class FfmpegOpusTranscoder implements OpusTranscoder {
             // above remains authoritative; a successful contradictory probe still fails.
             if (verifyCode === 0 && !probedAsOpus) throw new Error('Generated Opus file failed validation');
             return bytes;
+        } catch (error) {
+            failed = true;
+            throw error;
         } finally {
             request.signal?.removeEventListener('abort', abort);
-            ffmpeg.off('progress', progress);
-            await Promise.allSettled([
-                ffmpeg.deleteFile(inputPath), ffmpeg.deleteFile(outputPath),
-                ffmpeg.deleteFile(probePath),
-                ffmpeg.deleteFile(verifyPath),
-                ...(extractedCoverPath ? [ffmpeg.deleteFile(extractedCoverPath)] : []),
-            ]);
+            if (failed) {
+                // Do not touch the virtual filesystem of a module that may have
+                // trapped — the cleanup calls would throw again and mask the
+                // real error. Retire it instead.
+                try { ffmpeg.off('progress', progress); } catch { /* dead module */ }
+                this.discardInstance(ffmpeg);
+            } else {
+                ffmpeg.off('progress', progress);
+                await Promise.allSettled([
+                    ffmpeg.deleteFile(inputPath), ffmpeg.deleteFile(outputPath),
+                    ffmpeg.deleteFile(probePath),
+                    ffmpeg.deleteFile(verifyPath),
+                    ...(extractedCoverPath ? [ffmpeg.deleteFile(extractedCoverPath)] : []),
+                ]);
+            }
         }
     }
 }

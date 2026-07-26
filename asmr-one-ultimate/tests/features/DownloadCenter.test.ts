@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
     loadCatalog: vi.fn(),
     cachedDetails: vi.fn(),
     semanticSearch: vi.fn(),
+    clearSemanticCache: vi.fn(),
     searchWorks: vi.fn(),
     getTracks: vi.fn(),
     getWorkInfo: vi.fn(),
@@ -36,7 +37,11 @@ vi.mock('../../src/features/playlist/PlaylistService', () => ({
     getAuthHeader: mocks.getAuthHeader,
     getApiBaseUrl: () => 'https://api.example.test',
 }));
-vi.mock('../../src/features/SemanticWorkSearchService', () => ({ semanticWorkSearch: mocks.semanticSearch }));
+vi.mock('../../src/features/SemanticWorkSearchService', () => ({
+    semanticWorkSearch: mocks.semanticSearch,
+    clearSemanticWorkSearchCache: mocks.clearSemanticCache,
+    SEMANTIC_WORK_SEARCH_PAGE_SIZE: 100,
+}));
 vi.mock('../../src/api', () => ({ WorksApi: { searchWorks: mocks.searchWorks } }));
 vi.mock('../../src/services/WorkService', () => ({
     WorkService: { getTracks: mocks.getTracks, getWorkInfo: mocks.getWorkInfo },
@@ -75,6 +80,18 @@ function deferred<T>() {
     return { promise, resolve };
 }
 
+interface SemanticPage { results: any[]; total: number }
+
+/** `total` is the whole match set, which is larger than one page. */
+/** A live-lane response page with explicit pagination, matching the real API. */
+function worksPage(works: any[], currentPage: number, totalCount: number): any {
+    return { works, pagination: { currentPage, pageSize: 100, totalCount } };
+}
+
+function semanticPage(results: any[], total = results.length): SemanticPage {
+    return { results, total };
+}
+
 describe('DownloadCenter', () => {
     beforeEach(() => {
         vi.clearAllMocks();
@@ -88,7 +105,7 @@ describe('DownloadCenter', () => {
         }]);
         mocks.loadCatalog.mockResolvedValue(mocks.cachedCatalog());
         mocks.cachedDetails.mockRejectedValue(new Error('cache miss'));
-        mocks.semanticSearch.mockResolvedValue([]);
+        mocks.semanticSearch.mockResolvedValue(semanticPage([]));
         mocks.recover.mockResolvedValue([]);
         mocks.loadSettledJob.mockResolvedValue(undefined);
         mocks.canCreateDestination.mockReturnValue(true);
@@ -256,7 +273,7 @@ describe('DownloadCenter', () => {
 
     it('uses full-site semantic search and adds its direct results to the same collection', async () => {
         mocks.fetchOwn.mockResolvedValue([]);
-        mocks.semanticSearch.mockResolvedValue([{ id: '42', title: '添い寝音声', score: 0.8 }]);
+        mocks.semanticSearch.mockResolvedValue(semanticPage([{ id: '42', title: '添い寝音声', score: 0.8 }]));
         mocks.searchWorks.mockResolvedValue({
             works: [{ id: 43, title: 'Newest live result' }],
             pagination: { currentPage: 1, pageSize: 20, totalCount: 1 },
@@ -270,7 +287,7 @@ describe('DownloadCenter', () => {
         await flushPromises();
         (document.querySelector('[data-testid="search-all-works"]') as HTMLButtonElement).click();
         await flushPromises();
-        expect(mocks.semanticSearch).toHaveBeenCalledWith('Direct', 200);
+        expect(mocks.semanticSearch).toHaveBeenCalledWith('Direct', { limit: 100, offset: 0 });
         expect(mocks.searchWorks).toHaveBeenCalledWith('Direct', { page: 1, pageSize: 100, limit: 100 });
         expect(document.querySelector('[data-testid="search-work-RJ000042"]')?.textContent).toContain('添い寝音声');
         expect(document.querySelector('[data-testid="search-work-RJ000043"]')?.textContent).toContain('Newest live result');
@@ -511,7 +528,7 @@ describe('DownloadCenter', () => {
 
     it('keeps semantic results when the live site search is unavailable', async () => {
         mocks.fetchOwn.mockResolvedValue([]);
-        mocks.semanticSearch.mockResolvedValue([{ id: '44', title: '意味検索の結果', score: 0.8 }]);
+        mocks.semanticSearch.mockResolvedValue(semanticPage([{ id: '44', title: '意味検索の結果', score: 0.8 }]));
         mocks.searchWorks.mockRejectedValue(new Error('live site unavailable'));
         const wrapper = mount(DownloadCenter, { attachTo: document.body });
         await wrapper.get('[data-testid="download-center-open"]').trigger('click');
@@ -573,7 +590,7 @@ describe('DownloadCenter', () => {
     });
 
     it('renders live results first and merges a slower semantic answer for the active query', async () => {
-        const semantic = deferred<any[]>();
+        const semantic = deferred<SemanticPage>();
         mocks.fetchOwn.mockResolvedValue([]);
         mocks.semanticSearch.mockReturnValue(semantic.promise);
         mocks.searchWorks.mockResolvedValue({
@@ -592,7 +609,7 @@ describe('DownloadCenter', () => {
 
         expect(document.querySelector('[data-testid="search-work-RJ000046"]')).not.toBeNull();
         expect(document.querySelector('[data-testid="search-work-RJ000044"]')).toBeNull();
-        semantic.resolve([{ id: '44', title: 'Later semantic result', score: 0.8 }]);
+        semantic.resolve(semanticPage([{ id: '44', title: 'Later semantic result', score: 0.8 }]));
         await flushPromises();
 
         expect(document.querySelector('[data-testid="search-work-RJ000046"]')).not.toBeNull();
@@ -601,7 +618,7 @@ describe('DownloadCenter', () => {
     });
 
     it('keeps searching when an empty live response arrives before a useful semantic answer', async () => {
-        const semantic = deferred<any[]>();
+        const semantic = deferred<SemanticPage>();
         mocks.fetchOwn.mockResolvedValue([]);
         mocks.semanticSearch.mockReturnValue(semantic.promise);
         mocks.searchWorks.mockResolvedValue({
@@ -620,7 +637,7 @@ describe('DownloadCenter', () => {
 
         expect((document.querySelector('[data-testid="search-all-works"]') as HTMLButtonElement).disabled).toBe(true);
         expect(document.querySelector('[data-testid="search-work-RJ000044"]')).toBeNull();
-        semantic.resolve([{ id: '44', title: 'Semantic-only result', score: 0.8 }]);
+        semantic.resolve(semanticPage([{ id: '44', title: 'Semantic-only result', score: 0.8 }]));
         await flushPromises();
 
         expect(document.querySelector('[data-testid="search-work-RJ000044"]')).not.toBeNull();
@@ -629,11 +646,11 @@ describe('DownloadCenter', () => {
     });
 
     it('ignores a late semantic answer after a newer site query starts', async () => {
-        const firstSemantic = deferred<any[]>();
+        const firstSemantic = deferred<SemanticPage>();
         mocks.fetchOwn.mockResolvedValue([]);
         mocks.semanticSearch
             .mockReturnValueOnce(firstSemantic.promise)
-            .mockResolvedValueOnce([]);
+            .mockResolvedValueOnce(semanticPage([]));
         mocks.searchWorks
             .mockResolvedValueOnce({
                 works: [{ id: 46, title: 'First live result' }],
@@ -661,7 +678,7 @@ describe('DownloadCenter', () => {
         await flushPromises();
         expect(document.querySelector('[data-testid="search-work-RJ000047"]')).not.toBeNull();
 
-        firstSemantic.resolve([{ id: '99', title: 'Stale semantic result', score: 0.9 }]);
+        firstSemantic.resolve(semanticPage([{ id: '99', title: 'Stale semantic result', score: 0.9 }]));
         await flushPromises();
 
         expect(document.querySelector('[data-testid="search-work-RJ000099"]')).toBeNull();
@@ -945,7 +962,7 @@ describe('DownloadCenter', () => {
     });
 
     it('keeps every live result and reports the real catalogue total', async () => {
-        mocks.semanticSearch.mockResolvedValue([]);
+        mocks.semanticSearch.mockResolvedValue(semanticPage([]));
         mocks.searchWorks.mockResolvedValue({
             works: Array.from({ length: 45 }, (_, index) => ({ id: 1000 + index, title: `Result ${index}` })),
             pagination: { currentPage: 1, pageSize: 45, totalCount: 1234 },
@@ -967,7 +984,7 @@ describe('DownloadCenter', () => {
     });
 
     it('appends the next catalogue page without dropping the current selection', async () => {
-        mocks.semanticSearch.mockResolvedValue([]);
+        mocks.semanticSearch.mockResolvedValue(semanticPage([]));
         mocks.searchWorks
             .mockResolvedValueOnce({
                 works: [{ id: 2001, title: 'Page one' }],
@@ -997,8 +1014,201 @@ describe('DownloadCenter', () => {
         wrapper.unmount();
     });
 
+    it('still applies a load-more page when the other lane resolves mid-flight', async () => {
+        // Regression: the guard compared BOTH lane refs, but searchAllWorks
+        // merges the slower lane's first page in the background. That mutated
+        // the other lane's ref and silently discarded a load-more that had
+        // nothing to do with it — a dead click with no error and no spinner,
+        // during the ordinary first-search window.
+        let releaseSemanticFirstPage: (() => void) | undefined;
+        mocks.searchWorks
+            .mockResolvedValueOnce(worksPage([{ id: 2200, title: 'Live 1' }], 1, 900))
+            .mockResolvedValueOnce(worksPage([{ id: 2201, title: 'Live 2' }], 2, 900));
+        mocks.semanticSearch.mockImplementationOnce(() => new Promise(resolve => {
+            releaseSemanticFirstPage = () => resolve(semanticPage([{ id: '7000', title: 'Sem 1', score: 0.9 }], 1));
+        }));
+
+        const wrapper = mount(DownloadCenter, { attachTo: document.body });
+        await wrapper.get('[data-testid="download-center-open"]').trigger('click');
+        const input = document.querySelector('[data-testid="search"]') as HTMLInputElement;
+        input.value = 'race'; input.dispatchEvent(new Event('input', { bubbles: true }));
+        await flushPromises();
+        (document.querySelector('[data-testid="search-all-works"]') as HTMLButtonElement).click();
+        await flushPromises();
+
+        // Live landed first; the semantic lane is still in flight.
+        (document.querySelector('[data-testid="load-more"]') as HTMLButtonElement)?.click();
+        releaseSemanticFirstPage?.();
+        await vi.waitFor(() => expect(document.querySelector('[data-testid="search-work-RJ002201"]')).not.toBeNull());
+
+        // The requested page must actually render rather than be thrown away.
+        expect(document.querySelector('[data-testid="search-work-RJ002201"]')).not.toBeNull();
+        wrapper.unmount();
+    });
+
+    it('does not present a page-length fallback as an exact total', async () => {
+        // readWorksTotalCount falls back to the page length when the API omits
+        // pagination. Rendering that as "Showing 5 of 5" states a non-fact.
+        mocks.searchWorks.mockResolvedValueOnce({ works: [{ id: 2300, title: 'No pagination' }] } as never);
+        mocks.semanticSearch.mockResolvedValueOnce(semanticPage([], 0));
+        const wrapper = mount(DownloadCenter, { attachTo: document.body });
+        await wrapper.get('[data-testid="download-center-open"]').trigger('click');
+        const input = document.querySelector('[data-testid="search"]') as HTMLInputElement;
+        input.value = 'nototal'; input.dispatchEvent(new Event('input', { bubbles: true }));
+        await flushPromises();
+        (document.querySelector('[data-testid="search-all-works"]') as HTMLButtonElement).click();
+        await flushPromises();
+
+        expect(document.querySelector('[data-testid="search-result-count"]')?.textContent).toBe('Showing 1');
+        wrapper.unmount();
+    });
+
+    it('never lets a later page shrink the reported total', async () => {
+        // "Showing 3 of 900" must not become "Showing 6 of 6" on the next click.
+        mocks.searchWorks
+            .mockResolvedValueOnce(worksPage([{ id: 2400, title: 'A' }, { id: 2401, title: 'B' }, { id: 2402, title: 'C' }], 1, 900))
+            .mockResolvedValueOnce({ works: [{ id: 2403, title: 'D' }, { id: 2404, title: 'E' }, { id: 2405, title: 'F' }] } as never);
+        mocks.semanticSearch.mockResolvedValue(semanticPage([], 0));
+        const wrapper = mount(DownloadCenter, { attachTo: document.body });
+        await wrapper.get('[data-testid="download-center-open"]').trigger('click');
+        const input = document.querySelector('[data-testid="search"]') as HTMLInputElement;
+        input.value = 'monotonic'; input.dispatchEvent(new Event('input', { bubbles: true }));
+        await flushPromises();
+        (document.querySelector('[data-testid="search-all-works"]') as HTMLButtonElement).click();
+        await flushPromises();
+        expect(document.querySelector('[data-testid="search-result-count"]')?.textContent).toBe('Showing 3 of 900');
+
+        (document.querySelector('[data-testid="load-more"]') as HTMLButtonElement)?.click();
+        await vi.waitFor(() => expect(document.querySelector('[data-testid="search-work-RJ002405"]')).not.toBeNull());
+
+        expect(document.querySelector('[data-testid="search-result-count"]')?.textContent).toBe('Showing 6 of 900');
+        wrapper.unmount();
+    });
+
+    it('reports the whole semantic match count and pages past the first page', async () => {
+        const page = (start: number, size: number) => Array.from(
+            { length: size },
+            (_, index) => ({ id: String(5000 + start + index), title: `Semantic ${start + index}`, score: 0.9 }),
+        );
+        mocks.semanticSearch
+            .mockResolvedValueOnce(semanticPage(page(0, 100), 512))
+            .mockResolvedValueOnce(semanticPage(page(100, 100), 512));
+        const wrapper = mount(DownloadCenter, { attachTo: document.body });
+        await wrapper.get('[data-testid="download-center-open"]').trigger('click');
+        const input = document.querySelector('[data-testid="search"]') as HTMLInputElement;
+        input.value = 'meaning'; input.dispatchEvent(new Event('input', { bubbles: true }));
+        await flushPromises();
+        (document.querySelector('[data-testid="search-all-works"]') as HTMLButtonElement).click();
+        await flushPromises();
+
+        // The old lane sliced its ranking to 200, discarded the match count and
+        // offered no way to reach the rest, so the UI could only say "Showing 200".
+        expect(document.querySelector('[data-testid="search-result-count"]')?.textContent).toBe('Showing 100 of 512');
+        expect(document.querySelector('[data-testid="load-more"]')).not.toBeNull();
+
+        (document.querySelector('[data-testid="load-more"]') as HTMLButtonElement).click();
+        await vi.waitFor(() => expect(document.querySelector('[data-testid="search-work-RJ005100"]')).not.toBeNull());
+
+        expect(mocks.semanticSearch).toHaveBeenLastCalledWith('meaning', { limit: 100, offset: 100 });
+        expect(document.querySelectorAll('[data-testid^="search-work-"]')).toHaveLength(200);
+        expect(document.querySelector('[data-testid="search-result-count"]')?.textContent).toBe('Showing 200 of 512');
+        expect(document.querySelector('[data-testid="search-work-RJ005000"]')).not.toBeNull();
+        wrapper.unmount();
+    });
+
+    it('pages both search lanes together, merging their overlap onto one row', async () => {
+        mocks.searchWorks
+            .mockResolvedValueOnce({
+                works: [{ id: 6001, title: 'Live one' }],
+                pagination: { currentPage: 1, pageSize: 1, totalCount: 3 },
+            })
+            .mockResolvedValueOnce({
+                works: [{ id: 6002, title: 'Live two' }, { id: 6003, title: 'Live three' }],
+                pagination: { currentPage: 2, pageSize: 2, totalCount: 3 },
+            });
+        mocks.semanticSearch
+            .mockResolvedValueOnce(semanticPage([
+                { id: '6001', title: 'Also live one', score: 0.9 },
+                { id: '7001', title: 'Semantic only', score: 0.8 },
+            ], 4))
+            .mockResolvedValueOnce(semanticPage([
+                { id: '6002', title: 'Also live two', score: 0.7 },
+                { id: '7002', title: 'Semantic only two', score: 0.6 },
+            ], 4));
+        const wrapper = mount(DownloadCenter, { attachTo: document.body });
+        await wrapper.get('[data-testid="download-center-open"]').trigger('click');
+        const input = document.querySelector('[data-testid="search"]') as HTMLInputElement;
+        input.value = 'both lanes'; input.dispatchEvent(new Event('input', { bubbles: true }));
+        await flushPromises();
+        (document.querySelector('[data-testid="search-all-works"]') as HTMLButtonElement).click();
+        await vi.waitFor(() => expect(document.querySelector('[data-testid="search-work-RJ007001"]')).not.toBeNull());
+        (document.querySelector('[data-testid="search-work-RJ006001"] input') as HTMLInputElement).click();
+        await flushPromises();
+
+        // 3 live + 4 semantic with one duplicate already seen.
+        expect(document.querySelectorAll('[data-testid^="search-work-"]')).toHaveLength(2);
+        expect(document.querySelector('[data-testid="search-result-count"]')?.textContent).toBe('Showing 2 of about 6');
+
+        (document.querySelector('[data-testid="load-more"]') as HTMLButtonElement).click();
+        await vi.waitFor(() => expect(document.querySelector('[data-testid="search-work-RJ007002"]')).not.toBeNull());
+
+        expect(mocks.searchWorks).toHaveBeenLastCalledWith('both lanes', { page: 2, pageSize: 100, limit: 100 });
+        expect(mocks.semanticSearch).toHaveBeenLastCalledWith('both lanes', { limit: 100, offset: 2 });
+        expect(document.querySelectorAll('[data-testid^="search-work-"]')).toHaveLength(5);
+        expect(document.querySelector('[data-testid="search-result-count"]')?.textContent).toBe('Showing 5 of 5');
+        expect((document.querySelector('[data-testid="search-work-RJ006001"] input') as HTMLInputElement).checked).toBe(true);
+        expect(document.querySelector('[data-testid="load-more"]')).toBeNull();
+        expect(document.querySelector('[data-testid="load-more-error"]')).toBeNull();
+        wrapper.unmount();
+    });
+
+    it('names the total even when the first page already holds every match', async () => {
+        mocks.semanticSearch.mockResolvedValue(semanticPage([
+            { id: '8001', title: 'Only match', score: 0.9 },
+            { id: '8002', title: 'Second match', score: 0.8 },
+        ], 2));
+        const wrapper = mount(DownloadCenter, { attachTo: document.body });
+        await wrapper.get('[data-testid="download-center-open"]').trigger('click');
+        const input = document.querySelector('[data-testid="search"]') as HTMLInputElement;
+        input.value = 'narrow'; input.dispatchEvent(new Event('input', { bubbles: true }));
+        await flushPromises();
+        (document.querySelector('[data-testid="search-all-works"]') as HTMLButtonElement).click();
+        await flushPromises();
+
+        expect(document.querySelector('[data-testid="search-result-count"]')?.textContent).toBe('Showing 2 of 2');
+        expect(document.querySelector('[data-testid="load-more"]')).toBeNull();
+        wrapper.unmount();
+    });
+
+    it('keeps a load-more page usable when only one lane fails', async () => {
+        mocks.searchWorks
+            .mockResolvedValueOnce({
+                works: [{ id: 9001, title: 'Live one' }],
+                pagination: { currentPage: 1, pageSize: 1, totalCount: 3 },
+            })
+            .mockRejectedValueOnce(new Error('catalogue unavailable'));
+        mocks.semanticSearch
+            .mockResolvedValueOnce(semanticPage([{ id: '9101', title: 'Semantic one', score: 0.9 }], 3))
+            .mockResolvedValueOnce(semanticPage([{ id: '9102', title: 'Semantic two', score: 0.8 }], 3));
+        const wrapper = mount(DownloadCenter, { attachTo: document.body });
+        await wrapper.get('[data-testid="download-center-open"]').trigger('click');
+        const input = document.querySelector('[data-testid="search"]') as HTMLInputElement;
+        input.value = 'half broken'; input.dispatchEvent(new Event('input', { bubbles: true }));
+        await flushPromises();
+        (document.querySelector('[data-testid="search-all-works"]') as HTMLButtonElement).click();
+        await vi.waitFor(() => expect(document.querySelector('[data-testid="search-work-RJ009101"]')).not.toBeNull());
+
+        (document.querySelector('[data-testid="load-more"]') as HTMLButtonElement).click();
+        await vi.waitFor(() => expect(document.querySelector('[data-testid="search-work-RJ009102"]')).not.toBeNull());
+
+        expect(document.querySelector('[data-testid="load-more-error"]')).toBeNull();
+        // The failed lane keeps its unread pages, so the button stays available.
+        expect(document.querySelector('[data-testid="load-more"]')).not.toBeNull();
+        wrapper.unmount();
+    });
+
     it('links each result row to its work page outside the selection control', async () => {
-        mocks.semanticSearch.mockResolvedValue([]);
+        mocks.semanticSearch.mockResolvedValue(semanticPage([]));
         mocks.searchWorks.mockResolvedValue({
             works: [{ id: 3001, title: 'Linked result' }],
             pagination: { currentPage: 1, pageSize: 1, totalCount: 1 },
@@ -1125,7 +1335,7 @@ describe('DownloadCenter', () => {
             id: '11111111-1111-4111-8111-111111111111', name: 'Cached public', description: '', worksCount: 1,
             works: [{ rjCode: 'RJ000042', title: 'Playlist title' }],
         });
-        mocks.semanticSearch.mockResolvedValue([{ id: 'RJ000042', title: 'Search title', score: 0.8 }]);
+        mocks.semanticSearch.mockResolvedValue(semanticPage([{ id: 'RJ000042', title: 'Search title', score: 0.8 }]));
         const wrapper = mount(DownloadCenter, { attachTo: document.body });
         await wrapper.get('[data-testid="download-center-open"]').trigger('click');
         await flushPromises();

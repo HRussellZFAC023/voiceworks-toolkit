@@ -354,6 +354,23 @@ function getSplitDtypeCandidates() {
     return [{ encoder_model: 'fp32', decoder_model_merged: 'q8' }];
 }
 
+/**
+ * A decoder split onto the WASM EP needs the same QDQ workaround as the pure
+ * WASM path. Transformers.js applies session options globally rather than
+ * per-module, so this is scoped to split layouts only: an all-WebGPU run keeps
+ * ORT's extended optimizer, which it handles fine.
+ *
+ * Without this, session creation on the split layout fails outright with
+ * "qdq_actions.cc TransposeDQWeightsForMatMulNBits" - observed on the live site
+ * in Firefox, where the readback probe always selects the split.
+ */
+function getSessionOptionsForDevice(device) {
+    if (device && typeof device === 'object' && Object.values(device).includes('wasm')) {
+        return { graphOptimizationLevel: 'basic' };
+    }
+    return null;
+}
+
 function getDtypeCandidates(device) {
     if (device && typeof device === 'object' && device.decoder_model_merged === 'wasm') {
         return getSplitDtypeCandidates();
@@ -536,11 +553,13 @@ async function loadPipelineForModel(settings, progressCb) {
             for (const dtype of dtypeCandidates) {
                 for (let hubIdx = 0; hubIdx < HUB_BASE_URLS.length; hubIdx++) {
                     env.remoteHost = HUB_BASE_URLS[hubIdx];
+                    const splitSessionOptions = getSessionOptionsForDevice(resolvedDevice);
                     const opts = {
                         progress_callback: progressCb,
                         revision,
                         device: resolvedDevice,
                         dtype,
+                        ...(splitSessionOptions ? { session_options: splitSessionOptions } : {}),
                     };
                     pipelinePromise = pipeline('automatic-speech-recognition', modelName, opts);
                     try {
@@ -990,6 +1009,9 @@ self.__whisperTestConfigureWebGpuRuntime = (testEnv, adapter) => {
     return configureWebGpuRuntime(adapter);
 };
 self.__whisperTestIsRetryableHubLoadError = isRetryableHubLoadError;
+self.__whisperTestSetSlowReadback = (value) => { slowGpuReadback = value; };
+self.__whisperTestResolveDeviceForModules = resolveDeviceForModules;
+self.__whisperTestGetSessionOptionsForDevice = getSessionOptionsForDevice;
 self.__whisperTestSetTransformers = (testPipeline, testEnv = {}) => {
     pipeline = testPipeline;
     env = testEnv;
