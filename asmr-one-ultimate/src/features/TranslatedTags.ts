@@ -5,7 +5,7 @@ import { Config, I18n } from '../core/Config';
 import { CentralObserver } from '../core/CentralObserver';
 import { EventBus } from '../core/EventBus';
 import { Priority } from '../core/GpuScheduler';
-import { isChinese } from '../core/DomUtils';
+import { dropNestedDuplicateTargets, isChinese } from '../core/DomUtils';
 import type { TagEntry, TagI18n } from '../types/api';
 
 /** Raw tag from the /api/tags endpoint — superset of TagEntry with i18n info */
@@ -283,6 +283,7 @@ export class TranslatedTags {
         el.dataset.asmrtagState = 'pending';
         delete el.dataset.asmrtagTranslation;
         delete el.dataset.asmrtagPrimary;
+        delete el.dataset.asmrtagSuffix;
         el.classList.remove('asmr-worktree-translation');
         if (scopeKey) {
             el.dataset.asmrtagScope = scopeKey;
@@ -315,6 +316,7 @@ export class TranslatedTags {
         delete el.dataset.asmrtagScope;
         delete el.dataset.asmrtagTranslation;
         delete el.dataset.asmrtagPrimary;
+        delete el.dataset.asmrtagSuffix;
         el.classList.remove('asmr-translated');
         el.classList.remove('asmr-worktree-translation');
         // Clean up card/list translation subtitle if present
@@ -374,8 +376,12 @@ export class TranslatedTags {
 
         if (state === 'done' && tracked) {
             if (currentText === tracked || currentText.includes(tracked)) {
-                // Worktree translations survive via CSS ::after (data-attribute based)
-                if (el.classList.contains('asmr-worktree-translation') && el.dataset.asmrtagTranslation) {
+                // Worktree translations survive via CSS ::after (data-attribute based).
+                // 'nested' means an enclosing/enclosed element owns the visible suffix,
+                // which is equally final — re-queueing would just churn.
+                if (el.dataset.asmrtagTranslation
+                    && (el.classList.contains('asmr-worktree-translation')
+                        || el.dataset.asmrtagSuffix === 'nested')) {
                     return true;
                 }
                 // Work titles: translation lives in a sibling <div class="asmr-card-translation">.
@@ -433,7 +439,7 @@ export class TranslatedTags {
         this.beginDOMModification();
         try {
             // 1. Chips (Tags) — known tag matches applied immediately, rest queued
-            const chips = Array.from(document.querySelectorAll('.q-chip:not(.asmr-ignore)')) as HTMLElement[];
+            const chips = this.innermostTargets(Array.from(document.querySelectorAll('.q-chip:not(.asmr-ignore)')) as HTMLElement[]);
             for (const chip of chips) {
                 // Skip chips in the header search bar — they show raw keyword syntax
                 // ($va:NAME$, $tag:NAME$) and modifying their DOM causes duplication
@@ -485,7 +491,7 @@ export class TranslatedTags {
             }
 
             // 2. List Items (Groups, VAs, work tree files)
-            const listItems = Array.from(document.querySelectorAll('.q-item__label:not(.q-item__label--caption)')) as HTMLElement[];
+            const listItems = this.innermostTargets(Array.from(document.querySelectorAll('.q-item__label:not(.q-item__label--caption)')) as HTMLElement[]);
             for (const item of listItems) {
                 const text = this.extractBaseText(item);
                 if (!text || !this.looksJapanese(text)) continue;
@@ -521,7 +527,11 @@ export class TranslatedTags {
             }
 
             // 3. Breadcrumbs
-            const breadcrumbs = Array.from(document.querySelectorAll('#work-tree .q-breadcrumbs__el span, .work-tree .q-breadcrumbs__el span')) as HTMLElement[];
+            // Quasar renders each crumb as a button whose label is wrapped twice
+            // (`.q-btn__content` > `span.block`), so this selector matches the same
+            // label more than once. Keep only the innermost match, otherwise every
+            // wrapper renders its own "(translation)" suffix.
+            const breadcrumbs = this.innermostTargets(Array.from(document.querySelectorAll('#work-tree .q-breadcrumbs__el span, .work-tree .q-breadcrumbs__el span')) as HTMLElement[]);
             for (const span of breadcrumbs) {
                 const rawText = this.extractBaseText(span);
                 const text = this.stripLegacyInlineTranslationSuffix(rawText);
@@ -555,7 +565,7 @@ export class TranslatedTags {
             }
 
             // 4. Anchors
-            const anchors = Array.from(document.querySelectorAll('a[href*="/circles/"], a[href*="/authors/"], a[href*="/actors/"], a[href*="/vas/"], a[href*="/cv/"]')) as HTMLAnchorElement[];
+            const anchors = this.innermostTargets(Array.from(document.querySelectorAll('a[href*="/circles/"], a[href*="/authors/"], a[href*="/actors/"], a[href*="/vas/"], a[href*="/cv/"]')) as HTMLAnchorElement[]);
             for (const anchor of anchors) {
                 const text = this.extractBaseText(anchor);
                 if (!text) continue;
@@ -570,7 +580,7 @@ export class TranslatedTags {
             }
 
             // 5. Work Card Circles / Studios
-            const cardMetaNames = Array.from(document.querySelectorAll('.text-subtitle1 .text-grey.ellipsis')) as HTMLElement[];
+            const cardMetaNames = this.innermostTargets(Array.from(document.querySelectorAll('.text-subtitle1 .text-grey.ellipsis')) as HTMLElement[]);
             for (const el of cardMetaNames) {
                 const text = this.extractBaseText(el);
                 if (!text) continue;
@@ -585,7 +595,7 @@ export class TranslatedTags {
             }
 
             // 6. Work Titles — keep original, show translated subtitle below
-            const workTitles = Array.from(document.querySelectorAll('.ellipsis-3-lines a[href*="/work/"], .ellipsis-2-lines a[href*="/work/"], .q-card .text-h6 a[href*="/work/"], .q-card a[href*="/work/"] .text-weight-medium')) as HTMLElement[];
+            const workTitles = this.innermostTargets(Array.from(document.querySelectorAll('.ellipsis-3-lines a[href*="/work/"], .ellipsis-2-lines a[href*="/work/"], .q-card .text-h6 a[href*="/work/"], .q-card a[href*="/work/"] .text-weight-medium')) as HTMLElement[]);
             for (const el of workTitles) {
                 // Use extractBaseText to ignore JPDB furigana <rt> annotations —
                 // raw textContent includes interleaved readings (e.g. "生せい耳みみ")
@@ -625,7 +635,7 @@ export class TranslatedTags {
 
             // 6b. Work Titles in list view (favourites, reviews, playlists, etc.)
             // List view uses .q-item layout with .q-item__label.text-body2 instead of card layout
-            const listWorkLabels = document.querySelectorAll('.q-list .q-item__label.text-body2') as NodeListOf<HTMLElement>;
+            const listWorkLabels = this.innermostTargets(Array.from(document.querySelectorAll('.q-list .q-item__label.text-body2')) as HTMLElement[]);
             for (const el of listWorkLabels) {
                 // Only process work items — verify parent .q-item has a work link
                 const qItem = el.closest('.q-item');
@@ -1049,6 +1059,32 @@ export class TranslatedTags {
         return { original: text, input, ext };
     }
 
+    /**
+     * Collapse ancestor/descendant matches that carry identical text down to the
+     * innermost one. Wrapper markup (e.g. Quasar's `.q-btn__content` > `span.block`)
+     * makes one visible label match a selector several times; translating every
+     * match renders the translation once per wrapper.
+     */
+    private innermostTargets<T extends HTMLElement>(elements: T[]): T[] {
+        return dropNestedDuplicateTargets(elements, (el) => this.extractBaseText(el));
+    }
+
+    /**
+     * True when an enclosing or enclosed element already renders the "(translation)"
+     * suffix for this same label. The suffix is a CSS ::after on every marked
+     * element, so a marked ancestor and a marked descendant print it twice.
+     *
+     * Matched on the tracked original, not on position: a nested element holding a
+     * genuinely different label still deserves its own suffix.
+     */
+    private hasWorkTreeSuffixInChain(el: HTMLElement, original: string): boolean {
+        for (const inner of el.querySelectorAll<HTMLElement>('.asmr-worktree-translation')) {
+            if (inner.dataset.asmrtag === original) return true;
+        }
+        const outer = el.parentElement?.closest<HTMLElement>('.asmr-worktree-translation');
+        return outer?.dataset.asmrtag === original;
+    }
+
     private applyWorkTreeTranslation(el: HTMLElement, original: string, translated: string): void {
         // Keep the original text intact so Vue can safely re-render when items change.
         // Use extractBaseText to ignore furigana ruby annotations when comparing.
@@ -1057,6 +1093,16 @@ export class TranslatedTags {
             el.textContent = original;
         }
         el.dataset.asmrtagTranslation = translated;
+        if (this.hasWorkTreeSuffixInChain(el, original)) {
+            // Applying the marker here would print a second suffix on the same
+            // label. Record the translation (state + tooltip) but leave the
+            // rendering to the element that already owns the suffix slot.
+            el.dataset.asmrtagSuffix = 'nested';
+            el.classList.remove('asmr-worktree-translation');
+            el.title = `${original} (${translated})`;
+            return;
+        }
+        delete el.dataset.asmrtagSuffix;
         el.classList.add('asmr-worktree-translation');
     }
 

@@ -17,6 +17,7 @@ import {
     getVueItem,
     getFatherFolder,
     isDarkMode,
+    dropNestedDuplicateTargets,
 } from '../../src/core/DomUtils';
 
 describe('DomUtils', () => {
@@ -372,6 +373,61 @@ describe('DomUtils', () => {
 
         it('should return false when no dark class', () => {
             expect(isDarkMode()).toBe(false);
+        });
+    });
+
+    // =========================================================================
+    // Nested Target Collapsing
+    // =========================================================================
+
+    describe('dropNestedDuplicateTargets', () => {
+        const text = (el: Element) => (el.textContent || '').trim();
+
+        it('keeps only the innermost match when wrappers repeat the same text', () => {
+            document.body.innerHTML = `
+                <button class="q-btn q-breadcrumbs__el">
+                    <span class="q-focus-helper"></span>
+                    <span class="q-btn__content"><span class="block">圧縮</span></span>
+                </button>
+            `;
+            const matches = Array.from(document.querySelectorAll<HTMLElement>('.q-breadcrumbs__el span'));
+            expect(matches).toHaveLength(3);
+
+            const kept = dropNestedDuplicateTargets(matches, text);
+            expect(kept.map((el) => el.className)).toEqual(['q-focus-helper', 'block']);
+        });
+
+        it('keeps an ancestor that holds text its descendant does not cover', () => {
+            document.body.innerHTML = `
+                <div class="target">前置き <span class="target">圧縮</span></div>
+            `;
+            const matches = Array.from(document.querySelectorAll<HTMLElement>('.target'));
+            const kept = dropNestedDuplicateTargets(matches, text);
+            expect(kept).toHaveLength(2);
+        });
+
+        it('collapses chains deeper than one level', () => {
+            document.body.innerHTML = `
+                <div class="target"><div class="target"><div class="target">視聴</div></div></div>
+            `;
+            const matches = Array.from(document.querySelectorAll<HTMLElement>('.target'));
+            const kept = dropNestedDuplicateTargets(matches, text);
+            expect(kept).toHaveLength(1);
+            expect(kept[0].children).toHaveLength(0);
+        });
+
+        it('leaves sibling matches alone', () => {
+            document.body.innerHTML = `
+                <div><span class="target">版</span><span class="target">版</span></div>
+            `;
+            const matches = Array.from(document.querySelectorAll<HTMLElement>('.target'));
+            expect(dropNestedDuplicateTargets(matches, text)).toHaveLength(2);
+        });
+
+        it('returns the input untouched when there is nothing to collapse', () => {
+            document.body.innerHTML = '<span class="target">版</span>';
+            const matches = Array.from(document.querySelectorAll<HTMLElement>('.target'));
+            expect(dropNestedDuplicateTargets(matches, text)).toBe(matches);
         });
     });
 

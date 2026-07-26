@@ -195,6 +195,7 @@ export class PlayerTranslator {
                 delete el.dataset.asmrtagUntil;
                 delete el.dataset.asmrtagScope;
                 delete el.dataset.asmrtagTranslation;
+                delete el.dataset.asmrtagSuffix;
                 el.classList.remove('asmr-translated');
                 el.classList.remove('asmr-worktree-translation');
             }

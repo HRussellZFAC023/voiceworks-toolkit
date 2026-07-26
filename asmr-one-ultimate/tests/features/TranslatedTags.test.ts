@@ -93,6 +93,25 @@ vi.mock('../../src/core/Logger', () => ({
     }
 }));
 
+/**
+ * jsdom does not render pseudo-elements, so reproduce what the injected
+ * `.asmr-worktree-translation::after { content: " (" attr(data-asmrtag-translation) ")" }`
+ * rule paints. This is what the user actually reads on screen.
+ */
+function renderWithSuffixes(root: Element): string {
+    let out = '';
+    for (const node of Array.from(root.childNodes)) {
+        if (node.nodeType === Node.TEXT_NODE) out += node.textContent || '';
+        else if (node instanceof Element) out += renderWithSuffixes(node);
+    }
+    if (root instanceof HTMLElement
+        && root.classList.contains('asmr-worktree-translation')
+        && root.dataset.asmrtagTranslation) {
+        out += ` (${root.dataset.asmrtagTranslation})`;
+    }
+    return out.replace(/\s+/g, ' ').trim();
+}
+
 describe('TranslatedTags', () => {
     let bridge: KikoeruBridge;
     let mockStore: any;
@@ -406,6 +425,116 @@ describe('TranslatedTags', () => {
         expect(crumb.textContent).toBe('【本編】長乳エルフお姉さん');
         expect(crumb.classList.contains('asmr-worktree-translation')).toBe(true);
         expect(crumb.dataset.asmrtagTranslation).toBe('Main story');
+    });
+
+    it('renders one suffix per breadcrumb label when Quasar wraps it in nested spans', async () => {
+        await bridge.initialize();
+        vi.mocked(TranslationService.translateBatch).mockResolvedValue(['compression']);
+
+        // Real Quasar breadcrumb markup: the crumb is a q-btn, so the label sits
+        // inside `.q-btn__content` > `span.block` and `.q-breadcrumbs__el span`
+        // matches it three times.
+        document.body.innerHTML += `
+            <div id="work-tree">
+                <div class="q-breadcrumbs">
+                    <button class="q-btn q-breadcrumbs__el">
+                        <span class="q-focus-helper"></span>
+                        <span class="q-btn__content text-center col items-center q-anchor--skip justify-center row">
+                            <span class="block">圧縮</span>
+                        </span>
+                    </button>
+                </div>
+            </div>
+        `;
+
+        const translatedTags = TranslatedTags.getInstance();
+        (translatedTags as any).isEnabled = true;
+        (translatedTags as any).augmentTags();
+
+        const crumb = document.querySelector('#work-tree .q-breadcrumbs__el') as HTMLElement;
+        for (let i = 0; i < 20; i++) {
+            if (crumb.querySelector('.asmr-worktree-translation')) break;
+            await new Promise(resolve => setTimeout(resolve, 10));
+        }
+
+        expect(renderWithSuffixes(crumb)).toBe('圧縮 (compression)');
+        expect(crumb.querySelectorAll('.asmr-worktree-translation')).toHaveLength(1);
+    });
+
+    it('is idempotent — a second pass over translated breadcrumbs changes nothing', async () => {
+        await bridge.initialize();
+        vi.mocked(TranslationService.translateBatch).mockResolvedValue(['compression']);
+
+        document.body.innerHTML += `
+            <div id="work-tree">
+                <div class="q-breadcrumbs">
+                    <button class="q-btn q-breadcrumbs__el">
+                        <span class="q-focus-helper"></span>
+                        <span class="q-btn__content">
+                            <span class="block">圧縮</span>
+                        </span>
+                    </button>
+                </div>
+            </div>
+        `;
+
+        const translatedTags = TranslatedTags.getInstance();
+        (translatedTags as any).isEnabled = true;
+        (translatedTags as any).augmentTags();
+
+        const crumb = document.querySelector('#work-tree .q-breadcrumbs__el') as HTMLElement;
+        for (let i = 0; i < 20; i++) {
+            if (crumb.querySelector('.asmr-worktree-translation')) break;
+            await new Promise(resolve => setTimeout(resolve, 10));
+        }
+        const afterFirstPass = crumb.outerHTML;
+
+        (translatedTags as any).augmentTags();
+        await new Promise(resolve => setTimeout(resolve, 50));
+
+        expect(crumb.outerHTML).toBe(afterFirstPass);
+        expect(renderWithSuffixes(crumb)).toBe('圧縮 (compression)');
+    });
+
+    it('still suffixes a nested label that carries a different original', () => {
+        const translatedTags = TranslatedTags.getInstance();
+        document.body.innerHTML += `
+            <div id="work-tree">
+                <div class="outer" data-asmrtag="親フォルダ"></div>
+            </div>
+        `;
+        const outer = document.querySelector('.outer') as HTMLElement;
+        const inner = document.createElement('span');
+        inner.textContent = '子ファイル.wav';
+        outer.appendChild(inner);
+
+        (translatedTags as any).applyWorkTreeTranslation(outer, '親フォルダ', 'Parent folder');
+        (translatedTags as any).applyWorkTreeTranslation(inner, '子ファイル.wav', 'Child file.wav');
+
+        // Different labels — each keeps its own suffix.
+        expect(outer.classList.contains('asmr-worktree-translation')).toBe(true);
+        expect(inner.classList.contains('asmr-worktree-translation')).toBe(true);
+        expect(inner.dataset.asmrtagSuffix).toBeUndefined();
+    });
+
+    it('suppresses the second suffix when the same label is marked twice in one chain', () => {
+        const translatedTags = TranslatedTags.getInstance();
+        document.body.innerHTML += `
+            <div id="work-tree">
+                <span class="outer" data-asmrtag="圧縮"><span class="inner">圧縮</span></span>
+            </div>
+        `;
+        const outer = document.querySelector('.outer') as HTMLElement;
+        const inner = document.querySelector('.inner') as HTMLElement;
+        inner.dataset.asmrtag = '圧縮';
+
+        (translatedTags as any).applyWorkTreeTranslation(outer, '圧縮', 'compression');
+        (translatedTags as any).applyWorkTreeTranslation(inner, '圧縮', 'compression');
+
+        expect(outer.classList.contains('asmr-worktree-translation')).toBe(true);
+        expect(inner.classList.contains('asmr-worktree-translation')).toBe(false);
+        expect(inner.dataset.asmrtagSuffix).toBe('nested');
+        expect(renderWithSuffixes(outer)).toBe('圧縮 (compression)');
     });
 
     it('clears stale translated state in player surfaces', async () => {

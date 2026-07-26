@@ -384,6 +384,53 @@ export function scrollIntoView(element: Element, options?: ScrollIntoViewOptions
 // ============================================================================
 
 /**
+ * Keep only the innermost element of every ancestor/descendant pair that carries
+ * identical text.
+ *
+ * Framework wrappers routinely wrap a label in several nested elements that all
+ * match the same CSS selector — a Quasar button, for example, renders
+ * `<span class="q-btn__content"><span class="block">LABEL</span></span>`, so
+ * `.q-breadcrumbs__el span` matches twice for one visible label. Annotating both
+ * makes any per-element decoration (a `::after` suffix, an appended node) render
+ * once per match, which reads as duplicated output.
+ *
+ * Only exact text matches are collapsed: an ancestor holding extra text of its
+ * own still owns content the descendant does not cover, so it is left alone.
+ */
+export function dropNestedDuplicateTargets<T extends Element>(
+    elements: T[],
+    getText: (el: T) => string,
+): T[] {
+    if (elements.length < 2) return elements;
+
+    const candidates = new Set<Element>(elements);
+    const textCache = new Map<Element, string>();
+    const textOf = (el: Element): string => {
+        let text = textCache.get(el);
+        if (text === undefined) {
+            text = getText(el as unknown as T);
+            textCache.set(el, text);
+        }
+        return text;
+    };
+
+    const shadowed = new Set<Element>();
+    for (const el of elements) {
+        let parent = el.parentElement;
+        while (parent) {
+            if (candidates.has(parent)) {
+                if (textOf(parent) !== textOf(el)) break;
+                shadowed.add(parent);
+            }
+            parent = parent.parentElement;
+        }
+    }
+
+    if (shadowed.size === 0) return elements;
+    return elements.filter((el) => !shadowed.has(el));
+}
+
+/**
  * Get clean text from an element, stripping JPDB furigana annotations.
  * Checks data-jpdb-original attribute first, then falls back to stripping
  * <rt>/<rp> elements from ruby annotations.

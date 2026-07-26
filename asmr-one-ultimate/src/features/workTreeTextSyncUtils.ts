@@ -52,6 +52,7 @@ export function applyLabelFixes(fixes: LabelFix[]): void {
         delete label.dataset.asmrtagState;
         delete label.dataset.asmrtagScope;
         delete label.dataset.asmrtagTranslation;
+        delete label.dataset.asmrtagSuffix;
         label.classList.remove('asmr-translated');
         label.classList.remove('asmr-worktree-translation');
         label.removeAttribute('data-jpdb');
