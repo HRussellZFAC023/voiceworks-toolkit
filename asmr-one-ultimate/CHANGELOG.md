@@ -1,5 +1,10 @@
 # Changelog
 
+## 173 — 2026-07-26
+
+- Fixed a settings-panel layout defect at narrow widths: Quasar's gutter helper pulls its container up with a negative top margin, so an action row directly below a list item overlapped that item as soon as its label wrapped, which it always did at phone widths. Action buttons now wrap instead of running past the panel edge.
+- Release-suite corrections only, otherwise identical to 172: the suite no longer fails on intermittent errors thrown by the host site's own bundle during navigation (its autoplay observer throws while our script is merely present), page errors now retain their stack so an intermittent failure is diagnosable, and the Google client assertion reads the effective configuration rather than raw storage that nothing writes now the client-ID row is gone.
+
 ## 172 — 2026-07-26
 
 - Fixed the root cause of inaccurate live transcription: Whisper decoded greedily with no anti-repetition, so non-verbal ASMR audio (laughter, breaths, rustling) sent it into unbounded token loops that consumed a whole window's budget and swallowed the real speech in it. Measured on a 150-second Japanese ASMR excerpt against its published script, whisper-small went from 124.1% character error rate with a 120-character repeat run to 26.1% with no repeat run, and inference got 46% faster because tokens are no longer spent looping.
