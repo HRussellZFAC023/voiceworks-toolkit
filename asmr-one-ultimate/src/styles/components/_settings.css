@@ -79,6 +79,25 @@
     min-width: 0;
 }
 
+/* Quasar's `q-gutter-*` pulls its container up with a negative top margin and
+   spaces children with positive ones. In an action row that sits directly below
+   a q-item, that negative margin overlaps the item above as soon as the item's
+   label wraps — which it always does at narrow panel widths. Cancel the pull and
+   space the row explicitly instead. */
+.asmr-settings-section [class*="q-gutter-"] {
+    margin-top: 0;
+}
+
+.asmr-settings-section .q-item + [class*="q-gutter-"] {
+    padding-top: 4px;
+}
+
+/* Action buttons must wrap rather than run past the panel edge on narrow
+   viewports. */
+.asmr-settings-section [class*="q-gutter-"].row {
+    flex-wrap: wrap;
+}
+
 .asmr-settings-section .q-item__label,
 .asmr-settings-section .q-item__label--caption {
     white-space: normal;

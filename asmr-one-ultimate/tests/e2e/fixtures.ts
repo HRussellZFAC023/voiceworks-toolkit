@@ -769,7 +769,30 @@ export const helpers = {
         const errors: string[] = [];
         const samples: Array<{ heap: number; dom: number }> = [];
 
-        const errorHandler = (e: Error) => errors.push(e.message);
+        // Keep the stack: a bare message makes an intermittent page error
+        // effectively undiagnosable, which is how flakes survive for releases.
+        //
+        // Only OUR errors are a signal here. The host's own bundle throws
+        // intermittently during navigation — e.g. `autoplayObserver`'s
+        // IntersectionObserver callback reading 'stop' of undefined in
+        // asmr.one/js/app.*.js — and asserting zero of those makes the suite
+        // permanently flaky for a defect we cannot fix. Frames pointing only at
+        // the host bundle are recorded for visibility but not treated as ours.
+        const isHostOwnFrame = (stack: string): boolean => {
+            const frames = stack.split('\n').slice(1).map(l => l.trim()).filter(Boolean);
+            if (!frames.length) return false;
+            return frames.every(f => /\/js\/(app|vendor|chunk)[.\-][^/]*\.js/i.test(f));
+        };
+        const errorHandler = (e: Error) => {
+            const stack = String(e.stack || '');
+            const frames = stack.split('\n').slice(1, 5).map(l => l.trim()).join(' << ');
+            const detail = frames ? `${e.message} | ${frames}` : e.message;
+            if (isHostOwnFrame(stack)) {
+                console.log(`  [host error ignored] ${detail}`);
+                return;
+            }
+            errors.push(detail);
+        };
         page.on('pageerror', errorHandler);
 
         for (let i = 0; i < seconds; i++) {

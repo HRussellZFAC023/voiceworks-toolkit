@@ -44,7 +44,7 @@ test.describe('Work Page Stability', () => {
     }
 
     expect(alive).toBe(true);
-    expect(errors.length).toBe(0);
+    expect(errors).toEqual([]);
   });
 
   test('navigation between pages stays stable', async ({ injectedPage, isScriptLoaded }) => {
@@ -67,7 +67,7 @@ test.describe('Work Page Stability', () => {
     // Monitor briefly
     const { alive, errors } = await helpers.monitorHealth(injectedPage, 5);
     expect(alive).toBe(true);
-    expect(errors.length).toBe(0);
+    expect(errors).toEqual([]);
   });
 
   test('settings page renders without crash', async ({ injectedPage, isScriptLoaded }) => {

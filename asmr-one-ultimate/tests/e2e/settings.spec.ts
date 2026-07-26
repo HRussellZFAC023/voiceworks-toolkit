@@ -198,8 +198,18 @@ test.describe('Settings Input Fields', () => {
     const input = section.locator('input[data-key="googleDriveClientId"]');
 
     await expect(input).toHaveCount(0);
-    await expect.poll(() => helpers.getConfig(injectedPage, 'googleDriveClientId'))
-      .toMatch(/^166564421003-[a-z0-9]+\.apps\.googleusercontent\.com$/);
+    // Read the EFFECTIVE config, not GM storage. Now that the client-ID row is
+    // gone nothing ever persists the value, so it correctly lives only in
+    // CONFIG_DEFAULTS — reading raw storage would report undefined even though
+    // the bundled client is configured and used.
+    await expect.poll(() => injectedPage.evaluate(() => {
+      const store = (window as typeof window & {
+        __ASMR_APP_STORE__?: { getConfig?: (key: string) => unknown };
+      }).__ASMR_APP_STORE__;
+      return typeof store?.getConfig === 'function'
+        ? String(store.getConfig('googleDriveClientId') ?? '')
+        : '';
+    })).toMatch(/^166564421003-[a-z0-9]+\.apps\.googleusercontent\.com$/);
     await expect.poll(() => injectedPage.evaluate(() => Boolean(
       (window as typeof window & { google?: { accounts?: { oauth2?: unknown } } })
         .google?.accounts?.oauth2,
