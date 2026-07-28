@@ -344,7 +344,7 @@ test.describe('Learner Mode Layout', () => {
     });
   }
 
-  test('keeps non-fullscreen player geometry stable as bilingual content grows', async ({ injectedPage, isScriptLoaded }) => {
+  test('keeps non-fullscreen player geometry stable without clipping normal bilingual content', async ({ injectedPage, isScriptLoaded }) => {
     await helpers.gotoWork(injectedPage, TEST_WORKS.WITH_SUBTITLES);
     await isScriptLoaded();
     await injectedPage.evaluate(() => {
@@ -361,7 +361,7 @@ test.describe('Learner Mode Layout', () => {
         'inset:80px auto auto 80px',
         'display:flex',
         'flex-direction:column',
-        'width:420px',
+        'width:320px',
         'height:520px',
         'background:#222',
         'z-index:2147483647',
@@ -370,7 +370,15 @@ test.describe('Learner Mode Layout', () => {
         <div class="albumart" style="display:flex;flex:1 1 auto;min-height:0">
           <div class="q-img" style="flex:1 1 auto;min-height:0"></div>
         </div>
-        <div class="learner-subs-expanded">
+        <div
+          class="learner-subs-expanded"
+          style="
+            --asmr-subs-primary-scale:1;
+            --asmr-subs-primary-lines:2;
+            --asmr-subs-secondary-scale:1;
+            --asmr-subs-secondary-lines:2
+          "
+        >
           <div class="learner-jp" lang="ja">短い字幕です</div>
           <button class="learner-en" type="button">The short translation.</button>
         </div>
@@ -384,11 +392,20 @@ test.describe('Learner Mode Layout', () => {
     ).first();
     await expect(expanded).toBeVisible();
 
+    type LaneGeometry = {
+      overflowY: string;
+      lineClamp: string;
+      clientHeight: number;
+      contentHeight: number;
+      lineHeight: number;
+    };
     type Geometry = {
       panelHeight: number;
       playerHeight: number;
       coverHeight: number;
       coverMaxHeight: string;
+      primary: LaneGeometry;
+      secondary: LaneGeometry;
     };
     const snapshot = async (): Promise<Geometry> => injectedPage.evaluate(async () => {
       await new Promise<void>(resolve => requestAnimationFrame(() => {
@@ -399,84 +416,71 @@ test.describe('Learner Mode Layout', () => {
       ) as HTMLElement | null;
       const player = panel?.closest('.audio-player') as HTMLElement | null;
       const cover = player?.querySelector('.albumart .q-img') as HTMLElement | null;
-      if (!panel || !player || !cover) {
+      const primary = panel?.querySelector('.learner-jp') as HTMLElement | null;
+      const secondary = panel?.querySelector('.learner-en') as HTMLElement | null;
+      if (!panel || !player || !cover || !primary || !secondary) {
         throw new Error('Expanded player geometry was not available');
       }
+      const laneSnapshot = (element: HTMLElement) => {
+        const style = getComputedStyle(element);
+        const range = document.createRange();
+        range.selectNodeContents(element);
+        return {
+          overflowY: style.overflowY,
+          lineClamp: style.getPropertyValue('-webkit-line-clamp'),
+          clientHeight: element.clientHeight,
+          contentHeight: range.getBoundingClientRect().height,
+          lineHeight: Number.parseFloat(style.lineHeight),
+        };
+      };
       return {
         panelHeight: panel.getBoundingClientRect().height,
         playerHeight: player.getBoundingClientRect().height,
         coverHeight: cover.getBoundingClientRect().height,
         coverMaxHeight: cover.style.maxHeight,
+        primary: laneSnapshot(primary),
+        secondary: laneSnapshot(secondary),
       };
     });
 
     const baseline = await snapshot();
-    expect(baseline.panelHeight).toBeGreaterThan(0);
+    expect(baseline.panelHeight).toBeGreaterThanOrEqual(167);
+    expect(baseline.panelHeight).toBeLessThanOrEqual(169);
     expect(baseline.coverHeight).toBeGreaterThan(0);
+    expect(baseline.primary.lineClamp).toBe('2');
+    expect(baseline.secondary.lineClamp).toBe('2');
+    expect(baseline.primary.contentHeight).toBeLessThanOrEqual(baseline.primary.clientHeight + 1);
+    expect(baseline.secondary.contentHeight).toBeLessThanOrEqual(baseline.secondary.clientHeight + 1);
 
-    const variants = [
-      {
-        jp: '短い字幕です',
-        en: '',
-      },
-      {
-        jp: 'これは非同期で届く長い日本語字幕です。'.repeat(12),
-        en: 'This deliberately long translation arrives after the Japanese line. '.repeat(12),
-      },
-      {
-        jp: '次の行です',
-        en: 'The next line.',
-      },
-    ];
-
-    for (const variant of variants) {
-      await injectedPage.evaluate(({ jp, en }) => {
-        const panel = document.querySelector(
-          '[data-testid="learner-layout-fixture"] .learner-subs-expanded',
-        );
-        const primary = panel?.querySelector('.learner-jp');
-        const secondary = panel?.querySelector('.learner-en');
-        if (!primary || !secondary) throw new Error('Subtitle slots were not available');
-        primary.textContent = jp;
-        secondary.textContent = en;
-      }, variant);
-
-      const current = await snapshot();
-      expect(Math.abs(current.panelHeight - baseline.panelHeight)).toBeLessThanOrEqual(1);
-      expect(Math.abs(current.coverHeight - baseline.coverHeight)).toBeLessThanOrEqual(1);
-      expect(Math.abs(current.playerHeight - baseline.playerHeight)).toBeLessThanOrEqual(1);
-      expect(current.coverMaxHeight).toBe(baseline.coverMaxHeight);
-    }
-
-    const laneContainment = await injectedPage.evaluate(() => {
-      const panel = document.querySelector(
-        '[data-testid="learner-layout-fixture"] .learner-subs-expanded',
-      ) as HTMLElement | null;
-      const primary = panel?.querySelector('.learner-jp') as HTMLElement | null;
-      const secondary = panel?.querySelector('.learner-en') as HTMLElement | null;
+    await expanded.evaluate((panel) => {
+      panel.style.setProperty('--asmr-subs-primary-scale', '0.8');
+      panel.style.setProperty('--asmr-subs-primary-lines', '3');
+      panel.style.setProperty('--asmr-subs-secondary-scale', '1');
+      panel.style.setProperty('--asmr-subs-secondary-lines', '3');
+      const primary = panel.querySelector('.learner-jp');
+      const secondary = panel.querySelector('.learner-en');
       if (!primary || !secondary) throw new Error('Subtitle slots were not available');
-      const snapshot = (element: HTMLElement) => {
-        const style = getComputedStyle(element);
-        return {
-          overflowY: style.overflowY,
-          lineClamp: style.getPropertyValue('-webkit-line-clamp'),
-          clientHeight: element.clientHeight,
-          scrollHeight: element.scrollHeight,
-        };
-      };
-      return {
-        primary: snapshot(primary),
-        secondary: snapshot(secondary),
-      };
+      primary.textContent = 'これは三行分の領域で読みやすく表示する中くらいの長さの日本語字幕です。';
+      secondary.textContent = 'This medium translation should fit fully within its reserved three-line lane.';
     });
 
-    for (const lane of [laneContainment.primary, laneContainment.secondary]) {
-      expect(lane.overflowY).toBe('hidden');
-      expect(lane.lineClamp).toBe('2');
-      // The source text can be taller, but the player exposes no nested
-      // scrolling surface and keeps the visual lane at exactly two lines.
-      expect(lane.scrollHeight).toBeGreaterThanOrEqual(lane.clientHeight);
-    }
+    const medium = await snapshot();
+    expect(Math.abs(medium.panelHeight - baseline.panelHeight)).toBeLessThanOrEqual(1);
+    expect(Math.abs(medium.coverHeight - baseline.coverHeight)).toBeLessThanOrEqual(1);
+    expect(Math.abs(medium.playerHeight - baseline.playerHeight)).toBeLessThanOrEqual(1);
+    expect(medium.coverMaxHeight).toBe(baseline.coverMaxHeight);
+    expect(medium.primary.overflowY).toBe('hidden');
+    expect(medium.secondary.overflowY).toBe('hidden');
+    expect(medium.primary.lineClamp).toBe('3');
+    expect(medium.secondary.lineClamp).toBe('3');
+    expect(medium.primary.clientHeight + 1)
+      .toBeGreaterThanOrEqual(medium.primary.lineHeight * 3);
+    expect(medium.secondary.clientHeight + 1)
+      .toBeGreaterThanOrEqual(medium.secondary.lineHeight * 3);
+    // A DOM Range spans hidden line boxes even when Chromium reports a
+    // line-clamped element's scrollHeight as equal to its clientHeight.
+    expect(medium.primary.contentHeight).toBeLessThanOrEqual(medium.primary.clientHeight + 1);
+    expect(medium.secondary.contentHeight).toBeLessThanOrEqual(medium.secondary.clientHeight + 1);
   });
 
   test('opens clamped subtitles in a body-level dialog without shifting the player', async ({ injectedPage, isScriptLoaded }) => {
@@ -572,23 +576,49 @@ test.describe('Learner Mode Layout', () => {
     await injectedPage.locator('[data-testid="learner-disclosure-fixture"]').evaluate(element => element.remove());
   });
 
-  test('contains both bilingual subtitle lanes on mobile', async ({ injectedPage, isScriptLoaded }) => {
+  test('keeps mobile expanded and collapsed subtitle lanes within their fixed bounds', async ({ injectedPage, isScriptLoaded }) => {
     await injectedPage.setViewportSize({ width: 390, height: 844 });
     await helpers.gotoWork(injectedPage, TEST_WORKS.WITH_SUBTITLES);
     await isScriptLoaded();
     await injectedPage.evaluate(() => {
       document.querySelector('[data-testid="learner-mobile-layout-fixture"]')?.remove();
+      document.querySelector('[data-testid="learner-collapsed-layout-fixture"]')?.remove();
       const fixture = document.createElement('div');
       fixture.dataset.testid = 'learner-mobile-layout-fixture';
       fixture.className = 'audio-player';
       fixture.style.cssText = 'position:fixed;inset:20px 15px auto;width:360px;z-index:2147483647';
       fixture.innerHTML = `
-        <div class="learner-subs-expanded">
-          <div class="learner-jp" lang="ja">これは長い日本語字幕が複数行に折り返されても読めることを確認する表示です。</div>
-          <button class="learner-en" type="button">This checks that a long translated subtitle remains inside its reserved mobile lane.</button>
+        <div
+          class="learner-subs-expanded"
+          style="
+            --asmr-subs-primary-scale:0.8;
+            --asmr-subs-primary-lines:3;
+            --asmr-subs-secondary-scale:1;
+            --asmr-subs-secondary-lines:3
+          "
+        >
+          <div class="learner-jp" lang="ja">これは三行分の領域で読みやすく表示する中くらいの長さの日本語字幕です。</div>
+          <button class="learner-en" type="button">This medium translation should fit fully within its reserved three-line lane.</button>
         </div>
       `;
       document.body.appendChild(fixture);
+
+      const collapsed = document.createElement('div');
+      collapsed.dataset.testid = 'learner-collapsed-layout-fixture';
+      collapsed.className = 'learner-subs-collapsed';
+      collapsed.style.cssText = [
+        '--asmr-subs-primary-scale:0.8',
+        '--asmr-subs-primary-lines:3',
+        '--asmr-subs-secondary-scale:1',
+        '--asmr-subs-secondary-lines:3',
+        'inset:auto 20px 20px',
+        'width:350px',
+      ].join(';');
+      collapsed.innerHTML = `
+        <div class="learner-jp" lang="ja">これは三行分を要求しても小型表示では二行に収める日本語字幕です。</div>
+        <button class="learner-en" type="button">The compact player keeps this translation within two visible lines.</button>
+      `;
+      document.body.appendChild(collapsed);
     });
 
     const geometry = await injectedPage.evaluate(async () => {
@@ -600,41 +630,65 @@ test.describe('Learner Mode Layout', () => {
       ) as HTMLElement | null;
       const primary = panel?.querySelector('.learner-jp') as HTMLElement | null;
       const secondary = panel?.querySelector('.learner-en') as HTMLElement | null;
-      if (!panel || !primary || !secondary) throw new Error('Mobile subtitle fixture was unavailable');
+      const collapsed = document.querySelector(
+        '[data-testid="learner-collapsed-layout-fixture"]',
+      ) as HTMLElement | null;
+      const collapsedPrimary = collapsed?.querySelector('.learner-jp') as HTMLElement | null;
+      const collapsedSecondary = collapsed?.querySelector('.learner-en') as HTMLElement | null;
+      if (!panel || !primary || !secondary || !collapsed || !collapsedPrimary || !collapsedSecondary) {
+        throw new Error('Compact subtitle fixtures were unavailable');
+      }
+      const contentGeometry = (element: HTMLElement) => {
+        const range = document.createRange();
+        range.selectNodeContents(element);
+        return {
+          clientHeight: element.clientHeight,
+          contentHeight: range.getBoundingClientRect().height,
+        };
+      };
       return {
         panel: panel.getBoundingClientRect().toJSON(),
         primary: primary.getBoundingClientRect().toJSON(),
         secondary: secondary.getBoundingClientRect().toJSON(),
+        primaryContent: contentGeometry(primary),
+        secondaryContent: contentGeometry(secondary),
         clientHeight: panel.clientHeight,
         scrollHeight: panel.scrollHeight,
         primaryOverflowY: getComputedStyle(primary).overflowY,
         secondaryOverflowY: getComputedStyle(secondary).overflowY,
         primaryLineClamp: getComputedStyle(primary).getPropertyValue('-webkit-line-clamp'),
         secondaryLineClamp: getComputedStyle(secondary).getPropertyValue('-webkit-line-clamp'),
+        collapsed: {
+          panel: collapsed.getBoundingClientRect().toJSON(),
+          primary: collapsedPrimary.getBoundingClientRect().toJSON(),
+          secondary: collapsedSecondary.getBoundingClientRect().toJSON(),
+          overflowY: getComputedStyle(collapsed).overflowY,
+          primaryLineClamp: getComputedStyle(collapsedPrimary).getPropertyValue('-webkit-line-clamp'),
+          secondaryLineClamp: getComputedStyle(collapsedSecondary).getPropertyValue('-webkit-line-clamp'),
+        },
       };
     });
 
     expect(geometry.scrollHeight).toBeLessThanOrEqual(geometry.clientHeight);
     expect(geometry.primaryOverflowY).toBe('hidden');
     expect(geometry.secondaryOverflowY).toBe('hidden');
-    expect(geometry.primaryLineClamp).toBe('2');
-    expect(geometry.secondaryLineClamp).toBe('2');
+    expect(geometry.panel.height).toBeGreaterThanOrEqual(167);
+    expect(geometry.panel.height).toBeLessThanOrEqual(169);
+    expect(geometry.primaryLineClamp).toBe('3');
+    expect(geometry.secondaryLineClamp).toBe('3');
+    expect(geometry.primaryContent.contentHeight)
+      .toBeLessThanOrEqual(geometry.primaryContent.clientHeight + 1);
+    expect(geometry.secondaryContent.contentHeight)
+      .toBeLessThanOrEqual(geometry.secondaryContent.clientHeight + 1);
     expect(geometry.primary.top).toBeGreaterThanOrEqual(geometry.panel.top - 1);
     expect(geometry.secondary.bottom).toBeLessThanOrEqual(geometry.panel.bottom + 1);
-  });
-
-  test('collapsed panel is compact', async ({ injectedPage, isScriptLoaded }) => {
-    await helpers.gotoWork(injectedPage, TEST_WORKS.WITH_SUBTITLES);
-    await isScriptLoaded();
-    await injectedPage.waitForTimeout(2000);
-
-    const collapsed = injectedPage.locator('.learner-subs-collapsed').first();
-    if (await collapsed.isVisible()) {
-      const box = await collapsed.boundingBox();
-      if (box) {
-        console.log(`Collapsed height: ${box.height}`);
-      }
-    }
+    expect(geometry.collapsed.panel.height).toBeGreaterThanOrEqual(111);
+    expect(geometry.collapsed.panel.height).toBeLessThanOrEqual(113);
+    expect(geometry.collapsed.overflowY).toBe('hidden');
+    expect(geometry.collapsed.primaryLineClamp).toBe('2');
+    expect(geometry.collapsed.secondaryLineClamp).toBe('2');
+    expect(geometry.collapsed.primary.top).toBeGreaterThanOrEqual(geometry.collapsed.panel.top - 1);
+    expect(geometry.collapsed.secondary.bottom).toBeLessThanOrEqual(geometry.collapsed.panel.bottom + 1);
   });
 });
 

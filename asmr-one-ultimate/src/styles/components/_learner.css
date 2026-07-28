@@ -41,7 +41,7 @@
  * block itself to grow/shrink makes the cover visibly pulse on every update.
  */
 .audio-player:not(.asmr-player-fullscreen) .learner-subs-expanded {
-    --asmr-expanded-subs-height: 152px;
+    --asmr-expanded-subs-height: 168px;
     flex: 0 0 var(--asmr-expanded-subs-height);
     block-size: var(--asmr-expanded-subs-height);
     min-block-size: var(--asmr-expanded-subs-height);
@@ -57,9 +57,9 @@
  * and move the artwork above on every subtitle change.
  */
 .audio-player:not(.asmr-player-fullscreen) .learner-subs-expanded .learner-jp {
-    flex: 0 0 var(--asmr-subs-primary-lane, 4.125rem);
-    min-block-size: var(--asmr-subs-primary-lane, 4.125rem);
-    max-block-size: var(--asmr-subs-primary-lane, 4.125rem);
+    flex: 0 0 var(--asmr-subs-primary-lane, 5rem);
+    min-block-size: var(--asmr-subs-primary-lane, 5rem);
+    max-block-size: var(--asmr-subs-primary-lane, 5rem);
     overflow: hidden;
     display: -webkit-box;
     -webkit-box-orient: vertical;
@@ -68,9 +68,9 @@
 }
 
 .audio-player:not(.asmr-player-fullscreen) .learner-subs-expanded .learner-en {
-    flex: 0 0 var(--asmr-subs-expanded-secondary-lane, 2.7rem);
-    min-block-size: var(--asmr-subs-expanded-secondary-lane, 2.7rem);
-    max-block-size: var(--asmr-subs-expanded-secondary-lane, 2.7rem);
+    flex: 0 0 var(--asmr-subs-expanded-secondary-lane, 3.25rem);
+    min-block-size: var(--asmr-subs-expanded-secondary-lane, 3.25rem);
+    max-block-size: var(--asmr-subs-expanded-secondary-lane, 3.25rem);
     overflow: hidden;
     display: -webkit-box;
     -webkit-box-orient: vertical;
@@ -126,8 +126,8 @@
     flex: 0 0 var(--asmr-subs-collapsed-primary-lane, 3.565rem);
     min-block-size: var(--asmr-subs-collapsed-primary-lane, 3.565rem);
     max-block-size: var(--asmr-subs-collapsed-primary-lane, 3.565rem);
-    -webkit-line-clamp: var(--asmr-subs-primary-lines, 2);
-    line-clamp: var(--asmr-subs-primary-lines, 2);
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
 }
 
 .learner-subs-collapsed .learner-en {
@@ -497,10 +497,6 @@ button.learner-en:focus-visible {
 /* Mobile: hidden upcoming text takes layout space → blank wrapped lines.
    Use display:none so only spoken text affects line wrapping. */
 @media (max-width: 600px) {
-    .audio-player:not(.asmr-player-fullscreen) .learner-subs-expanded {
-        --asmr-expanded-subs-height: 136px;
-    }
-
     .karaoke-upcoming.karaoke-hidden {
         display: none;
     }

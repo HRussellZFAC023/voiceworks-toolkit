@@ -123,16 +123,24 @@ describe('legacy Whisper status overlay', () => {
 
 describe('gallery controls over arbitrary album artwork', () => {
     const scrim = readDeclaration(galleryComponent, '.asmr-gallery-nav', 'background');
-    const opacity = Number(readDeclaration(galleryComponent, '.asmr-gallery-nav', 'opacity'));
 
-    it('keeps the resting surface transparent without fading its dual-tone glyph', () => {
+    it('keeps transparent resting controls subdued but edged on pale artwork', () => {
         expect(scrim).toBe('transparent');
-        expect(opacity).toBe(1);
+        expect(readDeclaration(galleryComponent, '.asmr-gallery-nav', 'opacity')).toBe('1');
+        expect(readDeclaration(galleryComponent, '.asmr-gallery-nav', 'border'))
+            .toBe('1px solid rgba(17, 24, 39, 0.22)');
+        expect(readDeclaration(galleryComponent, '.asmr-gallery-nav', 'box-shadow'))
+            .toBe('0 1px 4px rgba(17, 24, 39, 0.3)');
+        expect(readDeclaration(
+            galleryComponent,
+            '.asmr-gallery-nav :deep(.material-icons)',
+            'opacity',
+        )).toBe('0.46');
         expect(readDeclaration(
             galleryComponent,
             '.asmr-gallery-nav :deep(.material-icons)',
             '-webkit-text-stroke',
-        )).toBe('1px rgba(0, 0, 0, 0.92)');
+        )).toBe('0');
         expect(readDeclaration(galleryComponent, '.asmr-gallery-nav:hover', 'opacity')).toBe('1');
         expect(readDeclaration(galleryComponent, '.asmr-gallery-nav:focus-visible', 'opacity')).toBe('1');
     });
@@ -170,16 +178,44 @@ describe('gallery controls over arbitrary album artwork', () => {
         }
     });
 
-    it('keeps the fullscreen glyph dual-tone while its resting surface is transparent', () => {
+    it('keeps the fullscreen control quiet at rest and fully legible when engaged', () => {
         expect(readDeclaration(fullscreenCss, '.audio-player .asmr-fullscreen-btn', 'background'))
             .toBe('transparent');
         expect(readDeclaration(fullscreenCss, '.audio-player .asmr-fullscreen-btn', 'opacity'))
             .toBe('1');
+        expect(readDeclaration(fullscreenCss, '.audio-player .asmr-fullscreen-btn', 'border'))
+            .toBe('1px solid rgba(17, 24, 39, 0.22)');
+        expect(readDeclaration(fullscreenCss, '.audio-player .asmr-fullscreen-btn', 'box-shadow'))
+            .toBe('0 1px 4px rgba(17, 24, 39, 0.3)');
+        expect(readDeclaration(
+            fullscreenCss,
+            '.audio-player .asmr-fullscreen-btn .material-icons',
+            'opacity',
+        )).toBe('0.46');
         expect(readDeclaration(
             fullscreenCss,
             '.audio-player .asmr-fullscreen-btn .material-icons',
             '-webkit-text-stroke',
-        )).toBe('1px rgba(0, 0, 0, 0.92)');
+        )).toBe('0');
+        expect(readDeclaration(
+            fullscreenCss,
+            '.audio-player .asmr-fullscreen-btn:focus-visible',
+            'opacity',
+        )).toBe('1');
+    });
+
+    it('keeps fullscreen delayed and upcoming copy readable on the dark media surface', () => {
+        const surfaces: Rgb[] = [BLACK, [51, 51, 51]];
+        for (const selector of [
+            '.audio-player.asmr-player-fullscreen .karaoke-upcoming',
+            '.audio-player.asmr-player-fullscreen .learner-whisper-delayed',
+        ]) {
+            const color = readDeclaration(fullscreenCss, selector, 'color');
+            for (const surface of surfaces) {
+                expect(contrastRatio(composite(color, surface), surface))
+                    .toBeGreaterThanOrEqual(TEXT_MIN);
+            }
+        }
     });
 });
 

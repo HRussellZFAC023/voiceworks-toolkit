@@ -51,6 +51,12 @@ function createEventBus() {
     };
 }
 
+function deferred<T>() {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>(res => { resolve = res; });
+    return { promise, resolve };
+}
+
 function setConfig(key: string, value: unknown): void {
     (globalThis as typeof globalThis & { GM_setValue: (key: string, value: unknown) => void })
         .GM_setValue(key, value);
@@ -215,12 +221,10 @@ describe('LearnerSubtitles status surface and long-line fit', () => {
             await nextTick();
 
             expect(document.querySelectorAll('.whisper-status')).toHaveLength(0);
-            const activity = wrapper.findAll('.learner-whisper-activity')
-                .filter(node => node.text().length > 0);
-            expect(activity).toHaveLength(1);
-            expect(activity[0].text()).toBe('whisperCatchingUp');
-            expect(activity[0].get('.learner-whisper-activity-label').classes())
-                .toContain('learner-visually-hidden');
+            const activity = wrapper.get('.learner-subs-expanded .learner-whisper-activity');
+            expect(activity.attributes('aria-label')).toBe('whisperCatchingUp');
+            expect(activity.text()).toBe('');
+            expect(activity.find('.learner-whisper-activity-label').exists()).toBe(false);
             wrapper.unmount();
         });
 
@@ -251,11 +255,10 @@ describe('LearnerSubtitles status surface and long-line fit', () => {
             await nextTick();
 
             const marker = wrapper.get('.learner-subs-expanded .learner-whisper-activity');
-            const text = marker.text();
-            expect(text).toBe('whisperPreparingSubtitles');
-            expect(text).not.toMatch(/onnx|webgpu|wasm|queued|%/i);
-            expect(marker.get('.learner-whisper-activity-label').classes())
-                .toContain('learner-visually-hidden');
+            expect(marker.attributes('aria-label')).toBe('whisperPreparingSubtitles');
+            expect(marker.text()).toBe('');
+            expect(marker.html()).not.toMatch(/onnx|webgpu|wasm|queued|%/i);
+            expect(marker.find('.learner-whisper-activity-label').exists()).toBe(false);
             wrapper.unmount();
         });
 
@@ -271,8 +274,8 @@ describe('LearnerSubtitles status surface and long-line fit', () => {
 
             const marker = wrapper.get('.learner-subs-expanded .learner-whisper-activity');
             expect(marker.classes()).toContain('learner-whisper-activity--error');
-            expect(marker.get('.learner-whisper-activity-label').classes())
-                .not.toContain('learner-visually-hidden');
+            expect(marker.get('.learner-whisper-activity-label').text())
+                .toBe('whisperGpuCrashed');
             expect(marker.text()).toBe('whisperGpuCrashed');
             wrapper.unmount();
         });
@@ -292,9 +295,9 @@ describe('LearnerSubtitles status surface and long-line fit', () => {
         it('declares the subtitle lanes in rem so the auto-fit cannot move the panel', () => {
             // em lanes would shrink together with the scaled font-size and pull
             // the album art up and down on every subtitle change.
-            expect(learnerCss).toContain('--asmr-expanded-subs-height: 152px');
-            expect(learnerCss).toContain('--asmr-subs-primary-lane, 4.125rem');
-            expect(learnerCss).toContain('--asmr-subs-expanded-secondary-lane, 2.7rem');
+            expect(learnerCss).toContain('--asmr-expanded-subs-height: 168px');
+            expect(learnerCss).toContain('--asmr-subs-primary-lane, 5rem');
+            expect(learnerCss).toContain('--asmr-subs-expanded-secondary-lane, 3.25rem');
             expect(learnerCss).toContain('--asmr-subs-secondary-lane, 2.1125rem');
             expect(learnerCss).toContain('--asmr-subs-collapsed-primary-lane, 3.565rem');
             expect(learnerCss).not.toMatch(/(min|max)-block-size:\s*3\.1em/);
@@ -306,6 +309,11 @@ describe('LearnerSubtitles status surface and long-line fit', () => {
             expect(learnerCss).toContain('-webkit-line-clamp: var(--asmr-subs-secondary-lines, 2)');
             expect(learnerCss).toContain('font-size: calc(1.25rem * var(--asmr-subs-primary-scale, 1))');
             expect(learnerCss).toContain('font-size: calc(0.8125rem * var(--asmr-subs-secondary-scale, 1))');
+
+            const collapsedPrimary = /\.learner-subs-collapsed \.learner-jp\s*\{([^}]*)\}/
+                .exec(learnerCss)?.[1] ?? '';
+            expect(collapsedPrimary).toMatch(/-webkit-line-clamp:\s*2/);
+            expect(collapsedPrimary).not.toMatch(/--asmr-subs-primary-lines/);
         });
     });
 
@@ -329,10 +337,8 @@ describe('LearnerSubtitles status surface and long-line fit', () => {
                 .toBe('最後まで表示する字幕');
             expect(wrapper.get('.learner-subs-expanded .learner-en').text())
                 .toBe('The translated line');
-            const marker = wrapper.get('.learner-subs-expanded .learner-whisper-activity');
-            expect(marker.text()).toBe('whisperCatchingUp');
-            expect(marker.get('.learner-whisper-activity-label').classes())
-                .toContain('learner-visually-hidden');
+            expect(wrapper.find('.learner-subs-expanded .learner-whisper-activity').exists())
+                .toBe(false);
             wrapper.unmount();
         });
 
@@ -357,16 +363,137 @@ describe('LearnerSubtitles status surface and long-line fit', () => {
             mounted.wrapper.unmount();
         });
 
-        it('still clears a pre-seek caption so it is not assigned to another playhead', async () => {
+        it('retains the confirmed bilingual pair across a same-track seek', async () => {
+            vi.mocked(TranslationService.peekCached).mockReturnValue('Subtitle before seek');
             const { wrapper } = await showLine('シーク前の字幕');
             const audio = document.querySelector('audio')! as HTMLAudioElement;
             audio.currentTime = 60;
             audio.dispatchEvent(new Event('seeking'));
             await nextTick();
 
-            expect(wrapper.get('.learner-subs-expanded .learner-jp').text()).toBe('');
-            expect(wrapper.get('.learner-subs-expanded .learner-en').text()).toBe('');
+            expect(wrapper.get('.learner-subs-expanded .learner-jp').text())
+                .toBe('シーク前の字幕');
+            expect(wrapper.get('.learner-subs-expanded .learner-en').text())
+                .toBe('Subtitle before seek');
             wrapper.unmount();
+        });
+
+        it('replaces both lanes together when the current translation resolves', async () => {
+            const pendingTranslation = deferred<string>();
+            vi.mocked(TranslationService.peekCached).mockImplementation((text, target) => {
+                if (target === 'en' && text === 'シーク前の字幕') return 'Subtitle before seek';
+                return null;
+            });
+            vi.mocked(TranslationService.translate).mockImplementation((text) => (
+                text === 'シーク後の字幕' ? pendingTranslation.promise : Promise.resolve('')
+            ));
+            const mounted = await showLine('シーク前の字幕');
+            const audio = document.querySelector('audio')! as HTMLAudioElement;
+
+            audio.currentTime = 21;
+            mounted.eventBus.emit('whisper:update', {
+                text: 'シーク後の字幕',
+                segments: [
+                    { start: 0, end: 10, text: 'シーク前の字幕' },
+                    { start: 20, end: 30, text: 'シーク後の字幕' },
+                ],
+                final: true,
+                live: true,
+                source: 'complete',
+                sourceLanguageHint: 'ja',
+            });
+            await nextTick();
+
+            expect(mounted.wrapper.get('.learner-subs-expanded .learner-jp').text())
+                .toBe('シーク前の字幕');
+            expect(mounted.wrapper.get('.learner-subs-expanded .learner-en').text())
+                .toBe('Subtitle before seek');
+
+            pendingTranslation.resolve('Subtitle after seek');
+            await flushPromises();
+            await nextTick();
+
+            expect(mounted.wrapper.get('.learner-subs-expanded .learner-jp').text())
+                .toBe('シーク後の字幕');
+            expect(mounted.wrapper.get('.learner-subs-expanded .learner-en').text())
+                .toBe('Subtitle after seek');
+            mounted.wrapper.unmount();
+        });
+
+        it('does not cancel and restart the same in-flight translation on ticker updates', async () => {
+            const pendingTranslation = deferred<string>();
+            vi.mocked(TranslationService.translate).mockReturnValue(pendingTranslation.promise);
+            const mounted = await showLine('一度だけ翻訳する字幕');
+            const audio = document.querySelector('audio')! as HTMLAudioElement;
+
+            for (let index = 0; index < 5; index += 1) {
+                audio.dispatchEvent(new Event('timeupdate'));
+                await nextTick();
+            }
+
+            expect(TranslationService.translate).toHaveBeenCalledTimes(1);
+            pendingTranslation.resolve('Translate this subtitle once');
+            await flushPromises();
+            await nextTick();
+            expect(mounted.wrapper.get('.learner-subs-expanded .learner-en').text())
+                .toBe('Translate this subtitle once');
+            mounted.wrapper.unmount();
+        });
+
+        it('does not let a stale same-text request clear its replacement guard', async () => {
+            let now = 0;
+            vi.spyOn(Date, 'now').mockImplementation(() => now);
+            const firstRequest = deferred<string>();
+            const replacementRequest = deferred<string>();
+            let requestCount = 0;
+            vi.mocked(TranslationService.translate).mockImplementation(() => {
+                requestCount += 1;
+                return requestCount === 1 ? firstRequest.promise : replacementRequest.promise;
+            });
+            const mounted = await showLine('シーク後も同じ字幕');
+            const audio = document.querySelector('audio')! as HTMLAudioElement;
+            expect(requestCount).toBe(1);
+
+            audio.currentTime = 5;
+            audio.dispatchEvent(new Event('seeking'));
+            audio.dispatchEvent(new Event('timeupdate'));
+            await nextTick();
+            expect(requestCount).toBe(2);
+
+            firstRequest.resolve('Stale translation');
+            await flushPromises();
+            now = 1_500;
+            audio.dispatchEvent(new Event('timeupdate'));
+            await nextTick();
+
+            // The old promise has settled beyond the retry cooldown, but its
+            // generation must not clear the replacement's in-flight guard.
+            expect(requestCount).toBe(2);
+
+            replacementRequest.resolve('Current translation');
+            await flushPromises();
+            await nextTick();
+            expect(mounted.wrapper.get('.learner-subs-expanded .learner-en').text())
+                .toBe('Current translation');
+            mounted.wrapper.unmount();
+        });
+
+        it('clears the retained pair at a work/source boundary', async () => {
+            vi.mocked(TranslationService.peekCached).mockReturnValue('Translated');
+            const mounted = await showLine('現在の音源だけの字幕');
+            const audio = document.querySelector('audio')! as HTMLAudioElement;
+            audio.currentTime = 60;
+            audio.dispatchEvent(new Event('seeking'));
+            await nextTick();
+            expect(mounted.wrapper.get('.learner-subs-expanded .learner-jp').text())
+                .toBe('現在の音源だけの字幕');
+
+            mounted.eventBus.emit('work:change', undefined);
+            await nextTick();
+
+            expect(mounted.wrapper.get('.learner-subs-expanded .learner-jp').text()).toBe('');
+            expect(mounted.wrapper.get('.learner-subs-expanded .learner-en').text()).toBe('');
+            mounted.wrapper.unmount();
         });
 
         it('does not change native timed-cue expiry behavior', async () => {
@@ -406,7 +533,7 @@ describe('LearnerSubtitles status surface and long-line fit', () => {
             // 34 full-width glyphs => weight 68, past the 60-unit two-line budget.
             const { wrapper } = await showLine(jpLine(34));
             expect(fitOf(wrapper.get('.learner-subs-expanded').attributes('style')))
-                .toEqual({ scale: '0.8', lines: '2' });
+                .toEqual({ scale: '0.8', lines: '3' });
             wrapper.unmount();
         });
 
@@ -443,6 +570,17 @@ describe('LearnerSubtitles status surface and long-line fit', () => {
             await nextTick();
             const style = wrapper.get('.learner-subs-expanded').attributes('style') ?? '';
             expect(style).toMatch(/--asmr-subs-secondary-scale:\s*0\.85/);
+            expect(style).toMatch(/--asmr-subs-secondary-lines:\s*3/);
+            wrapper.unmount();
+        });
+
+        it('keeps an ordinary three-line translation at full readable size', async () => {
+            vi.mocked(TranslationService.peekCached).mockReturnValue(
+                'Cute trainer who feels good after massaging me very gently.',
+            );
+            const { wrapper } = await showLine(jpLine(7));
+            const style = wrapper.get('.learner-subs-expanded').attributes('style') ?? '';
+            expect(style).toMatch(/--asmr-subs-secondary-scale:\s*1(?:;|$)/);
             expect(style).toMatch(/--asmr-subs-secondary-lines:\s*3/);
             wrapper.unmount();
         });

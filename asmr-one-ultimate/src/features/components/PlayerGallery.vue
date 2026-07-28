@@ -1004,9 +1004,9 @@ onUnmounted(() => {
 }
 
 /*
- * Keep the resting surface transparent without fading the glyph itself. A
- * white fill plus dark stroke stays identifiable over both pale and dark
- * artwork; whole-control opacity made both layers disappear on pale covers.
+ * Keep artwork controls quiet until they are engaged. The button remains
+ * transparent, while a low-contrast dark edge stays discoverable on pale
+ * covers. Fade the glyph rather than the whole control so that edge survives.
  */
 .asmr-gallery-nav {
     position: absolute;
@@ -1021,12 +1021,13 @@ onUnmounted(() => {
     min-width: 44px;
     min-height: 44px;
     background: transparent;
-    border: 1px solid transparent;
+    border: 1px solid rgba(17, 24, 39, 0.22);
     color: #fff;
     cursor: pointer;
     padding: 0;
     opacity: 1;
     border-radius: 50%;
+    box-shadow: 0 1px 4px rgba(17, 24, 39, 0.3);
     transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
@@ -1061,13 +1062,15 @@ onUnmounted(() => {
 .asmr-gallery-nav :deep(.material-icons) {
     font-size: 24px;
     color: #fff;
-    -webkit-text-stroke: 1px rgba(0, 0, 0, 0.92);
-    text-shadow:
-        -1px 0 rgba(0, 0, 0, 0.92),
-        1px 0 rgba(0, 0, 0, 0.92),
-        0 -1px rgba(0, 0, 0, 0.92),
-        0 1px rgba(0, 0, 0, 0.92),
-        0 1px 2px rgba(0, 0, 0, 0.95);
+    opacity: 0.46;
+    -webkit-text-stroke: 0;
+    filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.92));
+    transition: opacity 0.2s ease;
+}
+
+.asmr-gallery-nav:hover :deep(.material-icons),
+.asmr-gallery-nav:focus-visible :deep(.material-icons) {
+    opacity: 1;
 }
 
 /* Slideshow pause/play toggle — top-right, next to exclude */
@@ -1080,12 +1083,12 @@ onUnmounted(() => {
     min-width: 44px;
     min-height: 44px;
     background: transparent;
-    border-color: transparent;
+    border-color: rgba(17, 24, 39, 0.22);
 }
 
 .asmr-gallery-slideshow-toggle :deep(.material-icons) {
     font-size: 20px;
-    opacity: 1;
+    opacity: 0.46;
 }
 
 .asmr-gallery-slideshow-toggle:hover,
@@ -1097,7 +1100,8 @@ onUnmounted(() => {
     transform: scale(1.05) !important;
 }
 
-.asmr-gallery-slideshow-toggle:hover :deep(.material-icons) {
+.asmr-gallery-slideshow-toggle:hover :deep(.material-icons),
+.asmr-gallery-slideshow-toggle:focus-visible :deep(.material-icons) {
     opacity: 1;
 }
 
@@ -1115,12 +1119,12 @@ onUnmounted(() => {
     min-width: 44px;
     min-height: 44px;
     background: transparent;
-    border-color: transparent;
+    border-color: rgba(17, 24, 39, 0.22);
 }
 
 .asmr-gallery-exclude :deep(.material-icons) {
     font-size: 20px;
-    opacity: 1;
+    opacity: 0.46;
 }
 
 .asmr-gallery-exclude:hover,
@@ -1130,7 +1134,8 @@ onUnmounted(() => {
     transform: scale(1.05) !important;
 }
 
-.asmr-gallery-exclude:hover :deep(.material-icons) {
+.asmr-gallery-exclude:hover :deep(.material-icons),
+.asmr-gallery-exclude:focus-visible :deep(.material-icons) {
     opacity: 1;
 }
 
@@ -1158,14 +1163,17 @@ onUnmounted(() => {
     transition: opacity 0.2s;
 }
 
-/* Touch devices cannot hover, so keep a quieter but still tappable resting state. */
-@media (max-width: 800px) {
+/* Touch devices cannot hover, so retain a subdued but discoverable surface. */
+@media (hover: none), (pointer: coarse) {
     .asmr-gallery-nav {
         opacity: 1;
         width: 44px;
         height: 44px;
-        background: rgba(17, 24, 39, 0.52);
-        border-color: rgba(255, 255, 255, 0.28);
+        background: rgba(17, 24, 39, 0.12);
+    }
+
+    .asmr-gallery-nav :deep(.material-icons) {
+        opacity: 0.68;
     }
 
     .asmr-gallery-prev {

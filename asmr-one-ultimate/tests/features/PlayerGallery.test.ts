@@ -171,11 +171,10 @@ describe('PlayerGallery', () => {
         expect(next.isVisible()).toBe(true);
         expect(wrapper.find('.asmr-gallery-open').exists()).toBe(false);
 
-        // The surface stays transparent at rest while the white glyph retains
-        // a dark outline. Fading the whole button also faded that contrast
-        // layer and made the controls disappear on pale artwork.
-        expect(playerGallerySource).toMatch(/\.asmr-gallery-nav\s*\{[\s\S]*background:\s*transparent;[\s\S]*opacity:\s*1;/);
-        expect(playerGallerySource).toMatch(/\.asmr-gallery-nav :deep\(\.material-icons\)\s*\{[\s\S]*-webkit-text-stroke:\s*1px rgba\(0, 0, 0, 0\.92\);/);
+        // The surface stays transparent and the glyph stays quiet at rest,
+        // while a persistent dark edge keeps the control findable on pale art.
+        expect(playerGallerySource).toMatch(/\.asmr-gallery-nav\s*\{[\s\S]*background:\s*transparent;[\s\S]*border:\s*1px solid rgba\(17, 24, 39, 0\.22\);[\s\S]*opacity:\s*1;[\s\S]*box-shadow:\s*0 1px 4px rgba\(17, 24, 39, 0\.3\);/);
+        expect(playerGallerySource).toMatch(/\.asmr-gallery-nav :deep\(\.material-icons\)\s*\{[\s\S]*opacity:\s*0\.46;[\s\S]*-webkit-text-stroke:\s*0;[\s\S]*filter:\s*drop-shadow/);
         expect(playerGallerySource).toMatch(/\.asmr-gallery-nav:hover\s*\{[\s\S]*opacity:\s*1\s*!important;/);
         expect(playerGallerySource).not.toContain(':global(.albumart):hover');
         expect(playerFullscreenCss).not.toMatch(/\.albumart:hover \.asmr-gallery-nav/);

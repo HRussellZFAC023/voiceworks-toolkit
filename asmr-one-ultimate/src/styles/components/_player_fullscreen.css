@@ -73,11 +73,7 @@ body.asmr-fullscreen-active .player-bar-container {
     z-index: 10 !important;
 }
 
-/*
- * Stable fullscreen affordance. Keep the resting surface transparent, but do
- * not fade the glyph: its white fill and dark stroke remain identifiable over
- * either light or dark artwork.
- */
+/* Stable but quiet fullscreen affordance; full contrast appears on engagement. */
 .audio-player .asmr-fullscreen-btn {
     position: absolute;
     top: max(8px, env(safe-area-inset-top));
@@ -91,7 +87,7 @@ body.asmr-fullscreen-active .player-bar-container {
     min-width: 44px;
     min-height: 44px;
     padding: 0;
-    border: 1px solid transparent;
+    border: 1px solid rgba(17, 24, 39, 0.22);
     border-radius: 50%;
     background: transparent;
     color: #fff;
@@ -99,6 +95,7 @@ body.asmr-fullscreen-active .player-bar-container {
     cursor: pointer;
     pointer-events: auto;
     backdrop-filter: blur(6px);
+    box-shadow: 0 1px 4px rgba(17, 24, 39, 0.3);
     transition: opacity 0.2s ease, background-color 0.2s ease, transform 0.2s ease;
 }
 
@@ -122,13 +119,15 @@ body.asmr-fullscreen-active .player-bar-container {
 .audio-player .asmr-fullscreen-btn .material-icons {
     font-size: 22px;
     line-height: 1;
-    -webkit-text-stroke: 1px rgba(0, 0, 0, 0.92);
-    text-shadow:
-        -1px 0 rgba(0, 0, 0, 0.92),
-        1px 0 rgba(0, 0, 0, 0.92),
-        0 -1px rgba(0, 0, 0, 0.92),
-        0 1px rgba(0, 0, 0, 0.92),
-        0 1px 2px rgba(0, 0, 0, 0.95);
+    opacity: 0.46;
+    -webkit-text-stroke: 0;
+    filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.92));
+    transition: opacity 0.2s ease;
+}
+
+.audio-player .asmr-fullscreen-btn:hover .material-icons,
+.audio-player .asmr-fullscreen-btn:focus-visible .material-icons {
+    opacity: 1;
 }
 
 /* Hide Pull Handler */
@@ -206,8 +205,9 @@ body.asmr-fullscreen-active .player-bar-container {
     background: transparent !important;
     backdrop-filter: blur(10px) !important;
     color: #fff !important;
-    border: 1px solid transparent !important;
+    border: 1px solid rgba(17, 24, 39, 0.22) !important;
     border-radius: 50% !important;
+    box-shadow: 0 1px 4px rgba(17, 24, 39, 0.3) !important;
     transition: all 0.2s ease !important;
     opacity: 1;
 }
@@ -400,6 +400,20 @@ body.asmr-fullscreen-active .player-bar-container {
     color: rgba(255, 255, 255, 0.7) !important;
 }
 
+/*
+ * Fullscreen is deliberately a dark media surface even when the host theme is
+ * light. Do not inherit the host's grey tertiary token into that surface.
+ */
+.audio-player.asmr-player-fullscreen .karaoke-upcoming {
+    color: rgba(255, 255, 255, 0.62) !important;
+    text-shadow: 0 1px 3px rgba(0, 0, 0, 0.78);
+}
+
+.audio-player.asmr-player-fullscreen .learner-whisper-delayed {
+    color: rgba(255, 255, 255, 0.78) !important;
+    text-shadow: 0 1px 3px rgba(0, 0, 0, 0.78);
+}
+
 /* ========================================
    Auto-hide Controls on Touch Devices
    ======================================== */
@@ -440,7 +454,12 @@ body.asmr-fullscreen-active .player-bar-container {
     .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-slideshow-toggle,
     .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-exclude {
         opacity: 1 !important;
+        background: rgba(17, 24, 39, 0.12) !important;
         pointer-events: auto !important;
+    }
+
+    .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-nav .material-icons {
+        opacity: 0.68;
     }
 }
 
@@ -458,8 +477,6 @@ body.asmr-fullscreen-active .player-bar-container {
     .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-nav {
         width: 44px !important;
         height: 44px !important;
-        opacity: 1;
-        background: rgba(17, 24, 39, 0.52) !important;
     }
 
     .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-nav .material-icons {
