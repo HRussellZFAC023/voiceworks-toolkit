@@ -2161,10 +2161,18 @@ function _updateWhisperDisplay() {
             // Look-ahead: pre-translate next 10 upcoming lines
             translateLookahead(fullText, targetLang, sourceLanguageHint);
         }
+        const cachedSecondaryNeedsJapanese = !!(
+            cachedSecondary
+            && (sourceLanguageHint === 'zh'
+                || (sourceLanguageHint === 'auto' && isChinese(fullText)))
+            && targetLang !== 'ja'
+            && !isAlreadyTargetLanguage(fullText, targetLang, sourceLanguageHint)
+            && !TranslationService.peekCached(fullText, 'ja', 'zh')
+        );
         const shouldRetainConfirmedPair = !!(
             fullText
             && translatable
-            && !cachedSecondary
+            && (!cachedSecondary || cachedSecondaryNeedsJapanese)
             && enablePlayerTranslator.value
             && lastWhisperCaptionConfirmed
             && primaryText.value
@@ -2194,7 +2202,7 @@ function _updateWhisperDisplay() {
             if (!translatable) {
                 // Pure punctuation/symbols — clear secondary, nothing to translate
                 updateSecondaryLine('', false);
-            } else if (cachedSecondary) {
+            } else if (cachedSecondary && !retainConfirmedPair) {
                 updateSecondaryLine(cachedSecondary, false);
                 lastSecondaryShown = cachedSecondary;
             } else if (!retainConfirmedPair) {
@@ -2202,7 +2210,12 @@ function _updateWhisperDisplay() {
                 // until this first caption's translation arrives.
                 updateSecondaryLine('', true);
             }
-        } else if (translatable && cachedSecondary && cachedSecondary !== lastSecondaryShown) {
+        } else if (
+            !retainConfirmedPair
+            && translatable
+            && cachedSecondary
+            && cachedSecondary !== lastSecondaryShown
+        ) {
             // Translation became available (e.g. translateAhead filled the cache)
             updateSecondaryLine(cachedSecondary, false);
             lastSecondaryShown = cachedSecondary;
@@ -2369,9 +2382,17 @@ function _updateWhisperDisplay() {
         const cached = !alreadyTarget && cachedCandidate?.trim() === requestedText.trim()
             ? null
             : cachedCandidate;
+        const cachedSecondaryNeedsJapanese = !!(
+            cached
+            && (sourceLanguageHint === 'zh'
+                || (sourceLanguageHint === 'auto' && isChinese(requestedText)))
+            && targetLang !== 'ja'
+            && !alreadyTarget
+            && !TranslationService.peekCached(requestedText, 'ja', 'zh')
+        );
         const shouldRetainConfirmedPair = !!(
             wtTranslatable
-            && !cached
+            && (!cached || cachedSecondaryNeedsJapanese)
             && enablePlayerTranslator.value
             && lastWhisperCaptionConfirmed
             && primaryText.value
@@ -2536,17 +2557,22 @@ function _updateWhisperDisplay() {
             if (!retainConfirmedPair) lastSecondaryShown = '';
             if (!wtTranslatable) {
                 updateSecondaryLine('', false);
-            } else if (cached) {
+            } else if (cached && !retainConfirmedPair) {
                 updateSecondaryLine(cached, false);
                 lastSecondaryShown = cached;
             } else if (!retainConfirmedPair) {
                 updateSecondaryLine('', true);
             }
-        } else if (wtTranslatable && cached && cached !== lastSecondaryShown) {
+        } else if (
+            !retainConfirmedPair
+            && wtTranslatable
+            && cached
+            && cached !== lastSecondaryShown
+        ) {
             updateSecondaryLine(cached, false);
             lastSecondaryShown = cached;
         }
-        if (!retainConfirmedPair && requestedText !== lastWhisperDisplayText) {
+        if (requestedText !== lastWhisperDisplayText) {
             const cn = sourceLanguageHint === 'zh'
                 || (sourceLanguageHint === 'auto' && isChinese(requestedText));
             let prim = requestedText;
@@ -2567,31 +2593,50 @@ function _updateWhisperDisplay() {
                         cancellableKey: realtimeJaQueueKey,
                         sourceLanguageHint: 'zh',
                     }).then(ja2 => {
-                        if (ja2 && pendingWhisperPairText === requestedText) {
+                        const usableJapanese = usablePairTranslation(requestedText, ja2);
+                        if (pendingWhisperPairText === requestedText) {
                             const translated = TranslationService.peekCached(
                                 requestedText,
                                 targetLang,
                                 sourceLanguageHint,
                                 LEARNER_SECONDARY_TARGET,
                             );
-                            if (translated) {
+                            if (usableJapanese && translated) {
                                 commitPendingWhisperPair(
                                     requestedText,
                                     translated,
                                     sourceLanguageHint,
                                     false,
                                     requestIsCurrent,
+                                    usableJapanese,
+                                );
+                            } else if (!usableJapanese) {
+                                releaseFailedPendingWhisperPair(
                                     requestedText,
+                                    sourceLanguageHint,
+                                    targetLang,
+                                    requestIsCurrent,
+                                    '',
+                                    translated || '',
                                 );
                             }
                             return;
                         }
-                        if (ja2 && ja2.trim() !== requestedText.trim()
+                        if (usableJapanese
                             && requestIsCurrent() && lastDisplayedText === requestedText) {
-                            updatePrimaryLine(ja2);
-                            lastWhisperDisplayText = ja2;
+                            updatePrimaryLine(usableJapanese);
+                            lastWhisperDisplayText = usableJapanese;
                         }
-                    }).catch(() => {}).finally(() => {
+                    }).catch(() => {
+                        releaseFailedPendingWhisperPair(
+                            requestedText,
+                            sourceLanguageHint,
+                            targetLang,
+                            requestIsCurrent,
+                            '',
+                            cached || '',
+                        );
+                    }).finally(() => {
                         if (
                             realtimeJaTranslationRequestGeneration === requestGeneration
                             && realtimeJaTranslationInFlightText === requestedText
@@ -2601,8 +2646,10 @@ function _updateWhisperDisplay() {
                     });
                 }
             }
-            updatePrimaryLine(prim);
-            lastWhisperDisplayText = prim;
+            if (!retainConfirmedPair) {
+                updatePrimaryLine(prim);
+                lastWhisperDisplayText = prim;
+            }
         }
     } else {
         retainWhisperCaptionWhileSeekTargetResolves();

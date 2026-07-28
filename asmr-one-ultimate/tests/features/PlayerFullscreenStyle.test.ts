@@ -34,15 +34,17 @@ describe('PlayerFullscreen keeps a stable clickable control', () => {
     it('keeps the resting control quiet and restores full contrast on engagement', () => {
         const resting = /\.audio-player \.asmr-fullscreen-btn\s*\{([^}]*)\}/.exec(globalCss)?.[1] ?? '';
         expect(resting).toMatch(/background:\s*transparent/);
-        expect(resting).toMatch(/border:\s*1px solid rgba\(17, 24, 39, 0\.22\)/);
-        expect(resting).toMatch(/box-shadow:\s*0 1px 4px rgba\(17, 24, 39, 0\.3\)/);
+        expect(resting).toMatch(/border:\s*1px solid transparent/);
+        expect(resting).toMatch(/box-shadow:\s*none/);
+        expect(resting).toMatch(/backdrop-filter:\s*none/);
         expect(resting).toMatch(/opacity:\s*1/);
-        expect(globalCss).toContain('-webkit-text-stroke: 0');
-        expect(globalCss).toContain('filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.92))');
-        expect(globalCss).toMatch(/\.audio-player \.asmr-fullscreen-btn \.material-icons\s*\{[^}]*opacity:\s*0\.46/);
+        expect(globalCss).toContain('-webkit-text-stroke: 0.75px rgba(0, 0, 0, 0.82)');
+        expect(globalCss).toContain('filter: drop-shadow(0 0 1px rgba(0, 0, 0, 0.96))');
+        expect(globalCss).toMatch(/\.audio-player \.asmr-fullscreen-btn \.material-icons\s*\{[^}]*color:\s*rgba\(255, 255, 255, 0\.58\)[^}]*opacity:\s*1/);
         const interactive = /\.audio-player \.asmr-fullscreen-btn:hover,[\s\S]*?\.audio-player \.asmr-fullscreen-btn:focus-visible\s*\{([^}]*)\}/
             .exec(globalCss)?.[1] ?? '';
         expect(interactive).toMatch(/opacity:\s*1/);
-        expect(globalCss).toMatch(/\.audio-player \.asmr-fullscreen-btn:hover \.material-icons,[\s\S]*?opacity:\s*1/);
+        expect(globalCss).toMatch(/\.audio-player \.asmr-fullscreen-btn:hover \.material-icons,[\s\S]*?color:\s*#fff/);
+        expect(globalCss).toMatch(/@media \(hover: none\), \(pointer: coarse\)\s*\{[\s\S]*?\.audio-player \.asmr-fullscreen-btn \.material-icons\s*\{[^}]*color:\s*rgba\(255, 255, 255, 0\.68\)/);
     });
 });

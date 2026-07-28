@@ -87,15 +87,15 @@ body.asmr-fullscreen-active .player-bar-container {
     min-width: 44px;
     min-height: 44px;
     padding: 0;
-    border: 1px solid rgba(17, 24, 39, 0.22);
+    border: 1px solid transparent;
     border-radius: 50%;
     background: transparent;
     color: #fff;
     opacity: 1;
     cursor: pointer;
     pointer-events: auto;
-    backdrop-filter: blur(6px);
-    box-shadow: 0 1px 4px rgba(17, 24, 39, 0.3);
+    backdrop-filter: none;
+    box-shadow: none;
     transition: opacity 0.2s ease, background-color 0.2s ease, transform 0.2s ease;
 }
 
@@ -119,15 +119,17 @@ body.asmr-fullscreen-active .player-bar-container {
 .audio-player .asmr-fullscreen-btn .material-icons {
     font-size: 22px;
     line-height: 1;
-    opacity: 0.46;
-    -webkit-text-stroke: 0;
-    filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.92));
-    transition: opacity 0.2s ease;
+    color: rgba(255, 255, 255, 0.58);
+    opacity: 1;
+    -webkit-text-stroke: 0.75px rgba(0, 0, 0, 0.82);
+    text-shadow: 0 1px 1px rgba(0, 0, 0, 0.95);
+    filter: drop-shadow(0 0 1px rgba(0, 0, 0, 0.96));
+    transition: color 0.2s ease;
 }
 
 .audio-player .asmr-fullscreen-btn:hover .material-icons,
 .audio-player .asmr-fullscreen-btn:focus-visible .material-icons {
-    opacity: 1;
+    color: #fff;
 }
 
 /* Hide Pull Handler */
@@ -203,11 +205,11 @@ body.asmr-fullscreen-active .player-bar-container {
     width: 60px !important;
     height: 60px !important;
     background: transparent !important;
-    backdrop-filter: blur(10px) !important;
+    backdrop-filter: none !important;
     color: #fff !important;
-    border: 1px solid rgba(17, 24, 39, 0.22) !important;
+    border: 1px solid transparent !important;
     border-radius: 50% !important;
-    box-shadow: 0 1px 4px rgba(17, 24, 39, 0.3) !important;
+    box-shadow: none !important;
     transition: all 0.2s ease !important;
     opacity: 1;
 }
@@ -230,6 +232,12 @@ body.asmr-fullscreen-active .player-bar-container {
     .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-nav:active {
         background: rgba(0, 0, 0, 0.5) !important;
         transform: translateY(-50%) scale(1.1) !important;
+    }
+}
+
+@media (hover: none), (pointer: coarse) {
+    .audio-player .asmr-fullscreen-btn .material-icons {
+        color: rgba(255, 255, 255, 0.68);
     }
 }
 
@@ -450,16 +458,21 @@ body.asmr-fullscreen-active .player-bar-container {
 /* Keep gallery controls visible/tappable during slideshow on touch devices */
 @media (hover: none) {
     .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-nav,
-    .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-counter,
     .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-slideshow-toggle,
     .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-exclude {
         opacity: 1 !important;
-        background: rgba(17, 24, 39, 0.12) !important;
+        background: transparent !important;
+        pointer-events: auto !important;
+    }
+
+    .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-counter {
+        opacity: 1 !important;
         pointer-events: auto !important;
     }
 
     .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-nav .material-icons {
-        opacity: 0.68;
+        color: rgba(255, 255, 255, 0.68);
+        opacity: 1;
     }
 }
 

@@ -173,9 +173,10 @@ describe('PlayerGallery', () => {
 
         // The surface stays transparent and the glyph stays quiet at rest,
         // while a persistent dark edge keeps the control findable on pale art.
-        expect(playerGallerySource).toMatch(/\.asmr-gallery-nav\s*\{[\s\S]*background:\s*transparent;[\s\S]*border:\s*1px solid rgba\(17, 24, 39, 0\.22\);[\s\S]*opacity:\s*1;[\s\S]*box-shadow:\s*0 1px 4px rgba\(17, 24, 39, 0\.3\);/);
-        expect(playerGallerySource).toMatch(/\.asmr-gallery-nav :deep\(\.material-icons\)\s*\{[\s\S]*opacity:\s*0\.46;[\s\S]*-webkit-text-stroke:\s*0;[\s\S]*filter:\s*drop-shadow/);
+        expect(playerGallerySource).toMatch(/\.asmr-gallery-nav\s*\{[\s\S]*background:\s*transparent;[\s\S]*border:\s*1px solid transparent;[\s\S]*opacity:\s*1;[\s\S]*box-shadow:\s*none;/);
+        expect(playerGallerySource).toMatch(/\.asmr-gallery-nav :deep\(\.material-icons\)\s*\{[\s\S]*color:\s*rgba\(255, 255, 255, 0\.58\);[\s\S]*opacity:\s*1;[\s\S]*-webkit-text-stroke:\s*0\.75px rgba\(0, 0, 0, 0\.82\);[\s\S]*filter:\s*drop-shadow/);
         expect(playerGallerySource).toMatch(/\.asmr-gallery-nav:hover\s*\{[\s\S]*opacity:\s*1\s*!important;/);
+        expect(playerGallerySource).toMatch(/@media \(hover: none\), \(pointer: coarse\)\s*\{[\s\S]*?\.asmr-gallery-nav\s*\{[^}]*background:\s*transparent;/);
         expect(playerGallerySource).not.toContain(':global(.albumart):hover');
         expect(playerFullscreenCss).not.toMatch(/\.albumart:hover \.asmr-gallery-nav/);
         expect(playerFullscreenCss).toMatch(/\.albumart:hover \.asmr-gallery-counter\s*\{[\s\S]*opacity:\s*1/);

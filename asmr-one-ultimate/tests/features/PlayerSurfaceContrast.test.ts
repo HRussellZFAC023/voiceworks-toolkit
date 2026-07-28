@@ -43,6 +43,12 @@ const THEMES = {
 const TEXT_MIN = 4.5;
 const CONTROL_MIN = 3;
 
+function strokeColor(value: string): string {
+    const match = /(rgba?\([^)]+\)|#[0-9a-f]{3,6})/i.exec(value);
+    if (!match) throw new Error(`No colour in stroke declaration: ${value}`);
+    return match[1];
+}
+
 describe('subtitle status and helper text', () => {
     it('keeps the "delayed transcription" label above the small-text floor in both themes', () => {
         // 0.68rem is small text, so it needs the full 4.5:1. The previous
@@ -128,21 +134,43 @@ describe('gallery controls over arbitrary album artwork', () => {
         expect(scrim).toBe('transparent');
         expect(readDeclaration(galleryComponent, '.asmr-gallery-nav', 'opacity')).toBe('1');
         expect(readDeclaration(galleryComponent, '.asmr-gallery-nav', 'border'))
-            .toBe('1px solid rgba(17, 24, 39, 0.22)');
+            .toBe('1px solid transparent');
         expect(readDeclaration(galleryComponent, '.asmr-gallery-nav', 'box-shadow'))
-            .toBe('0 1px 4px rgba(17, 24, 39, 0.3)');
+            .toBe('none');
+        const glyphColor = readDeclaration(
+            galleryComponent,
+            '.asmr-gallery-nav :deep(.material-icons)',
+            'color',
+        );
         expect(readDeclaration(
             galleryComponent,
             '.asmr-gallery-nav :deep(.material-icons)',
             'opacity',
-        )).toBe('0.46');
-        expect(readDeclaration(
+        )).toBe('1');
+        const edgeColor = strokeColor(readDeclaration(
             galleryComponent,
             '.asmr-gallery-nav :deep(.material-icons)',
             '-webkit-text-stroke',
-        )).toBe('0');
+        ));
+
+        expect(contrastRatio(composite(glyphColor, BLACK), BLACK))
+            .toBeGreaterThanOrEqual(CONTROL_MIN);
+        expect(contrastRatio(composite(edgeColor, WHITE), WHITE))
+            .toBeGreaterThanOrEqual(CONTROL_MIN);
         expect(readDeclaration(galleryComponent, '.asmr-gallery-nav:hover', 'opacity')).toBe('1');
         expect(readDeclaration(galleryComponent, '.asmr-gallery-nav:focus-visible', 'opacity')).toBe('1');
+    });
+
+    it('keeps touch controls transparent while strengthening only the edged glyph', () => {
+        expect(galleryComponent).toMatch(
+            /@media \(hover: none\), \(pointer: coarse\)\s*\{[\s\S]*?\.asmr-gallery-nav\s*\{[^}]*background:\s*transparent;/,
+        );
+        expect(galleryComponent).toMatch(
+            /@media \(hover: none\), \(pointer: coarse\)\s*\{[\s\S]*?\.asmr-gallery-nav :deep\(\.material-icons\)\s*\{[^}]*color:\s*rgba\(255, 255, 255, 0\.68\);[^}]*opacity:\s*1;/,
+        );
+        expect(fullscreenCss).toMatch(
+            /@media \(hover: none\)\s*\{[\s\S]*?\.asmr-gallery-nav,[\s\S]*?\.asmr-gallery-slideshow-toggle,[\s\S]*?\.asmr-gallery-exclude\s*\{[^}]*background:\s*transparent\s*!important;/,
+        );
     });
 
     it('keeps the engaged nav glyph legible on white and black covers', () => {
@@ -160,6 +188,25 @@ describe('gallery controls over arbitrary album artwork', () => {
     it('uses a dark hover scrim rather than a translucent-white wash', () => {
         expect(readDeclaration(galleryComponent, '.asmr-gallery-nav:hover', 'background'))
             .toBe('rgba(17, 24, 39, 0.78)');
+    });
+
+    it('lets slideshow and exclude controls inherit the same edged glyph without a resting surface', () => {
+        for (const selector of [
+            '.asmr-gallery-slideshow-toggle',
+            '.asmr-gallery-exclude',
+        ]) {
+            expect(readDeclaration(galleryComponent, selector, 'background')).toBe('transparent');
+            expect(readDeclaration(galleryComponent, selector, 'border-color')).toBe('transparent');
+        }
+
+        for (const selector of [
+            '.asmr-gallery-slideshow-toggle :deep(.material-icons)',
+            '.asmr-gallery-exclude :deep(.material-icons)',
+        ]) {
+            const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const rule = new RegExp(`${escaped}\\s*\\{([^}]*)\\}`).exec(galleryComponent)?.[1] ?? '';
+            expect(rule).not.toMatch(/(?:^|;)\s*(?:color|opacity|-webkit-text-stroke)\s*:/);
+        }
     });
 
     it('never reintroduces a translucent-white hover state that washes the glyph out', () => {
@@ -184,19 +231,28 @@ describe('gallery controls over arbitrary album artwork', () => {
         expect(readDeclaration(fullscreenCss, '.audio-player .asmr-fullscreen-btn', 'opacity'))
             .toBe('1');
         expect(readDeclaration(fullscreenCss, '.audio-player .asmr-fullscreen-btn', 'border'))
-            .toBe('1px solid rgba(17, 24, 39, 0.22)');
+            .toBe('1px solid transparent');
         expect(readDeclaration(fullscreenCss, '.audio-player .asmr-fullscreen-btn', 'box-shadow'))
-            .toBe('0 1px 4px rgba(17, 24, 39, 0.3)');
+            .toBe('none');
+        const glyphColor = readDeclaration(
+            fullscreenCss,
+            '.audio-player .asmr-fullscreen-btn .material-icons',
+            'color',
+        );
         expect(readDeclaration(
             fullscreenCss,
             '.audio-player .asmr-fullscreen-btn .material-icons',
             'opacity',
-        )).toBe('0.46');
-        expect(readDeclaration(
+        )).toBe('1');
+        const edgeColor = strokeColor(readDeclaration(
             fullscreenCss,
             '.audio-player .asmr-fullscreen-btn .material-icons',
             '-webkit-text-stroke',
-        )).toBe('0');
+        ));
+        expect(contrastRatio(composite(glyphColor, BLACK), BLACK))
+            .toBeGreaterThanOrEqual(CONTROL_MIN);
+        expect(contrastRatio(composite(edgeColor, WHITE), WHITE))
+            .toBeGreaterThanOrEqual(CONTROL_MIN);
         expect(readDeclaration(
             fullscreenCss,
             '.audio-player .asmr-fullscreen-btn:focus-visible',

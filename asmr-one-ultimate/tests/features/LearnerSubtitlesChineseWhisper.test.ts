@@ -430,6 +430,51 @@ describe('LearnerSubtitles Chinese Whisper rendering', () => {
         wrapper.unmount();
     });
 
+    it('retains a segmented pair when English is cached until Japanese is ready', async () => {
+        setConfig('learnerSubtitleMode', 'jp-en');
+        const japanese = deferred<string>();
+        vi.mocked(TranslationService.peekCached).mockImplementation((text, target) => {
+            if (text === '前の字幕' && target === 'en') return 'Previous subtitle';
+            if (text === '缓存的字幕' && target === 'en') return 'Cached subtitle';
+            return null;
+        });
+        vi.spyOn(TranslationService, 'translate').mockImplementation(async (text, target) => {
+            if (text === '缓存的字幕' && target === 'ja') return japanese.promise;
+            return '';
+        });
+        const { wrapper, eventBus } = mountLearner();
+
+        eventBus.emit('whisper:update', {
+            text: '前の字幕',
+            segments: [{ start: 0, end: 10, text: '前の字幕' }],
+            final: true,
+            live: true,
+            source: 'complete',
+            sourceLanguageHint: 'ja',
+        });
+        await nextTick();
+
+        eventBus.emit('whisper:update', {
+            text: '缓存的字幕',
+            segments: [{ start: 0, end: 10, text: '缓存的字幕' }],
+            final: true,
+            live: true,
+            source: 'complete',
+            sourceLanguageHint: 'zh',
+        });
+        await nextTick();
+
+        expect(wrapper.get('.learner-subs-expanded .learner-jp').text()).toBe('前の字幕');
+        expect(wrapper.get('.learner-subs-expanded .learner-en').text()).toBe('Previous subtitle');
+
+        japanese.resolve('キャッシュ済みの字幕');
+        await flushPromises();
+        await nextTick();
+        expect(wrapper.get('.learner-subs-expanded .learner-jp').text()).toBe('キャッシュ済みの字幕');
+        expect(wrapper.get('.learner-subs-expanded .learner-en').text()).toBe('Cached subtitle');
+        wrapper.unmount();
+    });
+
     it('commits a text-only Chinese cue atomically after both translations resolve', async () => {
         setConfig('learnerSubtitleMode', 'jp-en');
         const japanese = deferred<string>();
@@ -474,6 +519,51 @@ describe('LearnerSubtitles Chinese Whisper rendering', () => {
         await nextTick();
         expect(wrapper.get('.learner-subs-expanded .learner-jp').text()).toBe('文字だけの字幕');
         expect(wrapper.get('.learner-subs-expanded .learner-en').text()).toBe('Text-only subtitle');
+        wrapper.unmount();
+    });
+
+    it('retains a text-only pair when English is cached until Japanese is ready', async () => {
+        setConfig('learnerSubtitleMode', 'jp-en');
+        const japanese = deferred<string>();
+        vi.mocked(TranslationService.peekCached).mockImplementation((text, target) => {
+            if (text === '確定済み字幕' && target === 'en') return 'Confirmed subtitle';
+            if (text === '缓存的纯文字字幕' && target === 'en') return 'Cached text-only subtitle';
+            return null;
+        });
+        vi.spyOn(TranslationService, 'translate').mockImplementation(async (text, target) => {
+            if (text === '缓存的纯文字字幕' && target === 'ja') return japanese.promise;
+            return '';
+        });
+        const { wrapper, eventBus } = mountLearner();
+
+        eventBus.emit('whisper:update', {
+            text: '確定済み字幕',
+            segments: [{ start: 0, end: 10, text: '確定済み字幕' }],
+            final: true,
+            live: true,
+            source: 'complete',
+            sourceLanguageHint: 'ja',
+        });
+        await nextTick();
+
+        eventBus.emit('whisper:update', {
+            text: '缓存的纯文字字幕',
+            segments: [],
+            final: true,
+            live: true,
+            source: 'complete',
+            sourceLanguageHint: 'zh',
+        });
+        await nextTick();
+
+        expect(wrapper.get('.learner-subs-expanded .learner-jp').text()).toBe('確定済み字幕');
+        expect(wrapper.get('.learner-subs-expanded .learner-en').text()).toBe('Confirmed subtitle');
+
+        japanese.resolve('キャッシュ済みのテキスト字幕');
+        await flushPromises();
+        await nextTick();
+        expect(wrapper.get('.learner-subs-expanded .learner-jp').text()).toBe('キャッシュ済みのテキスト字幕');
+        expect(wrapper.get('.learner-subs-expanded .learner-en').text()).toBe('Cached text-only subtitle');
         wrapper.unmount();
     });
 
