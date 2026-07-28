@@ -2,10 +2,9 @@
 /**
  * PlayerFullscreen.vue - Expands the audio player to fill the viewport.
  *
- * Renders no control of its own. The host player already ships a fullscreen
- * button, and injecting a second one next to it was reported as unwanted
- * duplication, so this component is now behaviour-only: it owns the fullscreen
- * CSS class, the idle auto-hide, and the exit gestures.
+ * Renders one stable fullscreen control inside the injected feature root. The
+ * host control is not present in every player build, so relying on it left the
+ * keyboard shortcut as the only discoverable entry point.
  *
  * Entry: the `f` keyboard shortcut (KeyboardManager -> controller.toggle()) or
  * any other caller of the exposed `toggleFullscreen`. Exit: the same shortcut,
@@ -15,6 +14,7 @@
 import { ref, onMounted, onUnmounted } from 'vue';
 import { useEventBus } from '../../composables/useEventBus';
 import { useAppStore } from '../../composables/useAppStore';
+import { useI18n } from '../../composables/useI18n';
 import { AppStore } from '../../store/AppStore';
 import { Logger } from '../../core/Utils';
 
@@ -25,6 +25,7 @@ const IDLE_TIMEOUT = 4000;    // ms before auto-hiding controls on touch devices
 // -- Composables --
 const { emit } = useEventBus();
 const appStore = useAppStore();
+const { t } = useI18n();
 
 // -- Reactive state --
 const isFullscreen = ref(false);
@@ -213,5 +214,16 @@ defineExpose({ syncFullscreenClass, toggleFullscreen, exit, isFullscreen });
 </script>
 
 <template>
-    <!-- Behaviour-only feature: the host player supplies the fullscreen control. -->
+    <button
+        type="button"
+        class="asmr-fullscreen-btn"
+        :aria-label="isFullscreen ? t('fullscreenExit') : t('fullscreenToggle')"
+        :title="isFullscreen ? t('fullscreenExit') : t('fullscreenToggle')"
+        :aria-pressed="isFullscreen"
+        @click.stop="toggleFullscreen"
+    >
+        <i class="material-icons" aria-hidden="true">
+            {{ isFullscreen ? 'fullscreen_exit' : 'fullscreen' }}
+        </i>
+    </button>
 </template>

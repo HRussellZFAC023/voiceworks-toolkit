@@ -255,10 +255,9 @@ export function findLyricsSource(
     return parseLyricsFromDom(root);
 }
 
-export function parseVttContent(content: string): LyricLine[] {
+function parseTimedSubtitleContent(content: string, timestampRegex: RegExp): LyricLine[] {
     const lyrics: LyricLine[] = [];
-    const lines = content.split(/\r?\n/);
-    const timestampRegex = /^(?:(\d+):)?(\d{2}):(\d{2})\.(\d{3})\s*-->\s*(?:(\d+):)?(\d{2}):(\d{2})\.(\d{3})/;
+    const lines = content.replace(/^\uFEFF/, '').split(/\r?\n/);
 
     let i = 0;
     while (i < lines.length && !timestampRegex.test(lines[i])) i++;
@@ -298,6 +297,20 @@ export function parseVttContent(content: string): LyricLine[] {
     return lyrics;
 }
 
+export function parseVttContent(content: string): LyricLine[] {
+    return parseTimedSubtitleContent(
+        content,
+        /^(?:(\d+):)?(\d{2}):(\d{2})\.(\d{3})\s*-->\s*(?:(\d+):)?(\d{2}):(\d{2})\.(\d{3})/,
+    );
+}
+
+export function parseSrtContent(content: string): LyricLine[] {
+    return parseTimedSubtitleContent(
+        content,
+        /^(\d+):(\d{2}):(\d{2}),(\d{3})\s*-->\s*(\d+):(\d{2}):(\d{2}),(\d{3})/,
+    );
+}
+
 export function parseLrcContent(content: string): Array<{ time: number; text: string }> {
     const lyrics: Array<{ time: number; text: string }> = [];
     const lines = content.split(/\r?\n/);
@@ -333,7 +346,9 @@ export function parseLrcContent(content: string): Array<{ time: number; text: st
 
 export function parseSubtitleContent(content: string): LyricLine[] {
     const fromVtt = parseVttContent(content);
-    return fromVtt.length > 0 ? fromVtt : parseLrcContent(content);
+    if (fromVtt.length > 0) return fromVtt;
+    const fromSrt = parseSrtContent(content);
+    return fromSrt.length > 0 ? fromSrt : parseLrcContent(content);
 }
 
 function normalizeTimeValue(value: unknown, fallback: number): number {

@@ -41,22 +41,17 @@ async function forcePlayerVisible(page: Page): Promise<boolean> {
 }
 
 /**
- * Enter fullscreen via the `f` shortcut.
- *
- * We deliberately no longer inject a fullscreen button: the host player already
- * ships one, and a second control beside it was reported as unwanted
- * duplication. The feature is now behaviour-only, so the shortcut (or any
- * caller of toggleFullscreen) is the entry point.
+ * Enter fullscreen through the visible control. The `f` shortcut remains
+ * covered by the keyboard-shortcuts suite.
  */
 async function enterFullscreen(page: Page): Promise<void> {
     await forcePlayerVisible(page);
-    await page.locator('body').click({ position: { x: 5, y: 5 } }).catch(() => {});
-    await page.keyboard.press('f');
+    await page.locator('.asmr-fullscreen-btn').click();
     await page.waitForTimeout(600);
 }
 
 test.describe('Player Fullscreen', () => {
-    test('does not inject a second fullscreen button beside the host one', async ({ injectedPage, isScriptLoaded }) => {
+    test('injects one stable fullscreen button when the host control is absent', async ({ injectedPage, isScriptLoaded }) => {
         await helpers.gotoWork(injectedPage, TEST_WORKS.STANDARD);
         await isScriptLoaded();
 
@@ -65,9 +60,9 @@ test.describe('Player Fullscreen', () => {
             return;
         }
 
-        // The host player already ships a fullscreen control; duplicating it was
-        // reported as unwanted. Fullscreen is entered via the `f` shortcut.
-        await expect(injectedPage.locator('.asmr-fullscreen-btn')).toHaveCount(0);
+        const button = injectedPage.locator('.asmr-fullscreen-btn');
+        await expect(button).toHaveCount(1);
+        await expect(button).toHaveAttribute('aria-label', /fullscreen/i);
     });
 
     test('clicking fullscreen button enters fullscreen mode', async ({ injectedPage, isScriptLoaded }) => {

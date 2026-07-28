@@ -128,6 +128,24 @@ describe('learnerLyricsUtils', () => {
             const parsed = parseSubtitleContent('[00:02.00]LRC line');
             expect(parsed).toEqual([{ time: 2, text: 'LRC line' }]);
         });
+
+        it('parses BOM-prefixed CRLF SRT cues with optional indices and multiline text', () => {
+            const content = [
+                '\uFEFF1',
+                '00:00:02,050 --> 00:00:03,525',
+                '帰ってきたの？',
+                '',
+                '00:00:05,750 --> 00:00:06,325',
+                '待って',
+                'もう少しここにいて',
+                '',
+            ].join('\r\n');
+
+            expect(parseSubtitleContent(content)).toEqual([
+                { time: 2.05, endTime: 3.525, text: '帰ってきたの？' },
+                { time: 5.75, endTime: 6.325, text: '待って もう少しここにいて' },
+            ]);
+        });
     });
 
     describe('normalizeLyricLines', () => {

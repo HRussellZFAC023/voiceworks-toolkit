@@ -543,6 +543,142 @@ describe('Whisper', () => {
             }
         });
 
+        it('defers auto-start until Firefox playback is source-ready', () => {
+            vi.useFakeTimers();
+            try {
+                const whisper = new Whisper();
+                const audio = document.createElement('audio');
+                audio.src = 'https://raw.kiko-play-niptan.one/media/stream/track.mp3';
+                Object.defineProperty(audio, 'paused', { configurable: true, value: true });
+                Object.defineProperty(audio, 'readyState', {
+                    configurable: true,
+                    value: HTMLMediaElement.HAVE_NOTHING,
+                });
+                document.body.appendChild(audio);
+                (whisper as any).enabled = true;
+                (whisper as any).autoTranscribeWorkId = 'RJ01052162';
+                const start = vi.spyOn(whisper as any, 'startTranscription').mockResolvedValue(undefined);
+
+                (whisper as any).scheduleAutoStart('RJ01052162');
+                vi.advanceTimersByTime(500);
+
+                expect(start).not.toHaveBeenCalled();
+
+                Object.defineProperty(audio, 'paused', { configurable: true, value: false });
+                Object.defineProperty(audio, 'readyState', {
+                    configurable: true,
+                    value: HTMLMediaElement.HAVE_ENOUGH_DATA,
+                });
+                audio.dispatchEvent(new Event('playing'));
+
+                expect(start).toHaveBeenCalledTimes(1);
+            } finally {
+                vi.clearAllTimers();
+                vi.useRealTimers();
+            }
+        });
+
+        it('waits for an audio element created after the auto-start callback', () => {
+            vi.useFakeTimers();
+            try {
+                const whisper = new Whisper();
+                (whisper as any).enabled = true;
+                (whisper as any).autoTranscribeWorkId = 'RJ01052162';
+                const start = vi.spyOn(whisper as any, 'startTranscription').mockResolvedValue(undefined);
+
+                (whisper as any).scheduleAutoStart('RJ01052162');
+                vi.advanceTimersByTime(500);
+
+                expect(document.querySelector('audio')).toBeNull();
+                expect(start).not.toHaveBeenCalled();
+
+                const audio = document.createElement('audio');
+                audio.src = 'https://raw.kiko-play-niptan.one/media/stream/new-track.mp3';
+                Object.defineProperty(audio, 'paused', { configurable: true, value: false });
+                Object.defineProperty(audio, 'readyState', {
+                    configurable: true,
+                    value: HTMLMediaElement.HAVE_ENOUGH_DATA,
+                });
+                document.body.appendChild(audio);
+                audio.dispatchEvent(new Event('playing'));
+
+                expect(start).toHaveBeenCalledTimes(1);
+            } finally {
+                vi.clearAllTimers();
+                vi.useRealTimers();
+            }
+        });
+
+        it('follows a Vue-replaced audio element before playback starts', () => {
+            vi.useFakeTimers();
+            try {
+                const whisper = new Whisper();
+                const oldAudio = document.createElement('audio');
+                oldAudio.src = 'https://raw.kiko-play-niptan.one/media/stream/old-track.mp3';
+                Object.defineProperty(oldAudio, 'paused', { configurable: true, value: true });
+                document.body.appendChild(oldAudio);
+                (whisper as any).enabled = true;
+                (whisper as any).autoTranscribeWorkId = 'RJ01052162';
+                const start = vi.spyOn(whisper as any, 'startTranscription').mockResolvedValue(undefined);
+
+                (whisper as any).scheduleAutoStart('RJ01052162');
+                vi.advanceTimersByTime(500);
+
+                const newAudio = document.createElement('audio');
+                newAudio.src = 'https://raw.kiko-play-niptan.one/media/stream/new-track.mp3';
+                Object.defineProperty(newAudio, 'paused', { configurable: true, value: false });
+                Object.defineProperty(newAudio, 'readyState', {
+                    configurable: true,
+                    value: HTMLMediaElement.HAVE_ENOUGH_DATA,
+                });
+                oldAudio.replaceWith(newAudio);
+
+                Object.defineProperty(oldAudio, 'paused', { configurable: true, value: false });
+                Object.defineProperty(oldAudio, 'readyState', {
+                    configurable: true,
+                    value: HTMLMediaElement.HAVE_ENOUGH_DATA,
+                });
+                oldAudio.dispatchEvent(new Event('playing'));
+                expect(start).not.toHaveBeenCalled();
+
+                newAudio.dispatchEvent(new Event('playing'));
+                expect(start).toHaveBeenCalledTimes(1);
+            } finally {
+                vi.clearAllTimers();
+                vi.useRealTimers();
+            }
+        });
+
+        it('cancels a playback-deferred auto-start during lifecycle cleanup', () => {
+            vi.useFakeTimers();
+            try {
+                const whisper = new Whisper();
+                const audio = document.createElement('audio');
+                audio.src = 'https://raw.kiko-play-niptan.one/media/stream/track.mp3';
+                Object.defineProperty(audio, 'paused', { configurable: true, value: true });
+                document.body.appendChild(audio);
+                (whisper as any).enabled = true;
+                (whisper as any).autoTranscribeWorkId = 'RJ01052162';
+                const start = vi.spyOn(whisper as any, 'startTranscription').mockResolvedValue(undefined);
+
+                (whisper as any).scheduleAutoStart('RJ01052162');
+                vi.advanceTimersByTime(500);
+                (whisper as any).clearAutoStartTimer();
+
+                Object.defineProperty(audio, 'paused', { configurable: true, value: false });
+                Object.defineProperty(audio, 'readyState', {
+                    configurable: true,
+                    value: HTMLMediaElement.HAVE_ENOUGH_DATA,
+                });
+                audio.dispatchEvent(new Event('playing'));
+
+                expect(start).not.toHaveBeenCalled();
+            } finally {
+                vi.clearAllTimers();
+                vi.useRealTimers();
+            }
+        });
+
         it('mounts status as a no-flow cover overlay before first load and removes it on disable', () => {
             const player = document.createElement('div');
             player.className = 'audio-player';

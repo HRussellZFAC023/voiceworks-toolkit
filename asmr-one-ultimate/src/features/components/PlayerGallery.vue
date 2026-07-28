@@ -1004,18 +1004,9 @@ onUnmounted(() => {
 }
 
 /*
- * Navigation arrows.
- *
- * These sit on top of arbitrary album artwork, so quietness has to come from a
- * translucent scrim rather than element opacity. Fading the whole control
- * (previously opacity: 0.18) also fades the glyph towards the artwork: a white
- * arrow at 0.18 over a light cover measures ~1.2:1 and simply vanishes, which
- * is what "impossible to see in light mode" was describing.
- *
- * rgba(17, 24, 39, 0.62) is the lightest scrim that still keeps the white glyph
- * at >= 4.5:1 over pure white artwork (5.30:1) and 19.7:1 over black, so the
- * control is legible against any cover in either theme while staying visually
- * recessed until hover/focus.
+ * Keep the resting surface transparent without fading the glyph itself. A
+ * white fill plus dark stroke stays identifiable over both pale and dark
+ * artwork; whole-control opacity made both layers disappear on pale covers.
  */
 .asmr-gallery-nav {
     position: absolute;
@@ -1029,8 +1020,7 @@ onUnmounted(() => {
     height: 44px;
     min-width: 44px;
     min-height: 44px;
-    background: rgba(17, 24, 39, 0.62);
-    backdrop-filter: blur(8px);
+    background: transparent;
     border: 1px solid transparent;
     color: #fff;
     cursor: pointer;
@@ -1071,6 +1061,13 @@ onUnmounted(() => {
 .asmr-gallery-nav :deep(.material-icons) {
     font-size: 24px;
     color: #fff;
+    -webkit-text-stroke: 1px rgba(0, 0, 0, 0.92);
+    text-shadow:
+        -1px 0 rgba(0, 0, 0, 0.92),
+        1px 0 rgba(0, 0, 0, 0.92),
+        0 -1px rgba(0, 0, 0, 0.92),
+        0 1px rgba(0, 0, 0, 0.92),
+        0 1px 2px rgba(0, 0, 0, 0.95);
 }
 
 /* Slideshow pause/play toggle — top-right, next to exclude */
@@ -1082,9 +1079,8 @@ onUnmounted(() => {
     height: 44px;
     min-width: 44px;
     min-height: 44px;
-    background: rgba(17, 24, 39, 0.62);
+    background: transparent;
     border-color: transparent;
-    opacity: 1;
 }
 
 .asmr-gallery-slideshow-toggle :deep(.material-icons) {
@@ -1118,9 +1114,8 @@ onUnmounted(() => {
     height: 44px;
     min-width: 44px;
     min-height: 44px;
-    background: rgba(17, 24, 39, 0.62);
+    background: transparent;
     border-color: transparent;
-    opacity: 1;
 }
 
 .asmr-gallery-exclude :deep(.material-icons) {
@@ -1163,15 +1158,13 @@ onUnmounted(() => {
     transition: opacity 0.2s;
 }
 
-/* Touch devices cannot hover, so the resting state is the only state. Keep the
-   full scrim: at the previous 0.58 opacity over a 0.28 scrim the arrows
-   measured ~1.4:1 on light artwork. */
+/* Touch devices cannot hover, so keep a quieter but still tappable resting state. */
 @media (max-width: 800px) {
     .asmr-gallery-nav {
         opacity: 1;
         width: 44px;
         height: 44px;
-        background: rgba(17, 24, 39, 0.62);
+        background: rgba(17, 24, 39, 0.52);
         border-color: rgba(255, 255, 255, 0.28);
     }
 

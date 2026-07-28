@@ -41,7 +41,7 @@
  * block itself to grow/shrink makes the cover visibly pulse on every update.
  */
 .audio-player:not(.asmr-player-fullscreen) .learner-subs-expanded {
-    --asmr-expanded-subs-height: 136px;
+    --asmr-expanded-subs-height: 152px;
     flex: 0 0 var(--asmr-expanded-subs-height);
     block-size: var(--asmr-expanded-subs-height);
     min-block-size: var(--asmr-expanded-subs-height);
@@ -57,9 +57,9 @@
  * and move the artwork above on every subtitle change.
  */
 .audio-player:not(.asmr-player-fullscreen) .learner-subs-expanded .learner-jp {
-    flex: 0 0 var(--asmr-subs-primary-lane, 3.875rem);
-    min-block-size: var(--asmr-subs-primary-lane, 3.875rem);
-    max-block-size: var(--asmr-subs-primary-lane, 3.875rem);
+    flex: 0 0 var(--asmr-subs-primary-lane, 4.125rem);
+    min-block-size: var(--asmr-subs-primary-lane, 4.125rem);
+    max-block-size: var(--asmr-subs-primary-lane, 4.125rem);
     overflow: hidden;
     display: -webkit-box;
     -webkit-box-orient: vertical;
@@ -68,9 +68,9 @@
 }
 
 .audio-player:not(.asmr-player-fullscreen) .learner-subs-expanded .learner-en {
-    flex: 0 0 var(--asmr-subs-secondary-lane, 2.1125rem);
-    min-block-size: var(--asmr-subs-secondary-lane, 2.1125rem);
-    max-block-size: var(--asmr-subs-secondary-lane, 2.1125rem);
+    flex: 0 0 var(--asmr-subs-expanded-secondary-lane, 2.7rem);
+    min-block-size: var(--asmr-subs-expanded-secondary-lane, 2.7rem);
+    max-block-size: var(--asmr-subs-expanded-secondary-lane, 2.7rem);
     overflow: hidden;
     display: -webkit-box;
     -webkit-box-orient: vertical;
@@ -134,8 +134,8 @@
     flex: 0 0 var(--asmr-subs-secondary-lane, 2.1125rem);
     min-block-size: var(--asmr-subs-secondary-lane, 2.1125rem);
     max-block-size: var(--asmr-subs-secondary-lane, 2.1125rem);
-    -webkit-line-clamp: var(--asmr-subs-secondary-lines, 2);
-    line-clamp: var(--asmr-subs-secondary-lines, 2);
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
 }
 
 .learner-subs-collapsed.hidden {
@@ -237,7 +237,7 @@ button.learner-en:focus-visible {
 .learner-whisper-delayed {
     position: absolute;
     inset-block-start: 6px;
-    inset-inline-start: 8px;
+    inset-inline-start: 24px;
     max-inline-size: calc(100% - 56px);
     overflow: hidden;
     color: var(--asmr-text-secondary);
@@ -255,25 +255,68 @@ button.learner-en:focus-visible {
 }
 
 /*
- * The transcription status is deliberately absolutely positioned inside the
- * fixed-height subtitle lane: it appears, changes and disappears without ever
- * adding a box to the flow, so the artwork above cannot resize when Whisper
- * moves between preparing/listening/catching-up.
+ * Runtime activity is deliberately a quiet corner marker rather than copy in
+ * the primary caption lane. Its localized label remains available to assistive
+ * technology and as a hover title. Errors retain a compact visible label, but
+ * never replace the last subtitle pair.
  */
-.learner-whisper-placeholder {
+.learner-whisper-activity {
     position: absolute;
-    inset: 18px 44px;
-    display: grid;
-    place-items: center;
+    inset-block-start: 9px;
+    inset-inline-start: 10px;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    max-inline-size: calc(100% - 56px);
     margin: 0;
     overflow: hidden;
     color: var(--asmr-text-secondary);
-    font-size: 0.78rem;
+    font-size: 0.68rem;
     font-weight: 600;
-    line-height: 1.35;
-    text-align: center;
-    text-wrap: balance;
+    line-height: 1.2;
+    white-space: nowrap;
+    text-overflow: ellipsis;
     pointer-events: none;
+    z-index: 2;
+}
+
+.learner-whisper-activity-dot {
+    flex: 0 0 auto;
+    inline-size: 6px;
+    block-size: 6px;
+    border-radius: 50%;
+    background: var(--asmr-accent);
+    opacity: 0.58;
+}
+
+.learner-whisper-activity--error {
+    padding: 3px 6px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--q-negative, #c62828) 12%, var(--asmr-bg-primary));
+    color: var(--asmr-text-primary);
+}
+
+.learner-whisper-activity--error .learner-whisper-activity-dot {
+    background: var(--q-negative, #c62828);
+    opacity: 1;
+}
+
+.learner-whisper-activity-label {
+    min-inline-size: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.learner-visually-hidden {
+    position: absolute !important;
+    inline-size: 1px !important;
+    block-size: 1px !important;
+    padding: 0 !important;
+    margin: -1px !important;
+    overflow: hidden !important;
+    clip: rect(0, 0, 0, 0) !important;
+    white-space: nowrap !important;
+    border: 0 !important;
 }
 
 .learner-subtitle-expand {
@@ -362,6 +405,7 @@ button.learner-en:focus-visible {
 
 .learner-subtitle-dialog-header h2 {
     margin: 0;
+    color: var(--asmr-text-primary) !important;
     font-size: 1.1rem;
     line-height: 1.35;
 }
@@ -454,7 +498,7 @@ button.learner-en:focus-visible {
    Use display:none so only spoken text affects line wrapping. */
 @media (max-width: 600px) {
     .audio-player:not(.asmr-player-fullscreen) .learner-subs-expanded {
-        --asmr-expanded-subs-height: 120px;
+        --asmr-expanded-subs-height: 136px;
     }
 
     .karaoke-upcoming.karaoke-hidden {

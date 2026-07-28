@@ -15,24 +15,29 @@ const controller = readFileSync(
     'utf8',
 );
 
-describe('PlayerFullscreen injects no control of its own', () => {
-    it('renders no fullscreen button, because the host player already ships one', () => {
-        expect(component).not.toContain('asmr-fullscreen-btn');
-        expect(component).not.toMatch(/<button/);
-        expect(globalCss).not.toContain('asmr-fullscreen-btn');
+describe('PlayerFullscreen keeps a stable clickable control', () => {
+    it('renders exactly one themed fullscreen toggle when the host control is absent', () => {
+        expect(component.match(/class="asmr-fullscreen-btn"/g)).toHaveLength(1);
+        expect(component).toContain(":aria-label=\"isFullscreen ? t('fullscreenExit') : t('fullscreenToggle')\"");
+        expect(component).toContain(":aria-pressed=\"isFullscreen\"");
+        expect(globalCss).toContain('.audio-player .asmr-fullscreen-btn');
     });
 
-    it('keeps the fullscreen behaviour reachable without a duplicated button', () => {
-        // Escape, swipe-down and the keyboard/programmatic entry points all
-        // survive the button removal; only the redundant affordance is gone.
+    it('keeps button, keyboard, swipe and programmatic entry points on one toggle', () => {
+        expect(component).toContain('@click.stop="toggleFullscreen"');
         expect(component).toContain("document.addEventListener('keydown', onKeydown, true)");
         expect(component).toContain('function onTouchEnd');
         expect(component).toContain('defineExpose({ syncFullscreenClass, toggleFullscreen, exit, isFullscreen })');
         expect(controller).toContain('exposed?.toggleFullscreen?.()');
     });
 
-    it('drops the now-unused button labels from the component', () => {
-        expect(component).not.toContain('fullscreenToggle');
-        expect(component).not.toContain('fullscreenExit');
+    it('keeps the resting surface transparent without fading the outlined glyph', () => {
+        const resting = /\.audio-player \.asmr-fullscreen-btn\s*\{([^}]*)\}/.exec(globalCss)?.[1] ?? '';
+        expect(resting).toMatch(/background:\s*transparent/);
+        expect(resting).toMatch(/opacity:\s*1/);
+        expect(globalCss).toContain('-webkit-text-stroke: 1px rgba(0, 0, 0, 0.92)');
+        const interactive = /\.audio-player \.asmr-fullscreen-btn:hover,[\s\S]*?\.audio-player \.asmr-fullscreen-btn:focus-visible\s*\{([^}]*)\}/
+            .exec(globalCss)?.[1] ?? '';
+        expect(interactive).toMatch(/opacity:\s*1/);
     });
 });

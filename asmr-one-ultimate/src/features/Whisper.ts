@@ -80,6 +80,8 @@ import { selectWhisperSchedulingWindow } from './whisperSchedulingPolicy';
 // ============================================================================
 
 const TARGET_SAMPLE_RATE = 16000;
+const AUTO_START_READINESS_TIMEOUT_MS = 15_000;
+const AUTO_START_OBSERVER_ID = 'whisper-auto-start-readiness';
 // The worker executes inference sequentially. Keep one active inference and at
 // most one replaceable queued window so slow devices cannot accumulate a large
 // FIFO that later looks stalled.
@@ -735,6 +737,7 @@ export class Whisper {
     private loggedTranscriptKeys = new Set<string>();
     private _audioCache: AudioCache | null = null;
     private autoStartTimer: number | null = null;
+    private deferredAutoStartCleanup: (() => void) | null = null;
     private fetchAbortController: AbortController | null = null;
     private chunkStallRecoveryCount = 0;
     private consecutiveInferenceTimeouts = 0;
@@ -1151,11 +1154,79 @@ export class Whisper {
         this.clearAutoStartTimer();
         this.autoStartTimer = window.setTimeout(() => {
             this.autoStartTimer = null;
-            // Guard: only start if we're still on the same work
-            if (this.autoTranscribeWorkId === workId || Config.get('alwaysTranscribe')) {
-                this.startTranscription().catch(err => Logger.error('[Whisper] Auto-start failed:', err));
+            if (this.isAutoStartScopeCurrent(workId)) {
+                this.deferAutoStartUntilPlaybackReady(workId);
             }
         }, 500);
+    }
+
+    private isAutoStartScopeCurrent(workId: string): boolean {
+        if (!this.enabled || this.transcribing) return false;
+        let currentWorkId = '';
+        try {
+            currentWorkId = this.bridge.currentWorkId || '';
+        } catch {
+            // The bridge may still be attaching during userscript startup.
+        }
+        if (workId && currentWorkId && currentWorkId !== workId) return false;
+        if (this.autoTranscribeWorkId === workId) return true;
+        if (!Config.get('alwaysTranscribe')) return false;
+
+        return !workId || !currentWorkId || currentWorkId === workId;
+    }
+
+    private isPlaybackReadyForAutoStart(audio: HTMLAudioElement): boolean {
+        return !audio.paused
+            && !audio.ended
+            && !!(audio.currentSrc || audio.src)
+            && audio.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA;
+    }
+
+    private deferAutoStartUntilPlaybackReady(workId: string): void {
+        this.deferredAutoStartCleanup?.();
+
+        let readinessTimeout: number | null = null;
+        const cleanup = () => {
+            document.removeEventListener('playing', handlePlaying, true);
+            CentralObserver.unregister(AUTO_START_OBSERVER_ID);
+            if (readinessTimeout !== null) {
+                clearTimeout(readinessTimeout);
+                readinessTimeout = null;
+            }
+            if (this.deferredAutoStartCleanup === cleanup) {
+                this.deferredAutoStartCleanup = null;
+            }
+        };
+        const tryStart = (eventTarget?: EventTarget | null) => {
+            if (!this.isAutoStartScopeCurrent(workId)) {
+                cleanup();
+                return;
+            }
+
+            const audio = getAudioElement();
+            // A detached node can emit `playing` while Vue is replacing the
+            // player. Only the current document audio element may start a run.
+            if (!audio || (eventTarget && eventTarget !== audio)) return;
+            if (!this.isPlaybackReadyForAutoStart(audio)) return;
+
+            cleanup();
+            this.startTranscription().catch(err => Logger.error('[Whisper] Deferred auto-start failed:', err));
+        };
+        const handlePlaying = (event: Event) => {
+            tryStart(event.target);
+        };
+
+        this.deferredAutoStartCleanup = cleanup;
+        document.addEventListener('playing', handlePlaying, true);
+        CentralObserver.register(AUTO_START_OBSERVER_ID, () => tryStart(), 0);
+        readinessTimeout = window.setTimeout(() => {
+            Logger.debug('[Whisper] Auto-start readiness wait expired');
+            cleanup();
+        }, AUTO_START_READINESS_TIMEOUT_MS);
+
+        // Covers tracks that became ready between the 500ms callback and
+        // listener registration without relying on another DOM mutation.
+        tryStart();
     }
 
     private clearAutoStartTimer(): void {
@@ -1163,6 +1234,7 @@ export class Whisper {
             clearTimeout(this.autoStartTimer);
             this.autoStartTimer = null;
         }
+        this.deferredAutoStartCleanup?.();
     }
 
     private abortFetch(): void {

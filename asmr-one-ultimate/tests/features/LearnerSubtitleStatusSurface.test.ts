@@ -5,12 +5,14 @@
  *    appearing double" / "the album art would cover status": exactly one status
  *    surface may exist, and it may not be the artwork overlay.
  *  - "there is so much content shift rn ... the image above keeps getting
- *    bigger or smaller": the status must not add a box to the flow.
+ *    bigger or smaller": the activity marker must not add a box to the flow.
+ *  - "instead of listening for audio ... continue to show the last subtitle":
+ *    transient Whisper gaps retain the last JP/secondary pair.
  *  - "I dont like that the pannel if the text is too big it has like the scroll
  *    wrap": long lines shrink to fit instead of being cut, without changing the
  *    lane geometry the artwork height is derived from.
  */
-import { mount } from '@vue/test-utils';
+import { flushPromises, mount } from '@vue/test-utils';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { nextTick } from 'vue';
 import { readFileSync } from 'node:fs';
@@ -97,6 +99,7 @@ describe('LearnerSubtitles status surface and long-line fit', () => {
         setConfig('karaokeMode', false);
         setConfig('segmentMode', false);
         setConfig('learnerBlur', false);
+        setConfig('whisperOverrideSubs', true);
         setConfig('enableJpdb', false);
         setConfig('jpdbSubtitleFurigana', false);
         setConfig('jpdbShowFurigana', false);
@@ -196,7 +199,7 @@ describe('LearnerSubtitles status surface and long-line fit', () => {
             wrapper.unmount();
         });
 
-        it('never lets the legacy node and the Vue placeholder be shown together', async () => {
+        it('never lets the legacy node and the Vue activity marker be shown together', async () => {
             AppStore.setWhisperState({
                 isTranscribing: true,
                 isLoadingModel: false,
@@ -212,14 +215,16 @@ describe('LearnerSubtitles status surface and long-line fit', () => {
             await nextTick();
 
             expect(document.querySelectorAll('.whisper-status')).toHaveLength(0);
-            const placeholders = wrapper.findAll('.learner-whisper-placeholder')
+            const activity = wrapper.findAll('.learner-whisper-activity')
                 .filter(node => node.text().length > 0);
-            expect(placeholders).toHaveLength(1);
-            expect(placeholders[0].text()).toBe('whisperCatchingUp');
+            expect(activity).toHaveLength(1);
+            expect(activity[0].text()).toBe('whisperCatchingUp');
+            expect(activity[0].get('.learner-whisper-activity-label').classes())
+                .toContain('learner-visually-hidden');
             wrapper.unmount();
         });
 
-        it('keeps the status inside the subtitle panel, never on the album artwork', async () => {
+        it('keeps the activity marker inside the subtitle panel, never on the album artwork', async () => {
             AppStore.setWhisperState({
                 isTranscribing: true,
                 isLoadingModel: false,
@@ -229,7 +234,7 @@ describe('LearnerSubtitles status surface and long-line fit', () => {
             const { wrapper } = mountLearner();
             await nextTick();
 
-            const status = document.querySelector('.learner-whisper-placeholder')!;
+            const status = document.querySelector('.learner-whisper-activity')!;
             expect(status.closest('.albumart')).toBeNull();
             expect(status.closest('.learner-subs-expanded, .learner-subs-collapsed')).not.toBeNull();
             wrapper.unmount();
@@ -245,18 +250,40 @@ describe('LearnerSubtitles status surface and long-line fit', () => {
             const { wrapper } = mountLearner();
             await nextTick();
 
-            const text = wrapper.get('.learner-subs-expanded .learner-whisper-placeholder').text();
+            const marker = wrapper.get('.learner-subs-expanded .learner-whisper-activity');
+            const text = marker.text();
             expect(text).toBe('whisperPreparingSubtitles');
             expect(text).not.toMatch(/onnx|webgpu|wasm|queued|%/i);
+            expect(marker.get('.learner-whisper-activity-label').classes())
+                .toContain('learner-visually-hidden');
+            wrapper.unmount();
+        });
+
+        it('keeps an error visible as a compact label without replacing the captions', async () => {
+            AppStore.setWhisperState({
+                isTranscribing: false,
+                isLoadingModel: false,
+                stage: 'error',
+                progressMessage: 'whisperGpuCrashed',
+            });
+            const { wrapper } = mountLearner();
+            await nextTick();
+
+            const marker = wrapper.get('.learner-subs-expanded .learner-whisper-activity');
+            expect(marker.classes()).toContain('learner-whisper-activity--error');
+            expect(marker.get('.learner-whisper-activity-label').classes())
+                .not.toContain('learner-visually-hidden');
+            expect(marker.text()).toBe('whisperGpuCrashed');
             wrapper.unmount();
         });
     });
 
     describe('stable geometry', () => {
-        it('paints the status outside the flow so it cannot resize the artwork', () => {
-            const rule = /\.learner-whisper-placeholder\s*\{([^}]*)\}/.exec(learnerCss)?.[1] ?? '';
+        it('paints the activity marker outside the flow so it cannot resize the artwork', () => {
+            const rule = /\.learner-whisper-activity\s*\{([^}]*)\}/.exec(learnerCss)?.[1] ?? '';
             expect(rule).toMatch(/position:\s*absolute/);
-            expect(rule).toMatch(/inset:/);
+            expect(rule).toMatch(/inset-block-start:/);
+            expect(rule).toMatch(/inset-inline-start:/);
 
             const delayed = /\.learner-whisper-delayed\s*\{([^}]*)\}/.exec(learnerCss)?.[1] ?? '';
             expect(delayed).toMatch(/position:\s*absolute/);
@@ -265,7 +292,9 @@ describe('LearnerSubtitles status surface and long-line fit', () => {
         it('declares the subtitle lanes in rem so the auto-fit cannot move the panel', () => {
             // em lanes would shrink together with the scaled font-size and pull
             // the album art up and down on every subtitle change.
-            expect(learnerCss).toContain('--asmr-subs-primary-lane, 3.875rem');
+            expect(learnerCss).toContain('--asmr-expanded-subs-height: 152px');
+            expect(learnerCss).toContain('--asmr-subs-primary-lane, 4.125rem');
+            expect(learnerCss).toContain('--asmr-subs-expanded-secondary-lane, 2.7rem');
             expect(learnerCss).toContain('--asmr-subs-secondary-lane, 2.1125rem');
             expect(learnerCss).toContain('--asmr-subs-collapsed-primary-lane, 3.565rem');
             expect(learnerCss).not.toMatch(/(min|max)-block-size:\s*3\.1em/);
@@ -277,6 +306,86 @@ describe('LearnerSubtitles status surface and long-line fit', () => {
             expect(learnerCss).toContain('-webkit-line-clamp: var(--asmr-subs-secondary-lines, 2)');
             expect(learnerCss).toContain('font-size: calc(1.25rem * var(--asmr-subs-primary-scale, 1))');
             expect(learnerCss).toContain('font-size: calc(0.8125rem * var(--asmr-subs-secondary-scale, 1))');
+        });
+    });
+
+    describe('caption continuity', () => {
+        it('retains the last JP and translation while live Whisper is between segments', async () => {
+            vi.mocked(TranslationService.peekCached).mockReturnValue('The translated line');
+            const { wrapper } = await showLine('最後まで表示する字幕');
+            const audio = document.querySelector('audio')! as HTMLAudioElement;
+
+            AppStore.setWhisperState({
+                isTranscribing: true,
+                isLoadingModel: false,
+                stage: 'behind',
+                progressMessage: 'technical detail',
+            });
+            audio.currentTime = 30;
+            audio.dispatchEvent(new Event('timeupdate'));
+            await nextTick();
+
+            expect(wrapper.get('.learner-subs-expanded .learner-jp').text())
+                .toBe('最後まで表示する字幕');
+            expect(wrapper.get('.learner-subs-expanded .learner-en').text())
+                .toBe('The translated line');
+            const marker = wrapper.get('.learner-subs-expanded .learner-whisper-activity');
+            expect(marker.text()).toBe('whisperCatchingUp');
+            expect(marker.get('.learner-whisper-activity-label').classes())
+                .toContain('learner-visually-hidden');
+            wrapper.unmount();
+        });
+
+        it('retains the last subtitle when an empty final chunk arrives', async () => {
+            vi.mocked(TranslationService.peekCached).mockReturnValue('Translated');
+            const mounted = await showLine('静かな間にも残る字幕');
+
+            mounted.eventBus.emit('whisper:update', {
+                text: '',
+                segments: [],
+                source: 'complete',
+                final: true,
+                live: true,
+                sourceLanguageHint: 'ja',
+            });
+            await nextTick();
+
+            expect(mounted.wrapper.get('.learner-subs-expanded .learner-jp').text())
+                .toBe('静かな間にも残る字幕');
+            expect(mounted.wrapper.get('.learner-subs-expanded .learner-en').text())
+                .toBe('Translated');
+            mounted.wrapper.unmount();
+        });
+
+        it('still clears a pre-seek caption so it is not assigned to another playhead', async () => {
+            const { wrapper } = await showLine('シーク前の字幕');
+            const audio = document.querySelector('audio')! as HTMLAudioElement;
+            audio.currentTime = 60;
+            audio.dispatchEvent(new Event('seeking'));
+            await nextTick();
+
+            expect(wrapper.get('.learner-subs-expanded .learner-jp').text()).toBe('');
+            expect(wrapper.get('.learner-subs-expanded .learner-en').text()).toBe('');
+            wrapper.unmount();
+        });
+
+        it('does not change native timed-cue expiry behavior', async () => {
+            const { wrapper } = mountLearner([{
+                time: 0,
+                endTime: 10,
+                text: 'ネイティブ字幕',
+            }]);
+            const audio = document.querySelector('audio')! as HTMLAudioElement;
+            audio.currentTime = 5;
+            audio.dispatchEvent(new Event('timeupdate'));
+            await nextTick();
+            expect(wrapper.get('.learner-subs-expanded .learner-jp').text()).not.toBe('');
+
+            audio.currentTime = 30;
+            audio.dispatchEvent(new Event('timeupdate'));
+            await nextTick();
+            expect(wrapper.get('.learner-subs-expanded .learner-jp').text()).toBe('');
+            wrapper.unmount();
         });
     });
 
@@ -325,11 +434,32 @@ describe('LearnerSubtitles status surface and long-line fit', () => {
             wrapper.unmount();
         });
 
+        it('gives a long expanded translation a third reserved line', async () => {
+            vi.mocked(TranslationService.translate).mockResolvedValue(
+                'This deliberately long translated subtitle needs a third readable line in the expanded player. '.repeat(2),
+            );
+            const { wrapper } = await showLine(jpLine(7));
+            await flushPromises();
+            await nextTick();
+            const style = wrapper.get('.learner-subs-expanded').attributes('style') ?? '';
+            expect(style).toMatch(/--asmr-subs-secondary-scale:\s*0\.85/);
+            expect(style).toMatch(/--asmr-subs-secondary-lines:\s*3/);
+            wrapper.unmount();
+        });
+
         it('still offers the full-text dialog as the escape hatch, with no inner scroller', () => {
             const dialog = /\.learner-subtitle-dialog\s*\{([^}]*)\}/.exec(learnerCss)?.[1] ?? '';
             expect(dialog).not.toMatch(/overflow(-y)?:\s*(auto|scroll)/);
             const content = /\.learner-subtitle-dialog-content\s*\{([^}]*)\}/.exec(learnerCss)?.[1] ?? '';
             expect(content).not.toMatch(/overflow(-y)?:\s*(auto|scroll)/);
+        });
+
+        it('forces the teleported dialog title to inherit the active theme', () => {
+            const title = /\.learner-subtitle-dialog-header h2\s*\{([^}]*)\}/.exec(learnerCss)?.[1] ?? '';
+            expect(title).toMatch(/color:\s*var\(--asmr-text-primary\)\s*!important/);
+            const dialog = /\.learner-subtitle-dialog\s*\{([^}]*)\}/.exec(learnerCss)?.[1] ?? '';
+            expect(dialog).toMatch(/background:\s*var\(--asmr-bg-primary\)/);
+            expect(dialog).toMatch(/color:\s*var\(--asmr-text-primary\)/);
         });
     });
 });

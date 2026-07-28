@@ -73,6 +73,64 @@ body.asmr-fullscreen-active .player-bar-container {
     z-index: 10 !important;
 }
 
+/*
+ * Stable fullscreen affordance. Keep the resting surface transparent, but do
+ * not fade the glyph: its white fill and dark stroke remain identifiable over
+ * either light or dark artwork.
+ */
+.audio-player .asmr-fullscreen-btn {
+    position: absolute;
+    top: max(8px, env(safe-area-inset-top));
+    right: max(8px, env(safe-area-inset-right));
+    z-index: 130;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 44px;
+    height: 44px;
+    min-width: 44px;
+    min-height: 44px;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: 50%;
+    background: transparent;
+    color: #fff;
+    opacity: 1;
+    cursor: pointer;
+    pointer-events: auto;
+    backdrop-filter: blur(6px);
+    transition: opacity 0.2s ease, background-color 0.2s ease, transform 0.2s ease;
+}
+
+.audio-player .asmr-fullscreen-btn:hover,
+.audio-player .asmr-fullscreen-btn:focus-visible {
+    background: rgba(17, 24, 39, 0.82);
+    border-color: rgba(255, 255, 255, 0.72);
+    opacity: 1;
+    transform: scale(1.05);
+}
+
+.audio-player .asmr-fullscreen-btn:focus-visible {
+    outline: 3px solid var(--asmr-accent);
+    outline-offset: 2px;
+}
+
+.audio-player .asmr-fullscreen-btn:active {
+    transform: scale(0.95);
+}
+
+.audio-player .asmr-fullscreen-btn .material-icons {
+    font-size: 22px;
+    line-height: 1;
+    -webkit-text-stroke: 1px rgba(0, 0, 0, 0.92);
+    text-shadow:
+        -1px 0 rgba(0, 0, 0, 0.92),
+        1px 0 rgba(0, 0, 0, 0.92),
+        0 -1px rgba(0, 0, 0, 0.92),
+        0 1px rgba(0, 0, 0, 0.92),
+        0 1px 2px rgba(0, 0, 0, 0.95);
+}
+
 /* Hide Pull Handler */
 .audio-player.asmr-player-fullscreen .pull-handler {
     display: none !important;
@@ -134,16 +192,8 @@ body.asmr-fullscreen-active .player-bar-container {
     display: none !important;
 }
 
-/*
- * Gallery navigation over artwork.
- *
- * Element opacity fades the glyph towards whatever image is underneath, so it
- * cannot be used to make these controls quiet: white at 0.18 over a pale cover
- * is ~1.2:1. Quietness comes from a translucent dark scrim instead, which keeps
- * the white glyph at >= 4.5:1 over any artwork in either theme.
- */
+/* Gallery navigation stays transparent until the individual control is engaged. */
 @media (hover: hover) {
-    .audio-player .albumart:hover .asmr-gallery-nav,
     .audio-player .albumart:hover .asmr-gallery-counter {
         opacity: 1;
     }
@@ -153,7 +203,7 @@ body.asmr-fullscreen-active .player-bar-container {
     z-index: 100 !important;
     width: 60px !important;
     height: 60px !important;
-    background: rgba(17, 24, 39, 0.62) !important;
+    background: transparent !important;
     backdrop-filter: blur(10px) !important;
     color: #fff !important;
     border: 1px solid transparent !important;
@@ -163,12 +213,12 @@ body.asmr-fullscreen-active .player-bar-container {
 }
 
 @media (hover: hover) {
-    .audio-player.asmr-player-fullscreen .albumart:hover .asmr-gallery-nav,
     .audio-player.asmr-player-fullscreen .albumart:hover .asmr-gallery-counter {
         opacity: 1 !important;
     }
 
-    .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-nav:hover {
+    .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-nav:hover,
+    .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-nav:focus-visible {
         background: rgba(0, 0, 0, 0.62) !important;
         border-color: rgba(255, 255, 255, 0.7) !important;
         opacity: 1 !important;
@@ -196,7 +246,7 @@ body.asmr-fullscreen-active .player-bar-container {
     right: calc(112px + env(safe-area-inset-right)) !important;
     width: 44px !important;
     height: 44px !important;
-    background: rgba(17, 24, 39, 0.62) !important;
+    background: transparent !important;
     opacity: 1;
     transform: none !important;
     z-index: 120 !important;
@@ -227,7 +277,7 @@ body.asmr-fullscreen-active .player-bar-container {
     right: calc(60px + env(safe-area-inset-right)) !important;
     width: 44px !important;
     height: 44px !important;
-    background: rgba(17, 24, 39, 0.62) !important;
+    background: transparent !important;
     opacity: 1;
     transform: none !important;
     z-index: 120 !important;
@@ -409,7 +459,7 @@ body.asmr-fullscreen-active .player-bar-container {
         width: 44px !important;
         height: 44px !important;
         opacity: 1;
-        background: rgba(17, 24, 39, 0.62) !important;
+        background: rgba(17, 24, 39, 0.52) !important;
     }
 
     .audio-player.asmr-player-fullscreen .albumart .asmr-gallery-nav .material-icons {

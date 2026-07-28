@@ -136,6 +136,17 @@ let whisperOutputLanguageHint: TranslationSourceHint = 'auto';
 let whisperTimingQuality: 'word' | 'segment' = 'segment';
 let whisperTextGeneration = 0;
 let lastWhisperDisplayText = '';
+let lastWhisperCaptionConfirmed = false;
+let whisperUpdateIsProvisional = false;
+let previousConfirmedWhisperCaption: {
+    primary: string;
+    secondary: string;
+    secondaryFallback: boolean;
+    lastText: string;
+    lastDisplayedText: string;
+    lastWhisperDisplayText: string;
+    lastSecondaryShown: string;
+} | null = null;
 let whisperTickerId: number | null = null;
 let whisperTickerInterval = 80;
 let laggedWhisperLine: LyricLine | null = null;
@@ -271,8 +282,10 @@ function resolvePrimarySubtitleFit(text: string): { scale: number; lines: number
 
 function resolveSecondarySubtitleFit(text: string): { scale: number; lines: number } {
     // The secondary lane is already small; 0.85 is the lowest step that keeps it
-    // above the 11px floor where it would stop being comfortably readable.
-    return subtitleTextWeight(text) <= 70 ? { scale: 1, lines: 2 } : { scale: 0.85, lines: 2 };
+    // above the 11px floor where it would stop being comfortably readable. The
+    // expanded player reserves a third line for long translations; the compact
+    // teleported bar deliberately remains capped at two lines in CSS.
+    return subtitleTextWeight(text) <= 70 ? { scale: 1, lines: 2 } : { scale: 0.85, lines: 3 };
 }
 
 const subtitleFitStyle = computed<Record<string, string>>(() => {
@@ -286,8 +299,8 @@ const subtitleFitStyle = computed<Record<string, string>>(() => {
     };
 });
 
-const whisperPlaceholderText = computed(() => {
-    if (primaryText.value || secondaryText.value || !whisperStatusSessionActive.value) return '';
+const whisperActivityText = computed(() => {
+    if (!whisperStatusSessionActive.value) return '';
     const state = whisperUiState.value;
     if (state.stage === 'error') {
         return state.progressMessage || t('whisperUnknownError');
@@ -295,6 +308,7 @@ const whisperPlaceholderText = computed(() => {
     const listenerKey = resolveWhisperListenerStatusKey(state.stage);
     return listenerKey ? t(listenerKey) : '';
 });
+const whisperActivityIsError = computed(() => whisperUiState.value.stage === 'error');
 const secondaryLanguage = computed(() => resolveLearnerSecondaryLanguage(
     learnerSubtitleMode.value,
     subtitleLang.value,
@@ -375,6 +389,36 @@ function resetDedupState(options: { includeWhisperDisplay?: boolean; bumpTransla
     if (options.bumpTranslationToken) {
         translationToken += 1;
     }
+}
+
+function rememberConfirmedWhisperCaption(): void {
+    if (!lastWhisperCaptionConfirmed || (!primaryText.value && !secondaryText.value)) return;
+    previousConfirmedWhisperCaption = {
+        primary: primaryText.value,
+        secondary: secondaryText.value,
+        secondaryFallback: isFallback.value,
+        lastText,
+        lastDisplayedText,
+        lastWhisperDisplayText,
+        lastSecondaryShown,
+    };
+}
+
+function restoreConfirmedWhisperCaption(): boolean {
+    const caption = previousConfirmedWhisperCaption;
+    if (!caption) return false;
+
+    resetRealtimeQueues();
+    translationToken += 1;
+    updatePrimaryLine(caption.primary);
+    updateSecondaryLine(caption.secondary, caption.secondaryFallback);
+    lastText = caption.lastText;
+    lastDisplayedText = caption.lastDisplayedText;
+    lastWhisperDisplayText = caption.lastWhisperDisplayText;
+    lastSecondaryShown = caption.lastSecondaryShown;
+    lastWhisperCaptionConfirmed = true;
+    refreshVisibility();
+    return true;
 }
 
 function activeSubtitlePanels(): HTMLElement[] {
@@ -662,6 +706,7 @@ function resetTrackRuntimeState(): void {
     whisperSourceLanguageHint = 'auto';
     whisperOutputLanguageHint = 'auto';
     whisperTimingQuality = 'segment';
+    whisperUpdateIsProvisional = false;
     // A component/host remount can rebuild the player while the same canonical
     // run is still active. Preserve its status reservation; an ensuing idle
     // state or explicit clear will release it.
@@ -885,6 +930,8 @@ function clearDisplay() {
     lastJpdbText = '';
     lastDisplayedText = '';
     lastSecondaryShown = '';
+    lastWhisperCaptionConfirmed = false;
+    previousConfirmedWhisperCaption = null;
     refreshVisibility();
 }
 
@@ -947,6 +994,10 @@ function handleAudioSeeking() {
     resetLaggedWhisperCaption(false);
     resetDedupState({ includeWhisperDisplay: true, bumpTranslationToken: true });
     resetRealtimeQueues();
+    // A manual seek invalidates the old playhead completely. Ordinary
+    // inference gaps retain the last caption below, but a pre-seek line must
+    // not be presented as belonging to the new position.
+    clearDisplay();
 
     // Defer to next frame when currentTime will have synchronized
     seekingRafId = requestAnimationFrame(() => {
@@ -1735,7 +1786,10 @@ function _updateWhisperDisplay() {
             && whisperOutputLanguageHint === 'en'
             && whisperOutputLanguageHint !== whisperSourceLanguageHint
         ) {
-            renderDirectEnglishWhisper(fullText);
+            renderDirectEnglishWhisper(
+                fullText,
+                !whisperUpdateIsProvisional || fullText !== whisperText,
+            );
             return;
         }
         if (fullText && fullText !== lastText) lastText = fullText;
@@ -1826,7 +1880,9 @@ function _updateWhisperDisplay() {
         // In karaoke mode, dedup against fullText (not progressive displayText) so
         // the rAF 60fps path can take over once the segment is established.
         const karaokeDedup = karaokeMode.value ? (fullText || display.displayText) : display.displayText;
+        const captionConfirmed = !whisperUpdateIsProvisional || fullText !== whisperText;
         if (display.displayText && karaokeDedup !== lastWhisperDisplayText) {
+            lastWhisperCaptionConfirmed = captionConfirmed;
             const cn = sourceLanguageHint === 'zh'
                 || (sourceLanguageHint === 'auto' && isChinese(display.displayText));
             let prim = display.displayText;
@@ -1886,6 +1942,7 @@ function _updateWhisperDisplay() {
             updatePrimaryLine(prim, splitIdx, hlStart);
             lastWhisperDisplayText = karaokeMode.value ? (fullText || prim) : prim;
         } else if (display.displayText && karaokeMode.value) {
+            if (captionConfirmed) lastWhisperCaptionConfirmed = true;
             // Karaoke: same segment — rAF handles smooth 60fps inter-frame updates.
             // Also recompute on every tick for responsive scrubbing (even while paused).
             if (whisperTimingQuality === 'word') {
@@ -1904,12 +1961,21 @@ function _updateWhisperDisplay() {
                 karaokeSplitIndex.value = -1;
                 karaokeHighlightStart.value = -1;
             }
+        } else if (display.displayText && captionConfirmed) {
+            // A finalized result can confirm the same text that its heartbeat
+            // already painted. Record that promotion even though no DOM update
+            // is needed, so the next provisional window can retain this pair.
+            lastWhisperCaptionConfirmed = true;
         } else if (!display.displayText) {
-            // Never present an expired ASR cue as current speech. The container
-            // has fixed geometry, so clearing does not shift the player.
-            clearDisplay();
-            lastText = '';
-            lastWhisperDisplayText = '';
+            // ASMR frequently contains long pauses and Whisper can briefly
+            // trail the playhead. Keep the last complete JP/secondary pair in
+            // place instead of replacing it with a prominent "listening" or
+            // "catching up" message. Explicit stop, track change and manual
+            // seek paths still clear the lanes, so content from another
+            // timeline cannot leak into the current one.
+            clearKaraokeState();
+            karaokeSplitIndex.value = -1;
+            karaokeHighlightStart.value = -1;
         }
         refreshVisibility();
         return;
@@ -1923,7 +1989,7 @@ function _updateWhisperDisplay() {
             whisperOutputLanguageHint === 'en'
             && whisperOutputLanguageHint !== whisperSourceLanguageHint
         ) {
-            renderDirectEnglishWhisper(requestedText);
+            renderDirectEnglishWhisper(requestedText, false);
             return;
         }
         const requestContext: WhisperTextRequestContext = {
@@ -1989,6 +2055,7 @@ function _updateWhisperDisplay() {
             }
         }
         if (requestedText !== lastDisplayedText) {
+            lastWhisperCaptionConfirmed = false;
             lastDisplayedText = requestedText;
             lastSecondaryShown = '';
             if (!wtTranslatable) {
@@ -2043,7 +2110,7 @@ function _updateWhisperDisplay() {
  * never label the English output as Japanese or send it through translation
  * again.
  */
-function renderDirectEnglishWhisper(text: string) {
+function renderDirectEnglishWhisper(text: string, confirmed: boolean) {
     const directEnglish = text.trim();
     discoverNativeLyrics();
     const native = getSubtitleDisplay();
@@ -2058,6 +2125,7 @@ function renderDirectEnglishWhisper(text: string) {
     lastDisplayedText = directEnglish;
     lastWhisperDisplayText = nativePrimary;
     lastSecondaryShown = directEnglish;
+    lastWhisperCaptionConfirmed = confirmed;
     refreshVisibility();
 }
 
@@ -2074,21 +2142,61 @@ function applyWhisperRuntimeMetadata(payload: WhisperUpdatePayload) {
     whisperSourceLanguageHint = payload.sourceLanguageHint || 'auto';
     whisperOutputLanguageHint = payload.outputLanguageHint || whisperSourceLanguageHint;
     whisperTimingQuality = payload.timingQuality || 'segment';
+    whisperUpdateIsProvisional = payload.source === 'heartbeat';
     whisperText = sanitizeWhisperText(payload.text);
 }
 
-function applyWhisperSegments(payload: WhisperUpdatePayload) {
+function finalizedWindowRejectedProvisional(
+    payload: WhisperUpdatePayload,
+    previousText: string,
+    previousLines: LyricLine[],
+    finalizedLines: LyricLine[],
+): boolean {
+    if ((payload.source !== 'complete' && !payload.final) || !previousText) return false;
+    const provisionalLine = previousLines.findLast(
+        line => sanitizeWhisperText(line.text) === previousText,
+    );
+    if (!provisionalLine) return false;
+
+    const provisionalEnd = provisionalLine.endTime ?? provisionalLine.time;
+    return !finalizedLines.some((line) => {
+        const finalizedEnd = line.endTime ?? line.time;
+        return finalizedEnd > provisionalLine.time && line.time < provisionalEnd;
+    });
+}
+
+function applyWhisperSegments(
+    payload: WhisperUpdatePayload,
+    previousProvisional?: { text: string; lines: LyricLine[] },
+) {
     const segments = Array.isArray(payload.segments) ? payload.segments : [];
+    const newLines = normalizeWhisperSubtitleLines(segments);
+    const rejectedProvisional = !!previousProvisional && finalizedWindowRejectedProvisional(
+        payload,
+        previousProvisional.text,
+        previousProvisional.lines,
+        newLines,
+    );
+    if (rejectedProvisional) {
+        whisperLines = newLines;
+        resetLaggedWhisperCaption();
+        resetDedupState({ includeWhisperDisplay: true, bumpTranslationToken: true });
+        if (!restoreConfirmedWhisperCaption()) clearDisplay();
+        return;
+    }
     if (segments.length === 0) {
         if (payload.source === 'complete' || payload.final) {
+            const retainConfirmedCaption = lastWhisperCaptionConfirmed
+                && !!(primaryText.value || secondaryText.value);
             whisperLines = [];
             resetLaggedWhisperCaption();
             resetDedupState({ includeWhisperDisplay: true, bumpTranslationToken: true });
-            clearDisplay();
+            // A text-only provisional result may be rejected by the finalized
+            // window and must not linger as if it were confirmed speech.
+            if (!retainConfirmedCaption) clearDisplay();
         }
         return;
     }
-    const newLines = normalizeWhisperSubtitleLines(segments);
     if (newLines.length > 0) {
         if (whisperOutputLanguageHint !== 'en' || whisperOutputLanguageHint === whisperSourceLanguageHint) {
             schedulePreTranslation(newLines, 20, whisperOutputLanguageHint);
@@ -2121,12 +2229,16 @@ function applyWhisperSegments(payload: WhisperUpdatePayload) {
 
 function handleWhisperUpdate(payload: WhisperUpdatePayload) {
     if (!payload) return;
+    const previousProvisional = whisperUpdateIsProvisional
+        ? { text: whisperText, lines: [...whisperLines] }
+        : undefined;
+    if (payload.source === 'heartbeat') rememberConfirmedWhisperCaption();
     whisperTextGeneration++;
     whisperActive = true;
     whisperStatusSessionActive.value = true;
     applyWhisperRuntimeMetadata(payload);
     ensureWhisperTicker(whisperLive ? 80 : 200);
-    applyWhisperSegments(payload);
+    applyWhisperSegments(payload, previousProvisional);
     // Don't reset lastWhisperDisplayText here — let _updateWhisperDisplay()
     // naturally detect changes. Resetting forces re-renders that cause flashing
     // when paused and whisper reprocesses the same audio with slightly different output.
@@ -2147,6 +2259,7 @@ function handleWhisperClear() {
     whisperSourceLanguageHint = 'auto';
     whisperOutputLanguageHint = 'auto';
     whisperTimingQuality = 'segment';
+    whisperUpdateIsProvisional = false;
     resetLaggedWhisperCaption();
     resetDedupState({ includeWhisperDisplay: true });
     clearWhisperTicker();
@@ -3026,9 +3139,20 @@ watch(
                 :furigana-all="furiganaAll"
             />
         </div>
-        <p v-if="whisperPlaceholderText" class="learner-whisper-placeholder">
-            {{ whisperPlaceholderText }}
-        </p>
+        <span
+            v-if="whisperActivityText"
+            class="learner-whisper-activity"
+            :class="{ 'learner-whisper-activity--error': whisperActivityIsError }"
+            :title="whisperActivityText"
+            role="status"
+            aria-live="polite"
+        >
+            <span class="learner-whisper-activity-dot" aria-hidden="true"></span>
+            <span
+                class="learner-whisper-activity-label"
+                :class="{ 'learner-visually-hidden': !whisperActivityIsError }"
+            >{{ whisperActivityText }}</span>
+        </span>
         <span v-if="whisperCaptionDelayed" class="learner-whisper-delayed">
             {{ t('whisperCaptionDelayed') }}
         </span>
@@ -3082,9 +3206,20 @@ watch(
                     :furigana-all="furiganaAll"
                 />
             </div>
-            <p v-if="whisperPlaceholderText" class="learner-whisper-placeholder">
-                {{ whisperPlaceholderText }}
-            </p>
+            <span
+                v-if="whisperActivityText"
+                class="learner-whisper-activity"
+                :class="{ 'learner-whisper-activity--error': whisperActivityIsError }"
+                :title="whisperActivityText"
+                role="status"
+                aria-live="polite"
+            >
+                <span class="learner-whisper-activity-dot" aria-hidden="true"></span>
+                <span
+                    class="learner-whisper-activity-label"
+                    :class="{ 'learner-visually-hidden': !whisperActivityIsError }"
+                >{{ whisperActivityText }}</span>
+            </span>
             <span v-if="whisperCaptionDelayed" class="learner-whisper-delayed">
                 {{ t('whisperCaptionDelayed') }}
             </span>

@@ -57,14 +57,12 @@ describe('subtitle status and helper text', () => {
         }
     });
 
-    it('keeps the Whisper status placeholder readable in both themes', () => {
-        expect(readDeclaration(learnerCss, '.learner-whisper-placeholder', 'color'))
-            .toBe('var(--asmr-text-secondary)');
-
-        for (const theme of Object.values(THEMES)) {
-            const text = composite(theme.textSecondary, theme.surface);
-            expect(contrastRatio(text, theme.surface)).toBeGreaterThanOrEqual(TEXT_MIN);
-        }
+    it('uses a quiet activity dot while keeping visible error copy theme-readable', () => {
+        expect(readDeclaration(learnerCss, '.learner-whisper-activity-dot', 'background'))
+            .toBe('var(--asmr-accent)');
+        expect(readDeclaration(learnerCss, '.learner-whisper-activity--error', 'color'))
+            .toBe('var(--asmr-text-primary)');
+        expect(learnerCss).toContain('.learner-visually-hidden');
     });
 
     it('makes the "show full subtitles" control visible instead of a 2.7:1 ghost', () => {
@@ -127,26 +125,33 @@ describe('gallery controls over arbitrary album artwork', () => {
     const scrim = readDeclaration(galleryComponent, '.asmr-gallery-nav', 'background');
     const opacity = Number(readDeclaration(galleryComponent, '.asmr-gallery-nav', 'opacity'));
 
-    it('keeps the nav glyph legible on white and black covers', () => {
+    it('keeps the resting surface transparent without fading its dual-tone glyph', () => {
+        expect(scrim).toBe('transparent');
         expect(opacity).toBe(1);
+        expect(readDeclaration(
+            galleryComponent,
+            '.asmr-gallery-nav :deep(.material-icons)',
+            '-webkit-text-stroke',
+        )).toBe('1px rgba(0, 0, 0, 0.92)');
+        expect(readDeclaration(galleryComponent, '.asmr-gallery-nav:hover', 'opacity')).toBe('1');
+        expect(readDeclaration(galleryComponent, '.asmr-gallery-nav:focus-visible', 'opacity')).toBe('1');
+    });
+
+    it('keeps the engaged nav glyph legible on white and black covers', () => {
+        const engagedScrim = readDeclaration(galleryComponent, '.asmr-gallery-nav:hover', 'background');
         for (const artwork of [WHITE, BLACK]) {
             expect(controlContrast({
                 foreground: '#fff',
-                background: scrim,
+                background: engagedScrim,
                 backdrop: artwork,
-                opacity,
+                opacity: 1,
             })).toBeGreaterThanOrEqual(TEXT_MIN);
         }
     });
 
-    it('demonstrates why the previous element-opacity approach could not work', () => {
-        // The old resting state: transparent background at opacity 0.18.
-        expect(controlContrast({
-            foreground: '#fff',
-            background: 'rgba(0, 0, 0, 0)',
-            backdrop: WHITE,
-            opacity: 0.18,
-        })).toBeLessThan(CONTROL_MIN);
+    it('uses a dark hover scrim rather than a translucent-white wash', () => {
+        expect(readDeclaration(galleryComponent, '.asmr-gallery-nav:hover', 'background'))
+            .toBe('rgba(17, 24, 39, 0.78)');
     });
 
     it('never reintroduces a translucent-white hover state that washes the glyph out', () => {
@@ -163,6 +168,18 @@ describe('gallery controls over arbitrary album artwork', () => {
             expect(readDeclaration(galleryComponent, selector, 'width')).toBe('44px');
             expect(readDeclaration(galleryComponent, selector, 'height')).toBe('44px');
         }
+    });
+
+    it('keeps the fullscreen glyph dual-tone while its resting surface is transparent', () => {
+        expect(readDeclaration(fullscreenCss, '.audio-player .asmr-fullscreen-btn', 'background'))
+            .toBe('transparent');
+        expect(readDeclaration(fullscreenCss, '.audio-player .asmr-fullscreen-btn', 'opacity'))
+            .toBe('1');
+        expect(readDeclaration(
+            fullscreenCss,
+            '.audio-player .asmr-fullscreen-btn .material-icons',
+            '-webkit-text-stroke',
+        )).toBe('1px rgba(0, 0, 0, 0.92)');
     });
 });
 
