@@ -29,6 +29,10 @@ export interface DownloadCoordinatorProgress {
 }
 
 export type DownloadProgressListener = (progress: DownloadCoordinatorProgress) => void;
+export interface DownloadCoordinatorRunOptions {
+    /** Keep the job leased until a staged browser export has settled. */
+    deferJobCompletion?: boolean;
+}
 // Closing a File System Access writer commits safely but may copy the partial
 // file. Use coarse checkpoints to avoid quadratic I/O on large audio files.
 // Closing a FileSystemWritable commits its safe-write copy. A small interval
@@ -175,17 +179,25 @@ export class DownloadCoordinator {
         );
     }
 
-    async run(jobId: string, onProgress?: DownloadProgressListener): Promise<void> {
+    async run(
+        jobId: string,
+        onProgress?: DownloadProgressListener,
+        options: DownloadCoordinatorRunOptions = {},
+    ): Promise<void> {
         if (RUNNING_JOB_IDS.has(jobId)) throw new DownloadAlreadyRunningError(jobId);
         RUNNING_JOB_IDS.add(jobId);
         try {
-            await this.runExclusive(jobId, onProgress);
+            await this.runExclusive(jobId, onProgress, options);
         } finally {
             RUNNING_JOB_IDS.delete(jobId);
         }
     }
 
-    private async runExclusive(jobId: string, onProgress?: DownloadProgressListener): Promise<void> {
+    private async runExclusive(
+        jobId: string,
+        onProgress: DownloadProgressListener | undefined,
+        options: DownloadCoordinatorRunOptions,
+    ): Promise<void> {
         this.stoppedJobs.delete(jobId);
         if (this.leaseOwnerId) {
             if (!await this.repository.renewJobLease(jobId, this.leaseOwnerId)) {
@@ -208,7 +220,7 @@ export class DownloadCoordinator {
         });
         await Promise.all(workers);
         const finalFiles = await this.repository.listFiles(jobId);
-        if (finalFiles.every(file => file.status === 'completed')) {
+        if (finalFiles.every(file => file.status === 'completed') && !options.deferJobCompletion) {
             if (this.leaseOwnerId) await this.repository.completeJob(jobId, this.leaseOwnerId);
             else await this.repository.completeJob(jobId);
         }

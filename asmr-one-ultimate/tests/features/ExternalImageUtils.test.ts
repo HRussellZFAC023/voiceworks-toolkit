@@ -248,7 +248,7 @@ describe('externalImageUtils', () => {
             response: new Blob([Uint8Array.from([0xff, 0xd8, 0xff, 0xdb])], { type: 'image/jpeg' }),
             responseHeaders: 'content-type: image/jpeg',
         }));
-        localStorage.setItem('jwt-token', 'host-session-token');
+        localStorage.setItem('jwt-token', '__q_strn|host-session-token');
 
         try {
             const verified = await fetchVerifiedImageBlob(mediaUrl, {

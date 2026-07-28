@@ -239,6 +239,7 @@ export const jaLocale: Record<string, string> = {
         backupDownloaderDone: '選択した作品フォルダーをすべて保存しました。', backupDownloaderDoneWithSkipped: '利用可能な作品を保存しました。利用できない{count}作品はスキップしました。', backupDownloaderFailed: 'ダウンロードに失敗しました。再開用の進捗は保存済みです。', backupDownloaderFailedDetail: 'ダウンロードに失敗しました。再開用の進捗は保存済みです。{detail}',
         backupDownloaderResumeAvailable: '中断したダウンロードを再開できます：', backupDownloaderResuming: '保存済みダウンロードを再開中…', backupDownloaderPermission: '再開するには元の保存先フォルダーへのアクセスを許可してください。', backupDownloaderUnsupported: 'このブラウザーには書き込み可能なダウンロード保存領域がないため、再開可能な作品ダウンロードを利用できません。ブラウザーを更新するか、別のブラウザーをお試しください。',
         backupDownloaderDoneWithExportFailures: 'ダウンロードは完了しましたが、{count}件の作品フォルダーをブラウザーに渡せませんでした。ファイルは保持されており、再開時に改めて渡されます。',
+        backupDownloaderExportPending: '作品アーカイブの保存をブラウザーが確認できませんでした。ファイルは保持されています。再開してもう一度保存してください。',
         backupDownloaderDoneWithSkippedFiles: 'ダウンロードは完了しましたが、{count}件のファイルを保存できずスキップしました。それ以外はすべて完了しています。',
         downloadCenterPreparing: '準備中…',
         downloadCenterLoadMore: '検索結果をもっと読み込む', downloadCenterLoadingMore: '検索結果を読み込み中…',
@@ -251,7 +252,7 @@ export const jaLocale: Record<string, string> = {
         downloadCenterAlreadyRunning: 'このタブまたは別のタブですでにダウンロード中です。',
         downloadCenterSelectAll: '表示中をすべて選択', downloadCenterClearAll: 'すべて解除', downloadCenterFilterTags: 'ジャンル・タグで絞り込み', downloadCenterAllTags: 'すべてのジャンル・タグ',
         downloadCenterOwner: '{owner} 作成', downloadCenterWorks: '{count}作品', downloadCenterLoading: '読み込み中…', downloadCenterLoadFailed: 'このプレイリストを読み込めませんでした。',
-        downloadCenterOptions: 'ダウンロード設定', downloadCenterProgress: 'ダウンロード進捗', downloadCenterPause: '一時停止', downloadCenterResume: '再開', downloadCenterResumeWithoutOpus: '元の音声のまま再開', downloadCenterResumeWithOriginalTitles: '元のタイトルで再開',
+        downloadCenterOptions: 'ダウンロード設定', downloadCenterConcurrency: '同時ダウンロード数', downloadCenterConcurrencyHint: '1はサイトへの負荷が最小です。速度を上げる場合は増やしてください。', downloadCenterConcurrencyOpusHint: 'メモリ使用量を抑えるため、Opus変換は1ファイルずつ処理します。', downloadCenterProgress: 'ダウンロード進捗', downloadCenterPause: '一時停止', downloadCenterResume: '再開', downloadCenterResumeWithoutOpus: '元の音声のまま再開', downloadCenterResumeWithOriginalTitles: '元のタイトルで再開',
         downloadCenterRecovering: '中断したダウンロードを確認中…', downloadCenterDownloading: 'ファイルをダウンロード中…', downloadCenterConverting: 'Opus に変換中…', downloadCenterPaused: 'ダウンロードを一時停止しました',
 
         // Proxy donation banner

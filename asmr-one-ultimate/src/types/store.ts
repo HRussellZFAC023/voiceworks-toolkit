@@ -474,6 +474,8 @@ export interface AppEvents {
         segments: Array<{ start: number; end: number; text: string; words?: Array<{ start: number; end: number; text: string }> }>;
         final: boolean;
         sourceLanguageHint?: TranslationSourceHint;
+        /** Language of the text emitted by Whisper (English for task=translate). */
+        outputLanguageHint?: TranslationSourceHint;
         chunkIndex?: number;
         fromCache?: boolean;
         live?: boolean;

@@ -118,7 +118,9 @@ function declaredSize(node: DownloadTreeNode): number | undefined {
     const raw = node.size ?? node.fileSize ?? node.file_size;
     if (raw === undefined || raw === null || raw === '') return undefined;
     const size = Number(raw);
-    return Number.isFinite(size) && size >= 0 ? size : undefined;
+    // Host manifests commonly serialize an unavailable size as zero. Treat it
+    // as unknown and let the transport prove a genuinely empty response.
+    return Number.isFinite(size) && size > 0 ? size : undefined;
 }
 
 function stableFallbackId(sourcePath: readonly string[], urls: readonly DownloadSourceUrl[]): string {

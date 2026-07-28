@@ -259,6 +259,7 @@ export const enLocale: Record<string, string> = {
         backupDownloaderDone: 'All selected work folders were downloaded.',
         backupDownloaderDoneWithSkipped: 'Available work folders were downloaded; {count} unavailable works were skipped.',
         backupDownloaderDoneWithExportFailures: 'Downloading finished, but {count} work folders could not be handed to the browser. They are still saved and will be delivered when you resume.',
+        backupDownloaderExportPending: 'The browser did not confirm the work archive download. Its files are still saved; resume to try delivery again.',
         backupDownloaderDoneWithSkippedFiles: 'Downloading finished, but {count} files could not be saved and were skipped. Everything else completed.',
         backupDownloaderFailed: 'Work download failed. Progress was saved for resume.',
         backupDownloaderFailedDetail: 'Work download failed. Progress was saved for resume. {detail}',
@@ -277,7 +278,7 @@ export const enLocale: Record<string, string> = {
         downloadCenterAlreadyRunning: 'Another download is already running in this tab or another tab.',
         downloadCenterSelectAll: 'Select all shown', downloadCenterClearAll: 'Clear all', downloadCenterFilterTags: 'Filter by genre or tag', downloadCenterAllTags: 'All genres and tags',
         downloadCenterOwner: 'by {owner}', downloadCenterWorks: '{count} works', downloadCenterLoading: 'Loading…', downloadCenterLoadFailed: 'This playlist could not be loaded.',
-        downloadCenterOptions: 'Download options', downloadCenterProgress: 'Download progress', downloadCenterPause: 'Pause', downloadCenterResume: 'Resume', downloadCenterResumeWithoutOpus: 'Resume and keep original audio', downloadCenterResumeWithOriginalTitles: 'Resume with Original titles',
+        downloadCenterOptions: 'Download options', downloadCenterConcurrency: 'Concurrent downloads', downloadCenterConcurrencyHint: 'One is gentlest on the site; increase it for more throughput.', downloadCenterConcurrencyOpusHint: 'Opus conversion processes one file at a time to limit memory use.', downloadCenterProgress: 'Download progress', downloadCenterPause: 'Pause', downloadCenterResume: 'Resume', downloadCenterResumeWithoutOpus: 'Resume and keep original audio', downloadCenterResumeWithOriginalTitles: 'Resume with Original titles',
         downloadCenterRecovering: 'Checking interrupted downloads…', downloadCenterDownloading: 'Downloading files…', downloadCenterConverting: 'Converting to Opus…', downloadCenterPaused: 'Download paused',
 
         // Proxy donation banner

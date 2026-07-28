@@ -115,6 +115,7 @@ export interface BackupDownloadProfile {
     labels: BackupDownloaderLabels;
     selectedWorkIds?: Array<string | number>;
     filters: Record<BackupFileFilter, boolean>;
+    downloadConcurrency?: number;
     titleMode: BackupTitleMode;
     convertToOpus: boolean;
     opusBitrate: number;
@@ -125,9 +126,19 @@ export interface BackupDownloadProfile {
 export interface BackupDownloadState {
     selectedWorkIds: Array<string | number>;
     filters: Record<BackupFileFilter, boolean>;
+    downloadConcurrency?: number;
     titleMode: BackupTitleMode;
     convertToOpus: boolean;
     opusBitrate: number;
     metadataMode: BackupMetadataMode;
     includeArtwork: boolean;
+}
+
+export const DEFAULT_DOWNLOAD_CONCURRENCY = 1;
+export const MAX_DOWNLOAD_CONCURRENCY = 3;
+
+export function normalizeDownloadConcurrency(value: unknown): number {
+    const parsed = typeof value === 'number' ? value : Number(value);
+    if (!Number.isFinite(parsed)) return DEFAULT_DOWNLOAD_CONCURRENCY;
+    return Math.max(DEFAULT_DOWNLOAD_CONCURRENCY, Math.min(MAX_DOWNLOAD_CONCURRENCY, Math.floor(parsed)));
 }

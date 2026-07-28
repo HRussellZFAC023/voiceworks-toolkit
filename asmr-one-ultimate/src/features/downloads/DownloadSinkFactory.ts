@@ -35,9 +35,15 @@ export function supportsUserscriptDownload(): boolean {
     return candidates.some(candidate => typeof candidate?.GM_download === 'function');
 }
 
-/** True when at least one sink can be constructed, whatever the browser. */
+/**
+ * True when the browser can both stage and deliver the selected files.
+ *
+ * OPFS alone is private browser storage, not a user-visible destination. A
+ * userscript download callback is required to confirm Firefox ZIP delivery.
+ */
 export function canCreateDownloadDestination(): boolean {
-    return supportsDirectoryPicker() || supportsOriginPrivateFileSystem();
+    return supportsDirectoryPicker()
+        || (supportsOriginPrivateFileSystem() && supportsUserscriptDownload());
 }
 
 export class DownloadDestinationCancelledError extends Error {
@@ -75,9 +81,8 @@ export async function createDownloadDestination(): Promise<DownloadDestination> 
     await OpfsDownloadSink.create(OPFS_DOWNLOAD_ROOT);
     const persisted = await requestPersistentDownloadStorage();
     if (!persisted) Logger.debug('[DownloadCenter] Staged downloads are using best-effort storage');
-    return supportsUserscriptDownload()
-        ? { kind: 'gm', subfolder: OPFS_DOWNLOAD_ROOT }
-        : { kind: 'opfs', root: OPFS_DOWNLOAD_ROOT };
+    if (!supportsUserscriptDownload()) throw new DownloadDestinationUnsupportedError();
+    return { kind: 'gm', subfolder: OPFS_DOWNLOAD_ROOT };
 }
 
 export async function createDownloadSink(destination: DownloadDestination): Promise<DownloadSink> {

@@ -1060,6 +1060,7 @@ describe('DownloadCenter', () => {
         await flushPromises();
 
         expect(document.querySelector('[data-testid="search-result-count"]')?.textContent).toBe('Showing 1');
+        expect(document.querySelector('[data-testid="load-more"]')).not.toBeNull();
         wrapper.unmount();
     });
 

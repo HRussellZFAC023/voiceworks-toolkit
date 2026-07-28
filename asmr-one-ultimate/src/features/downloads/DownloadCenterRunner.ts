@@ -3,10 +3,18 @@ import { I18n } from '../../core/Config';
 import { DeviceCapabilities } from '../../core/DeviceCapabilities';
 import { TranslationService } from '../../services/TranslationService';
 import { WorkService } from '../../services/WorkService';
-import type { BackupDownloadProgress, BackupDownloadState, BackupWorkDownloadItem } from '../backupWorkDownloaderTypes';
+import {
+    normalizeDownloadConcurrency,
+    type BackupDownloadProgress,
+    type BackupDownloadState,
+    type BackupWorkDownloadItem,
+} from '../backupWorkDownloaderTypes';
 import { resolveDownloadWorkTranslations } from '../backupWorkDownloaderUtils';
 import { canonicalDownloadPath, reserveCollisionFreePath } from './DownloadPathUtils';
-import { DownloadFolderExporter } from './DownloadFolderExporter';
+import {
+    DOWNLOAD_EXPORT_STAGING_FOLDER,
+    DownloadFolderExporter,
+} from './DownloadFolderExporter';
 import {
     requiresDownloadExport,
     type DownloadDestination,
@@ -92,7 +100,7 @@ export interface DownloadCenterRunResult {
 }
 
 export class DownloadCenterRunError extends Error {
-    constructor(public readonly code: 'unsupported' | 'permission' | 'no-files' | 'paused' | 'title-translation' | 'already-running' | 'failed', cause?: unknown) {
+    constructor(public readonly code: 'unsupported' | 'permission' | 'no-files' | 'paused' | 'export' | 'title-translation' | 'already-running' | 'failed', cause?: unknown) {
         super(code);
         this.name = 'DownloadCenterRunError';
         if (cause !== undefined) (this as Error & { cause?: unknown }).cause = cause;
@@ -524,7 +532,7 @@ export class DownloadCenterRunner {
             sink,
             // ffmpeg.wasm keeps input/output copies in memory. Serial Opus
             // conversion prevents two large source buffers being resident.
-            options.state.convertToOpus ? 1 : 3,
+            options.state.convertToOpus ? 1 : normalizeDownloadConcurrency(options.state.downloadConcurrency),
             this.createOpusTransformer(options),
             this.ownerId,
         );
@@ -568,7 +576,7 @@ export class DownloadCenterRunner {
             });
         };
         onProgress?.({ jobId, phase: 'downloading', current: completed.size, total: files.length });
-        await coordinator.run(jobId, notify);
+        await coordinator.run(jobId, notify, { deferJobCompletion: Boolean(exporter) });
         exportTracker?.startPending();
         const finalFiles = await this.repository.listFiles(jobId);
         exportTracker?.flushExportable(finalFiles);
@@ -576,6 +584,15 @@ export class DownloadCenterRunner {
         // them settle before any pause/failure is reported so a paused job
         // still hands over every work folder it finished.
         const exportFailures = (await exportTracker?.settle()) ?? 0;
+        if (exportFailures > 0) throw new DownloadCenterRunError('export');
+        if (exporter && finalFiles.every(file => file.status === 'completed')) {
+            // Staged bytes are not complete from the user's perspective until
+            // every work archive reaches a confirmed browser download path.
+            // Keep a refused export resumable instead of hiding a completed job.
+            if (!await this.repository.completeJob(jobId, this.ownerId)) {
+                throw new DownloadCenterRunError('paused');
+            }
+        }
         if (!finalFiles.every(file => file.status === 'completed')) {
             const failedFiles = finalFiles.filter(file => file.error);
             // A pause leaves files that neither completed nor errored. Those are
@@ -654,7 +671,7 @@ export class DownloadCenterRunner {
             attempted.add(folder);
             chain = chain.then(async () => {
                 const result = await exporter.exportFolder(folder, await currentFolderPaths(folder));
-                if (!result.exported) {
+                if (!result.exported || result.stagedFilesRetained) {
                     failures += 1;
                     return;
                 }
@@ -874,8 +891,11 @@ export class DownloadCenterRunner {
                     if (!primarySource) {
                         throw new Error(`Missing full-quality source: ${entry.sourcePath.join('/')}`);
                     }
-                    const id = `${jobId}:${work.id}:${entry.id}`;
                     const path = [folder, ...entry.relativePath].join('/');
+                    // Host hashes are usually file identities, but malformed
+                    // manifests can repeat one hash at multiple paths. Include
+                    // the reserved path so IndexedDB keys cannot collide.
+                    const id = `${jobId}:${work.id}:${entry.id}:${canonicalDownloadPath(entry.relativePath)}`;
                     const sourceUrls = fullQualitySources
                         .map(source => source.url)
                         .filter((url, sourceIndex, urls) => url !== primarySource.url && urls.indexOf(url) === sourceIndex);
@@ -998,12 +1018,68 @@ export class DownloadCenterRunner {
 
     private async findRecoverableJobs(): Promise<DownloadCenterJob[]> {
         let jobs = await this.repository.listJobs<PersistedDownloadCenterOptions>();
+        const recovered = await this.recoverRetainedCompletedJobs(jobs);
+        jobs = jobs.map(job => {
+            const options = recovered.get(job.id);
+            return options ? { ...job, status: 'paused', options } : job;
+        });
         const active = jobs.filter(job => job.status === 'active');
         if (active.length && this.browserLocks()) {
             await Promise.all(active.map(job => this.recoverUnlockedJob(job.id)));
             jobs = await this.repository.listJobs<PersistedDownloadCenterOptions>();
         }
         return jobs.filter(job => job.status === 'pending' || job.status === 'paused' || job.status === 'failed');
+    }
+
+    /**
+     * v172-v175 could mark an anchor-triggered Firefox export completed while
+     * its work folders still occupied OPFS. Re-open those jobs once so users
+     * can resume delivery and the hidden bytes are no longer stranded.
+     */
+    private async recoverRetainedCompletedJobs(
+        jobs: readonly DownloadCenterJob[],
+    ): Promise<Map<string, PersistedDownloadCenterOptions>> {
+        const recovered = new Map<string, PersistedDownloadCenterOptions>();
+        for (const job of jobs) {
+            if (job.status !== 'completed') continue;
+            let destination: DownloadDestination;
+            try { destination = resolvePersistedDestination(job.options); }
+            catch { continue; }
+            if (!requiresDownloadExport(destination)) continue;
+            try {
+                const sink = await createDownloadSink(destination);
+                const rootEntries = new Set(await sink.listTopLevelEntryNames());
+                const files = await this.repository.listFiles(job.id);
+                const candidateFolders = new Set(files
+                    .map(file => file.path.split('/')[0])
+                    .filter(folder => Boolean(folder) && rootEntries.has(folder)));
+                const retainedFolders = new Set<string>();
+                for (const folder of candidateFolders) {
+                    // OPFS is shared by every job, so a same-named folder may
+                    // belong to a newer download. The old broken path left its
+                    // unique ZIP marker as well as the source folder.
+                    try {
+                        await sink.size([
+                            DOWNLOAD_EXPORT_STAGING_FOLDER,
+                            `${folder}.zip`,
+                        ]);
+                        retainedFolders.add(folder);
+                    } catch { /* no legacy marker: do not claim another job's folder */ }
+                }
+                if (!retainedFolders.size) continue;
+                const next = cloneOptions({
+                    ...job.options,
+                    exportedFolders: (job.options.exportedFolders ?? [])
+                        .filter(folder => !retainedFolders.has(folder)),
+                });
+                await this.repository.appendFilesAndUpdateOptions(job.id, next, []);
+                await this.repository.pauseJob(job.id);
+                recovered.set(job.id, next);
+            } catch (error) {
+                Logger.warn('[DownloadCenter] Could not recover retained staged export', job.id, error);
+            }
+        }
+        return recovered;
     }
 
     private browserLocks(): LockManager | undefined {

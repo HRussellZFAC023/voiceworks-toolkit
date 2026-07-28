@@ -138,6 +138,7 @@ const options = ref<Omit<BackupDownloadProfile, 'labels'>>({
     // "Complete works" means every manifest leaf by default. Users can opt
     // out of bulky categories explicitly when storage is the priority.
     filters: { audio: true, video: true, image: true, text: true, other: true },
+    downloadConcurrency: 1,
     titleMode: 'original-bracketed-translation',
     convertToOpus: false,
     opusBitrate: 96,
@@ -872,6 +873,7 @@ function friendlyError(error: unknown): string {
         if (error.code === 'permission') return t('backupDownloaderPermission');
         if (error.code === 'no-files') return t('backupDownloaderNoFiles');
         if (error.code === 'paused') return t('downloadCenterPaused');
+        if (error.code === 'export') return t('backupDownloaderExportPending');
         if (error.code === 'title-translation') return t('backupDownloaderTitleTranslationRequired');
         if (error.code === 'already-running') return t('downloadCenterAlreadyRunning');
     }
@@ -927,9 +929,9 @@ function markDownloadComplete(result: { jobId: string; skipped: number; exportFa
 function markDownloadFailed(error: unknown): void {
     if (
         error instanceof DownloadCenterRunError
-        && (error.code === 'paused' || error.code === 'title-translation')
+        && (error.code === 'paused' || error.code === 'export' || error.code === 'title-translation')
     ) {
-        if (error.code === 'title-translation') jobError.value = friendlyError(error);
+        if (error.code === 'title-translation' || error.code === 'export') jobError.value = friendlyError(error);
         if (progress.value) progress.value = { ...progress.value, phase: 'paused' };
         return;
     }

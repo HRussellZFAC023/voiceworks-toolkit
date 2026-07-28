@@ -52,6 +52,25 @@ describe('DownloadCoordinator', () => {
         expect(repository.completeJob).toHaveBeenCalledWith('job-1');
     });
 
+    it('defers job completion while a staged browser export is still settling', async () => {
+        const file: any = {
+            id: 'file', jobId: 'job', path: 'Work/track.wav', url: 'https://media/track',
+            status: 'completed', downloadedBytes: 5,
+        };
+        const repository: any = {
+            activateJob: vi.fn(),
+            listFiles: vi.fn(async () => [file]),
+            completeJob: vi.fn(),
+            pauseJob: vi.fn(),
+        };
+
+        await new DownloadCoordinator(repository, {} as any, {} as any, 1)
+            .run('job', undefined, { deferJobCompletion: true });
+
+        expect(repository.completeJob).not.toHaveBeenCalled();
+        expect(repository.pauseJob).not.toHaveBeenCalled();
+    });
+
     it('resumes after refresh from a locally and remotely fingerprinted audio checkpoint', async () => {
         const sourceUrl = 'https://api.asmr-200.com/api/media/download/flac-hash';
         const objectIdentity = 'https://raw.kiko-play-niptan.one/media/download/object/track.flac';

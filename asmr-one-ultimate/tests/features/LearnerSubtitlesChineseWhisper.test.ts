@@ -54,6 +54,7 @@ describe('LearnerSubtitles Chinese Whisper rendering', () => {
         setConfig('enablePlayerTranslator', true);
         setConfig('karaokeMode', false);
         setConfig('segmentMode', true);
+        setConfig('whisperOverrideSubs', true);
         setConfig('learnerBlur', false);
         setConfig('enableJpdb', false);
         setConfig('jpdbSubtitleFurigana', false);
@@ -385,6 +386,75 @@ describe('LearnerSubtitles Chinese Whisper rendering', () => {
         expect(primary.text()).toBe('お邪魔します');
         expect(primary.find('.karaoke-spoken').exists()).toBe(false);
         expect(primary.find('.karaoke-upcoming').exists()).toBe(false);
+        wrapper.unmount();
+    });
+
+    it('routes direct English Whisper translation to the secondary lane without retranslating it', async () => {
+        setConfig('learnerSubtitleMode', 'jp-en');
+        const translate = vi.spyOn(TranslationService, 'translate').mockResolvedValue('should not run');
+        const { wrapper, eventBus } = mountLearner();
+
+        eventBus.emit('whisper:update', {
+            text: 'Welcome back.',
+            segments: [{ start: 0, end: 10, text: 'Welcome back.' }],
+            final: false,
+            live: true,
+            sourceLanguageHint: 'ja',
+            outputLanguageHint: 'en',
+            timingQuality: 'segment',
+        });
+        await nextTick();
+
+        expect(wrapper.get('.learner-subs-expanded .learner-jp').text()).toBe('');
+        expect(wrapper.get('.learner-subs-expanded .learner-en').text()).toBe('Welcome back.');
+        expect(wrapper.get('.learner-subs-expanded .learner-en').attributes('lang')).toBe('en');
+        expect(translate).not.toHaveBeenCalled();
+        wrapper.unmount();
+    });
+
+    it('keeps a real native Japanese cue above direct English Whisper translation', async () => {
+        setConfig('learnerSubtitleMode', 'jp-en');
+        const translate = vi.spyOn(TranslationService, 'translate').mockResolvedValue('should not run');
+        const { wrapper, eventBus } = mountLearner([
+            { time: 0, endTime: 10, text: 'お帰りなさい。' },
+        ]);
+
+        eventBus.emit('whisper:update', {
+            text: 'Welcome back.',
+            segments: [{ start: 0, end: 10, text: 'Welcome back.' }],
+            final: false,
+            live: true,
+            sourceLanguageHint: 'ja',
+            outputLanguageHint: 'en',
+            timingQuality: 'segment',
+        });
+        await nextTick();
+
+        expect(wrapper.get('.learner-subs-expanded .learner-jp').text()).toBe('お帰りなさい。');
+        expect(wrapper.get('.learner-subs-expanded .learner-en').text()).toBe('Welcome back.');
+        expect(translate).not.toHaveBeenCalled();
+        wrapper.unmount();
+    });
+
+    it('honours whisperOverrideSubs=false when a native subtitle is available', async () => {
+        setConfig('whisperOverrideSubs', false);
+        const { wrapper, eventBus } = mountLearner([
+            { time: 0, endTime: 10, text: 'ネイティブ字幕' },
+        ]);
+
+        eventBus.emit('whisper:update', {
+            text: 'Whisper transcription',
+            segments: [{ start: 0, end: 10, text: 'Whisper transcription' }],
+            final: false,
+            live: true,
+            sourceLanguageHint: 'ja',
+            outputLanguageHint: 'ja',
+            timingQuality: 'segment',
+        });
+        await nextTick();
+
+        expect(wrapper.get('.learner-subs-expanded .learner-jp').text()).toBe('ネイティブ字幕');
+        expect(wrapper.get('.learner-subs-expanded .learner-jp').text()).not.toContain('Whisper');
         wrapper.unmount();
     });
 

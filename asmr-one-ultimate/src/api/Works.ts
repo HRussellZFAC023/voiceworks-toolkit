@@ -56,6 +56,13 @@ export function readWorksTotalCount(response: WorksResponse, alreadyLoaded = 0):
 /** True when another page is worth requesting. */
 export function hasMoreWorkPages(response: WorksResponse, loadedCount: number): boolean {
     if (!response?.works?.length) return false;
+    const total = Number(response?.pagination?.totalCount);
+    if (!Number.isSafeInteger(total) || total < 0) {
+        // Some mirrors omit pagination entirely (and may clamp a requested
+        // 100-row page to a smaller server default). Keep manual paging
+        // available until the server returns an empty page.
+        return true;
+    }
     return loadedCount < readWorksTotalCount(response, loadedCount - response.works.length);
 }
 

@@ -23,6 +23,7 @@ function profile(overrides: Partial<BackupDownloadProfile> = {}): BackupDownload
     return {
         labels, selectedWorkIds: [],
         filters: { audio: true, video: false, image: true, text: true, other: false },
+        downloadConcurrency: 1,
         titleMode: 'original-bracketed-translation', convertToOpus: false, opusBitrate: 128,
         metadataMode: 'additive', includeArtwork: true, ...overrides,
     };
@@ -223,6 +224,7 @@ describe('BackupWorkDownloader', () => {
             },
         });
         expect(wrapper.get('[data-testid="download-progress"]').text()).toContain('3 / 10');
+        expect(wrapper.get('.progress-label').attributes('title')).toBe('track.opus');
         expect(wrapper.get('.progress-track > div').attributes('style')).toContain('30%');
         await wrapper.get('[data-testid="pause"]').trigger('click');
         expect(wrapper.emitted('pause')).toHaveLength(1);
@@ -328,6 +330,7 @@ describe('BackupWorkDownloader', () => {
         const wrapper = mount(BackupWorkDownloader, { props: { playlists, works, profile: profile() } });
 
         expect(wrapper.find('.download-options-content').exists()).toBe(true);
+        expect(wrapper.get('[data-testid="download-concurrency"]').element).toHaveProperty('value', '1');
         expect(wrapper.get('[data-testid="opus-option"]').classes()).toContain('option-row');
         expect(wrapper.get('[data-testid="opus-memory-warning"]').text()).toBe('Large sources stay original.');
         expect(wrapper.get('[data-testid="artwork-option"]').classes()).toContain('hinted-option');
@@ -351,10 +354,12 @@ describe('BackupWorkDownloader', () => {
 
     it('emits the safe download options and never closes itself on start', async () => {
         const wrapper = mount(BackupWorkDownloader, { props: { playlists, works, profile: profile({ selectedWorkIds: [1] }) } });
+        await wrapper.get('[data-testid="download-concurrency"]').setValue('3');
         await wrapper.get('[data-testid="opus-toggle"]').setValue(true);
+        expect(wrapper.get('[data-testid="download-concurrency"]').attributes('disabled')).toBeDefined();
         await wrapper.get('[data-testid="opus-bitrate"]').setValue('160');
         await wrapper.get('[data-testid="start"]').trigger('click');
-        expect(wrapper.emitted('start')?.[0]?.[0]).toMatchObject({ selectedWorkIds: [1], convertToOpus: true, opusBitrate: 160, metadataMode: 'additive', includeArtwork: true });
+        expect(wrapper.emitted('start')?.[0]?.[0]).toMatchObject({ selectedWorkIds: [1], downloadConcurrency: 3, convertToOpus: true, opusBitrate: 160, metadataMode: 'additive', includeArtwork: true });
         expect(wrapper.emitted('close')).toBeUndefined();
     });
 });

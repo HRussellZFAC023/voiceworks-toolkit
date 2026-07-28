@@ -72,6 +72,7 @@ const showJP = useConfig('showJP');
 const karaokeMode = useConfig('karaokeMode');
 const segmentMode = useConfig('segmentMode');
 const enablePlayerTranslator = useConfig('enablePlayerTranslator');
+const whisperOverrideSubs = useConfig('whisperOverrideSubs');
 const enableJpdb = useConfig('enableJpdb');
 const jpdbSubtitleFurigana = useConfig('jpdbSubtitleFurigana');
 const jpdbShowFurigana = useConfig('jpdbShowFurigana');
@@ -131,6 +132,7 @@ let whisperFromCache = false;
 let whisperLive = false;
 let whisperLeadSec = 0;
 let whisperSourceLanguageHint: TranslationSourceHint = 'auto';
+let whisperOutputLanguageHint: TranslationSourceHint = 'auto';
 let whisperTimingQuality: 'word' | 'segment' = 'segment';
 let whisperTextGeneration = 0;
 let lastWhisperDisplayText = '';
@@ -658,6 +660,7 @@ function resetTrackRuntimeState(): void {
     whisperLive = false;
     whisperLeadSec = 0;
     whisperSourceLanguageHint = 'auto';
+    whisperOutputLanguageHint = 'auto';
     whisperTimingQuality = 'segment';
     // A component/host remount can rebuild the player while the same canonical
     // run is still active. Preserve its status reservation; an ensuing idle
@@ -1567,11 +1570,25 @@ function preTranslateAll(
 // The main updateLyrics() -- called on every timeupdate (~4Hz)
 // ---------------------------------------------------------------------------
 
+function discoverNativeLyrics(): void {
+    if (currentLyrics.length > 0) return;
+    const data = findLyricsSource()
+        || bridge.store?.state?.AudioPlayer?.lrcLines
+        || getTextTracksAsLyrics();
+    if (data?.length) currentLyrics = normalizeLyricLines(data as Record<string, unknown>[]);
+}
+
 function updateLyrics() {
     const trackKey = getTrackKey();
     enterTrack(trackKey);
 
-    const useWhisper = whisperActive;
+    // When native subtitles are preferred, discover them before deciding which
+    // source owns the two display lanes. Whisper can continue transcribing and
+    // caching in the background without replacing an available native cue.
+    if (!whisperOverrideSubs.value) discoverNativeLyrics();
+
+    const useWhisper = whisperActive
+        && (whisperOverrideSubs.value || currentLyrics.length === 0);
     if (useWhisper) {
         _updateWhisperDisplay();
         return;
@@ -1707,13 +1724,20 @@ function updateLyrics() {
 
 function _updateWhisperDisplay() {
     const targetLang = getSecondaryTargetLanguage();
-    const sourceLanguageHint = whisperSourceLanguageHint;
+    const sourceLanguageHint = whisperOutputLanguageHint;
 
     if (whisperLines.length) {
-        currentLyrics = whisperLines;
         const display = getWhisperDisplay();
         whisperCaptionDelayed.value = display.delayed === true;
         const fullText = display.fullText;
+        if (
+            fullText
+            && whisperOutputLanguageHint === 'en'
+            && whisperOutputLanguageHint !== whisperSourceLanguageHint
+        ) {
+            renderDirectEnglishWhisper(fullText);
+            return;
+        }
         if (fullText && fullText !== lastText) lastText = fullText;
         const secondaryRequestContext: WhisperTextRequestContext = {
             text: fullText,
@@ -1895,6 +1919,13 @@ function _updateWhisperDisplay() {
     whisperCaptionDelayed.value = false;
     if (whisperText) {
         const requestedText = whisperText;
+        if (
+            whisperOutputLanguageHint === 'en'
+            && whisperOutputLanguageHint !== whisperSourceLanguageHint
+        ) {
+            renderDirectEnglishWhisper(requestedText);
+            return;
+        }
         const requestContext: WhisperTextRequestContext = {
             text: requestedText,
             generation: whisperTextGeneration,
@@ -2006,6 +2037,30 @@ function _updateWhisperDisplay() {
     refreshVisibility();
 }
 
+/**
+ * Whisper's translate task emits English directly. Keep that text in the
+ * secondary lane and only populate the Japanese lane from a real native cue;
+ * never label the English output as Japanese or send it through translation
+ * again.
+ */
+function renderDirectEnglishWhisper(text: string) {
+    const directEnglish = text.trim();
+    discoverNativeLyrics();
+    const native = getSubtitleDisplay();
+    const nativePrimary = native.fullText && !isChinese(native.fullText)
+        ? (native.displayText || native.fullText)
+        : '';
+
+    clearKaraokeState();
+    updatePrimaryLine(nativePrimary);
+    updateSecondaryLine(directEnglish, false);
+    lastText = directEnglish;
+    lastDisplayedText = directEnglish;
+    lastWhisperDisplayText = nativePrimary;
+    lastSecondaryShown = directEnglish;
+    refreshVisibility();
+}
+
 // ---------------------------------------------------------------------------
 // Whisper event handlers
 // ---------------------------------------------------------------------------
@@ -2017,6 +2072,7 @@ function applyWhisperRuntimeMetadata(payload: WhisperUpdatePayload) {
         whisperLeadSec = Math.max(0, payload.leadSec);
     }
     whisperSourceLanguageHint = payload.sourceLanguageHint || 'auto';
+    whisperOutputLanguageHint = payload.outputLanguageHint || whisperSourceLanguageHint;
     whisperTimingQuality = payload.timingQuality || 'segment';
     whisperText = sanitizeWhisperText(payload.text);
 }
@@ -2034,7 +2090,9 @@ function applyWhisperSegments(payload: WhisperUpdatePayload) {
     }
     const newLines = normalizeWhisperSubtitleLines(segments);
     if (newLines.length > 0) {
-        schedulePreTranslation(newLines, 20, whisperSourceLanguageHint);
+        if (whisperOutputLanguageHint !== 'en' || whisperOutputLanguageHint === whisperSourceLanguageHint) {
+            schedulePreTranslation(newLines, 20, whisperOutputLanguageHint);
+        }
         const newlyArrived = newLines.filter((line) => {
             const signature = `${line.time}:${line.endTime ?? ''}:${line.text}`;
             if (seenWhisperArrivalSignatures.has(signature)) return false;
@@ -2087,6 +2145,7 @@ function handleWhisperClear() {
     whisperLive = false;
     whisperLeadSec = 0;
     whisperSourceLanguageHint = 'auto';
+    whisperOutputLanguageHint = 'auto';
     whisperTimingQuality = 'segment';
     resetLaggedWhisperCaption();
     resetDedupState({ includeWhisperDisplay: true });
@@ -2921,6 +2980,10 @@ onUnmounted(() => {
 
 // Watch showJP to sync the translate button active state
 watch(showJP, () => syncToggleJpBtn());
+watch(whisperOverrideSubs, () => {
+    resetDedupState({ includeWhisperDisplay: true, bumpTranslationToken: true });
+    scheduleUpdateLyrics();
+});
 
 // Segment transition: fade-in when primary text changes to a new segment
 watch(primaryText, (val) => {

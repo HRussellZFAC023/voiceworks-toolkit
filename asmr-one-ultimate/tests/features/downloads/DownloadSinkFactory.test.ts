@@ -72,10 +72,11 @@ describe('DownloadSinkFactory', () => {
         await expect(createDownloadDestination()).resolves.toEqual({ kind: 'gm', subfolder: OPFS_DOWNLOAD_ROOT });
     });
 
-    it('uses a plain browser-storage destination without a userscript manager', async () => {
+    it('does not advertise private browser storage as a user-visible destination', async () => {
         stubOriginPrivateFileSystem();
         expect(supportsUserscriptDownload()).toBe(false);
-        await expect(createDownloadDestination()).resolves.toEqual({ kind: 'opfs', root: OPFS_DOWNLOAD_ROOT });
+        expect(canCreateDownloadDestination()).toBe(false);
+        await expect(createDownloadDestination()).rejects.toBeInstanceOf(DownloadDestinationUnsupportedError);
     });
 
     it('rejects when the origin private file system is unavailable', async () => {

@@ -1,4 +1,5 @@
 import type { GmRequestConfig, GmResponse } from '../../infrastructure/HttpClient';
+import { readHostAuthToken } from '../../core/hostAuthToken';
 import {
     fetchSafeMediaBlob,
     getOfficialMediaRequestPolicy,
@@ -143,13 +144,8 @@ interface PrivilegedImagePolicy {
  * request header on the privileged (CORS-exempt) bridge, never in a URL.
  */
 function getOfficialMediaAuthHeaders(): Record<string, string> {
-    try {
-        const token = String(globalThis.localStorage?.getItem('jwt-token') || '').trim();
-        // Header values must stay printable ASCII; anything else is not a JWT.
-        if (token && /^[\x21-\x7e]+$/.test(token)) return { Authorization: `Bearer ${token}` };
-    } catch {
-        // Storage can be unavailable in restricted contexts.
-    }
+    const token = readHostAuthToken();
+    if (token) return { Authorization: `Bearer ${token}` };
     return {};
 }
 

@@ -21,6 +21,7 @@ vi.mock('../../../src/features/downloads/DownloadSinkFactory', () => ({
     createDownloadSink: mocks.createDownloadSink,
 }));
 vi.mock('../../../src/features/downloads/DownloadFolderExporter', () => ({
+    DOWNLOAD_EXPORT_STAGING_FOLDER: '.asmr-export',
     DownloadFolderExporter: class DownloadFolderExporter {
         constructor(...args: unknown[]) { mocks.exporterArgs.push(args); }
         exportFolder = mocks.exportFolder;
@@ -60,12 +61,15 @@ function file(id: string, path: string, status = 'pending') {
     return { id, jobId: 'job', path, url: `https://media.test/${id}`, status, downloadedBytes: 0 };
 }
 
-function repository(files: any[]) {
+function repository(files: any[], jobs: any[] = []) {
     let stored: PersistedDownloadCenterOptions | undefined;
     return {
         get stored() { return stored; },
+        listJobs: vi.fn(async () => jobs),
         listFiles: vi.fn(async () => files),
         appendFilesAndUpdateOptions: vi.fn(async (_job: string, next: PersistedDownloadCenterOptions) => { stored = next; }),
+        completeJob: vi.fn(async () => true),
+        pauseJob: vi.fn(async () => true),
         deleteJob: vi.fn(),
     };
 }
@@ -105,9 +109,15 @@ describe('DownloadCenterRunner staged export', () => {
         const result = await (runner as any).prepareAndRun('job', persisted(STAGED));
 
         expect(order).toEqual(['Work B', 'Work A']);
+        expect(mocks.coordinatorRun).toHaveBeenCalledWith(
+            'job',
+            expect.any(Function),
+            { deferJobCompletion: true },
+        );
         expect(mocks.exportFolder).toHaveBeenCalledWith('Work A', ['Work A/one.wav', 'Work A/two.wav']);
         expect(result.exportFailures).toBe(0);
         expect(repo.stored?.exportedFolders).toEqual(['Work B', 'Work A']);
+        expect(repo.completeJob).toHaveBeenCalledWith('job', expect.any(String));
     });
 
     it('never builds an exporter for a folder the user picked themselves', async () => {
@@ -158,15 +168,17 @@ describe('DownloadCenterRunner staged export', () => {
         expect(mocks.exportFolder).toHaveBeenCalledWith('Work A', ['Work A/one.opus']);
     });
 
-    it('reports export failures without failing the download job', async () => {
+    it('keeps refused exports resumable instead of completing the download job', async () => {
         const files = [file('a1', 'Work A/one.wav', 'completed')];
         const repo = repository(files);
         mocks.exportFolder.mockResolvedValue({ exported: false, stagedFilesRetained: true });
         const runner = new DownloadCenterRunner(repo as any);
 
-        const result = await (runner as any).prepareAndRun('job', persisted(STAGED));
+        const error = await (runner as any).prepareAndRun('job', persisted(STAGED))
+            .catch((value: unknown) => value);
 
-        expect(result.exportFailures).toBe(1);
+        expect(error).toMatchObject({ code: 'export' });
+        expect(repo.completeJob).not.toHaveBeenCalled();
         expect(repo.stored?.exportedFolders).toBeUndefined();
     });
 
@@ -184,6 +196,22 @@ describe('DownloadCenterRunner staged export', () => {
         await (runner as any).prepareAndRun('job', persisted(STAGED));
 
         expect(mocks.exportFolder).toHaveBeenCalledWith('Work A', ['Work A/one.wav']);
+    });
+
+    it('keeps a partial job resumable when its completed files cannot be exported', async () => {
+        const files = [
+            { ...file('a1', 'Work A/one.wav', 'completed'), status: 'completed' },
+            { ...file('b1', 'Work B/two.wav', 'failed'), status: 'failed', error: 'boom' },
+        ];
+        const repo = repository(files);
+        mocks.exportFolder.mockResolvedValue({ exported: false, stagedFilesRetained: true });
+        const runner = new DownloadCenterRunner(repo as any);
+
+        const error = await (runner as any).prepareAndRun('job', persisted(STAGED))
+            .catch((value: unknown) => value);
+
+        expect(error).toMatchObject({ code: 'export' });
+        expect(repo.completeJob).not.toHaveBeenCalled();
     });
 
     it('does not deliver a folder that still has files waiting to download', async () => {
@@ -210,5 +238,72 @@ describe('DownloadCenterRunner staged export', () => {
         });
 
         expect(mocks.createDownloadSink).toHaveBeenCalledWith({ kind: 'fsa', handle });
+    });
+
+    it('reopens a v175 completed staged job when its supposedly exported folder is still retained', async () => {
+        const options = persisted(STAGED, { exportedFolders: ['Work A'] });
+        const job = {
+            id: 'job',
+            title: 'Legacy staged download',
+            status: 'completed',
+            options,
+            createdAt: 1,
+            updatedAt: 1,
+        };
+        const repo = repository(
+            [file('a1', 'Work A/one.wav', 'completed')],
+            [job],
+        );
+        mocks.createDownloadSink.mockResolvedValueOnce({
+            listTopLevelEntryNames: vi.fn(async () => ['Work A']),
+            size: vi.fn(async (path: readonly string[]) => {
+                if (path.join('/') === '.asmr-export/Work A.zip') return 100;
+                throw new Error('missing');
+            }),
+        });
+        const runner = new DownloadCenterRunner(repo as any);
+
+        const recovered = await runner.recoverInterruptedJobs();
+
+        expect(recovered).toEqual([
+            expect.objectContaining({
+                id: 'job',
+                status: 'paused',
+                options: expect.objectContaining({ exportedFolders: [] }),
+            }),
+        ]);
+        expect(repo.appendFilesAndUpdateOptions).toHaveBeenCalledWith(
+            'job',
+            expect.objectContaining({ exportedFolders: [] }),
+            [],
+        );
+        expect(repo.pauseJob).toHaveBeenCalledWith('job');
+    });
+
+    it('leaves a confirmed completed staged job closed when no source folder remains', async () => {
+        const options = persisted(STAGED, { exportedFolders: ['Work A'] });
+        const job = {
+            id: 'job',
+            title: 'Confirmed staged download',
+            status: 'completed',
+            options,
+            createdAt: 1,
+            updatedAt: 1,
+        };
+        const repo = repository(
+            [file('a1', 'Work A/one.wav', 'completed')],
+            [job],
+        );
+        mocks.createDownloadSink.mockResolvedValueOnce({
+            // A newer job can legitimately recreate the same top-level folder.
+            // Without the old hidden ZIP marker it does not belong to this job.
+            listTopLevelEntryNames: vi.fn(async () => ['Work A']),
+            size: vi.fn(async () => { throw new Error('missing'); }),
+        });
+        const runner = new DownloadCenterRunner(repo as any);
+
+        expect(await runner.recoverInterruptedJobs()).toEqual([]);
+        expect(repo.appendFilesAndUpdateOptions).not.toHaveBeenCalled();
+        expect(repo.pauseJob).not.toHaveBeenCalled();
     });
 });

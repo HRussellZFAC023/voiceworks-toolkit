@@ -219,6 +219,43 @@ describe('DownloadCenterRunner', () => {
         expect(result.discovery).toMatchObject({ nextIndex: 2, complete: true });
     });
 
+    it('keeps repeated host hashes collision-free when they refer to different paths', async () => {
+        mocks.getValidatedLiveTracks.mockResolvedValue([
+            {
+                type: 'folder',
+                title: 'Disc 1',
+                children: [{
+                    type: 'audio',
+                    hash: 'shared',
+                    title: 'track.wav',
+                    mediaDownloadUrl: 'https://media.test/one.wav',
+                }],
+            },
+            {
+                type: 'folder',
+                title: 'Disc 2',
+                children: [{
+                    type: 'audio',
+                    hash: 'shared',
+                    title: 'track.wav',
+                    mediaDownloadUrl: 'https://media.test/two.wav',
+                }],
+            },
+        ]);
+        mocks.getWorkInfo.mockResolvedValue(info(''));
+        const repo = repository();
+        const runner = new DownloadCenterRunner(repo as any);
+
+        await (runner as any).continueDiscovery('job', options([{ id: 'RJ2', title: 'Work' }]));
+
+        const additions = repo.appendFilesAndUpdateOptions.mock.calls.flatMap(call => call[2] as any[]);
+        expect(additions.map(file => file.path)).toEqual([
+            'Work/Disc 1/track.wav',
+            'Work/Disc 2/track.wav',
+        ]);
+        expect(new Set(additions.map(file => file.id))).toHaveProperty('size', 2);
+    });
+
     it('reports a clean coordinator pause as paused, never failed', async () => {
         const pausedFile = { id: 'file', jobId: 'job', path: 'Work/track.wav', status: 'paused', downloadedBytes: 4 };
         const repo = repository([pausedFile]);
@@ -942,7 +979,7 @@ describe('DownloadCenterRunner', () => {
         expect(mocks.coordinatorArgs.at(-1)?.[3]).toBe(1);
     });
 
-    it('uses three file workers when conversion is disabled', async () => {
+    it('uses one file worker by default when conversion is disabled', async () => {
         const file = { id: 'file', jobId: 'job', path: 'Work/track.wav', status: 'paused', downloadedBytes: 0 };
         const repo = repository([file]);
         const runner = new DownloadCenterRunner(repo as any);
@@ -951,7 +988,38 @@ describe('DownloadCenterRunner', () => {
 
         await (runner as any).prepareAndRun('job', persisted).catch(() => undefined);
 
+        expect(mocks.coordinatorArgs.at(-1)?.[3]).toBe(1);
+    });
+
+    it('uses the requested bounded file concurrency when conversion is disabled', async () => {
+        const file = { id: 'file', jobId: 'job', path: 'Work/track.wav', status: 'paused', downloadedBytes: 0 };
+        const repo = repository([file]);
+        const runner = new DownloadCenterRunner(repo as any);
+        const persisted = options([{ id: 'RJ2', title: 'Work' }], 0, { downloadConcurrency: 3 });
+        persisted.discovery!.complete = true;
+
+        await (runner as any).prepareAndRun('job', persisted).catch(() => undefined);
+
         expect(mocks.coordinatorArgs.at(-1)?.[3]).toBe(3);
+    });
+
+    it.each([
+        { requested: undefined, expected: 1 },
+        { requested: 0, expected: 1 },
+        { requested: -2, expected: 1 },
+        { requested: 2.9, expected: 2 },
+        { requested: 99, expected: 3 },
+        { requested: Number.NaN, expected: 1 },
+    ])('normalizes persisted file concurrency $requested to $expected', async ({ requested, expected }) => {
+        const file = { id: 'file', jobId: 'job', path: 'Work/track.wav', status: 'paused', downloadedBytes: 0 };
+        const repo = repository([file]);
+        const runner = new DownloadCenterRunner(repo as any);
+        const persisted = options([{ id: 'RJ2', title: 'Work' }], 0, { downloadConcurrency: requested });
+        persisted.discovery!.complete = true;
+
+        await (runner as any).prepareAndRun('job', persisted).catch(() => undefined);
+
+        expect(mocks.coordinatorArgs.at(-1)?.[3]).toBe(expected);
     });
 
     it('persists an explicit resume-without-Opus choice before restarting a failed job', async () => {

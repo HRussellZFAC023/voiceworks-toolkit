@@ -97,6 +97,8 @@ const TINY_MODEL = 'onnx-community/whisper-tiny_timestamped';
 // legacy `whisperModel` config (safe adaptive behavior). Explicit presets map to
 // official onnx-community IDs. Large v3 Turbo is experimental/heavy.
 type WhisperModelPreset = 'auto' | 'tiny' | 'base' | 'small' | 'medium' | 'large-v3-turbo';
+type WhisperDtype = 'auto' | 'fp32' | 'fp16' | 'q8' | 'q4' | 'q4f16' | 'int8';
+type WhisperExecutionDevice = 'auto' | 'webgpu' | 'wasm' | 'split';
 
 const WHISPER_PRESET_MODELS: Record<Exclude<WhisperModelPreset, 'auto'>, string> = {
     tiny: TINY_MODEL,
@@ -116,6 +118,39 @@ function normalizeWhisperModelPreset(value: unknown): WhisperModelPreset {
     return normalized === 'auto' || normalized in WHISPER_PRESET_MODELS
         ? normalized as WhisperModelPreset
         : 'auto';
+}
+
+function normalizeWhisperDtype(value: unknown): WhisperDtype {
+    const normalized = String(value || 'auto').trim().toLowerCase();
+    return normalized === 'fp32'
+        || normalized === 'fp16'
+        || normalized === 'q8'
+        || normalized === 'q4'
+        || normalized === 'q4f16'
+        || normalized === 'int8'
+        ? normalized
+        : 'auto';
+}
+
+function normalizeWhisperExecutionDevice(value: unknown): WhisperExecutionDevice {
+    const normalized = String(value || 'auto').trim().toLowerCase();
+    return normalized === 'webgpu' || normalized === 'wasm' || normalized === 'split'
+        ? normalized
+        : 'auto';
+}
+
+function normalizeNoRepeatNgramSize(value: unknown): number {
+    const numeric = typeof value === 'number'
+        ? value
+        : typeof value === 'string' && value.trim() ? Number(value) : Number.NaN;
+    return Number.isFinite(numeric) ? Math.max(0, Math.min(10, Math.round(numeric))) : 6;
+}
+
+function normalizeRepetitionPenalty(value: unknown): number {
+    const numeric = typeof value === 'number'
+        ? value
+        : typeof value === 'string' && value.trim() ? Number(value) : Number.NaN;
+    return Number.isFinite(numeric) ? Math.max(1, Math.min(2, numeric)) : 1.15;
 }
 
 function requiresManualModelPreparation(preset: WhisperModelPreset): boolean {
@@ -170,12 +205,6 @@ const BOUNDED_AUDIO_STREAM_INACTIVITY_MS = 30_000;
 const BOUNDED_AUDIO_STREAM_TOTAL_MS = 120_000;
 const TRANSLATE_AHEAD_MAX_SEGMENTS_PER_RUN = 50;
 const TRANSCRIPT_CACHE_POLICY_VERSION = 2;
-// Bump the transcript policy version whenever the worker's precision policy
-// changes so results produced by a materially different graph never mix.
-const WHISPER_DTYPE_POLICY = {
-    webgpu: 'encoder-fp32+decoder-q4',
-    wasm: 'q8',
-} as const;
 const GPU_ERROR_PATTERN =
     /createBuffer|RangeError|out of memory|OOM|allocation|device lost|GPUDevice|createComputePipeline|createShaderModule|mapAsync|MapAsyncStatus|mapping webgpu buffer|failed to download data from buffer|buffer unmapped|invalid buffer|Instance reference|AbortError|release session|invalid session|index out of bounds|reading 'destroy'|reading 'dispose'/i;
 const EXPLICIT_DEVICE_LOSS_PATTERN = /device lost|Instance reference|release session|invalid session|reading 'destroy'|reading 'dispose'/i;
@@ -391,6 +420,11 @@ interface WhisperSettings {
     forceWasm: boolean;
     preferLowPowerAdapter: boolean;
     minWebgpuBufferBytes: number;
+    executionDevice: WhisperExecutionDevice;
+    encoderDtype: WhisperDtype;
+    decoderDtype: WhisperDtype;
+    noRepeatNgramSize: number;
+    repetitionPenalty: number;
 }
 
 export type WhisperAutoWarmupSuppressionReason =
@@ -408,6 +442,7 @@ interface WhisperWorkerInit {
     worker: Worker;
     generation: number;
     plan: Readonly<WhisperLoadedPlan>;
+    configKey: string;
 }
 
 interface WhisperTranslationPlan {
@@ -465,6 +500,25 @@ function createLoadedPlan(settings: WhisperSettings): Readonly<WhisperLoadedPlan
     });
 }
 
+function createWorkerConfigKey(settings: WhisperSettings): string {
+    return JSON.stringify([
+        resolveWorkerModel(settings.model, settings.multilingual),
+        settings.backend,
+        settings.multilingual,
+        settings.executionDevice,
+        settings.encoderDtype,
+        settings.decoderDtype,
+        settings.subtask,
+        settings.language,
+        settings.chunkLengthS,
+        settings.strideLengthS,
+        settings.noRepeatNgramSize,
+        settings.repetitionPenalty,
+        settings.preferLowPowerAdapter,
+        settings.minWebgpuBufferBytes,
+    ]);
+}
+
 function isSameLoadedPlan(
     left: Readonly<WhisperLoadedPlan> | null | undefined,
     right: Readonly<WhisperLoadedPlan> | null | undefined,
@@ -481,17 +535,24 @@ function canReuseReadyWorker(
     modelReady: boolean,
     loadedPlan: Readonly<WhisperLoadedPlan> | null,
     requestedPlan: Readonly<WhisperLoadedPlan>,
+    loadedConfigKey: string,
+    requestedConfigKey: string,
 ): boolean {
-    return worker !== null && modelReady && isSameLoadedPlan(loadedPlan, requestedPlan);
+    return worker !== null
+        && modelReady
+        && loadedConfigKey === requestedConfigKey
+        && isSameLoadedPlan(loadedPlan, requestedPlan);
 }
 
 function canReusePendingWorker(
     worker: Worker | null,
     pending: WhisperWorkerInit | null,
     requestedPlan: Readonly<WhisperLoadedPlan>,
+    requestedConfigKey: string,
 ): boolean {
     return worker !== null
         && pending?.worker === worker
+        && pending.configKey === requestedConfigKey
         && isSameLoadedPlan(pending.plan, requestedPlan);
 }
 
@@ -518,6 +579,12 @@ function isChineseSourceHint(sourceLang: ReturnType<typeof normalizeLanguageCode
 
 function getWhisperSourceLanguageHint(language: string): TranslationSourceHint {
     return normalizeLanguageCode(language) || 'auto';
+}
+
+function getWhisperOutputLanguageHint(settings: Pick<WhisperSettings, 'language' | 'subtask'>): TranslationSourceHint {
+    return settings.subtask === 'translate'
+        ? 'en'
+        : getWhisperSourceLanguageHint(settings.language);
 }
 
 function getWhisperTimingLabel(timingQuality: WhisperState['timingQuality']): string {
@@ -637,6 +704,7 @@ export class Whisper {
     private modelReady = false;
     private activeRunSettings: Readonly<WhisperSettings> | null = null;
     private loadedPlan: Readonly<WhisperLoadedPlan> | null = null;
+    private loadedWorkerConfigKey = '';
     private autoTranscribeWorkId: string | null = null;
 
     private finalizeOnIdle = false;
@@ -676,10 +744,16 @@ export class Whisper {
     private workerHasCompletedInference = false;
     /**
      * Blocks chunk scheduling between the first seeking event and the settled
-     * destination. The loaded worker/model remains intact; only obsolete work
-     * owned by the previous playhead is invalidated.
+     * destination. Queued work is invalidated immediately; an active inference
+     * owns its Worker and is terminated once for the whole scrub burst.
      */
     private seekInProgress = false;
+    /**
+     * ORT inference cannot be cancelled inside a live Worker. A scrub that
+     * starts with in-flight work therefore terminates that worker once, then
+     * reloads the exact frozen run settings after the final destination settles.
+     */
+    private restartWorkerAfterSeek = false;
 
     private getAudioCache(): AudioCache | null {
         if (!AudioCache.objectUrls) return null;
@@ -914,7 +988,13 @@ export class Whisper {
                 && key !== 'whisperModelPreset' && key !== 'whisperLanguage'
                 && key !== 'whisperAdaptiveWindow'
                 && key !== 'whisperLiveChunkSec' && key !== 'whisperLiveOverlapSec'
-                && key !== 'whisperAutoWarmup') return;
+                && key !== 'whisperAutoWarmup'
+                && key !== 'whisperCustomModelId'
+                && key !== 'whisperEncoderDtype' && key !== 'whisperDecoderDtype'
+                && key !== 'whisperExecutionDevice'
+                && key !== 'whisperNoRepeatNgramSize'
+                && key !== 'whisperRepetitionPenalty'
+                && key !== 'whisperTask') return;
             if (key === 'whisperAutoWarmup') {
                 if (value !== true) {
                     this.cancelAutomaticWarmup('auto-warmup-disabled');
@@ -1101,6 +1181,9 @@ export class Whisper {
     }
 
     private getWasmPolicyReason(): string | null {
+        const executionDevice = normalizeWhisperExecutionDevice(Config.get('whisperExecutionDevice'));
+        if (executionDevice === 'wasm') return 'whisperExecutionDevice';
+        if (executionDevice !== 'auto') return null;
         if (Config.get('forceWhisperWasm') === true) return 'forceWhisperWasm';
         return null;
     }
@@ -1486,6 +1569,7 @@ export class Whisper {
         this.seekDebounceTimer = null;
         this.seekingRafId = 0;
         this.seekInProgress = false;
+        this.restartWorkerAfterSeek = false;
     }
 
     private releasePcmBuffer(): void {
@@ -1668,6 +1752,7 @@ export class Whisper {
             segments: [...this.segments, provisional].sort((a, b) => a.start - b.start),
             final: false,
             sourceLanguageHint: getWhisperSourceLanguageHint(this.getExecutionSettings().language),
+            outputLanguageHint: getWhisperOutputLanguageHint(this.getExecutionSettings()),
             chunkIndex: chunkId,
             live: true,
             source: 'heartbeat',
@@ -2907,12 +2992,19 @@ export class Whisper {
 
         if (!this.seekInProgress) {
             this.seekInProgress = true;
-            // Cancel queued windows immediately. Waiting for the debounce lets
-            // an obsolete queued window become the uncancellable active job,
-            // which can leave the final scrub destination waiting a full
-            // inference cycle on slower GPUs.
-            this.clearChunkTracking({ resetRecovery: true, resetChunkCounter: false });
-            if (this.worker) this.worker.postMessage({ type: 'flush-queue' });
+            if (this.worker && this.pendingChunks > 0) {
+                // `flush-queue` cannot cancel the active Transformers/ORT call.
+                // Detach and terminate its owner now so the final destination
+                // never waits for obsolete inference (or its hard timeout).
+                this.restartWorkerAfterSeek = true;
+                this.resetWorker('seek-active-inference', true);
+            } else {
+                // No active work exists, so preserving the loaded model is safe.
+                // Still clear any controller-owned queue state before the worker
+                // can promote an obsolete waiting window.
+                this.clearChunkTracking({ resetRecovery: true, resetChunkCounter: false });
+                if (this.worker) this.worker.postMessage({ type: 'flush-queue' });
+            }
         }
 
         // Cancel any pending RAF to avoid stale updates
@@ -2984,9 +3076,16 @@ export class Whisper {
             }
         }
 
+        const shouldRestartWorker = this.restartWorkerAfterSeek;
+        this.restartWorkerAfterSeek = false;
         this.seekInProgress = false;
         this.emitWhisperSnapshot('seek');
-        if (scheduleNextChunk) this.maybeProcessNextChunk();
+        if (!scheduleNextChunk) return;
+        if (shouldRestartWorker && this.transcribing) {
+            this.initWorker(this.getExecutionSettings());
+            return;
+        }
+        this.maybeProcessNextChunk();
     }
 
     private handlePause = (): void => {
@@ -3016,6 +3115,7 @@ export class Whisper {
             segments: [...this.segments],
             final: false,
             sourceLanguageHint: getWhisperSourceLanguageHint(this.getExecutionSettings().language),
+            outputLanguageHint: getWhisperOutputLanguageHint(this.getExecutionSettings()),
             live: true,
             source,
             timingQuality: this.timingQuality || 'segment',
@@ -3129,12 +3229,14 @@ export class Whisper {
         this.modelReady = false;
         this.workerHasCompletedInference = false;
         this.loadedPlan = null;
+        this.loadedWorkerConfigKey = '';
         this.clearChunkTracking({ resetRecovery: false, resetChunkCounter: false });
         Logger.warn('[Whisper] Worker reset:', reason);
     }
 
     private initWorker(settings: WhisperSettings): void {
         const requestedPlan = createLoadedPlan(settings);
+        const requestedConfigKey = createWorkerConfigKey(settings);
         const restartDelayMs = settings.backend === 'webgpu'
             ? this.webGpuRestartNotBefore - performance.now()
             : 0;
@@ -3151,10 +3253,9 @@ export class Whisper {
                     const latest = this.transcribing
                         ? this.getExecutionSettings()
                         : this.getWhisperSettings();
-                    const nextSettings = isSameLoadedPlan(
-                        createLoadedPlan(deferred),
-                        createLoadedPlan(latest),
-                    ) ? deferred : latest;
+                    const nextSettings = createWorkerConfigKey(deferred) === createWorkerConfigKey(latest)
+                        ? deferred
+                        : latest;
                     this.initWorker(nextSettings);
                 }, Math.ceil(restartDelayMs));
             }
@@ -3165,11 +3266,23 @@ export class Whisper {
             });
             return;
         }
-        if (canReuseReadyWorker(this.worker, this.modelReady, this.loadedPlan, requestedPlan)) {
+        if (canReuseReadyWorker(
+            this.worker,
+            this.modelReady,
+            this.loadedPlan,
+            requestedPlan,
+            this.loadedWorkerConfigKey,
+            requestedConfigKey,
+        )) {
             Logger.debug('[Whisper] Reusing ready model for the exact execution plan');
             return;
         }
-        if (canReusePendingWorker(this.worker, this.workerInitPending, requestedPlan)) {
+        if (canReusePendingWorker(
+            this.worker,
+            this.workerInitPending,
+            requestedPlan,
+            requestedConfigKey,
+        )) {
             Logger.debug('[Whisper] Reusing in-flight initialization for the exact execution plan');
             return;
         }
@@ -3193,7 +3306,13 @@ export class Whisper {
         MLCrashGuard.initStarted('whisper');
         const initGeneration = ++this.workerInitGeneration;
         this.loadedPlan = requestedPlan;
-        this.workerInitPending = { worker, generation: initGeneration, plan: requestedPlan };
+        this.loadedWorkerConfigKey = requestedConfigKey;
+        this.workerInitPending = {
+            worker,
+            generation: initGeneration,
+            plan: requestedPlan,
+            configKey: requestedConfigKey,
+        };
         this.modelReady = false;
         this.dispatchProgress(I18n.t('whisperLoading'), 5, 'model');
 
@@ -3225,6 +3344,11 @@ export class Whisper {
                 minWebgpuBufferBytes: settings.minWebgpuBufferBytes,
                 gpuVendorHint: DeviceCapabilities.profile.gpuVendor,
                 recentInferenceDurationMs: this.inferenceDurationEwmaMs,
+                executionDevice: settings.executionDevice,
+                encoderDtype: settings.encoderDtype,
+                decoderDtype: settings.decoderDtype,
+                noRepeatNgramSize: settings.noRepeatNgramSize,
+                repetitionPenalty: settings.repetitionPenalty,
             });
             this.armModelLoadTimer(settings, initGeneration);
         }).catch(error => {
@@ -3312,6 +3436,11 @@ export class Whisper {
             playheadDistance,
             updateIntervalMs: settings.workerUpdateIntervalMs,
             inputRms,
+            executionDevice: settings.executionDevice,
+            encoderDtype: settings.encoderDtype,
+            decoderDtype: settings.decoderDtype,
+            noRepeatNgramSize: settings.noRepeatNgramSize,
+            repetitionPenalty: settings.repetitionPenalty,
         }, [transferableAudio.buffer]);
     }
 
@@ -3593,6 +3722,7 @@ export class Whisper {
                     segments: [...this.segments],
                     final: this.pendingChunks === 0,
                     sourceLanguageHint: getWhisperSourceLanguageHint(this.getExecutionSettings().language),
+                    outputLanguageHint: getWhisperOutputLanguageHint(this.getExecutionSettings()),
                     chunkIndex: complete.chunkId,
                     live: true,
                     source: 'complete',
@@ -4110,6 +4240,9 @@ export class Whisper {
             segments: cached.segments,
             final: !!cached.complete,
             sourceLanguageHint: getWhisperSourceLanguageHint(language),
+            outputLanguageHint: cached.subtask === 'translate'
+                ? 'en'
+                : getWhisperSourceLanguageHint(language),
             fromCache: true,
             live: false,
             source: 'cache',
@@ -4159,12 +4292,16 @@ export class Whisper {
             src,
             settings.model,
             settings.backend,
-            WHISPER_DTYPE_POLICY[settings.backend],
+            settings.executionDevice,
+            settings.encoderDtype,
+            settings.decoderDtype,
             settings.multilingual,
             settings.subtask,
             settings.language,
             settings.chunkLengthS,
             settings.strideLengthS,
+            settings.noRepeatNgramSize,
+            settings.repetitionPenalty,
         ]);
     }
 
@@ -4560,6 +4697,9 @@ export class Whisper {
     private getWhisperSettings(): WhisperSettings {
         const profile = DeviceCapabilities.profile;
         const memoryPressure = GpuScheduler.getMemoryPressure();
+        const executionDevicePreference = normalizeWhisperExecutionDevice(
+            Config.get('whisperExecutionDevice'),
+        );
         const forceWasm = this.shouldForceWasm();
 
         let maxPendingChunks = 2;
@@ -4602,15 +4742,23 @@ export class Whisper {
 
         const configuredModel = String(Config.get('whisperModel') || DEFAULT_MODEL).trim() || DEFAULT_MODEL;
         const preset = normalizeWhisperModelPreset(Config.get('whisperModelPreset'));
-        const isExplicitPreset = preset !== 'auto';
-        const requestedModel = resolveWhisperModelPreset(preset, configuredModel);
+        const customModel = String(Config.get('whisperCustomModelId') || '').trim();
+        const isExplicitPreset = preset !== 'auto' || customModel.length > 0;
+        const requestedModel = customModel || resolveWhisperModelPreset(preset, configuredModel);
 
         // Resolve both choices before model loading. Auto may choose a
         // conservative tier from known capabilities; explicit presets remain
         // exact even on WASM and report a load error rather than being changed.
-        const backend: WhisperSettings['backend'] = forceWasm || !profile.hasGpu
+        const backend: WhisperSettings['backend'] = executionDevicePreference === 'webgpu'
+            || executionDevicePreference === 'split'
+            ? 'webgpu'
+            : executionDevicePreference === 'wasm' || forceWasm || !profile.hasGpu
+                ? 'wasm'
+                : 'webgpu';
+        const executionDevice: WhisperExecutionDevice = executionDevicePreference === 'auto'
+            && backend === 'wasm'
             ? 'wasm'
-            : 'webgpu';
+            : executionDevicePreference;
         // Auto-only policy: CPU/constrained devices use Tiny, while Firefox's
         // unknown-memory M1-compatible WebGPU profile uses timestamped Base for
         // materially better Japanese recognition and exact word timing.
@@ -4659,6 +4807,14 @@ export class Whisper {
         const language = resolveWhisperLanguage(configuredLanguage, currentWork);
         const configuredTask = String(Config.get('whisperTask') || 'transcribe').toLowerCase();
         const subtask = configuredTask === 'translate' ? 'translate' : 'transcribe';
+        const encoderDtype = normalizeWhisperDtype(Config.get('whisperEncoderDtype'));
+        const decoderDtype = normalizeWhisperDtype(Config.get('whisperDecoderDtype'));
+        const noRepeatNgramSize = normalizeNoRepeatNgramSize(
+            Config.get('whisperNoRepeatNgramSize'),
+        );
+        const repetitionPenalty = normalizeRepetitionPenalty(
+            Config.get('whisperRepetitionPenalty'),
+        );
         // ASMR speech routinely sits close to the noise floor and can be
         // separated by long pauses. Legacy whisperVadMode is intentionally
         // ignored: every captured window reaches the model.
@@ -4709,6 +4865,11 @@ export class Whisper {
             forceWasm,
             preferLowPowerAdapter,
             minWebgpuBufferBytes,
+            executionDevice,
+            encoderDtype,
+            decoderDtype,
+            noRepeatNgramSize,
+            repetitionPenalty,
         };
     }
 

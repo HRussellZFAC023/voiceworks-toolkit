@@ -239,6 +239,7 @@ export const zhLocale: Record<string, string> = {
         backupDownloaderDone: '已下载全部所选作品文件夹。', backupDownloaderDoneWithSkipped: '已下载可用作品；跳过了 {count} 个不可用作品。', backupDownloaderFailed: '下载失败。进度已保存，可继续。', backupDownloaderFailedDetail: '下载失败。进度已保存，可继续。{detail}',
         backupDownloaderResumeAvailable: '可继续中断的下载：', backupDownloaderResuming: '正在继续已保存的下载…', backupDownloaderPermission: '请允许访问原下载文件夹以继续。', backupDownloaderUnsupported: '此浏览器没有可写的下载存储，无法进行可续传的作品下载。请更新浏览器或改用其他浏览器。',
         backupDownloaderDoneWithExportFailures: '下载已完成，但有 {count} 个作品文件夹未能交给浏览器保存。文件仍已保留，继续下载时会重新交付。',
+        backupDownloaderExportPending: '浏览器未确认作品压缩包已保存。文件仍然保留；请继续任务以再次尝试保存。',
         backupDownloaderDoneWithSkippedFiles: '下载已完成，但有 {count} 个文件无法保存已跳过。其余文件均已完成。',
         downloadCenterPreparing: '准备中…',
         downloadCenterLoadMore: '加载更多结果', downloadCenterLoadingMore: '正在加载更多结果…',
@@ -251,7 +252,7 @@ export const zhLocale: Record<string, string> = {
         downloadCenterAlreadyRunning: '此标签页或其他标签页已有下载任务正在运行。',
         downloadCenterSelectAll: '全选当前结果', downloadCenterClearAll: '全部取消', downloadCenterFilterTags: '按类型或标签筛选', downloadCenterAllTags: '所有类型和标签',
         downloadCenterOwner: '创建者：{owner}', downloadCenterWorks: '{count} 个作品', downloadCenterLoading: '正在加载…', downloadCenterLoadFailed: '无法加载此播放列表。',
-        downloadCenterOptions: '下载选项', downloadCenterProgress: '下载进度', downloadCenterPause: '暂停', downloadCenterResume: '继续', downloadCenterResumeWithoutOpus: '保留原始音频并继续', downloadCenterResumeWithOriginalTitles: '使用原标题继续',
+        downloadCenterOptions: '下载选项', downloadCenterConcurrency: '并发下载数', downloadCenterConcurrencyHint: '1 对网站的负载最低；需要更高速度时可增加。', downloadCenterConcurrencyOpusHint: '为限制内存占用，Opus 转换一次只处理一个文件。', downloadCenterProgress: '下载进度', downloadCenterPause: '暂停', downloadCenterResume: '继续', downloadCenterResumeWithoutOpus: '保留原始音频并继续', downloadCenterResumeWithOriginalTitles: '使用原标题继续',
         downloadCenterRecovering: '正在检查中断的下载…', downloadCenterDownloading: '正在下载文件…', downloadCenterConverting: '正在转换为 Opus…', downloadCenterPaused: '下载已暂停',
 
         // Proxy donation banner

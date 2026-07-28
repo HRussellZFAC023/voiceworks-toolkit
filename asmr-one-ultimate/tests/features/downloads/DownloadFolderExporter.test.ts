@@ -109,7 +109,7 @@ describe('DownloadFolderExporter', () => {
         expect(files.has(`${DOWNLOAD_EXPORT_STAGING_FOLDER}/Work A.zip`)).toBe(false);
     });
 
-    it('falls back to an anchor download and keeps staged bytes when the manager declines', async () => {
+    it('keeps an anchor fallback resumable because browser delivery is unconfirmed', async () => {
         const { sink, files } = memorySink(staged());
         const anchorDownload = vi.fn(() => true);
         const exporter = new DownloadFolderExporter(sink, { kind: 'gm', subfolder: 'root' }, {
@@ -119,7 +119,7 @@ describe('DownloadFolderExporter', () => {
 
         const result = await exporter.exportFolder('Work A', ['Work A/track.wav']);
 
-        expect(result).toEqual({ exported: true, stagedFilesRetained: true });
+        expect(result).toEqual({ exported: false, stagedFilesRetained: true });
         expect(anchorDownload).toHaveBeenCalledWith(expect.anything(), 'Work A.zip');
         expect(files.has('Work A/track.wav')).toBe(true);
     });
@@ -150,20 +150,17 @@ describe('DownloadFolderExporter', () => {
         expect(files.has(`${DOWNLOAD_EXPORT_STAGING_FOLDER}/Work A.zip`)).toBe(false);
     });
 
-    it('skips missing staged files rather than aborting the archive', async () => {
+    it('refuses a partial archive when any completed staged file is missing', async () => {
         const { sink, files } = memorySink(staged());
         const download = vi.fn(async () => true);
-        let captured: Uint8Array | undefined;
-        download.mockImplementation(async () => {
-            captured = files.get(`${DOWNLOAD_EXPORT_STAGING_FOLDER}/Work A.zip`);
-            return true;
-        });
         const exporter = new DownloadFolderExporter(sink, { kind: 'gm', subfolder: 'root' }, { download });
 
         const result = await exporter.exportFolder('Work A', ['Work A/track.wav', 'Work A/deleted.wav']);
 
-        expect(result.exported).toBe(true);
-        expect(archiveNames(captured!)).toEqual(['Work A/track.wav']);
+        expect(result).toEqual({ exported: false, stagedFilesRetained: true });
+        expect(download).not.toHaveBeenCalled();
+        expect(files.has('Work A/track.wav')).toBe(true);
+        expect(files.has(`${DOWNLOAD_EXPORT_STAGING_FOLDER}/Work A.zip`)).toBe(false);
     });
 
     it('reports a failure when every staged file is missing', async () => {

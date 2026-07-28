@@ -107,6 +107,12 @@ describe('WhisperWorkerLoader', () => {
         expect(code).not.toContain('transformers@3.8.1');
     });
 
+    it('keeps model bytes in the browser cache across worker restarts', () => {
+        const code = __getWhisperWorkerCodeForTests();
+
+        expect(code).toContain('env.useBrowserCache = true');
+    });
+
     it('uses env.remoteHost for hub URL configuration (not env.hub)', () => {
         const code = __getWhisperWorkerCodeForTests();
 
@@ -199,10 +205,170 @@ describe('WhisperWorkerLoader', () => {
     });
 
     it('uses q4 decoder as primary WebGPU dtype (per HF official example)', () => {
-        const code = __getWhisperWorkerCodeForTests();
+        const workerSelf = createTestWorker();
 
-        expect(code).toContain("encoder_model: 'fp32'");
-        expect(code).toContain("decoder_model_merged: 'q4'");
+        expect(workerSelf.__whisperTestResolveDtypeForDevice('webgpu', 'auto', 'auto')).toEqual({
+            encoder_model: 'fp32',
+            decoder_model_merged: 'q4',
+        });
+    });
+
+    it('keeps explicit execution-device and dtype choices exact', () => {
+        const workerSelf = createTestWorker();
+
+        expect(workerSelf.__whisperTestResolveExecutionDevice('webgpu', true)).toBe('webgpu');
+        expect(workerSelf.__whisperTestResolveExecutionDevice('split', false)).toEqual({
+            encoder_model: 'webgpu',
+            decoder_model_merged: 'wasm',
+        });
+        expect(workerSelf.__whisperTestResolveDtypeForDevice(
+            { encoder_model: 'webgpu', decoder_model_merged: 'wasm' },
+            'fp16',
+            'q4',
+        )).toEqual({
+            encoder_model: 'fp16',
+            decoder_model_merged: 'q4',
+        });
+        expect(workerSelf.__whisperTestResolveDtypeForDevice('wasm', 'auto', 'auto')).toBe('q8');
+    });
+
+    it('uses conservative split execution when the GPU readback probe fails', async () => {
+        const workerSelf = createTestWorker();
+        const adapter = {
+            requestDevice: vi.fn().mockRejectedValue(new Error('Buffer unmapped')),
+        };
+
+        await expect(workerSelf.__whisperTestProbeGpuReadbackLatency(adapter)).resolves.toBe(true);
+        expect(workerSelf.__whisperTestResolveExecutionDevice('auto', true)).toEqual({
+            encoder_model: 'webgpu',
+            decoder_model_merged: 'wasm',
+        });
+        expect(workerSelf.__whisperTestResolveExecutionDevice('webgpu', true)).toBe('webgpu');
+    });
+
+    it('destroys a probe device when GPU completion signalling fails', async () => {
+        const workerSelf = createTestWorker();
+        const device = {
+            queue: {
+                submit: vi.fn(),
+                onSubmittedWorkDone: vi.fn().mockRejectedValue(new Error('Buffer unmapped')),
+            },
+            destroy: vi.fn(),
+        };
+        const adapter = {
+            requestDevice: vi.fn().mockResolvedValue(device),
+        };
+
+        await expect(workerSelf.__whisperTestProbeGpuReadbackLatency(adapter)).resolves.toBe(true);
+        expect(device.destroy).toHaveBeenCalledTimes(1);
+    });
+
+    it('keys pipeline reuse only by loaded graph settings', () => {
+        const workerSelf = createTestWorker();
+        const base = {
+            model: TIMESTAMPED_TINY_MODEL,
+            multilingual: true,
+            backend: 'webgpu',
+            executionDevice: 'webgpu',
+            encoderDtype: 'fp32',
+            decoderDtype: 'q4',
+            subtask: 'transcribe',
+            language: 'japanese',
+            chunkLengthS: 29,
+            strideLengthS: 5,
+            noRepeatNgramSize: 6,
+            repetitionPenalty: 1.15,
+        };
+
+        const initial = workerSelf.__whisperTestBuildPipelineSettingsKey(base);
+        expect(workerSelf.__whisperTestBuildPipelineSettingsKey({
+            ...base,
+            decoderDtype: 'q8',
+        })).not.toBe(initial);
+        expect(workerSelf.__whisperTestBuildPipelineSettingsKey({
+            ...base,
+            noRepeatNgramSize: 3,
+        })).toBe(initial);
+        expect(workerSelf.__whisperTestBuildPipelineSettingsKey({
+            ...base,
+            subtask: 'translate',
+            language: 'english',
+            chunkLengthS: 6,
+            strideLengthS: 0,
+            repetitionPenalty: 1.4,
+        })).toBe(initial);
+    });
+
+    it('keeps one pipeline across init and the shorter bootstrap window', async () => {
+        const pipe = createSuccessfulTimestampPipe([]);
+        pipe.dispose = vi.fn();
+        const pipelineFactory = vi.fn(async () => pipe);
+        const { workerSelf } = setupPipelineLoader(pipelineFactory);
+        const initSettings = {
+            model: TIMESTAMPED_TINY_MODEL,
+            multilingual: true,
+            backend: 'wasm',
+            executionDevice: 'wasm',
+            encoderDtype: 'q8',
+            decoderDtype: 'q8',
+            subtask: 'transcribe',
+            language: 'japanese',
+            chunkLengthS: 29,
+            strideLengthS: 5,
+            noRepeatNgramSize: 6,
+            repetitionPenalty: 1.15,
+        };
+
+        await workerSelf.__whisperTestLoadPipelineForModel(initSettings, vi.fn());
+        await workerSelf.__whisperTestTranscribeDirect({
+            ...initSettings,
+            audio: new Float32Array(96_000),
+            chunkId: 92,
+            subtask: 'translate',
+            language: 'english',
+            chunkLengthS: 6,
+            strideLengthS: 0,
+            noRepeatNgramSize: 3,
+            repetitionPenalty: 1.4,
+        });
+
+        expect(pipelineFactory).toHaveBeenCalledTimes(1);
+        expect(pipe.dispose).not.toHaveBeenCalled();
+        expect(pipe).toHaveBeenCalledWith(
+            expect.any(Float32Array),
+            expect.objectContaining({
+                chunk_length_s: 6,
+                stride_length_s: 0,
+                task: 'translate',
+                language: 'english',
+                no_repeat_ngram_size: 3,
+                repetition_penalty: 1.4,
+            }),
+        );
+    });
+
+    it('applies the selected anti-repetition generation settings', async () => {
+        const timestampModes: unknown[] = [];
+        const pipe = createSuccessfulTimestampPipe(timestampModes);
+        const workerSelf = createTestWorker();
+        workerSelf.__whisperTestSetPipeline(pipe, {
+            model: TIMESTAMPED_TINY_MODEL,
+            backend: 'webgpu',
+        });
+
+        await transcribeTestChunk(workerSelf, 91, {
+            noRepeatNgramSize: 2,
+            repetitionPenalty: 1.42,
+        });
+
+        expect(pipe).toHaveBeenCalledWith(
+            expect.any(Float32Array),
+            expect.objectContaining({
+                no_repeat_ngram_size: 2,
+                repetition_penalty: 1.42,
+                task: 'transcribe',
+            }),
+        );
     });
 
     it('uses proportional inference timeout scaled to chunk length', () => {
@@ -793,9 +959,65 @@ describe('WhisperWorkerLoader', () => {
         expect(code).toContain('pipelinePromise');
         expect(code).toContain('currentModel === modelName');
         expect(code).toContain('currentBackend === requestedBackend');
+        expect(code).toContain('currentPipelineSettingsKey === requestedSettingsKey');
         expect(code).toContain('pipelineLoadPromise && pipelineLoadKey === loadingKey');
-        expect(code).toContain("const loadingKey = settings.model + '|' + String(settings.multilingual)");
-        expect(code).toContain('String(settings.backend)');
+        expect(code).toContain('const loadingKey = buildPipelineSettingsKey(settings)');
+    });
+
+    it('reuses one pipeline across init, bootstrap, and adaptive inference options', async () => {
+        const timestampModes: unknown[] = [];
+        const pipe = createSuccessfulTimestampPipe(timestampModes);
+        pipe.dispose = vi.fn();
+        const pipeline = vi.fn().mockResolvedValue(pipe);
+        const { workerSelf } = setupPipelineLoader(pipeline);
+        const session = {
+            model: TIMESTAMPED_TINY_MODEL,
+            multilingual: true,
+            backend: 'wasm',
+            executionDevice: 'wasm',
+            encoderDtype: 'q8',
+            decoderDtype: 'q8',
+        };
+
+        await workerSelf.__whisperTestLoadPipelineForModel({
+            ...session,
+            subtask: 'transcribe',
+            language: 'japanese',
+            chunkLengthS: 29,
+            strideLengthS: 5,
+            noRepeatNgramSize: 6,
+            repetitionPenalty: 1.15,
+        }, vi.fn());
+        await workerSelf.__whisperTestTranscribeDirect({
+            ...session,
+            type: 'transcribe',
+            audio: new Float32Array(8 * 16_000),
+            subtask: 'transcribe',
+            language: 'japanese',
+            chunkLengthS: 8,
+            strideLengthS: 0,
+            noRepeatNgramSize: 6,
+            repetitionPenalty: 1.15,
+            timeOffset: 0,
+            chunkId: 1,
+        });
+        await workerSelf.__whisperTestTranscribeDirect({
+            ...session,
+            type: 'transcribe',
+            audio: new Float32Array(29 * 16_000),
+            subtask: 'translate',
+            language: 'chinese',
+            chunkLengthS: 29,
+            strideLengthS: 5,
+            noRepeatNgramSize: 3,
+            repetitionPenalty: 1.35,
+            timeOffset: 8,
+            chunkId: 2,
+        });
+
+        expect(pipeline).toHaveBeenCalledTimes(1);
+        expect(pipe).toHaveBeenCalledTimes(2);
+        expect(pipe.dispose).not.toHaveBeenCalled();
     });
 
     it('rejects a missing or invalid backend instead of defaulting to WebGPU', async () => {

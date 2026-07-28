@@ -96,6 +96,20 @@ describe('download manifest discovery', () => {
         expect(manifest.entries[0]).toMatchObject({ id: 'leaf', sourceTitle: 'leaf.mp3' });
     });
 
+    it('treats a host-declared zero as unknown rather than rejecting real bytes as oversized', () => {
+        const manifest = discoverDownloadManifest([{
+            type: 'audio',
+            title: 'unknown.wav',
+            hash: 'unknown-size',
+            size: 0,
+            mediaDownloadUrl: '/download/unknown-size',
+        }]);
+
+        expect(manifest.entries[0].size).toBeUndefined();
+        expect(manifest.totalKnownBytes).toBe(0);
+        expect(manifest.unknownSizeCount).toBe(1);
+    });
+
     it('never promotes a low-quality preview to the full-folder primary source', () => {
         const manifest = discoverDownloadManifest([{
             type: 'audio',

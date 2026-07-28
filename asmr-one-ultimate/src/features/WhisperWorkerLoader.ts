@@ -150,6 +150,10 @@ let gpuVendorHint = '';
 let currentBackend = 'wasm';
 let currentVendor = '';
 let currentDtype = '';
+let currentExecutionDevice = 'wasm';
+let currentEncoderDtype = 'q8';
+let currentDecoderDtype = 'q8';
+let currentPipelineSettingsKey = '';
 // null = not probed for the current model, true = supported, false = the
 // current export does not expose cross-attention tensors.
 let wordTimestampsSupported = null;
@@ -166,6 +170,9 @@ function postReady(context) {
         vendor: currentVendor,
         model: currentModel,
         dtype: currentDtype,
+        executionDevice: currentExecutionDevice,
+        encoderDtype: currentEncoderDtype,
+        decoderDtype: currentDecoderDtype,
         chunkId: typeof context?.chunkId === 'number' ? context.chunkId : undefined,
     });
 }
@@ -299,8 +306,9 @@ let slowGpuReadback = null;
  */
 async function probeGpuReadbackLatency(adapter) {
     if (slowGpuReadback !== null) return slowGpuReadback;
+    let device = null;
     try {
-        const device = await adapter.requestDevice();
+        device = await adapter.requestDevice();
         // One warm-up submit so first-use initialisation is not counted.
         device.queue.submit([]);
         await device.queue.onSubmittedWorkDone();
@@ -316,10 +324,16 @@ async function probeGpuReadbackLatency(adapter) {
         slowGpuReadback = median >= SLOW_READBACK_THRESHOLD_MS;
         console.log('[Whisper Worker] GPU readback latency ' + median.toFixed(1) + 'ms'
             + (slowGpuReadback ? ' (slow: timer-polled)' : ' (fast)'));
-        try { device.destroy(); } catch { /* best effort */ }
     } catch (err) {
         console.warn('[Whisper Worker] Readback probe failed:', err);
-        slowGpuReadback = false;
+        // A failed readback is not evidence that all-WebGPU execution is safe.
+        // Auto mode must use the conservative split path; explicit choices
+        // remain exact in resolveExecutionDevice().
+        slowGpuReadback = true;
+    } finally {
+        // A failed signalling probe must not leave a second live GPUDevice
+        // competing with the ORT session that will be created next.
+        try { device?.destroy(); } catch { /* best effort */ }
     }
     return slowGpuReadback;
 }
@@ -336,6 +350,24 @@ async function probeGpuReadbackLatency(adapter) {
 function resolveDeviceForModules(hasSlowReadback) {
     if (!hasSlowReadback) return 'webgpu';
     return { encoder_model: 'webgpu', decoder_model_merged: 'wasm' };
+}
+
+function normalizeExecutionDevice(value, backend) {
+    const normalized = String(value || '').trim().toLowerCase();
+    if (normalized === 'webgpu' || normalized === 'wasm' || normalized === 'split') {
+        return normalized;
+    }
+    return backend === 'wasm' ? 'wasm' : 'auto';
+}
+
+function resolveExecutionDevice(requestedDevice, hasSlowReadback) {
+    if (requestedDevice === 'split') {
+        return { encoder_model: 'webgpu', decoder_model_merged: 'wasm' };
+    }
+    if (requestedDevice === 'webgpu' || requestedDevice === 'wasm') {
+        return requestedDevice;
+    }
+    return resolveDeviceForModules(hasSlowReadback);
 }
 
 /**
@@ -371,16 +403,49 @@ function getSessionOptionsForDevice(device) {
     return null;
 }
 
-function getDtypeCandidates(device) {
-    if (device && typeof device === 'object' && device.decoder_model_merged === 'wasm') {
-        return getSplitDtypeCandidates();
+const VALID_DTYPES = new Set(['fp32', 'fp16', 'q8', 'q4', 'q4f16', 'int8']);
+
+function normalizeDtype(value) {
+    const normalized = String(value || 'auto').trim().toLowerCase();
+    return VALID_DTYPES.has(normalized) ? normalized : 'auto';
+}
+
+function resolveDtypeForDevice(device, requestedEncoder, requestedDecoder) {
+    const encoderDefault = device === 'wasm' ? WASM_DTYPE : 'fp32';
+    const decoderDefault = device && typeof device === 'object'
+        && device.decoder_model_merged === 'wasm'
+        ? 'q8'
+        : device === 'wasm' ? WASM_DTYPE : 'q4';
+    const encoder = normalizeDtype(requestedEncoder) === 'auto'
+        ? encoderDefault
+        : normalizeDtype(requestedEncoder);
+    const decoder = normalizeDtype(requestedDecoder) === 'auto'
+        ? decoderDefault
+        : normalizeDtype(requestedDecoder);
+
+    // Preserve the compact legacy WASM request when both modules use one
+    // precision. Mixed explicit choices require per-module dtype selection.
+    if (device === 'wasm' && encoder === decoder) return encoder;
+    return { encoder_model: encoder, decoder_model_merged: decoder };
+}
+
+function getDtypeCandidates(device, requestedEncoder = 'auto', requestedDecoder = 'auto') {
+    return [resolveDtypeForDevice(device, requestedEncoder, requestedDecoder)];
+}
+
+function describeExecutionDevice(device) {
+    return device && typeof device === 'object' ? 'split' : String(device);
+}
+
+function describeDtypes(dtype) {
+    if (dtype && typeof dtype === 'object') {
+        return {
+            encoder: String(dtype.encoder_model || ''),
+            decoder: String(dtype.decoder_model_merged || ''),
+        };
     }
-    if (device !== 'webgpu') return null;
-    // Keep the acoustically sensitive encoder at full precision. Firefox/M1
-    // profiling showed that fp16 could complete quickly while collapsing a
-    // 29-second Japanese sample to one junk token; fp32 produced the full
-    // transcript and also retains compatibility with Intel Arc-class devices.
-    return [{ encoder_model: 'fp32', decoder_model_merged: 'q4' }];
+    const value = String(dtype || '');
+    return { encoder: value, decoder: value };
 }
 
 function resolveModelName(model, multilingual) {
@@ -480,6 +545,22 @@ function initializeTimestampCapability(modelName) {
     wordTimestampsSupported = null;
 }
 
+function buildPipelineSettingsKey(settings) {
+    // Only values that change the loaded graph/session belong here. Live
+    // bootstrap and catch-up windows deliberately vary chunk/stride lengths,
+    // while language, task, and decoding penalties are per-inference options.
+    // Keying those values would dispose and recompile the same model between
+    // otherwise compatible chunks.
+    return JSON.stringify([
+        resolveModelName(settings.model, settings.multilingual),
+        settings.backend,
+        settings.multilingual,
+        normalizeExecutionDevice(settings.executionDevice, settings.backend),
+        normalizeDtype(settings.encoderDtype),
+        normalizeDtype(settings.decoderDtype),
+    ]);
+}
+
 async function loadPipelineForModel(settings, progressCb) {
     const modelName = resolveModelName(settings.model, settings.multilingual);
     const requestedBackend = settings.backend;
@@ -491,6 +572,30 @@ async function loadPipelineForModel(settings, progressCb) {
             '',
         );
     }
+    const requestedExecutionDevice = normalizeExecutionDevice(
+        settings.executionDevice,
+        requestedBackend,
+    );
+    if (
+        (requestedExecutionDevice === 'wasm' && requestedBackend !== 'wasm')
+        || (
+            (requestedExecutionDevice === 'webgpu' || requestedExecutionDevice === 'split')
+            && requestedBackend !== 'webgpu'
+        )
+    ) {
+        throw toLoadFailure(
+            new Error(
+                'Whisper execution device '
+                + requestedExecutionDevice
+                + ' conflicts with backend '
+                + requestedBackend,
+            ),
+            modelName,
+            requestedBackend,
+            '',
+        );
+    }
+    const requestedSettingsKey = buildPipelineSettingsKey(settings);
     await loadTransformers();
 
     if (
@@ -498,6 +603,7 @@ async function loadPipelineForModel(settings, progressCb) {
         && currentModel === modelName
         && currentMultilingual === settings.multilingual
         && currentBackend === requestedBackend
+        && (!currentPipelineSettingsKey || currentPipelineSettingsKey === requestedSettingsKey)
     ) {
         return pipelinePromise;
     }
@@ -507,6 +613,7 @@ async function loadPipelineForModel(settings, progressCb) {
         pipelinePromise = null;
         currentModel = null;
         currentDtype = '';
+        currentPipelineSettingsKey = '';
         wordTimestampsSupported = null;
         wordTimestampsEnabled = false;
         successfulInferenceCount = 0;
@@ -531,12 +638,24 @@ async function loadPipelineForModel(settings, progressCb) {
 
     currentBackend = backend.device;
     currentVendor = backend.vendor || '';
+    const resolvedDevice = currentBackend === 'webgpu'
+        ? resolveExecutionDevice(requestedExecutionDevice, slowGpuReadback === true)
+        : 'wasm';
+    const resolvedDtype = resolveDtypeForDevice(
+        resolvedDevice,
+        settings.encoderDtype,
+        settings.decoderDtype,
+    );
+    const resolvedDtypeParts = describeDtypes(resolvedDtype);
 
     self.postMessage({
         status: 'initiate',
         backend: currentBackend,
         vendor: currentVendor,
         reason: backend.reason || '',
+        executionDevice: describeExecutionDevice(resolvedDevice),
+        encoderDtype: resolvedDtypeParts.encoder,
+        decoderDtype: resolvedDtypeParts.decoder,
         chunkId: typeof settings.chunkId === 'number' ? settings.chunkId : undefined,
     });
 
@@ -545,10 +664,11 @@ async function loadPipelineForModel(settings, progressCb) {
     // --- WebGPU path ---
     if (currentBackend === 'webgpu') {
         configureWebGpuRuntime(backend.adapter);
-        // Resolve the device layout first: precision has to follow it, because a
-        // decoder split onto WASM needs q8 rather than the GPU-appropriate q4.
-        const resolvedDevice = resolveDeviceForModules(slowGpuReadback === true);
-        const dtypeCandidates = getDtypeCandidates(resolvedDevice);
+        const dtypeCandidates = getDtypeCandidates(
+            resolvedDevice,
+            settings.encoderDtype,
+            settings.decoderDtype,
+        );
         if (dtypeCandidates) {
             for (const dtype of dtypeCandidates) {
                 for (let hubIdx = 0; hubIdx < HUB_BASE_URLS.length; hubIdx++) {
@@ -567,6 +687,11 @@ async function loadPipelineForModel(settings, progressCb) {
                         currentModel = modelName;
                         currentMultilingual = settings.multilingual;
                         currentDtype = JSON.stringify(dtype);
+                        currentExecutionDevice = describeExecutionDevice(resolvedDevice);
+                        const dtypeParts = describeDtypes(dtype);
+                        currentEncoderDtype = dtypeParts.encoder;
+                        currentDecoderDtype = dtypeParts.decoder;
+                        currentPipelineSettingsKey = requestedSettingsKey;
                         initializeTimestampCapability(modelName);
                         console.log('[Whisper Worker] Model loaded on webgpu [' + currentDtype + ']:', modelName);
                         return pipelinePromise;
@@ -600,7 +725,7 @@ async function loadPipelineForModel(settings, progressCb) {
         progress_callback: progressCb,
         revision,
         device: 'wasm',
-        dtype: WASM_DTYPE,
+        dtype: resolvedDtype,
         session_options: {
             // ORT's extended optimizer currently breaks Whisper's tied
             // embedding QDQ graph before inference. Basic optimization keeps
@@ -618,7 +743,13 @@ async function loadPipelineForModel(settings, progressCb) {
             await pipelinePromise;
             currentModel = modelName;
             currentMultilingual = settings.multilingual;
-            currentDtype = WASM_DTYPE;
+            currentDtype = typeof resolvedDtype === 'string'
+                ? resolvedDtype
+                : JSON.stringify(resolvedDtype);
+            currentExecutionDevice = 'wasm';
+            currentEncoderDtype = resolvedDtypeParts.encoder;
+            currentDecoderDtype = resolvedDtypeParts.decoder;
+            currentPipelineSettingsKey = requestedSettingsKey;
             initializeTimestampCapability(modelName);
             console.log('[Whisper Worker] Model loaded on wasm [' + currentDtype + ']:', modelName);
             return pipelinePromise;
@@ -626,21 +757,21 @@ async function loadPipelineForModel(settings, progressCb) {
             lastErr = err;
             pipelinePromise = null;
             if (!isRetryableHubLoadError(err)) {
-                throw toLoadFailure(err, modelName, 'wasm', WASM_DTYPE);
+                throw toLoadFailure(err, modelName, 'wasm', resolvedDtype);
             }
             if (hubIdx + 1 >= HUB_BASE_URLS.length) break;
             console.warn('[Whisper Worker] Hub transport/auth failure, retrying the exact model on the next mirror...');
         }
     }
 
-    throw toLoadFailure(lastErr || new Error('Failed to load model'), modelName, 'wasm', WASM_DTYPE);
+    throw toLoadFailure(lastErr || new Error('Failed to load model'), modelName, 'wasm', resolvedDtype);
 }
 
 let pipelineLoadPromise = null;
 let pipelineLoadKey = '';
 
 async function ensurePipeline(settings, progressCb) {
-    const loadingKey = settings.model + '|' + String(settings.multilingual) + '|' + String(settings.backend);
+    const loadingKey = buildPipelineSettingsKey(settings);
     if (pipelineLoadPromise && pipelineLoadKey === loadingKey) {
         return pipelineLoadPromise;
     }
@@ -719,8 +850,12 @@ async function transcribe(msg) {
         //
         // 6 is deliberately permissive: natural Japanese repeats (ドキドキ,
         // へへへ) stay intact, while degenerate loops are blocked.
-        no_repeat_ngram_size: 6,
-        repetition_penalty: 1.15,
+        no_repeat_ngram_size: Number.isFinite(Number(msg.noRepeatNgramSize))
+            ? Math.max(0, Math.min(10, Math.round(Number(msg.noRepeatNgramSize))))
+            : 6,
+        repetition_penalty: Number.isFinite(Number(msg.repetitionPenalty))
+            ? Math.max(1, Math.min(2, Number(msg.repetitionPenalty)))
+            : 1.15,
     };
     if (msg.language) basePipeOpts.language = msg.language;
 
@@ -1010,7 +1145,11 @@ self.__whisperTestConfigureWebGpuRuntime = (testEnv, adapter) => {
 };
 self.__whisperTestIsRetryableHubLoadError = isRetryableHubLoadError;
 self.__whisperTestSetSlowReadback = (value) => { slowGpuReadback = value; };
+self.__whisperTestProbeGpuReadbackLatency = probeGpuReadbackLatency;
 self.__whisperTestResolveDeviceForModules = resolveDeviceForModules;
+self.__whisperTestResolveExecutionDevice = resolveExecutionDevice;
+self.__whisperTestResolveDtypeForDevice = resolveDtypeForDevice;
+self.__whisperTestBuildPipelineSettingsKey = buildPipelineSettingsKey;
 self.__whisperTestGetSessionOptionsForDevice = getSessionOptionsForDevice;
 self.__whisperTestSetTransformers = (testPipeline, testEnv = {}) => {
     pipeline = testPipeline;
@@ -1027,6 +1166,10 @@ self.__whisperTestSetPipeline = (testPipe, options = {}) => {
     currentModel = String(options.model || 'onnx-community/whisper-small_timestamped');
     currentMultilingual = options.multilingual !== false;
     currentBackend = String(options.backend || 'webgpu');
+    currentExecutionDevice = String(options.executionDevice || currentBackend);
+    currentEncoderDtype = String(options.encoderDtype || (currentBackend === 'wasm' ? 'q8' : 'fp32'));
+    currentDecoderDtype = String(options.decoderDtype || (currentBackend === 'wasm' ? 'q8' : 'q4'));
+    currentPipelineSettingsKey = '';
     TextStreamer = options.TextStreamer || class { constructor() {} };
     WhisperTextStreamer = options.WhisperTextStreamer || TextStreamer;
     transformersLoaded = true;
@@ -1138,6 +1281,11 @@ self.addEventListener('message', async (event) => {
         }
         currentModel = null;
         currentMultilingual = null;
+        currentDtype = '';
+        currentExecutionDevice = 'wasm';
+        currentEncoderDtype = WASM_DTYPE;
+        currentDecoderDtype = WASM_DTYPE;
+        currentPipelineSettingsKey = '';
         wordTimestampsSupported = null;
         wordTimestampsEnabled = false;
         successfulInferenceCount = 0;

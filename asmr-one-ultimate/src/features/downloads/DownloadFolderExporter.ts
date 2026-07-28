@@ -109,10 +109,12 @@ export class DownloadFolderExporter {
                 await this.discard([folder], true);
                 return { exported: true, stagedFilesRetained: false };
             }
-            // Without a manager callback the transfer cannot be confirmed, so
-            // the staged bytes stay put rather than being silently destroyed.
+            // Without a manager callback the transfer cannot be confirmed.
+            // The anchor is still useful as a best-effort delivery attempt, but
+            // it must not make the resumable job disappear if Firefox blocks it.
             if (this.anchorDownload(blob, archiveName)) {
-                return { exported: true, stagedFilesRetained: true };
+                await this.discard(archivePath);
+                return { exported: false, stagedFilesRetained: true };
             }
             await this.discard(archivePath);
             return { exported: false, stagedFilesRetained: true };
@@ -135,14 +137,10 @@ export class DownloadFolderExporter {
             for (const filePath of filePaths) {
                 const path = filePath.split('/').filter(Boolean);
                 if (!path.length) continue;
-                let size: number;
-                try { size = await this.sink.size(path); }
-                catch (error) {
-                    // A missing staged file is not fatal: it was either filtered
-                    // out or already exported by an earlier run.
-                    Logger.debug('[DownloadCenter] Skipping missing staged file', filePath, error);
-                    continue;
-                }
+                // Every path came from a completed database record. Missing
+                // bytes therefore mean eviction/corruption, never filtering.
+                // Abort instead of silently delivering a partial work archive.
+                const size = await this.sink.size(path);
                 await zip.addEntry({
                     name: path.join('/'),
                     size,
