@@ -109,6 +109,23 @@ describe('DownloadFolderExporter', () => {
         expect(files.has(`${DOWNLOAD_EXPORT_STAGING_FOLDER}/Work A.zip`)).toBe(false);
     });
 
+    it('keeps staged work bytes after a confirmed partial delivery', async () => {
+        const { sink, files, removed } = memorySink(staged());
+        const download = vi.fn(async () => true);
+        const exporter = new DownloadFolderExporter(sink, { kind: 'gm', subfolder: 'root' }, { download });
+
+        const result = await exporter.exportFolder(
+            'Work A',
+            ['Work A/track.wav'],
+            { retainSourceOnSuccess: true },
+        );
+
+        expect(result).toEqual({ exported: true, stagedFilesRetained: true });
+        expect(files.has('Work A/track.wav')).toBe(true);
+        expect(removed).not.toContainEqual({ path: 'Work A', recursive: true });
+        expect(files.has(`${DOWNLOAD_EXPORT_STAGING_FOLDER}/Work A.zip`)).toBe(false);
+    });
+
     it('keeps an anchor fallback resumable because browser delivery is unconfirmed', async () => {
         const { sink, files } = memorySink(staged());
         const anchorDownload = vi.fn(() => true);
@@ -124,16 +141,18 @@ describe('DownloadFolderExporter', () => {
         expect(files.has('Work A/track.wav')).toBe(true);
     });
 
-    it('never asks the userscript manager for a plain browser-storage destination', async () => {
-        const { sink } = memorySink(staged());
+    it('uses confirmed userscript delivery when resuming a legacy OPFS job', async () => {
+        const { sink, files } = memorySink(staged());
         const download = vi.fn(async () => true);
         const anchorDownload = vi.fn(() => true);
         const exporter = new DownloadFolderExporter(sink, { kind: 'opfs', root: 'root' }, { download, anchorDownload });
 
-        await exporter.exportFolder('Work A', ['Work A/track.wav']);
+        const result = await exporter.exportFolder('Work A', ['Work A/track.wav']);
 
-        expect(download).not.toHaveBeenCalled();
-        expect(anchorDownload).toHaveBeenCalled();
+        expect(result).toEqual({ exported: true, stagedFilesRetained: false });
+        expect(download).toHaveBeenCalledWith({ url: 'blob:staged', name: 'Work A.zip', saveAs: false });
+        expect(anchorDownload).not.toHaveBeenCalled();
+        expect(files.has('Work A/track.wav')).toBe(false);
     });
 
     it('reports a failure without discarding staged bytes when both transports refuse', async () => {

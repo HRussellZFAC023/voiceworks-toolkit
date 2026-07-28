@@ -82,7 +82,14 @@ describe('DownloadCenterRunner staged export', () => {
             ensurePermission: vi.fn(async () => true),
             listTopLevelEntryNames: vi.fn(async () => []),
         });
-        mocks.exportFolder.mockResolvedValue({ exported: true, stagedFilesRetained: false });
+        mocks.exportFolder.mockImplementation(async (
+            _folder: string,
+            _paths: string[],
+            options?: { retainSourceOnSuccess?: boolean },
+        ) => ({
+            exported: true,
+            stagedFilesRetained: Boolean(options?.retainSourceOnSuccess),
+        }));
         mocks.coordinatorRun.mockResolvedValue(undefined);
     });
 
@@ -143,6 +150,52 @@ describe('DownloadCenterRunner staged export', () => {
         expect(mocks.exportFolder).toHaveBeenCalledWith('Work A', ['Work A/one.wav']);
     });
 
+    it('re-exports a complete work after a failed file succeeds on resume', async () => {
+        const files = [
+            { ...file('a1', 'Work A/one.wav', 'completed'), status: 'completed' },
+            { ...file('a2', 'Work A/two.wav', 'failed'), status: 'failed', error: 'boom' },
+        ];
+        const repo = repository(files);
+        mocks.exportFolder.mockImplementation(async (
+            _folder: string,
+            _paths: string[],
+            options?: { retainSourceOnSuccess?: boolean },
+        ) => ({
+            exported: true,
+            stagedFilesRetained: Boolean(options?.retainSourceOnSuccess),
+        }));
+        const runner = new DownloadCenterRunner(repo as any);
+        const initial = persisted(STAGED);
+
+        await (runner as any).prepareAndRun('job', initial);
+        expect(repo.stored?.exportedFolders).toBeUndefined();
+
+        files[1].status = 'pending';
+        Reflect.deleteProperty(files[1], 'error');
+        mocks.coordinatorRun.mockImplementationOnce(async (
+            _jobId: string,
+            notify: (progress: any) => void,
+        ) => {
+            files[1].status = 'completed';
+            notify({ jobId: 'job', fileId: 'a2', completedBytes: 1, status: 'complete' });
+        });
+
+        await (runner as any).prepareAndRun('job', initial);
+
+        expect(mocks.exportFolder).toHaveBeenNthCalledWith(
+            1,
+            'Work A',
+            ['Work A/one.wav'],
+            { retainSourceOnSuccess: true },
+        );
+        expect(mocks.exportFolder).toHaveBeenNthCalledWith(
+            2,
+            'Work A',
+            ['Work A/one.wav', 'Work A/two.wav'],
+        );
+        expect(repo.stored?.exportedFolders).toEqual(['Work A']);
+    });
+
     it('does not re-export a folder already recorded as delivered', async () => {
         const files = [file('a1', 'Work A/one.wav', 'completed')];
         const runner = new DownloadCenterRunner(repository(files) as any);
@@ -195,7 +248,11 @@ describe('DownloadCenterRunner staged export', () => {
 
         await (runner as any).prepareAndRun('job', persisted(STAGED));
 
-        expect(mocks.exportFolder).toHaveBeenCalledWith('Work A', ['Work A/one.wav']);
+        expect(mocks.exportFolder).toHaveBeenCalledWith(
+            'Work A',
+            ['Work A/one.wav'],
+            { retainSourceOnSuccess: true },
+        );
     });
 
     it('keeps a partial job resumable when its completed files cannot be exported', async () => {

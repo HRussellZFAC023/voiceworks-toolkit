@@ -21,6 +21,14 @@ export interface DownloadFolderExporterOptions {
     chunkBytes?: number;
 }
 
+export interface DownloadFolderExportOptions {
+    /**
+     * Keep the staged work folder after a confirmed delivery. Partial work
+     * archives use this so a later Resume can rebuild the complete archive.
+     */
+    retainSourceOnSuccess?: boolean;
+}
+
 /** Keeps the URL alive long enough for the browser to start reading it. */
 const OBJECT_URL_LIFETIME_MS = 10 * 60 * 1000;
 
@@ -88,7 +96,11 @@ export class DownloadFolderExporter {
      * @param folder Top-level work folder name inside the sink.
      * @param filePaths Slash-separated paths, each starting with `folder`.
      */
-    async exportFolder(folder: string, filePaths: readonly string[]): Promise<DownloadFolderExportResult> {
+    async exportFolder(
+        folder: string,
+        filePaths: readonly string[],
+        options: DownloadFolderExportOptions = {},
+    ): Promise<DownloadFolderExportResult> {
         const archiveName = `${folder}.zip`;
         const archivePath = [DOWNLOAD_EXPORT_STAGING_FOLDER, archiveName];
         try {
@@ -100,14 +112,20 @@ export class DownloadFolderExporter {
             // GM_download is documented to take a URL, so hand it an object URL
             // rather than the blob itself; a manager that refuses simply reports
             // false and the anchor fallback runs.
-            const objectUrl = this.destination.kind === 'gm' ? createObjectUrl(blob) : undefined;
+            // v175 persisted some Firefox staging jobs as `opfs` before the
+            // confirmed userscript-delivery capability became mandatory.
+            // Both browser-storage variants can use GM_download on Resume.
+            const objectUrl = this.destination.kind !== 'fsa' ? createObjectUrl(blob) : undefined;
             const delivered = objectUrl
                 ? await this.download({ url: objectUrl, name: archiveName, saveAs: false })
                 : false;
             if (delivered) {
                 await this.discard(archivePath);
-                await this.discard([folder], true);
-                return { exported: true, stagedFilesRetained: false };
+                if (!options.retainSourceOnSuccess) await this.discard([folder], true);
+                return {
+                    exported: true,
+                    stagedFilesRetained: Boolean(options.retainSourceOnSuccess),
+                };
             }
             // Without a manager callback the transfer cannot be confirmed.
             // The anchor is still useful as a best-effort delivery attempt, but

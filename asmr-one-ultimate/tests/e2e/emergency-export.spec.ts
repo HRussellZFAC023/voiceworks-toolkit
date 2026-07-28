@@ -279,7 +279,11 @@ test.describe('Emergency export and Download Center', () => {
         await injectedPage.getByTestId('search-all-works').click();
         await expect(injectedPage.getByTestId('search-work-RJ999999')).toBeVisible();
         await injectedPage.getByTestId('search-work-RJ999999').locator('input').check();
+        await expect(injectedPage.getByTestId('download-concurrency')).toHaveValue('1');
+        await injectedPage.getByTestId('download-concurrency').selectOption('3');
+        await expect(injectedPage.getByTestId('download-concurrency')).toHaveValue('3');
         await injectedPage.getByTestId('opus-toggle').check();
+        await expect(injectedPage.getByTestId('download-concurrency')).toBeDisabled();
         await expect(injectedPage.getByTestId('artwork-toggle')).toBeVisible();
         await expect(injectedPage.getByTestId('download-center-import-input')).toHaveCount(0);
         const layout = await injectedPage.evaluate(() => {
@@ -365,6 +369,22 @@ test.describe('Emergency export and Download Center', () => {
         await injectedPage.getByTestId('start').click();
         await expect(injectedPage.getByTestId('download-progress')).toContainText(/downloaded|download complete|保存|下载/i, { timeout: 30_000 });
         await expect(injectedPage.getByTestId('backup-downloader')).toBeVisible();
+        const progressLayout = await injectedPage.locator('.progress-label').evaluate(element => {
+            const style = getComputedStyle(element);
+            return {
+                overflow: style.overflow,
+                textOverflow: style.textOverflow,
+                whiteSpace: style.whiteSpace,
+                height: element.getBoundingClientRect().height,
+                lineHeight: Number.parseFloat(style.lineHeight),
+            };
+        });
+        expect(progressLayout).toMatchObject({
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+        });
+        expect(progressLayout.height).toBeLessThanOrEqual(progressLayout.lineHeight + 1);
         const files = await injectedPage.evaluate(async () => {
             const root = await navigator.storage.getDirectory(); const work = await root.getDirectoryHandle('Own Work One'); const audio = await work.getDirectoryHandle('Audio');
             const read = async (name: string) => [...new Uint8Array(await (await (await audio.getFileHandle(name)).getFile()).arrayBuffer())];

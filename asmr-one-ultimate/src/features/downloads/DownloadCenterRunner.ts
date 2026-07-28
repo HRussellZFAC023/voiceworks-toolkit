@@ -666,15 +666,25 @@ export class DownloadCenterRunner {
         const attempted = new Set(exported);
         let chain: Promise<void> = Promise.resolve();
         let failures = 0;
-        const enqueue = (folder: string): void => {
+        const enqueue = (folder: string, final = true): void => {
             if (attempted.has(folder)) return;
             attempted.add(folder);
             chain = chain.then(async () => {
-                const result = await exporter.exportFolder(folder, await currentFolderPaths(folder));
-                if (!result.exported || result.stagedFilesRetained) {
+                const paths = await currentFolderPaths(folder);
+                const result = final
+                    ? await exporter.exportFolder(folder, paths)
+                    : await exporter.exportFolder(folder, paths, { retainSourceOnSuccess: true });
+                const retentionMismatch = final
+                    ? result.stagedFilesRetained
+                    : !result.stagedFilesRetained;
+                if (!result.exported || retentionMismatch) {
                     failures += 1;
                     return;
                 }
+                // A partial archive is useful immediately, but it is not the
+                // final delivery checkpoint. Its source folder stays staged so
+                // a later Resume can export the recovered file with the rest.
+                if (!final) return;
                 exported.add(folder);
                 const next = cloneOptions({ ...readOptions(), exportedFolders: [...exported] });
                 writeOptions(next);
@@ -716,7 +726,7 @@ export class DownloadCenterRunner {
                     );
                     if (stillPending) continue;
                     if (!folderFiles.some(file => file.status === 'completed')) continue;
-                    enqueue(folder);
+                    enqueue(folder, folderFiles.every(file => file.status === 'completed'));
                 }
             },
             settle: async () => {
