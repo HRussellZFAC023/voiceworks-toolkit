@@ -430,7 +430,7 @@ describe('LearnerSubtitles Chinese Whisper rendering', () => {
         wrapper.unmount();
     });
 
-    it('retains a segmented pair when English is cached until Japanese is ready', async () => {
+    it('keeps an uncached segmented Japanese fallback stable across the next ticker', async () => {
         setConfig('learnerSubtitleMode', 'jp-en');
         const japanese = deferred<string>();
         vi.mocked(TranslationService.peekCached).mockImplementation((text, target) => {
@@ -472,6 +472,14 @@ describe('LearnerSubtitles Chinese Whisper rendering', () => {
         await nextTick();
         expect(wrapper.get('.learner-subs-expanded .learner-jp').text()).toBe('キャッシュ済みの字幕');
         expect(wrapper.get('.learner-subs-expanded .learner-en').text()).toBe('Cached subtitle');
+        expect(TranslationService.translate).toHaveBeenCalledTimes(1);
+
+        vi.advanceTimersByTime(80);
+        await nextTick();
+
+        expect(wrapper.get('.learner-subs-expanded .learner-jp').text()).toBe('キャッシュ済みの字幕');
+        expect(wrapper.get('.learner-subs-expanded .learner-en').text()).toBe('Cached subtitle');
+        expect(TranslationService.translate).toHaveBeenCalledTimes(1);
         wrapper.unmount();
     });
 
@@ -522,7 +530,7 @@ describe('LearnerSubtitles Chinese Whisper rendering', () => {
         wrapper.unmount();
     });
 
-    it('retains a text-only pair when English is cached until Japanese is ready', async () => {
+    it('keeps an uncached text-only Japanese fallback stable across the next ticker', async () => {
         setConfig('learnerSubtitleMode', 'jp-en');
         const japanese = deferred<string>();
         vi.mocked(TranslationService.peekCached).mockImplementation((text, target) => {
@@ -564,6 +572,253 @@ describe('LearnerSubtitles Chinese Whisper rendering', () => {
         await nextTick();
         expect(wrapper.get('.learner-subs-expanded .learner-jp').text()).toBe('キャッシュ済みのテキスト字幕');
         expect(wrapper.get('.learner-subs-expanded .learner-en').text()).toBe('Cached text-only subtitle');
+
+        vi.advanceTimersByTime(80);
+        await nextTick();
+
+        expect(wrapper.get('.learner-subs-expanded .learner-jp').text()).toBe('キャッシュ済みのテキスト字幕');
+        expect(wrapper.get('.learner-subs-expanded .learner-en').text()).toBe('Cached text-only subtitle');
+        expect(TranslationService.translate).toHaveBeenCalledTimes(1);
+        wrapper.unmount();
+    });
+
+    it('commits a text-only JP-ZH pair without retrying the valid Chinese secondary', async () => {
+        setConfig('learnerSubtitleMode', 'jp-zh');
+        const source = '中文原文就是有效的中文字幕';
+        const translatedJapanese = '中国語の原文が有効な中国語字幕です';
+        vi.spyOn(TranslationService, 'translate').mockImplementation(async (_text, target) => (
+            target === 'ja' ? translatedJapanese : ''
+        ));
+        const { wrapper, eventBus } = mountLearner();
+
+        eventBus.emit('whisper:update', {
+            text: source,
+            segments: [],
+            final: true,
+            live: true,
+            source: 'complete',
+            sourceLanguageHint: 'zh',
+        });
+        await flushPromises();
+        await nextTick();
+
+        const japanese = wrapper.get('.learner-subs-expanded .learner-jp');
+        const chinese = wrapper.get('.learner-subs-expanded .learner-en');
+        const japaneseCallCount = () => vi.mocked(TranslationService.translate).mock.calls
+            .filter(([, target]) => target === 'ja').length;
+        expect(japanese.text()).toBe(translatedJapanese);
+        expect(chinese.text()).toBe(source);
+        expect(chinese.attributes('lang')).toBe('zh-CN');
+        expect(japaneseCallCount()).toBe(1);
+
+        vi.advanceTimersByTime(1_040);
+        await flushPromises();
+        await nextTick();
+
+        expect(japanese.text()).toBe(translatedJapanese);
+        expect(chinese.text()).toBe(source);
+        expect(japaneseCallCount()).toBe(1);
+        wrapper.unmount();
+    });
+
+    it.each(['empty', 'echo', 'rejection'] as const)(
+        'retries a text-only Japanese %s result after cooldown and recovers the pair',
+        async (failure) => {
+            setConfig('learnerSubtitleMode', 'jp-en');
+            const source = '再試行する字幕';
+            const secondary = 'Subtitle that retries';
+            const recoveredJapanese = '再試行で回復した字幕';
+            let japaneseAttempts = 0;
+            vi.mocked(TranslationService.peekCached).mockImplementation((text, target) => (
+                text === source && target === 'en' ? secondary : null
+            ));
+            vi.spyOn(TranslationService, 'translate').mockImplementation(async (text, target) => {
+                if (text !== source || target !== 'ja') return '';
+                japaneseAttempts += 1;
+                if (japaneseAttempts > 1) return recoveredJapanese;
+                if (failure === 'rejection') throw new Error('temporary JA failure');
+                return failure === 'echo' ? source : '';
+            });
+            const { wrapper, eventBus } = mountLearner();
+
+            eventBus.emit('whisper:update', {
+                text: source,
+                segments: [],
+                final: true,
+                live: true,
+                source: 'complete',
+                sourceLanguageHint: 'zh',
+            });
+            await flushPromises();
+            await nextTick();
+
+            const japanese = wrapper.get('.learner-subs-expanded .learner-jp');
+            const translation = wrapper.get('.learner-subs-expanded .learner-en');
+            const japaneseCallCount = () => vi.mocked(TranslationService.translate).mock.calls
+                .filter(([text, target]) => text === source && target === 'ja').length;
+            expect(japanese.text()).toBe('');
+            expect(translation.text()).toBe(secondary);
+            expect(japaneseCallCount()).toBe(1);
+
+            vi.advanceTimersByTime(80);
+            await flushPromises();
+            await nextTick();
+
+            expect(japanese.text()).toBe('');
+            expect(translation.text()).toBe(secondary);
+            expect(japaneseCallCount()).toBe(1);
+
+            vi.advanceTimersByTime(960);
+            await flushPromises();
+            await nextTick();
+
+            expect(japaneseCallCount()).toBe(2);
+            expect(japanese.text()).toBe(recoveredJapanese);
+            expect(translation.text()).toBe(secondary);
+
+            vi.advanceTimersByTime(1_040);
+            await flushPromises();
+            await nextTick();
+
+            expect(japanese.text()).toBe(recoveredJapanese);
+            expect(translation.text()).toBe(secondary);
+            expect(japaneseCallCount()).toBe(2);
+            wrapper.unmount();
+        },
+    );
+
+    it('rejects stale text-only secondary and Japanese callbacks after a same-track seek reset', async () => {
+        setConfig('learnerSubtitleMode', 'jp-en');
+        const source = 'シークで無効になる中国語字幕';
+        const staleSecondary = deferred<string>();
+        const staleJapanese = deferred<string>();
+        const currentSecondary = deferred<string>();
+        const currentJapanese = deferred<string>();
+        let secondaryAttempts = 0;
+        let japaneseAttempts = 0;
+        vi.spyOn(TranslationService, 'translate').mockImplementation(async (text, target) => {
+            if (text !== source) return '';
+            if (target === 'ja') {
+                japaneseAttempts += 1;
+                return japaneseAttempts === 1 ? staleJapanese.promise : currentJapanese.promise;
+            }
+            secondaryAttempts += 1;
+            return secondaryAttempts === 1 ? staleSecondary.promise : currentSecondary.promise;
+        });
+        const { wrapper, eventBus } = mountLearner();
+        const audio = document.querySelector('audio')!;
+
+        eventBus.emit('whisper:update', {
+            text: source,
+            segments: [],
+            final: true,
+            live: true,
+            source: 'complete',
+            sourceLanguageHint: 'zh',
+        });
+        await nextTick();
+        expect(secondaryAttempts).toBe(1);
+        expect(japaneseAttempts).toBe(1);
+
+        audio.currentTime = 30;
+        audio.dispatchEvent(new Event('seeking'));
+        audio.dispatchEvent(new Event('seeked'));
+        vi.advanceTimersByTime(30);
+        await nextTick();
+        expect(secondaryAttempts).toBe(2);
+        expect(japaneseAttempts).toBe(2);
+
+        staleSecondary.resolve('Stale secondary');
+        staleJapanese.reject(new Error('stale Japanese failure'));
+        await flushPromises();
+        await nextTick();
+        expect(wrapper.get('.learner-subs-expanded .learner-jp').text()).toBe('');
+        expect(wrapper.get('.learner-subs-expanded .learner-en').text()).toBe('');
+
+        currentSecondary.resolve('Current secondary');
+        await flushPromises();
+        await nextTick();
+        expect(wrapper.get('.learner-subs-expanded .learner-en').text()).toBe('Current secondary');
+
+        currentJapanese.resolve('現在の日本語字幕');
+        await flushPromises();
+        await nextTick();
+        expect(wrapper.get('.learner-subs-expanded .learner-jp').text()).toBe('現在の日本語字幕');
+        expect(wrapper.get('.learner-subs-expanded .learner-en').text()).toBe('Current secondary');
+        wrapper.unmount();
+    });
+
+    it('keeps a replacement pending pair intact when stale provider callbacks settle', async () => {
+        setConfig('learnerSubtitleMode', 'jp-en');
+        const source = '設定変更後に再試行する字幕';
+        const staleSecondary = deferred<string>();
+        const staleJapanese = deferred<string>();
+        const currentSecondary = deferred<string>();
+        const currentJapanese = deferred<string>();
+        let secondaryAttempts = 0;
+        let japaneseAttempts = 0;
+        vi.mocked(TranslationService.peekCached).mockImplementation((text, target) => (
+            text === '確定済み字幕' && target === 'en' ? 'Confirmed subtitle' : null
+        ));
+        vi.spyOn(TranslationService, 'translate').mockImplementation(async (text, target) => {
+            if (text !== source) return '';
+            if (target === 'ja') {
+                japaneseAttempts += 1;
+                return japaneseAttempts === 1 ? staleJapanese.promise : currentJapanese.promise;
+            }
+            secondaryAttempts += 1;
+            return secondaryAttempts === 1 ? staleSecondary.promise : currentSecondary.promise;
+        });
+        const { wrapper, eventBus } = mountLearner();
+
+        eventBus.emit('whisper:update', {
+            text: '確定済み字幕',
+            segments: [{ start: 0, end: 10, text: '確定済み字幕' }],
+            final: true,
+            live: true,
+            source: 'complete',
+            sourceLanguageHint: 'ja',
+        });
+        await nextTick();
+
+        eventBus.emit('whisper:update', {
+            text: source,
+            segments: [],
+            final: true,
+            live: true,
+            source: 'complete',
+            sourceLanguageHint: 'zh',
+        });
+        await nextTick();
+        expect(secondaryAttempts).toBe(1);
+        expect(japaneseAttempts).toBe(1);
+
+        eventBus.emit('config:change', {
+            key: 'translationApiModel',
+            value: 'replacement-provider',
+        });
+        await nextTick();
+        expect(secondaryAttempts).toBe(2);
+        expect(japaneseAttempts).toBe(2);
+
+        staleSecondary.reject(new Error('stale provider failure'));
+        staleJapanese.resolve('古いプロバイダーの日本語');
+        await flushPromises();
+        await nextTick();
+        expect(wrapper.get('.learner-subs-expanded .learner-jp').text()).toBe('確定済み字幕');
+        expect(wrapper.get('.learner-subs-expanded .learner-en').text()).toBe('Confirmed subtitle');
+
+        currentSecondary.resolve('Replacement secondary');
+        await flushPromises();
+        await nextTick();
+        expect(wrapper.get('.learner-subs-expanded .learner-jp').text()).toBe('確定済み字幕');
+        expect(wrapper.get('.learner-subs-expanded .learner-en').text()).toBe('Confirmed subtitle');
+
+        currentJapanese.resolve('置き換え後の日本語');
+        await flushPromises();
+        await nextTick();
+        expect(wrapper.get('.learner-subs-expanded .learner-jp').text()).toBe('置き換え後の日本語');
+        expect(wrapper.get('.learner-subs-expanded .learner-en').text()).toBe('Replacement secondary');
         wrapper.unmount();
     });
 

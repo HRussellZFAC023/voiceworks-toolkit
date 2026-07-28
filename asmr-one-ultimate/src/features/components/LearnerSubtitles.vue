@@ -208,6 +208,8 @@ let pretranslateJaQueueKey = '';
 // Ticker translation throttle
 let lastTickerTranslationText = '';
 let lastTickerTranslationAt = 0;
+let lastTickerJaTranslationText = '';
+let lastTickerJaTranslationAt = 0;
 const TICKER_TRANSLATION_COOLDOWN_MS = 1_000;
 
 // Drawer width tracking
@@ -728,6 +730,8 @@ function resetRealtimeQueues(): void {
     realtimeJaTranslationRequestGeneration += 1;
     lastTickerTranslationText = '';
     lastTickerTranslationAt = 0;
+    lastTickerJaTranslationText = '';
+    lastTickerJaTranslationAt = 0;
     lookaheadQueueKey = '';
     lookaheadJaQueueKey = '';
 }
@@ -832,6 +836,19 @@ function shouldTickerTranslate(text: string): boolean {
     }
     lastTickerTranslationText = text;
     lastTickerTranslationAt = now;
+    return true;
+}
+
+function shouldTickerTranslateJapanese(text: string): boolean {
+    const now = Date.now();
+    if (
+        text === lastTickerJaTranslationText
+        && now - lastTickerJaTranslationAt < TICKER_TRANSLATION_COOLDOWN_MS
+    ) {
+        return false;
+    }
+    lastTickerJaTranslationText = text;
+    lastTickerJaTranslationAt = now;
     return true;
 }
 
@@ -1597,7 +1614,7 @@ function preTranslateAll(
         (!isAlreadyTargetLanguage(t, targetLang, sourceLanguageHint)
             && !TranslationService.peekCached(t, targetLang, sourceLanguageHint, LEARNER_SECONDARY_TARGET))
         || ((sourceLanguageHint === 'zh' || (sourceLanguageHint === 'auto' && isChinese(t)))
-            && !TranslationService.peekCached(t, 'ja', 'zh'))
+            && !getUsableWhisperJapanese(t))
     );
     if (uncached.length === 0) return;
 
@@ -1631,7 +1648,13 @@ function preTranslateAll(
         for (const text of batch) {
             const cn = sourceLanguageHint === 'zh'
                 || (sourceLanguageHint === 'auto' && isChinese(text));
-            if (cn && !TranslationService.peekCached(text, 'ja', 'zh')) cnTexts.push(text);
+            if (
+                cn
+                && !getUsableWhisperJapanese(text)
+                && (text !== whisperText || shouldTickerTranslateJapanese(text))
+            ) {
+                cnTexts.push(text);
+            }
             // Chinese->Japanese is handled by the source-hinted lane below.
             if (!(cn && targetLang === 'ja')
                 && !isAlreadyTargetLanguage(text, targetLang, sourceLanguageHint)
@@ -1856,6 +1879,54 @@ function usablePairTranslation(sourceText: string, translatedText: string | null
     return translated && translated !== sourceText.trim() ? translated : '';
 }
 
+function getWhisperSecondaryCandidate(
+    sourceText: string,
+    targetLanguage: string,
+    sourceLanguageHint: TranslationSourceHint,
+): string | null {
+    if (isAlreadyTargetLanguage(sourceText, targetLanguage, sourceLanguageHint)) {
+        return sourceText;
+    }
+    return TranslationService.peekCached(
+        sourceText,
+        targetLanguage,
+        sourceLanguageHint,
+        LEARNER_SECONDARY_TARGET,
+    );
+}
+
+function usablePairSecondary(
+    sourceText: string,
+    secondaryText: string | null | undefined,
+    targetLanguage: string,
+    sourceLanguageHint: TranslationSourceHint,
+): string {
+    const secondary = secondaryText?.trim() || '';
+    if (
+        secondary === sourceText.trim()
+        && isAlreadyTargetLanguage(sourceText, targetLanguage, sourceLanguageHint)
+    ) {
+        return secondary;
+    }
+    return usablePairTranslation(sourceText, secondary);
+}
+
+/**
+ * TranslationService implementations may return a usable result without
+ * persisting it in their cache. Keep that rendered Japanese result stable for
+ * the matching Chinese cue instead of erasing and re-requesting it every tick.
+ */
+function getUsableWhisperJapanese(sourceText: string): string {
+    const cached = usablePairTranslation(
+        sourceText,
+        TranslationService.peekCached(sourceText, 'ja', 'zh'),
+    );
+    if (cached) return cached;
+    return lastWhisperDisplayText === sourceText
+        ? usablePairTranslation(sourceText, primaryText.value)
+        : '';
+}
+
 function commitPendingWhisperPair(
     fullText: string,
     translatedSecondary: string,
@@ -1871,7 +1942,12 @@ function commitPendingWhisperPair(
 
     const chineseSource = sourceLanguageHint === 'zh'
         || (sourceLanguageHint === 'auto' && isChinese(fullText));
-    const secondary = usablePairTranslation(fullText, translatedSecondary);
+    const secondary = usablePairSecondary(
+        fullText,
+        translatedSecondary,
+        getSecondaryTargetLanguage(),
+        sourceLanguageHint,
+    );
     if (secondary) pendingWhisperPairSecondary = secondary;
     if (chineseSource) {
         const primary = usablePairTranslation(fullText, primaryOverride)
@@ -1905,7 +1981,11 @@ function commitPendingWhisperPair(
     updateSecondaryLine(pendingWhisperPairSecondary, false);
     lastText = fullText;
     lastDisplayedText = fullText;
-    lastWhisperDisplayText = karaokeMode.value ? fullText : primary;
+    // The ticker dedupes by Whisper source identity. In particular, a usable
+    // CN -> JA result is not guaranteed to have been written to the translation
+    // cache, so storing the rendered Japanese text here would make the next
+    // tick treat this same Chinese cue as new and blank/re-request the lane.
+    lastWhisperDisplayText = fullText;
     lastSecondaryShown = pendingWhisperPairSecondary;
     lastWhisperCaptionConfirmed = confirmed;
     clearPendingWhisperPair();
@@ -1940,16 +2020,13 @@ function releaseFailedPendingWhisperPair(
         )
         : fullText;
     const secondary = (
-        usablePairTranslation(fullText, secondaryOverride)
+        usablePairSecondary(fullText, secondaryOverride, targetLanguage, sourceLanguageHint)
         || pendingWhisperPairSecondary
-        || usablePairTranslation(
+        || usablePairSecondary(
             fullText,
-            TranslationService.peekCached(
-                fullText,
-                targetLanguage,
-                sourceLanguageHint,
-                LEARNER_SECONDARY_TARGET,
-            ),
+            getWhisperSecondaryCandidate(fullText, targetLanguage, sourceLanguageHint),
+            targetLanguage,
+            sourceLanguageHint,
         )
     );
 
@@ -1959,7 +2036,10 @@ function releaseFailedPendingWhisperPair(
     updateSecondaryLine(secondary, !secondary);
     lastText = fullText;
     lastDisplayedText = fullText;
-    lastWhisperDisplayText = chineseSource ? primary : fullText;
+    // A failed Chinese -> Japanese leg must remain eligible for a throttled
+    // retry. A usable Japanese result keeps the source-identity marker so an
+    // intentionally uncached fallback stays pinned without an 80ms loop.
+    lastWhisperDisplayText = chineseSource && !primary ? '' : fullText;
     lastSecondaryShown = secondary;
     lastWhisperCaptionConfirmed = false;
     refreshVisibility();
@@ -2081,8 +2161,9 @@ function _updateWhisperDisplay() {
             if (
                 chineseSource
                 && targetLang !== 'ja'
-                && !TranslationService.peekCached(fullText, 'ja', 'zh')
+                && !getUsableWhisperJapanese(fullText)
                 && realtimeJaTranslationInFlightText !== fullText
+                && shouldTickerTranslateJapanese(fullText)
             ) {
                 realtimeJaQueueKey = updateQueueKey(
                     realtimeJaQueueKey,
@@ -2097,11 +2178,10 @@ function _updateWhisperDisplay() {
                     sourceLanguageHint: 'zh',
                 }).then((japanese) => {
                     const usableJapanese = usablePairTranslation(fullText, japanese);
-                    const translated = TranslationService.peekCached(
+                    const translated = getWhisperSecondaryCandidate(
                         fullText,
                         targetLang,
                         sourceLanguageHint,
-                        LEARNER_SECONDARY_TARGET,
                     );
                     if (usableJapanese && pendingWhisperPairText === fullText) {
                         commitPendingWhisperPair(
@@ -2140,7 +2220,7 @@ function _updateWhisperDisplay() {
                         && pendingWhisperPairText !== fullText
                     ) {
                         updatePrimaryLine(usableJapanese);
-                        lastWhisperDisplayText = usableJapanese;
+                        lastWhisperDisplayText = fullText;
                     }
                 }).catch(() => {
                     releaseFailedPendingWhisperPair(
@@ -2167,7 +2247,7 @@ function _updateWhisperDisplay() {
                 || (sourceLanguageHint === 'auto' && isChinese(fullText)))
             && targetLang !== 'ja'
             && !isAlreadyTargetLanguage(fullText, targetLang, sourceLanguageHint)
-            && !TranslationService.peekCached(fullText, 'ja', 'zh')
+            && !getUsableWhisperJapanese(fullText)
         );
         const shouldRetainConfirmedPair = !!(
             fullText
@@ -2231,14 +2311,17 @@ function _updateWhisperDisplay() {
             let splitIdx = -1;
             let hlStart = -1;
             if (cn) {
-                const ja = TranslationService.peekCached(fullText, 'ja', 'zh');
-                const usableJa = ja?.trim() && ja.trim() !== fullText.trim() ? ja : null;
+                const usableJa = getUsableWhisperJapanese(fullText);
                 // The primary container is explicitly Japanese. Keep it empty
                 // until CN->JA completes instead of temporarily labelling raw
                 // Chinese as lang="ja". The raw source remains visible in the
                 // Chinese secondary lane throughout this transition.
                 prim = usableJa || '';
-                if (!usableJa && realtimeJaTranslationInFlightText !== fullText) {
+                if (
+                    !usableJa
+                    && realtimeJaTranslationInFlightText !== fullText
+                    && shouldTickerTranslateJapanese(fullText)
+                ) {
                     realtimeJaQueueKey = updateQueueKey(
                         realtimeJaQueueKey,
                         buildTranslationQueueKey('learner:whisper-live:ja', 'ja'),
@@ -2263,7 +2346,7 @@ function _updateWhisperDisplay() {
                         );
                         if (ja2 && ja2.trim() !== fullText.trim() && jaRequestIsCurrent) {
                             updatePrimaryLine(ja2);
-                            lastWhisperDisplayText = ja2;
+                            lastWhisperDisplayText = fullText;
                         }
                     }).catch(() => {}).finally(() => {
                         if (
@@ -2291,7 +2374,7 @@ function _updateWhisperDisplay() {
                 }
             }
             updatePrimaryLine(prim, splitIdx, hlStart);
-            lastWhisperDisplayText = karaokeMode.value ? (fullText || prim) : prim;
+            lastWhisperDisplayText = cn ? fullText : (karaokeMode.value ? (fullText || prim) : prim);
         } else if (display.displayText && karaokeMode.value) {
             if (captionConfirmed) lastWhisperCaptionConfirmed = true;
             // Karaoke: same segment — rAF handles smooth 60fps inter-frame updates.
@@ -2388,7 +2471,7 @@ function _updateWhisperDisplay() {
                 || (sourceLanguageHint === 'auto' && isChinese(requestedText)))
             && targetLang !== 'ja'
             && !alreadyTarget
-            && !TranslationService.peekCached(requestedText, 'ja', 'zh')
+            && !getUsableWhisperJapanese(requestedText)
         );
         const shouldRetainConfirmedPair = !!(
             wtTranslatable
@@ -2429,6 +2512,10 @@ function _updateWhisperDisplay() {
                 buildTranslationQueueKey('learner:whisper-live', targetLang),
             );
             const requestGeneration = ++realtimeTranslationRequestGeneration;
+            const secondaryRequestIsCurrent = () => (
+                realtimeTranslationRequestGeneration === requestGeneration
+                && requestIsCurrent()
+            );
             realtimeTranslationInFlightText = requestedText;
             TranslationService.translate(requestedText, targetLang, {
                 ...LEARNER_SECONDARY_TARGET,
@@ -2437,6 +2524,7 @@ function _updateWhisperDisplay() {
                 cancellableKey: realtimeQueueKey,
                 sourceLanguageHint,
             }).then(tr => {
+                if (!secondaryRequestIsCurrent()) return;
                 const usableTranslation = usablePairTranslation(requestedText, tr);
                 if (usableTranslation && pendingWhisperPairText === requestedText) {
                     commitPendingWhisperPair(
@@ -2444,7 +2532,7 @@ function _updateWhisperDisplay() {
                         usableTranslation,
                         sourceLanguageHint,
                         false,
-                        requestIsCurrent,
+                        secondaryRequestIsCurrent,
                         requestedText,
                     );
                     return;
@@ -2454,21 +2542,22 @@ function _updateWhisperDisplay() {
                         requestedText,
                         sourceLanguageHint,
                         targetLang,
-                        requestIsCurrent,
+                        secondaryRequestIsCurrent,
                     );
                     return;
                 }
-                if (requestIsCurrent()
+                if (secondaryRequestIsCurrent()
                     && (lastDisplayedText === requestedText || lastText === requestedText)) {
                     updateSecondaryLine(usableTranslation, false);
                     lastSecondaryShown = usableTranslation;
                 }
             }).catch(() => {
+                if (!secondaryRequestIsCurrent()) return;
                 releaseFailedPendingWhisperPair(
                     requestedText,
                     sourceLanguageHint,
                     targetLang,
-                    requestIsCurrent,
+                    secondaryRequestIsCurrent,
                 );
             }).finally(() => {
                 if (
@@ -2483,13 +2572,19 @@ function _updateWhisperDisplay() {
             if (
                 chineseSource
                 && targetLang !== 'ja'
+                && !getUsableWhisperJapanese(requestedText)
                 && realtimeJaTranslationInFlightText !== requestedText
+                && shouldTickerTranslateJapanese(requestedText)
             ) {
                 realtimeJaQueueKey = updateQueueKey(
                     realtimeJaQueueKey,
                     buildTranslationQueueKey('learner:whisper-live:ja', 'ja'),
                 );
                 const requestGeneration = ++realtimeJaTranslationRequestGeneration;
+                const jaRequestIsCurrent = () => (
+                    realtimeJaTranslationRequestGeneration === requestGeneration
+                    && requestIsCurrent()
+                );
                 realtimeJaTranslationInFlightText = requestedText;
                 TranslationService.translate(requestedText, 'ja', {
                     priority: Priority.REALTIME,
@@ -2497,12 +2592,12 @@ function _updateWhisperDisplay() {
                     cancellableKey: realtimeJaQueueKey,
                     sourceLanguageHint: 'zh',
                 }).then((japanese) => {
+                    if (!jaRequestIsCurrent()) return;
                     const usableJapanese = usablePairTranslation(requestedText, japanese);
-                    const translated = TranslationService.peekCached(
+                    const translated = getWhisperSecondaryCandidate(
                         requestedText,
                         targetLang,
                         sourceLanguageHint,
-                        LEARNER_SECONDARY_TARGET,
                     );
                     if (usableJapanese && pendingWhisperPairText === requestedText) {
                         commitPendingWhisperPair(
@@ -2510,7 +2605,7 @@ function _updateWhisperDisplay() {
                             translated || '',
                             sourceLanguageHint,
                             false,
-                            requestIsCurrent,
+                            jaRequestIsCurrent,
                             usableJapanese,
                         );
                         return;
@@ -2520,26 +2615,27 @@ function _updateWhisperDisplay() {
                             requestedText,
                             sourceLanguageHint,
                             targetLang,
-                            requestIsCurrent,
+                            jaRequestIsCurrent,
                             '',
                             translated || '',
                         );
                         return;
                     }
                     if (
-                        requestIsCurrent()
+                        jaRequestIsCurrent()
                         && lastDisplayedText === requestedText
                         && pendingWhisperPairText !== requestedText
                     ) {
                         updatePrimaryLine(usableJapanese);
-                        lastWhisperDisplayText = usableJapanese;
+                        lastWhisperDisplayText = requestedText;
                     }
                 }).catch(() => {
+                    if (!jaRequestIsCurrent()) return;
                     releaseFailedPendingWhisperPair(
                         requestedText,
                         sourceLanguageHint,
                         targetLang,
-                        requestIsCurrent,
+                        jaRequestIsCurrent,
                     );
                 }).finally(() => {
                     if (
@@ -2577,15 +2673,25 @@ function _updateWhisperDisplay() {
                 || (sourceLanguageHint === 'auto' && isChinese(requestedText));
             let prim = requestedText;
             if (cn) {
-                const ja = TranslationService.peekCached(requestedText, 'ja', 'zh');
-                const usableJa = ja?.trim() && ja.trim() !== requestedText.trim() ? ja : null;
+                const usableJa = getUsableWhisperJapanese(requestedText);
                 prim = usableJa || '';
-                if (!usableJa && realtimeJaTranslationInFlightText !== requestedText) {
+                if (
+                    !usableJa
+                    && realtimeJaTranslationInFlightText !== requestedText
+                    && shouldTickerTranslateJapanese(requestedText)
+                ) {
+                    if (cached && pendingWhisperPairText !== requestedText) {
+                        beginPendingWhisperPair(requestedText);
+                    }
                     realtimeJaQueueKey = updateQueueKey(
                         realtimeJaQueueKey,
                         buildTranslationQueueKey('learner:whisper-live:ja', 'ja'),
                     );
                     const requestGeneration = ++realtimeJaTranslationRequestGeneration;
+                    const jaRequestIsCurrent = () => (
+                        realtimeJaTranslationRequestGeneration === requestGeneration
+                        && requestIsCurrent()
+                    );
                     realtimeJaTranslationInFlightText = requestedText;
                     TranslationService.translate(requestedText, 'ja', {
                         priority: Priority.REALTIME,
@@ -2593,13 +2699,13 @@ function _updateWhisperDisplay() {
                         cancellableKey: realtimeJaQueueKey,
                         sourceLanguageHint: 'zh',
                     }).then(ja2 => {
+                        if (!jaRequestIsCurrent()) return;
                         const usableJapanese = usablePairTranslation(requestedText, ja2);
                         if (pendingWhisperPairText === requestedText) {
-                            const translated = TranslationService.peekCached(
+                            const translated = getWhisperSecondaryCandidate(
                                 requestedText,
                                 targetLang,
                                 sourceLanguageHint,
-                                LEARNER_SECONDARY_TARGET,
                             );
                             if (usableJapanese && translated) {
                                 commitPendingWhisperPair(
@@ -2607,7 +2713,7 @@ function _updateWhisperDisplay() {
                                     translated,
                                     sourceLanguageHint,
                                     false,
-                                    requestIsCurrent,
+                                    jaRequestIsCurrent,
                                     usableJapanese,
                                 );
                             } else if (!usableJapanese) {
@@ -2615,7 +2721,7 @@ function _updateWhisperDisplay() {
                                     requestedText,
                                     sourceLanguageHint,
                                     targetLang,
-                                    requestIsCurrent,
+                                    jaRequestIsCurrent,
                                     '',
                                     translated || '',
                                 );
@@ -2623,16 +2729,17 @@ function _updateWhisperDisplay() {
                             return;
                         }
                         if (usableJapanese
-                            && requestIsCurrent() && lastDisplayedText === requestedText) {
+                            && jaRequestIsCurrent() && lastDisplayedText === requestedText) {
                             updatePrimaryLine(usableJapanese);
-                            lastWhisperDisplayText = usableJapanese;
+                            lastWhisperDisplayText = requestedText;
                         }
                     }).catch(() => {
+                        if (!jaRequestIsCurrent()) return;
                         releaseFailedPendingWhisperPair(
                             requestedText,
                             sourceLanguageHint,
                             targetLang,
-                            requestIsCurrent,
+                            jaRequestIsCurrent,
                             '',
                             cached || '',
                         );
@@ -2648,7 +2755,7 @@ function _updateWhisperDisplay() {
             }
             if (!retainConfirmedPair) {
                 updatePrimaryLine(prim);
-                lastWhisperDisplayText = prim;
+                lastWhisperDisplayText = cn && !prim ? '' : (cn ? requestedText : prim);
             }
         }
     } else {
