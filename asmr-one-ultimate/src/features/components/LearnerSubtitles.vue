@@ -2246,7 +2246,6 @@ function _updateWhisperDisplay() {
             && (sourceLanguageHint === 'zh'
                 || (sourceLanguageHint === 'auto' && isChinese(fullText)))
             && targetLang !== 'ja'
-            && !isAlreadyTargetLanguage(fullText, targetLang, sourceLanguageHint)
             && !getUsableWhisperJapanese(fullText)
         );
         const shouldRetainConfirmedPair = !!(
@@ -2470,7 +2469,6 @@ function _updateWhisperDisplay() {
             && (sourceLanguageHint === 'zh'
                 || (sourceLanguageHint === 'auto' && isChinese(requestedText)))
             && targetLang !== 'ja'
-            && !alreadyTarget
             && !getUsableWhisperJapanese(requestedText)
         );
         const shouldRetainConfirmedPair = !!(

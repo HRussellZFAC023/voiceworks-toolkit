@@ -621,6 +621,61 @@ describe('LearnerSubtitles Chinese Whisper rendering', () => {
         wrapper.unmount();
     });
 
+    it.each([
+        ['segmented', [{ start: 0, end: 10, text: '新的中文字幕' }]],
+        ['text-only', []],
+    ])(
+        'retains a confirmed JP-ZH pair until a %s Chinese cue has Japanese',
+        async (_kind, segments) => {
+            setConfig('learnerSubtitleMode', 'jp-zh');
+            const previousJapanese = '前の日本語字幕';
+            const previousChinese = '之前的中文字幕';
+            const nextChinese = '新的中文字幕';
+            const nextJapanese = '新しい日本語字幕';
+            const japanese = deferred<string>();
+            vi.mocked(TranslationService.peekCached).mockImplementation((text, target) => (
+                text === previousJapanese && (target ?? '').toLowerCase().startsWith('zh') ? previousChinese : null
+            ));
+            vi.spyOn(TranslationService, 'translate').mockImplementation(async (text, target) => (
+                text === nextChinese && target === 'ja' ? japanese.promise : ''
+            ));
+            const { wrapper, eventBus } = mountLearner();
+
+            eventBus.emit('whisper:update', {
+                text: previousJapanese,
+                segments: [{ start: 0, end: 10, text: previousJapanese }],
+                final: true,
+                live: true,
+                source: 'complete',
+                sourceLanguageHint: 'ja',
+            });
+            await nextTick();
+            expect(wrapper.get('.learner-subs-expanded .learner-jp').text()).toBe(previousJapanese);
+            expect(wrapper.get('.learner-subs-expanded .learner-en').text()).toBe(previousChinese);
+
+            eventBus.emit('whisper:update', {
+                text: nextChinese,
+                segments,
+                final: true,
+                live: true,
+                source: 'complete',
+                sourceLanguageHint: 'zh',
+            });
+            await nextTick();
+
+            expect(wrapper.get('.learner-subs-expanded .learner-jp').text()).toBe(previousJapanese);
+            expect(wrapper.get('.learner-subs-expanded .learner-en').text()).toBe(previousChinese);
+
+            japanese.resolve(nextJapanese);
+            await flushPromises();
+            await nextTick();
+
+            expect(wrapper.get('.learner-subs-expanded .learner-jp').text()).toBe(nextJapanese);
+            expect(wrapper.get('.learner-subs-expanded .learner-en').text()).toBe(nextChinese);
+            wrapper.unmount();
+        },
+    );
+
     it.each(['empty', 'echo', 'rejection'] as const)(
         'retries a text-only Japanese %s result after cooldown and recovers the pair',
         async (failure) => {
