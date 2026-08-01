@@ -246,6 +246,42 @@ describe('DownloadCenter', () => {
         wrapper.unmount();
     });
 
+    it('resolves manifest bytes for a whole-playlist selection without Opus', async () => {
+        mocks.cachedCatalog.mockReturnValue([{
+            id: '11111111-1111-4111-8111-111111111111', name: 'Sized public', userName: 'Community',
+            worksCount: 2, coverUrl: 'https://example.test/public.jpg', tags: ['Relaxing'],
+        }]);
+        mocks.loadCatalog.mockResolvedValue(mocks.cachedCatalog());
+        mocks.cachedDetails.mockResolvedValue({
+            version: 1,
+            fetchedAt: new Date().toISOString(),
+            works: [
+                { rjCode: 'RJ000001', title: 'One', durationSeconds: 60 },
+                { rjCode: 'RJ000002', title: 'Two', durationSeconds: 120 },
+            ],
+        });
+        mocks.getTracks.mockImplementation(async (id: string) => [{
+            type: 'audio',
+            title: `${id}.wav`,
+            size: id === 'RJ000001' ? 1024 * 1024 : 2 * 1024 * 1024,
+            mediaDownloadUrl: `https://media.example.test/${id}.wav`,
+        }]);
+        const wrapper = mount(DownloadCenter, { attachTo: document.body });
+        await wrapper.get('[data-testid="download-center-open"]').trigger('click');
+        (document.querySelector('[data-testid="source-public"]') as HTMLButtonElement).click();
+        await flushPromises();
+
+        expect((document.querySelector('[data-testid="opus-toggle"]') as HTMLInputElement).checked).toBe(false);
+        (document.querySelector('[data-testid="playlist-check-11111111-1111-4111-8111-111111111111"]') as HTMLInputElement).click();
+
+        await vi.waitFor(() => expect(mocks.getTracks).toHaveBeenCalledTimes(2));
+        await vi.waitFor(() => expect(document.querySelector('[data-testid="selection-summary"]')?.textContent).toContain('3 MB'));
+        const summary = document.querySelector('[data-testid="selection-summary"]')?.textContent ?? '';
+        expect(summary).not.toContain('0 B');
+        expect(summary).not.toContain('size unavailable');
+        wrapper.unmount();
+    });
+
     it('retries a playlist whose first lazy work request fails', async () => {
         mocks.fetchOwn.mockResolvedValue([]);
         mocks.fetchPlaylist

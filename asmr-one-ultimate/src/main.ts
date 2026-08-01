@@ -4,6 +4,11 @@
  * Initializes the plugin and orchestrates all features.
  */
 
+// Self-host the filled Material Icons face inside the userscript. The host
+// fetch is not reliable (and the deterministic browser suite blocks remote
+// fonts entirely); without this, ligature names such as `skip_previous` spill
+// into the player as clipped text and make the controls look corrupted.
+import '@material-design-icons/font/filled.css';
 import './styles/variables.css';
 import './styles/fixes.css';
 import './styles/ui.css';

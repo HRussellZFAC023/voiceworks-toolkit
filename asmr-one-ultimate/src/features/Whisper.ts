@@ -702,6 +702,12 @@ export class Whisper {
 
     private modelLoadingKey = '';
     private autoWarmupStarted = false;
+    /**
+     * The Settings button promises to download/cache a model, not to pin its
+     * compiled worker in memory. Heavy presets can retain several GiB across
+     * the worker and GPU process, which also starves the host page renderer.
+     */
+    private manualModelPreparation = false;
     private modelLoadTimer: number | null = null;
     private modelReady = false;
     private activeRunSettings: Readonly<WhisperSettings> | null = null;
@@ -912,6 +918,7 @@ export class Whisper {
             });
             this.clearStatus();
         }
+        this.manualModelPreparation = true;
         const settings = this.getWhisperSettings();
         // Just trigger the worker and let it report progress.
         this.initWorker(settings);
@@ -1337,6 +1344,10 @@ export class Whisper {
         // cancelled), but it must never mutate or stop the newer run.
         const startGeneration = ++this.transcriptionGeneration;
         this.transcribing = true;
+        // Only a real run takes ownership of an explicit preparation. Failed
+        // starts with no usable audio must still release the prepared worker
+        // as soon as its browser-cache download completes.
+        this.manualModelPreparation = false;
         EventBus.emit('whisper:transcribing', { active: true });
         this.setButtonsActive(true);
         this.dispatchProgress(I18n.t('whisperInit'), 0, 'loading');
@@ -3302,6 +3313,7 @@ export class Whisper {
         this.workerHasCompletedInference = false;
         this.loadedPlan = null;
         this.loadedWorkerConfigKey = '';
+        this.manualModelPreparation = false;
         this.clearChunkTracking({ resetRecovery: false, resetChunkCounter: false });
         Logger.warn('[Whisper] Worker reset:', reason);
     }
@@ -3563,6 +3575,12 @@ export class Whisper {
                         return;
                     }
                 }
+                // Capture this before any reset: an explicit Settings download
+                // is complete once Transformers has populated browser cache.
+                // Keeping the compiled session alive after that point needlessly
+                // retains the largest allocation on the page.
+                const releasePreparedWorker = this.manualModelPreparation && !this.transcribing;
+                this.manualModelPreparation = false;
                 // Model ready - clear loading status and hide transcribing indicator
                 this.settleWorkerInitSentinel();
                 this.releaseLoadLease();
@@ -3594,6 +3612,15 @@ export class Whisper {
                 }
                 if (this.transcribing && this.pcmBuffer) {
                     this.maybeProcessNextChunk();
+                }
+                if (!this.transcribing) {
+                    if (releasePreparedWorker) {
+                        this.resetWorker('manual-model-prepared', true);
+                    } else {
+                        // Automatic warmup is intentionally retained briefly,
+                        // but must still honor the device-tier idle budget.
+                        this.scheduleIdleUnload();
+                    }
                 }
                 break;
 
@@ -5084,7 +5111,7 @@ export class Whisper {
     }
 
     private reserveStatusSlot(): void {
-        if (!this.enabled || this.statusEl?.isConnected) return;
+        if (!this.enabled) return;
         if (this.hasDedicatedStatusSurface()) {
             this.clearStatus();
             return;
@@ -5104,37 +5131,61 @@ export class Whisper {
     }
 
     private ensureStatusEl(): HTMLElement {
-        if (this.statusEl && this.statusEl.isConnected) return this.statusEl;
+        if (!this.statusEl || !this.statusEl.isConnected) {
+            document.querySelectorAll('.asmr-whisper-status-host').forEach((el) => {
+                el.classList.remove('asmr-whisper-status-host');
+            });
+            this.statusEl = document.createElement('div');
+            this.statusEl.className = 'whisper-status';
+            this.statusEl.setAttribute('aria-label', I18n.t('whisperStatus') || 'Transcription status');
+            this.statusEl.setAttribute('role', 'status');
+        }
 
-        document.querySelectorAll('.asmr-whisper-status-host').forEach((el) => {
-            el.classList.remove('asmr-whisper-status-host');
-        });
-        this.statusEl = document.createElement('div');
-        this.statusEl.className = 'whisper-status';
-        this.statusEl.setAttribute('aria-label', I18n.t('whisperStatus') || 'Transcription status');
-        this.statusEl.setAttribute('role', 'status');
-
+        const status = this.statusEl;
         const player = document.querySelector('.audio-player');
         const albumArt = player?.querySelector('.albumart');
         if (albumArt) {
             // Overlay the transient model status on the cover. This removes the
             // status from document flow, so neither initial insertion nor later
             // show/hide transitions move the player content.
-            this.statusEl.classList.add('whisper-status--overlay');
-            albumArt.classList.add('asmr-whisper-status-host');
-            albumArt.appendChild(this.statusEl);
+            const alreadyOverlaid = status.parentElement === albumArt
+                && status.classList.contains('whisper-status--overlay')
+                && !status.classList.contains('whisper-status--inline')
+                && albumArt.classList.contains('asmr-whisper-status-host');
+            if (!alreadyOverlaid) {
+                document.querySelectorAll('.asmr-whisper-status-host').forEach((el) => {
+                    el.classList.remove('asmr-whisper-status-host');
+                });
+                status.classList.remove('whisper-status--inline');
+                status.classList.add('whisper-status--overlay');
+                albumArt.classList.add('asmr-whisper-status-host');
+                albumArt.appendChild(status);
+            }
         } else if (player) {
-            this.statusEl.classList.add('whisper-status--inline');
-            player.prepend(this.statusEl);
+            const alreadyInline = status.parentElement === player
+                && status.classList.contains('whisper-status--inline')
+                && !status.classList.contains('whisper-status--overlay');
+            if (!alreadyInline) {
+                document.querySelectorAll('.asmr-whisper-status-host').forEach((el) => {
+                    el.classList.remove('asmr-whisper-status-host');
+                });
+                status.classList.remove('whisper-status--overlay');
+                status.classList.add('whisper-status--inline');
+                player.prepend(status);
+            }
         } else {
             const bar = document.querySelector('.player-bar-container, .player-bar, .q-footer');
-            if (bar) {
-                this.statusEl.classList.add('whisper-status--inline');
-                bar.insertAdjacentElement('beforebegin', this.statusEl);
+            if (bar && status.parentElement !== bar.parentElement) {
+                document.querySelectorAll('.asmr-whisper-status-host').forEach((el) => {
+                    el.classList.remove('asmr-whisper-status-host');
+                });
+                status.classList.remove('whisper-status--overlay');
+                status.classList.add('whisper-status--inline');
+                bar.insertAdjacentElement('beforebegin', status);
             }
         }
 
-        return this.statusEl;
+        return status;
     }
 
     private hasDedicatedStatusSurface(): boolean {

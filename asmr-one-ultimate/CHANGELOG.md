@@ -1,5 +1,12 @@
 # Changelog
 
+## 177 — 2026-08-01
+
+- Fixed whole-playlist and Select All size totals in the Download Center. Newly selected works now resolve their real manifests even when Opus conversion is off, instead of leaving the footer at `0 B + size unavailable`.
+- Bundled the Material Icons font into the userscript, so playback controls remain real icons when the host's remote font is blocked or unavailable rather than degrading into clipped `skip_previous`/`pause` text.
+- Released a manually prepared Whisper worker as soon as the selected model is safely cached, and restored idle cleanup after automatic warmup. Preparing Medium or Large no longer leaves the compiled model and GPU allocations pinned in the page.
+- Moved an early inline Whisper status into the artwork overlay when the host finishes rendering the player, preventing the status slot from squeezing late-mounted controls.
+
 ## 174 — 2026-07-26
 
 - Live transcription now adapts to what the GPU can actually do. Whisper's decoder keeps its KV-cache shape arithmetic in int64, which WebGPU cannot express, so those nodes fall back to CPU and force roughly eight GPU-to-CPU readbacks per generated token. Where a browser resolves those readbacks on a polling timer rather than an event (Firefox does, on a fixed ~100 ms interval — Mozilla bug 1870699), that is around 0.8 s of pure waiting per token and accounts for about 95% of total transcription time. The worker now measures readback latency directly with an empty submit and, when it is slow, runs the encoder on WebGPU and the decoder on WASM. Measured on Apple M1 / Firefox with the base model: 0.20x realtime before, 1.04-1.35x after, with kanji intact. Browsers with fast readbacks are unaffected and keep the full pipeline on the GPU.

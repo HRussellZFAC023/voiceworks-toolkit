@@ -712,6 +712,37 @@ describe('Whisper', () => {
             expect(status.isConnected).toBe(false);
         });
 
+        it('moves an early inline status into album art when the host finishes rendering', () => {
+            const player = document.createElement('div');
+            player.className = 'audio-player';
+            document.body.appendChild(player);
+
+            const whisper = new Whisper();
+            vi.spyOn((whisper as any).bridge, 'store', 'get').mockReturnValue({
+                state: {},
+                watch: vi.fn().mockReturnValue(vi.fn()),
+            });
+            vi.spyOn(Config, 'get').mockReturnValue(false);
+
+            whisper.enable();
+            const status = document.querySelector('.whisper-status') as HTMLElement;
+            expect(status.parentElement).toBe(player);
+            expect(status.classList.contains('whisper-status--inline')).toBe(true);
+
+            const albumArt = document.createElement('div');
+            albumArt.className = 'albumart';
+            player.appendChild(albumArt);
+            (whisper as any).reserveStatusSlot();
+
+            expect(document.querySelector('.whisper-status')).toBe(status);
+            expect(status.parentElement).toBe(albumArt);
+            expect(status.classList.contains('whisper-status--inline')).toBe(false);
+            expect(status.classList.contains('whisper-status--overlay')).toBe(true);
+            expect(albumArt.classList.contains('asmr-whisper-status-host')).toBe(true);
+
+            whisper.disable();
+        });
+
         it('suppresses the legacy cover status when the Vue learner surface is mounted', () => {
             const player = document.createElement('div');
             player.className = 'audio-player';
@@ -1390,6 +1421,113 @@ describe('Whisper', () => {
             (whisper as any).initWorker(settings);
             expect(acquireSpy).toHaveBeenCalledTimes(1);
             expect(release).toHaveBeenCalledTimes(1);
+        });
+
+        it('releases a manually downloaded heavy model once its browser cache is ready', async () => {
+            const whisper = new Whisper();
+            const worker = createMockWhisperWorker();
+            const release = vi.fn();
+            const settings = createCompatibilityWhisperSettings({
+                preset: 'large-v3-turbo',
+                model: 'onnx-community/whisper-large-v3-turbo_timestamped',
+                backend: 'webgpu',
+                forceWasm: false,
+                executionDevice: 'split',
+                encoderDtype: 'fp32',
+                decoderDtype: 'q4',
+                noRepeatNgramSize: 6,
+                repetitionPenalty: 1.15,
+            });
+            vi.spyOn(GpuScheduler, 'acquireLoadLease').mockResolvedValue(release);
+            vi.spyOn(whisper as any, 'ensureWorker').mockImplementation(() => {
+                if (!(whisper as any).worker) (whisper as any).worker = worker;
+            });
+            vi.spyOn(whisper as any, 'getWhisperSettings').mockReturnValue(settings);
+            (whisper as any).enabled = true;
+
+            whisper.warmupModel(true);
+            await vi.waitFor(() => expect(worker.postMessage).toHaveBeenCalledWith(
+                expect.objectContaining({
+                    type: 'init',
+                    model: settings.model,
+                    backend: 'webgpu',
+                }),
+            ));
+
+            (whisper as any).handleWorkerMessage({
+                data: {
+                    status: 'ready',
+                    model: settings.model,
+                    backend: 'webgpu',
+                    dtype: '{"encoder_model":"fp32","decoder_model_merged":"q4"}',
+                },
+            });
+
+            expect(release).toHaveBeenCalledTimes(1);
+            expect(worker.terminate).toHaveBeenCalledTimes(1);
+            expect((whisper as any).worker).toBeNull();
+            expect(AppStore.state.whisper.progress).toBe(100);
+        });
+
+        it('still releases manual preparation after a start finds no audio source', async () => {
+            const whisper = new Whisper();
+            const worker = createMockWhisperWorker();
+            (whisper as any).enabled = true;
+            (whisper as any).manualModelPreparation = true;
+            (whisper as any).worker = worker;
+            (whisper as any).loadedPlan = Object.freeze({
+                model: 'onnx-community/whisper-medium_timestamped',
+                backend: 'webgpu',
+                multilingual: true,
+            });
+
+            await (whisper as any).startTranscription();
+            expect((whisper as any).manualModelPreparation).toBe(true);
+
+            (whisper as any).handleWorkerMessage({
+                data: {
+                    status: 'ready',
+                    model: 'onnx-community/whisper-medium_timestamped',
+                    backend: 'webgpu',
+                    dtype: 'q4',
+                },
+            });
+
+            expect(worker.terminate).toHaveBeenCalledTimes(1);
+            expect((whisper as any).worker).toBeNull();
+        });
+
+        it('unloads an automatic model warmup when its idle budget expires', () => {
+            vi.useFakeTimers();
+            try {
+                const whisper = new Whisper();
+                const worker = createMockWhisperWorker();
+                const settings = createCompatibilityWhisperSettings({ idleUnloadMs: 2_500 });
+                vi.spyOn(whisper as any, 'getWhisperSettings').mockReturnValue(settings);
+                (whisper as any).worker = worker;
+                (whisper as any).loadedPlan = Object.freeze({
+                    model: 'onnx-community/whisper-small_timestamped',
+                    backend: 'webgpu',
+                    multilingual: true,
+                });
+
+                (whisper as any).handleWorkerMessage({
+                    data: {
+                        status: 'ready',
+                        model: 'onnx-community/whisper-small_timestamped',
+                        backend: 'webgpu',
+                        dtype: 'q4',
+                    },
+                });
+
+                vi.advanceTimersByTime(2_499);
+                expect(worker.terminate).not.toHaveBeenCalled();
+                vi.advanceTimersByTime(1);
+                expect(worker.terminate).toHaveBeenCalledTimes(1);
+                expect((whisper as any).worker).toBeNull();
+            } finally {
+                vi.useRealTimers();
+            }
         });
 
         it('recreates a ready worker when model, backend, or multilingual identity changes', async () => {

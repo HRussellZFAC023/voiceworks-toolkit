@@ -345,18 +345,18 @@ function playlistIndeterminate(playlist: BackupPlaylistDownloadItem): boolean {
     return count > 0 && count < playlistWorks(playlist).length;
 }
 
+function commitSelection(next: Set<string>): void {
+    const newlySelectedIds = [...next].filter(id => !selectedIds.value.has(id));
+    selectedIds.value = next;
+    if (newlySelectedIds.length) props.enrichWorks?.(newlySelectedIds, true);
+    emitUpdate();
+}
+
 function toggleWork(work: BackupWorkDownloadItem): void {
     const next = new Set(selectedIds.value);
     const id = String(work.id);
-    if (next.has(id)) next.delete(id);
-    else {
-        next.add(id);
-        // Selecting one row is an explicit request for its real size, so this
-        // is the only place a full file manifest is read from the list view.
-        props.enrichWorks?.([id], true);
-    }
-    selectedIds.value = next;
-    emitUpdate();
+    next.has(id) ? next.delete(id) : next.add(id);
+    commitSelection(next);
 }
 
 async function togglePlaylist(playlist: BackupPlaylistDownloadItem): Promise<void> {
@@ -366,8 +366,7 @@ async function togglePlaylist(playlist: BackupPlaylistDownloadItem): Promise<voi
     for (const work of playlistWorks(playlist)) {
         wasChecked ? next.delete(String(work.id)) : next.add(String(work.id));
     }
-    selectedIds.value = next;
-    emitUpdate();
+    commitSelection(next);
 }
 
 async function selectAllVisible(): Promise<void> {
@@ -386,8 +385,7 @@ async function selectAllVisible(): Promise<void> {
         for (const work of playlistWorks(playlist)) next.add(String(work.id));
     }
     for (const work of standaloneWorks.value) next.add(String(work.id));
-    selectedIds.value = next;
-    emitUpdate();
+    commitSelection(next);
 }
 
 async function runAllWorksSearch(): Promise<void> {
@@ -417,8 +415,7 @@ async function loadMoreResults(): Promise<void> {
 }
 
 function clearAll(): void {
-    selectedIds.value = new Set();
-    emitUpdate();
+    commitSelection(new Set());
 }
 
 function formatBytes(bytes: number): string {

@@ -24,6 +24,11 @@ if (!/^\/\/ @run-at\s+document-start\s*$/m.test(source)) {
     throw new Error('Userscript must run at document-start for region-gate recovery');
 }
 
+if (!source.includes('Bundled Material Icons font by Google')
+    || !/Apache License\s+Version 2\.0, January 2004/.test(source)) {
+    throw new Error('Userscript must retain the bundled Material Icons Apache-2.0 license copy');
+}
+
 if (!builtBytes.equals(storefrontBytes)) {
     throw new Error('Repo-root storefront artifact must match the built userscript byte-for-byte');
 }

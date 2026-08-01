@@ -73,7 +73,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
 import { createSilentWav } from './audioFixture';
-import { ensureLoggedIn, GM_STUBS, loadUserscript } from './fixtures';
+import { ensureLoggedIn, GM_STUBS, helpers, loadUserscript } from './fixtures';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -88,8 +88,6 @@ const __dirname = path.dirname(__filename);
 const VIA_PROXY = process.env.E2E_PROXY !== '0';
 const E2E_PROXY_URL = (process.env.E2E_PROXY_URL
     || 'https://asmr-api-proxy.henry-robert-christopher-russell.workers.dev').replace(/\/$/, '');
-const E2E_SITE_ORIGIN = (process.env.E2E_BASE_URL || 'https://www.asmr.one').replace(/\/$/, '');
-
 const TEST_WAV_DATA = createSilentWav(16000, 2);
 
 // Extended timeout for model download + transcription
@@ -171,18 +169,30 @@ const test = base.extend<WhisperFixtures>({
                 if (request.method() !== 'GET') return route.continue();
                 const url = new URL(request.url());
                 url.searchParams.set('__host', url.hostname);
+                const proxied = `${E2E_PROXY_URL}${url.pathname}${url.search}`;
                 try {
-                    const response = await context.request.get(
-                        `${E2E_PROXY_URL}${url.pathname}${url.search}`,
-                        { timeout: 30000 },
-                    );
+                    const response = await context.request.get(proxied, {
+                        timeout: 30000,
+                        headers: {
+                            Accept: request.headers().accept || '*/*',
+                            'Accept-Language': 'zh-CN,zh;q=0.9,ja;q=0.8',
+                            ...(request.headers().authorization ? { Authorization: request.headers().authorization } : {}),
+                            ...(request.headers().range ? { Range: request.headers().range } : {}),
+                            ...(request.headers()['if-none-match'] ? { 'If-None-Match': request.headers()['if-none-match'] } : {}),
+                            ...(request.headers()['if-modified-since'] ? { 'If-Modified-Since': request.headers()['if-modified-since'] } : {}),
+                        },
+                    });
                     return route.fulfill({
                         status: response.status(),
                         contentType: response.headers()['content-type'] || 'text/html',
                         body: await response.body(),
                     });
-                } catch {
-                    return route.continue();
+                } catch (error) {
+                    return route.fulfill({
+                        status: 502,
+                        contentType: 'text/plain; charset=utf-8',
+                        body: `E2E relay failed for ${proxied}: ${String(error)}`,
+                    });
                 }
             });
         }
@@ -327,7 +337,7 @@ const TEST_WORK = 'RJ01052162';
 
 async function setupWhisperPage(page: Page): Promise<void> {
     await ensureLoggedIn(page);
-    await page.goto(`${E2E_SITE_ORIGIN}/work/${TEST_WORK}`, { waitUntil: 'commit', timeout: 30000 });
+    await helpers.gotoWork(page, TEST_WORK);
 
     // Wait for userscript injection
     const ready = await page.waitForFunction(
@@ -694,7 +704,7 @@ test.describe('Feature: Whisper AI Transcription End-to-End', () => {
         test('should show error when no audio source available', async ({ whisperPage: page }) => {
             test.setTimeout(60_000);
             await ensureLoggedIn(page);
-            await page.goto(`${E2E_SITE_ORIGIN}/work/${TEST_WORK}`, { waitUntil: 'commit', timeout: 30000 });
+            await helpers.gotoWork(page, TEST_WORK);
 
             await page.waitForFunction(
                 () => {

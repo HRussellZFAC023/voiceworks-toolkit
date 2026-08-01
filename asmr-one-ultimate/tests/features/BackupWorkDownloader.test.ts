@@ -69,6 +69,7 @@ describe('BackupWorkDownloader', () => {
     it('resolves playlist works only on expand/select and supports clear all', async () => {
         const lazyPlaylist = [{ id: 'lazy', title: 'Lazy', source: 'own' as const, worksCount: 1 }];
         const mutableWorks: BackupWorkDownloadItem[] = [];
+        const enrichWorks = vi.fn();
         const resolvePlaylist = vi.fn(async (playlist: typeof lazyPlaylist[number]) => {
             mutableWorks.push({ id: 9, title: 'Nine', sizeBytes: 9, playlistIds: ['lazy'] });
             await (wrapper as any).setProps({
@@ -76,7 +77,7 @@ describe('BackupWorkDownloader', () => {
                 playlists: [{ ...playlist, workIds: [9] }],
             });
         });
-        const wrapper = mount(BackupWorkDownloader, { props: { playlists: lazyPlaylist, works: mutableWorks, profile: profile(), resolvePlaylist } });
+        const wrapper = mount(BackupWorkDownloader, { props: { playlists: lazyPlaylist, works: mutableWorks, profile: profile(), resolvePlaylist, enrichWorks } });
         await wrapper.get('[data-testid="source-own"]').trigger('click');
         expect(resolvePlaylist).not.toHaveBeenCalled();
         await wrapper.get('[data-testid="expand-lazy"]').trigger('click');
@@ -84,21 +85,42 @@ describe('BackupWorkDownloader', () => {
         await vi.waitFor(() => expect(wrapper.find('[data-testid="work-9"]').exists()).toBe(true));
         await wrapper.get('[data-testid="playlist-check-lazy"]').setValue(true);
         expect(wrapper.emitted('update')?.at(-1)?.[0]).toMatchObject({ selectedWorkIds: [9] });
+        expect(enrichWorks).toHaveBeenCalledWith(['9'], true);
         await wrapper.get('[data-testid="clear-all"]').trigger('click');
         expect(wrapper.emitted('update')?.at(-1)?.[0]).toMatchObject({ selectedWorkIds: [] });
+        expect(enrichWorks).toHaveBeenCalledTimes(1);
+    });
+
+    it('requests detailed enrichment for every newly selected work in Select all', async () => {
+        const enrichWorks = vi.fn();
+        const wrapper = mount(BackupWorkDownloader, {
+            props: { playlists, works, profile: profile(), enrichWorks },
+        });
+        await wrapper.get('[data-testid="source-own"]').trigger('click');
+        await wrapper.get('[data-testid="select-all"]').trigger('click');
+
+        expect(wrapper.emitted('update')?.at(-1)?.[0]).toMatchObject({ selectedWorkIds: [1, 2] });
+        expect(enrichWorks).toHaveBeenCalledWith(['1', '2'], true);
+
+        await wrapper.get('[data-testid="playlist-check-p1"]').setValue(false);
+        expect(enrichWorks).toHaveBeenCalledTimes(1);
     });
 
     it('shows meaning-based results whose title does not literally contain the query', async () => {
+        const enrichWorks = vi.fn();
         const searchAllWorks = vi.fn(async () => {
             await (wrapper as any).setProps({ works: [...works, { id: 99, title: '添い寝音声', directSearchResult: true }] });
         });
-        const wrapper = mount(BackupWorkDownloader, { props: { playlists, works, profile: profile(), searchAllWorks } });
+        const wrapper = mount(BackupWorkDownloader, { props: { playlists, works, profile: profile(), searchAllWorks, enrichWorks } });
         await wrapper.get('[data-testid="search"]').setValue('sleepy comfort');
         await wrapper.get('[data-testid="search-all-works"]').trigger('click');
         await vi.waitFor(() => expect(searchAllWorks).toHaveBeenCalledWith('sleepy comfort'));
         expect(wrapper.get('[data-testid="all-work-results"]').text()).toContain('添い寝音声');
         await wrapper.get('[data-testid="search-work-99"] input').setValue(true);
         expect(wrapper.emitted('update')?.at(-1)?.[0]).toMatchObject({ selectedWorkIds: [99] });
+        expect(enrichWorks).toHaveBeenCalledWith(['99'], true);
+        await wrapper.get('[data-testid="search-work-99"] input').setValue(false);
+        expect(enrichWorks).toHaveBeenCalledTimes(1);
     });
 
     it('renders site covers and recalculates manifest bytes when file filters change', async () => {

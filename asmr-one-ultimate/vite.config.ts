@@ -9,6 +9,9 @@ export default defineConfig({
         // vite-plugin-monkey otherwise keeps the SystemJS payload readable,
         // pushing the userscript over the script host's 2 MiB code limit.
         minify: 'esbuild',
+        // The userscript is the only shipped asset, so the 128 KiB local icon
+        // font must be a data URL rather than an unreachable dist sidecar.
+        assetsInlineLimit: 160 * 1024,
     },
     plugins: [
         vue(),
@@ -74,7 +77,7 @@ export default defineConfig({
                 // resolves immediately only for the exact gate signature and
                 // otherwise waits for DOMContentLoaded before normal startup.
                 'run-at': 'document-start',
-                license: 'MIT',
+                license: 'MIT; bundled Material Icons font: Apache-2.0',
                 downloadURL: 'https://update.sleazyfork.org/scripts/563283.user.js',
                 updateURL: 'https://update.sleazyfork.org/scripts/563283.meta.js'
             },

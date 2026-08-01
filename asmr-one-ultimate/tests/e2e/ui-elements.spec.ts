@@ -45,6 +45,39 @@ test.describe('Sidebar Elements', () => {
 });
 
 test.describe('Header Elements', () => {
+  test('keeps Material Icons usable when every remote font request is blocked', async ({ injectedPage, isScriptLoaded }) => {
+    await helpers.gotoHome(injectedPage);
+    await isScriptLoaded();
+
+    const metrics = await injectedPage.evaluate(async () => {
+      const names = ['skip_previous', 'replay_10', 'pause', 'forward_10', 'skip_next'];
+      const host = document.createElement('div');
+      host.style.cssText = 'position:fixed;left:-9999px;top:0;display:flex';
+      for (const name of names) {
+        const icon = document.createElement('i');
+        icon.className = 'material-icons';
+        icon.textContent = name;
+        icon.style.width = '30px';
+        icon.style.fontSize = '24px';
+        host.appendChild(icon);
+      }
+      document.body.appendChild(host);
+      await document.fonts.ready;
+      const result = [...host.children].map(element => ({
+        name: element.textContent,
+        clientWidth: (element as HTMLElement).clientWidth,
+        scrollWidth: (element as HTMLElement).scrollWidth,
+      }));
+      host.remove();
+      return result;
+    });
+
+    expect(metrics).toHaveLength(5);
+    for (const metric of metrics) {
+      expect(metric.scrollWidth, `${metric.name} spilled fallback text`).toBeLessThanOrEqual(metric.clientWidth + 1);
+    }
+  });
+
   test('header actions container is injected', async ({ injectedPage, isScriptLoaded }) => {
     await helpers.gotoHome(injectedPage);
     await isScriptLoaded();
